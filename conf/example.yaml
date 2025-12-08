@@ -1,0 +1,81 @@
+worker_threads: 2
+log_directory: logs
+
+services:
+- name: cache
+  kind: cache
+  args: {}
+  layers:
+  - kind: concurrcylimit
+    args: {}
+
+- name: kv
+  kind: cache
+  args: {}
+  layers:
+  - kind: concurrcylimit
+    args: {}
+
+- name: backend
+  kind: backend
+  args: {}
+  layers:
+  - kind: concurrcylimit
+    args: {}
+
+- name: default-router
+  kind: router
+  args: {}
+  layers:
+  - kind: concurrcylimit
+    args: {}
+
+- name: hello_world_1
+  kind: hello_world
+  args: {}
+  layers:
+  - kind: ratelimit
+    args: {}
+  - kind: timeout
+    args: {}
+
+- name: hello_world_2
+  kind: hello_world
+  args: {}
+  layers:
+  - kind: buffer
+    args: {}
+  - kind: timeout
+    args: {}
+
+- name: cache-api
+  kind: cache
+  args: {}
+  layers:
+  - kind: ratelimit
+    args: {}
+  - kind: timeout
+    args: {}
+
+servers:
+- name: cache-api
+  listeners:
+  - addresses: 0.0.0.0:82
+    kind: grpc
+    args:
+  service: cache-api
+
+- name: default
+  listeners:
+    - kind: hyper
+      args:
+        addresses: [ 0.0.0.0:80, 0.0.0.0:81 ]
+        protocols: [ http ]
+        hostnames: []
+        certificates: []
+    - kind: socks5
+      args:
+        addresses: [ 0.0.0.0:1080 ]
+        hostnames: []
+        certificates: []
+  service: default-router

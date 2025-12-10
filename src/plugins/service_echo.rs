@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -19,26 +20,24 @@ impl EchoService {
 
 impl tower::Service<plugin::Request> for EchoService {
   type Error = anyhow::Error;
-  type Future =
-    Pin<Box<dyn Future<Output = Result<plugin::Response>> + Send>>;
+  type Future = Pin<Box<dyn Future<Output = Result<plugin::Response>>>>;
   type Response = plugin::Response;
 
   fn poll_ready(
     &mut self,
-    cx: &mut std::task::Context<'_>,
-  ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+    cx: &mut Context<'_>,
+  ) -> Poll<Result<(), Self::Error>> {
     cx.waker().clone().wake();
-    std::task::Poll::Ready(Ok(()))
+    Poll::Ready(Ok(()))
   }
 
   fn call(&mut self, req: plugin::Request) -> Self::Future {
     let fut = async {
-      let rb = req.collect().await?.to_bytes();
-      let buf = Bytes::from(rb);
-      let full = Full::new(buf);
-      let body =
-        plugin::ResponseBody::new(plugin::BytesBufBody::new(full));
-      let resp = Response::builder().status(200).body(body).unwrap();
+      let req_body = req.collect().await?.to_bytes();
+      let full = Full::new(req_body);
+      let bytes_buf = plugin::BytesBufBodyWrapper::new(full);
+      let resp_body = plugin::ResponseBody::new(bytes_buf);
+      let resp = Response::builder().status(200).body(resp_body).unwrap();
       Ok(resp)
     };
     Box::pin(fut)

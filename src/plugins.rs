@@ -4,9 +4,9 @@ use std::sync::LazyLock;
 use anyhow::Result;
 
 use super::plugin;
-
-mod echo;
-mod hyper;
+mod listener_hyper;
+mod service_echo;
+mod service_http3_upstream;
 
 pub struct PluginManager {
   service_facories:
@@ -22,10 +22,13 @@ impl PluginManager {
       listener_facories: HashMap::new(),
     };
 
-    let plugin = echo::create_plugin();
+    let plugin = service_http3_upstream::create_plugin();
     plugin_manager.service_facories.extend(plugin.service_factories());
 
-    let plugin = hyper::create_plugin();
+    let plugin = service_echo::create_plugin();
+    plugin_manager.service_facories.extend(plugin.service_factories());
+
+    let plugin = listener_hyper::create_plugin();
     plugin_manager
       .listener_facories
       .extend(plugin.listener_factories());
@@ -51,7 +54,10 @@ impl PluginManager {
     let fac = self.listener_facories.get(kind).unwrap(); // TODO:
     fac(args, service)
   }
-}
 
-pub static PLUGIN_MANAGER: LazyLock<PluginManager> =
-  LazyLock::new(|| PluginManager::new());
+  pub fn global() -> &'static LazyLock<PluginManager> {
+    static PLUGIN_MANAGER: LazyLock<PluginManager> =
+      LazyLock::new(|| PluginManager::new());
+    &PLUGIN_MANAGER
+  }
+}

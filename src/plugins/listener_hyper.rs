@@ -38,7 +38,7 @@ impl HyperService<HyperRequest<HyperIncoming>> for HyperServiceAdaptor {
     let (parts, body) = req.into_parts();
     let req = plugin::Request::from_parts(
       parts,
-      plugin::RequestBody::new(plugin::BytesBufBody::new(body)),
+      plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(body)),
     );
     let s = self.s.clone();
     Box::pin(Oneshot::new(s, req))

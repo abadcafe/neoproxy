@@ -5,14 +5,29 @@ services:
 - name: echo
   kind: echo
   args: {}
+- name: http3_upstream
+  kind: http3_upstream
+  args:
+    upstream_addresses:
+    - 127.0.0.1:8088
+    - 127.0.0.1:8089
 
 servers:
 - name: default
   listeners:
     - kind: hyper
       args:
-        addresses: [ 0.0.0.0:8080, 0.0.0.0:8081 ]
+        addresses: [ 0.0.0.0:8081, 0.0.0.0:111111 ]
         protocols: [ http ]
         hostnames: []
         certificates: []
   service: echo
+- name: http3-connect-proxy
+  listeners:
+    - kind: hyper
+      args:
+        addresses: [ 0.0.0.0:8080 ]
+        protocols: [ http ]
+        hostnames: []
+        certificates: []
+  service: http3_upstream

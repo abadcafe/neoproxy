@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 
-use super::plugin;
+use crate::plugin;
+
 mod listener_hyper;
 mod service_echo;
-mod service_http3_upstream;
+mod service_http3_chain;
 
 pub struct PluginManager {
   service_facories:
@@ -22,7 +23,7 @@ impl PluginManager {
       listener_facories: HashMap::new(),
     };
 
-    let plugin = service_http3_upstream::create_plugin();
+    let plugin = service_http3_chain::create_plugin();
     plugin_manager.service_facories.extend(plugin.service_factories());
 
     let plugin = service_echo::create_plugin();
@@ -41,8 +42,11 @@ impl PluginManager {
     kind: &str,
     args: plugin::SerializedArgs,
   ) -> Result<plugin::Service> {
-    let fac = self.service_facories.get(kind).unwrap(); // TODO:
-    fac(args)
+    if let Some(fac) = self.service_facories.get(kind) {
+      fac(args)
+    } else {
+      Err(anyhow!("unknown service kind: {kind}"))
+    }
   }
 
   pub fn create_listener(
@@ -51,8 +55,11 @@ impl PluginManager {
     args: plugin::SerializedArgs,
     service: plugin::Service,
   ) -> Result<(plugin::Listener, plugin::ListenerCloser)> {
-    let fac = self.listener_facories.get(kind).unwrap(); // TODO:
-    fac(args, service)
+    if let Some(fac) = self.listener_facories.get(kind) {
+      fac(args, service)
+    } else {
+      Err(anyhow!("unknown listener kind: {kind}"))
+    }
   }
 
   pub fn global() -> &'static LazyLock<PluginManager> {

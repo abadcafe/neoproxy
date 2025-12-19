@@ -7,26 +7,23 @@ edition = "2024"
 anyhow = "1.0.95"
 bytes = "1.11.0"
 clap = { version = "4.5.28", features = ["derive"] }
+tokio = { version = "1.43.0", features = ["full"] }
 http = "1.2.0"
+http-body = "1.0.1"
 http-body-util = "0.1.2"
 hyper = { version = "1.6.0", features = ["full"] }
 hyper-util = { version = "0.1.10", features = ["full"] }
-futures-util = { version = "0.3" }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_yaml = "0.9.34"
-tokio = { version = "1.43.0", features = ["full"] }
 tower = { version = "0.5.2", features = ["full"] }
 time = { version = "0.3.4", features = ["local-offset"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["local-time",
   "env-filter"] }
 tracing-appender = "0.2"
-tokio-rustls = "0.26.2"
 rustls = "0.23.29"
 rustls-pemfile = "2.2.0"
-boxcar = "0.2.13"
-futures = "0.3.31"
+rustls-native-certs = "0.8.2"
 h3 = "0.0.8"
 h3-quinn = { version = "0.0.10", features = ["datagram"] }
 quinn = { version = "0.11.9", features = ["qlog", "rustls", "rustls-log"] }
-rustls-native-certs = "0.8.2"

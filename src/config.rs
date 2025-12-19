@@ -1,4 +1,5 @@
-use std::{fs, sync};
+use std::fs;
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -21,9 +22,9 @@ pub struct CmdOpt {
 }
 
 impl CmdOpt {
-  pub fn global() -> &'static sync::LazyLock<CmdOpt> {
-    static CMD_OPT: sync::LazyLock<CmdOpt> =
-      sync::LazyLock::new(|| CmdOpt::parse());
+  pub fn global() -> &'static LazyLock<CmdOpt> {
+    static CMD_OPT: LazyLock<CmdOpt> =
+      LazyLock::new(|| CmdOpt::parse());
     &CMD_OPT
   }
 }
@@ -104,10 +105,9 @@ impl Config {
     config
   }
 
-  pub fn global() -> &'static sync::LazyLock<Config> {
-    static CONFIG: sync::LazyLock<Config> = sync::LazyLock::new(|| {
-      Config::new(&CmdOpt::global().config_file)
-    });
+  pub fn global() -> &'static LazyLock<Config> {
+    static CONFIG: LazyLock<Config> =
+      LazyLock::new(|| Config::new(&CmdOpt::global().config_file));
     &CONFIG
   }
 }

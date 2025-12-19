@@ -1,23 +1,35 @@
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::{runtime, sync, task};
+use tracing::{error, info};
 
 use crate::config::Config;
 use crate::plugin;
 use crate::plugins::PluginManager;
 
+fn create_services() -> Result<HashMap<&'static str, plugin::Service>> {
+  let mut services = HashMap::new();
+  for sc in Config::global().services.iter() {
+    let svc = PluginManager::global()
+      .create_service(sc.kind.as_str(), sc.args.clone())?;
+    services.insert(sc.name.as_str(), svc);
+  }
+  Ok(services)
+}
+
 async fn server_thread_main(
-  services: HashMap<&str, plugin::Service>,
   closer: Arc<sync::Notify>,
 ) -> Result<()> {
+  let services = create_services()?;
+  info!("created services:\n{services:#?}\n");
+
   let mut listener_closers = vec![];
   let mut listener_waitings = task::JoinSet::new();
   for server in &Config::global().servers {
     for listener_conf in &server.listeners {
-      let (listener, closer): (
+      let (mut listener, closer): (
         Box<dyn plugin::ListenerTrait>,
         Box<dyn plugin::ListenerCloserTrait>,
       ) = PluginManager::global().create_listener(
@@ -25,9 +37,8 @@ async fn server_thread_main(
         listener_conf.args.clone(),
         services.get(server.service.as_str()).unwrap().clone(),
       )?;
-      let listener: Rc<dyn plugin::ListenerTrait> = listener.into();
-      listener_waitings.spawn_local(listener.serve());
       listener_closers.push(closer);
+      listener_waitings.spawn_local(listener.serve());
     }
   }
 
@@ -39,13 +50,13 @@ async fn server_thread_main(
 }
 
 pub fn server_thread(
-  services: HashMap<&str, plugin::Service>,
+  name: &str,
   closer: Arc<sync::Notify>,
 ) -> Result<()> {
   let local_set = task::LocalSet::new();
   let rt = runtime::Builder::new_current_thread()
     .enable_all()
-    .thread_name("neoproxy server thread")
+    .thread_name(name)
     .build()?;
-  rt.block_on(local_set.run_until(server_thread_main(services, closer)))
+  rt.block_on(local_set.run_until(server_thread_main(closer)))
 }

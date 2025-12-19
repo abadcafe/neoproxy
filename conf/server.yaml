@@ -5,12 +5,15 @@ services:
 - name: echo
   kind: echo
   args: {}
-- name: http3_upstream
-  kind: http3_upstream
+- name: http3_chain
+  kind: http3_chain
   args:
-    upstream_addresses:
-    - 127.0.0.1:8088
-    - 127.0.0.1:8089
+    proxy_group:
+    - address: 127.0.0.1:8088
+      weight: 1
+    - address: 127.0.0.1:8089
+      weight: 1
+    ca_path: conf/ca
 
 servers:
 - name: default
@@ -30,4 +33,4 @@ servers:
         protocols: [ http ]
         hostnames: []
         certificates: []
-  service: http3_upstream
+  service: http3_chain

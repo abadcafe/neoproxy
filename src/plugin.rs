@@ -1,18 +1,17 @@
 use std::collections::hash_map::HashMap;
 use std::error::Error as StdError;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use anyhow::Result;
 use bytes::{Buf, Bytes};
+use http_body::{Body, Frame, SizeHint};
 use http_body_util::combinators::UnsyncBoxBody;
-use hyper::body::{Body, Frame, SizeHint};
 
-/// A wrapper for Bytes based Body types like Full<Bytes>, Empty<Bytes>,
-/// etc in crate http_body_util. Through this wrapper, different Body
-/// implements can be converted into RequestBody and ResponseBody
-/// handily.
+/// A wrapper for `Bytes` based `Body` types like `Full<Bytes>`,
+/// `Empty<Bytes>`, etc in crate `http_body_util`. Through this wrapper,
+/// different `Body` implements can be converted into `RequestBody` and
+/// `ResponseBody` handily.
 pub struct BytesBufBodyWrapper<B, E> {
   inner: Pin<Box<dyn Body<Data = B, Error = E> + Send>>,
 }
@@ -56,24 +55,33 @@ pub type RequestBody = UnsyncBoxBody<Bytes, anyhow::Error>;
 pub type ResponseBody = UnsyncBoxBody<Bytes, anyhow::Error>;
 pub type Request = hyper::Request<RequestBody>;
 pub type Response = hyper::Response<ResponseBody>;
+pub type RequestWithoutBody = hyper::Request<()>;
+pub type ResponseWithoutBody = hyper::Response<()>;
 
-/// To add clone function to the Service. The Clone trait can not be
-/// added into the type definition of the Service directly, in rust only
-/// the auto traits like Send, Sync etc can be added in to type
+/// To add clone function to the `Service`. The `Clone` trait can not be
+/// added into the type definition of the `Service` directly, in rust
+/// only the auto traits like `Send`, `Sync` etc can be added in to type
 /// definitions.
-trait CloneBoxedService: tower::Service<Request> {
+trait ClonableService:
+  tower::Service<
+    Request,
+    Error = anyhow::Error,
+    Response = Response,
+    Future = Pin<Box<dyn Future<Output = Result<Response>>>>,
+  >
+{
   fn clone_boxed(
     &self,
   ) -> Box<
-    dyn CloneBoxedService<
+    dyn ClonableService<
         Error = Self::Error,
         Response = Self::Response,
         Future = Pin<Box<dyn Future<Output = Result<Self::Response>>>>,
-      > + Send,
+      >,
   >;
 }
 
-impl<S> CloneBoxedService for S
+impl<S> ClonableService for S
 where
   S: tower::Service<
       Request,
@@ -81,32 +89,31 @@ where
       Response = Response,
       Future = Pin<Box<dyn Future<Output = Result<Response>>>>,
     > + Clone
-    + Send
     + 'static,
 {
   fn clone_boxed(
     &self,
   ) -> Box<
-    dyn CloneBoxedService<
+    dyn ClonableService<
         Error = anyhow::Error,
         Response = Response,
         Future = Pin<Box<dyn Future<Output = Result<Response>>>>,
-      > + Send,
+      >,
   > {
     Box::new(self.clone())
   }
 }
 
-/// The Service that plugins should be implemented. It is non-Sync and
-/// clonable. Plugins should implement a tower Service and wrap it by
-/// this struct.
+/// The `Service` that plugins should be implemented. It is non-`Sync`
+/// and clonable. Plugins should implement a `tower::Service` and wrap
+/// it by this struct.
 pub struct Service {
   inner: Box<
-    dyn CloneBoxedService<
+    dyn ClonableService<
         Error = anyhow::Error,
         Response = Response,
         Future = Pin<Box<dyn Future<Output = Result<Response>>>>,
-      > + Send,
+      >,
   >,
 }
 
@@ -119,7 +126,6 @@ impl Service {
         Error = anyhow::Error,
         Future = Pin<Box<dyn Future<Output = Result<Response>>>>,
       > + Clone
-      + Send
       + 'static,
   {
     Self { inner: Box::new(inner) }
@@ -148,7 +154,7 @@ impl Clone for Service {
 
 impl std::fmt::Debug for Service {
   fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
-    fmt.debug_struct("LocalService").finish()
+    fmt.debug_struct("Service").finish()
   }
 }
 
@@ -157,8 +163,7 @@ pub trait ListenerCloserTrait {
 }
 
 pub trait ListenerTrait {
-  fn serve(self: Rc<Self>)
-  -> Pin<Box<dyn Future<Output = Result<()>>>>;
+  fn serve(&mut self) -> Pin<Box<dyn Future<Output = Result<()>>>>;
 }
 
 pub type Listener = Box<dyn ListenerTrait>;

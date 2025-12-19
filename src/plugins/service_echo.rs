@@ -3,7 +3,6 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use anyhow::Result;
-use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::Response;
 
@@ -37,7 +36,8 @@ impl tower::Service<plugin::Request> for EchoService {
       let full = Full::new(req_body);
       let bytes_buf = plugin::BytesBufBodyWrapper::new(full);
       let resp_body = plugin::ResponseBody::new(bytes_buf);
-      let resp = Response::builder().status(200).body(resp_body).unwrap();
+      let resp =
+        Response::builder().status(200).body(resp_body).unwrap();
       Ok(resp)
     };
     Box::pin(fut)

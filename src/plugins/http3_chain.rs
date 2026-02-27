@@ -15,9 +15,10 @@ use http_body_util::BodyExt;
 use rustls::pki_types::CertificateDer;
 use rustls_native_certs::CertificateResult;
 use serde::Deserialize;
-use tokio::task;
-use tracing::{error, info};
+use tokio::{io, task};
+use tracing::{error, info, warn};
 
+use super::utils;
 use crate::plugin;
 
 static ALPN: &[u8] = b"h3";
@@ -179,40 +180,13 @@ fn build_empty_response(
   resp
 }
 
-fn is_connect_method(
-  req: &http::request::Parts,
-) -> Result<(String, u16)> {
-  if !req.method.as_str().eq_ignore_ascii_case("CONNECT") {
-    return Err(anyhow!("unknown http method"));
-  }
-
-  let dest = match req.uri.authority() {
-    None => {
-      return Err(anyhow!("unknown authority"));
-    }
-    Some(dest) => dest,
-  };
-
-  let port = match dest.port_u16() {
-    None => {
-      return Err(anyhow!("unknwon port"));
-    }
-    Some(port) => port,
-  };
-
-  if port < 1 {
-    return Err(anyhow!("invalid port number 0"));
-  }
-
-  Ok((dest.host().to_string(), port))
-}
-
 async fn request_body_transfering(
   mut req_body: plugin::RequestBody,
   mut proxy_sending_stream: h3_cli::RequestStream<
     h3_quinn::SendStream<Bytes>,
     Bytes,
   >,
+  shutdown: plugin::ShutdownHandle,
 ) -> Result<()> {
   let res = loop {
     let data = match req_body.frame().await {
@@ -234,7 +208,7 @@ async fn request_body_transfering(
   };
 
   if let Err(e) = proxy_sending_stream.finish().await {
-    info!("finishing sending stream error: {e}");
+    warn!("sending stream finishing error: {e}");
   }
 
   res
@@ -278,6 +252,59 @@ impl Body for H3ReceivingStreamBody {
   }
 }
 
+struct H3SendingStreamWriter(
+  h3_cli::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
+);
+
+impl H3SendingStreamWriter {
+  fn new(
+    inner: h3_cli::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
+  ) -> Self {
+    Self(inner)
+  }
+}
+
+impl io::AsyncWrite for H3SendingStreamWriter {
+  fn poll_write(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &[u8],
+  ) -> Poll<Result<usize, std::io::Error>> {
+    let buf = Bytes::copy_from_slice(buf);
+    let buf_size = buf.remaining();
+    let fut = self.0.send_data(buf);
+    Box::pin(fut).as_mut().poll(cx).map(|r| {
+      if let Err(e) = r {
+        if e.is_h3_no_error() {
+          Ok(buf_size)
+        } else {
+          Err(std::io::Error::other(e))
+        }
+      } else {
+        Ok(buf_size)
+      }
+    })
+  }
+
+  fn poll_flush(
+    self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Result<(), std::io::Error>> {
+    Poll::Ready(Ok(()))
+  }
+
+  fn poll_shutdown(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Result<(), std::io::Error>> {
+    let fut = self.0.finish();
+    Box::pin(fut)
+      .as_mut()
+      .poll(cx)
+      .map_err(|e| std::io::Error::other(e))
+  }
+}
+
 #[derive(Deserialize, Default, Clone, Debug)]
 struct Http3ChainServiceArgsProxyGroup {
   address: String,
@@ -293,7 +320,8 @@ struct Http3ChainServiceArgs {
 #[derive(Clone)]
 struct Http3ChainService {
   proxy_group: Rc<RefCell<ProxyGroup>>,
-  transfering_join_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
+  transfering_set: Rc<utils::TransferingSet>,
+  shutdown_handle: plugin::ShutdownHandle,
 }
 
 impl Http3ChainService {
@@ -320,7 +348,8 @@ impl Http3ChainService {
 
     Ok(plugin::Service::new(Self {
       proxy_group: Rc::new(RefCell::new(proxy_group)),
-      transfering_join_set: Rc::new(RefCell::new(task::JoinSet::new())),
+      transfering_set: Rc::new(utils::TransferingSet::new()),
+      shutdown_handle: plugin::ShutdownHandle::new(),
     }))
   }
 }
@@ -332,22 +361,23 @@ impl tower::Service<plugin::Request> for Http3ChainService {
 
   fn poll_ready(
     &mut self,
-    _cx: &mut Context<'_>,
+    cx: &mut Context<'_>,
   ) -> Poll<Result<(), Self::Error>> {
-    // todo: check the capacity.
+    cx.waker().clone().wake();
     Poll::Ready(Ok(()))
   }
 
   fn call(&mut self, req: plugin::Request) -> Self::Future {
     let pg = self.proxy_group.clone();
-    let transferings = self.transfering_join_set.clone();
+    let ts = self.transfering_set.clone();
     let (req_headers, req_body) = req.into_parts();
+    let shutdown = self.shutdown_handle.clone();
     Box::pin(async move {
-      let (host, port) = is_connect_method(&req_headers)?;
-      let mut sender = pg.borrow_mut().get_proxy_conn().await?;
+      let (host, port) = utils::is_connect_method(&req_headers)?;
+      let mut requester = pg.borrow_mut().get_proxy_conn().await?;
       let proxy_req =
-        hyper::Request::connect(format!("{host}:{port}")).body(())?;
-      let mut proxy_stream = sender.send_request(proxy_req).await?;
+        http::Request::connect(format!("{host}:{port}")).body(())?;
+      let mut proxy_stream = requester.send_request(proxy_req).await?;
       let proxy_resp = proxy_stream.recv_response().await?;
       if !proxy_resp.status().is_success() {
         return Ok(build_empty_response(proxy_resp.status()));
@@ -362,32 +392,43 @@ impl tower::Service<plugin::Request> for Http3ChainService {
       *resp.status_mut() = http::StatusCode::OK;
 
       // transfer request body's data frames to proxy sending stream.
-      transferings.borrow_mut().spawn_local(request_body_transfering(
-        req_body,
-        sending_stream,
-      ));
+      ts.new_transfering(
+        tokio_util::io::StreamReader::new(
+          req_body
+            .map_err(|e| std::io::Error::other(e))
+            .into_data_stream(),
+        ),
+        H3SendingStreamWriter::new(sending_stream),
+      )?;
 
       Ok(resp)
     })
   }
 }
 
-struct Http3ChainPlugin {}
+struct Http3ChainPlugin {
+  service_builders:
+    HashMap<&'static str, Box<dyn plugin::BuildService>>,
+}
 
-impl<'a> plugin::Plugin<'a> for Http3ChainPlugin {
-  fn name(&self) -> &'a str {
-    "http3_chain"
-  }
-
-  fn service_factories(
-    &self,
-  ) -> HashMap<&'a str, Box<dyn plugin::ServiceFactory>> {
-    let boxed: Box<dyn plugin::ServiceFactory> =
-      Box::new(Http3ChainService::new);
-    HashMap::from([("http3_chain", boxed)])
+impl Http3ChainPlugin {
+  fn new() -> Self {
+    let builder: Box<dyn plugin::BuildService> =
+      Box::new(move |a| Http3ChainService::new(a));
+    let service_builders = HashMap::from([("http3_chain", builder)]);
+    Self { service_builders }
   }
 }
 
-pub fn create_plugin() -> Box<dyn plugin::Plugin<'static>> {
-  Box::new(Http3ChainPlugin {})
+impl plugin::Plugin for Http3ChainPlugin {
+  fn service_builder(
+    &self,
+    name: &str,
+  ) -> Option<&Box<dyn plugin::BuildService>> {
+    self.service_builders.get(name)
+  }
+}
+
+pub fn create_plugin() -> Box<dyn plugin::Plugin> {
+  Box::new(Http3ChainPlugin::new())
 }

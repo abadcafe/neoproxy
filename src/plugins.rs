@@ -5,66 +5,42 @@ use anyhow::{Result, anyhow};
 
 use crate::plugin;
 
-mod listener_hyper;
-mod service_echo;
-mod service_http3_chain;
+mod connect_tcp;
+mod echo;
+mod http3_chain;
+mod hyper;
+mod utils;
 
-pub struct PluginManager {
-  service_facories:
-    HashMap<&'static str, Box<dyn plugin::ServiceFactory>>,
-  listener_facories:
-    HashMap<&'static str, Box<dyn plugin::ListenerFactory>>,
+pub struct PluginBuilderSet {
+  builders: HashMap<&'static str, Box<dyn plugin::BuildPlugin>>,
 }
 
-impl PluginManager {
+impl PluginBuilderSet {
   fn new() -> Self {
-    let mut plugin_manager = PluginManager {
-      service_facories: HashMap::new(),
-      listener_facories: HashMap::new(),
-    };
+    let mut plugin_manager = Self { builders: HashMap::new() };
+    let builders = &mut plugin_manager.builders;
 
-    let plugin = service_http3_chain::create_plugin();
-    plugin_manager.service_facories.extend(plugin.service_factories());
-
-    let plugin = service_echo::create_plugin();
-    plugin_manager.service_facories.extend(plugin.service_factories());
-
-    let plugin = listener_hyper::create_plugin();
-    plugin_manager
-      .listener_facories
-      .extend(plugin.listener_factories());
+    builders.insert(
+      connect_tcp::plugin_name(),
+      Box::new(connect_tcp::create_plugin),
+    );
+    builders.insert(echo::plugin_name(), Box::new(echo::create_plugin));
+    builders
+      .insert(hyper::plugin_name(), Box::new(hyper::create_plugin));
 
     plugin_manager
   }
 
-  pub fn create_service(
+  pub fn plugin_builder(
     &self,
-    kind: &str,
-    args: plugin::SerializedArgs,
-  ) -> Result<plugin::Service> {
-    if let Some(fac) = self.service_facories.get(kind) {
-      fac(args)
-    } else {
-      Err(anyhow!("unknown service kind: {kind}"))
-    }
+    name: &str,
+  ) -> Option<&Box<dyn plugin::BuildPlugin>> {
+    self.builders.get(name)
   }
 
-  pub fn create_listener(
-    &self,
-    kind: &str,
-    args: plugin::SerializedArgs,
-    service: plugin::Service,
-  ) -> Result<(plugin::Listener, plugin::ListenerCloser)> {
-    if let Some(fac) = self.listener_facories.get(kind) {
-      fac(args, service)
-    } else {
-      Err(anyhow!("unknown listener kind: {kind}"))
-    }
-  }
-
-  pub fn global() -> &'static LazyLock<PluginManager> {
-    static PLUGIN_MANAGER: LazyLock<PluginManager> =
-      LazyLock::new(|| PluginManager::new());
+  pub fn global() -> &'static LazyLock<PluginBuilderSet> {
+    static PLUGIN_MANAGER: LazyLock<PluginBuilderSet> =
+      LazyLock::new(|| PluginBuilderSet::new());
     &PLUGIN_MANAGER
   }
 }

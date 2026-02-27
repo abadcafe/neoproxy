@@ -3,10 +3,21 @@ log_directory: "logs/"
 
 services: 
 - name: echo
-  kind: echo
+  kind: echo.echo
   args: {}
+
 - name: http3_chain
   kind: http3_chain
+  args:
+    proxy_group:
+    - address: 127.0.0.1:8088
+      weight: 1
+    - address: 127.0.0.1:8089
+      weight: 1
+    ca_path: conf/ca
+
+- name: connect_tcp
+  kind: connect_tcp.connect_tcp
   args:
     proxy_group:
     - address: 127.0.0.1:8088
@@ -18,19 +29,20 @@ services:
 servers:
 - name: default
   listeners:
-    - kind: hyper
-      args:
-        addresses: [ 0.0.0.0:8081, 0.0.0.0:111111 ]
-        protocols: [ http ]
-        hostnames: []
-        certificates: []
+  - kind: hyper.hyper
+    args:
+      addresses: [ 0.0.0.0:8081, 0.0.0.0:111111 ]
+      protocols: [ http ]
+      hostnames: []
+      certificates: []
   service: echo
-- name: http3-connect-proxy
+
+- name: http_connect
   listeners:
-    - kind: hyper
-      args:
-        addresses: [ 0.0.0.0:8080 ]
-        protocols: [ http ]
-        hostnames: []
-        certificates: []
-  service: http3_chain
+  - kind: hyper.hyper
+    args:
+      addresses: [ 0.0.0.0:8080 ]
+      protocols: [ http ]
+      hostnames: []
+      certificates: []
+  service: connect_tcp

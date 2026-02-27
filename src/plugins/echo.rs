@@ -44,22 +44,33 @@ impl tower::Service<plugin::Request> for EchoService {
   }
 }
 
-struct EchoPlugin {}
+struct EchoPlugin {
+  service_builders:
+    HashMap<&'static str, Box<dyn plugin::BuildService>>,
+}
 
-impl<'a> plugin::Plugin<'a> for EchoPlugin {
-  fn name(&self) -> &'a str {
-    "echo"
-  }
-
-  fn service_factories(
-    &self,
-  ) -> HashMap<&'a str, Box<dyn plugin::ServiceFactory>> {
-    let boxed: Box<dyn plugin::ServiceFactory> =
-      Box::new(EchoService::new);
-    HashMap::from([("echo", boxed)])
+impl EchoPlugin {
+  fn new() -> Self {
+    let builder: Box<dyn plugin::BuildService> =
+      Box::new(move |a| EchoService::new(a));
+    let service_builders = HashMap::from([("echo", builder)]);
+    Self { service_builders }
   }
 }
 
-pub fn create_plugin() -> Box<dyn plugin::Plugin<'static>> {
-  Box::new(EchoPlugin {})
+impl plugin::Plugin for EchoPlugin {
+  fn service_builder(
+    &self,
+    name: &str,
+  ) -> Option<&Box<dyn plugin::BuildService>> {
+    self.service_builders.get(name)
+  }
+}
+
+pub fn plugin_name() -> &'static str {
+  "echo"
+}
+
+pub fn create_plugin() -> Box<dyn plugin::Plugin> {
+  Box::new(EchoPlugin::new())
 }

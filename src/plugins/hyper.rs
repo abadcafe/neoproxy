@@ -4,16 +4,15 @@ use std::future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use anyhow::Result;
 use hyper::{body as hyper_body, service as hyper_svc};
 use hyper_util::rt as rt_util;
 use hyper_util::server::conn::auto as conn_util;
 use serde::Deserialize;
-use tokio::{net, sync, task};
+use tokio::{net, task};
 use tower::util as tower_util;
-use tracing::{error, info};
+use tracing::{error, warn};
 
 use crate::plugin;
 
@@ -36,7 +35,7 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
 
   fn call(
     &self,
-    req: hyper::Request<hyper_body::Incoming>,
+    req: http::Request<hyper_body::Incoming>,
   ) -> Self::Future {
     let (parts, body) = req.into_parts();
     let req = plugin::Request::from_parts(
@@ -67,23 +66,13 @@ struct HyperListenerArgs {
   hostnames: Vec<String>,
 }
 
-struct HyperListenerCloser {
-  shutdown: Arc<sync::Notify>,
-}
-
-impl plugin::ListenerCloserTrait for HyperListenerCloser {
-  fn shutdown(&self) {
-    self.shutdown.notify_waiters()
-  }
-}
-
 struct HyperListener {
   addresses: Vec<SocketAddr>,
   _protocols: Vec<String>,
   _hostnames: Vec<String>,
-  listening_join_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
-  conn_join_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
-  shutdown: Arc<sync::Notify>,
+  listening_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
+  conn_serving_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
+  shutdown_handle: plugin::ShutdownHandle,
   service: plugin::Service,
 }
 
@@ -91,29 +80,25 @@ impl HyperListener {
   fn new(
     sargs: plugin::SerializedArgs,
     svc: plugin::Service,
-  ) -> Result<(plugin::Listener, plugin::ListenerCloser)> {
+  ) -> Result<plugin::Listener> {
     let args: HyperListenerArgs = serde_yaml::from_value(sargs)?;
-    let shutdown = Arc::new(sync::Notify::new());
-    Ok((
-      Box::new(Self {
-        addresses: args
-          .addresses
-          .iter()
-          .filter_map(|s| {
-            s.parse()
-              .inspect_err(|e| error!("address '{s}' invalid: {e}"))
-              .ok()
-          })
-          .collect(),
-        _protocols: args.protocols,
-        _hostnames: args.hostnames,
-        listening_join_set: Rc::new(RefCell::new(task::JoinSet::new())),
-        conn_join_set: Rc::new(RefCell::new(task::JoinSet::new())),
-        shutdown: shutdown.clone(),
-        service: svc,
-      }),
-      Box::new(HyperListenerCloser { shutdown: shutdown }),
-    ))
+    Ok(plugin::Listener::new(Self {
+      addresses: args
+        .addresses
+        .iter()
+        .filter_map(|s| {
+          s.parse()
+            .inspect_err(|e| warn!("address '{s}' invalid: {e}"))
+            .ok()
+        })
+        .collect(),
+      _protocols: args.protocols,
+      _hostnames: args.hostnames,
+      listening_set: Rc::new(RefCell::new(task::JoinSet::new())),
+      conn_serving_set: Rc::new(RefCell::new(task::JoinSet::new())),
+      shutdown_handle: plugin::ShutdownHandle::new(),
+      service: svc,
+    }))
   }
 
   fn serve_addr(
@@ -126,33 +111,38 @@ impl HyperListener {
     socket.set_reuseport(true)?;
     socket.bind(addr)?;
     let listener = socket.listen(1024)?;
-    let conn_join_set = self.conn_join_set.clone();
-    let notifier = self.shutdown.clone();
+    let conn_serving_set = self.conn_serving_set.clone();
+    let notifier = self.shutdown_handle.clone();
     let accepting_fut = async move {
+      let shutdown = async move || notifier.notified().await;
       let accepting = async move || match listener.accept().await {
         Err(e) => {
-          todo!()
+          error!("accepting new connection failed: {e}");
         }
         Ok((stream, _raddr)) => {
           let io = rt_util::TokioIo::new(stream);
           let svc = HyperServiceAdaptor::new(svc.clone());
           let builder = conn_util::Builder::new(TokioLocalExecutor {});
-          conn_join_set.borrow_mut().spawn_local(async move {
+          conn_serving_set.borrow_mut().spawn_local(async move {
+            // Do not need any graceful shutdown actions here for
+            // connections. The `Service`s should do this instead.
             let conn = builder.serve_connection(io, svc);
             conn.await.map_err(|e| anyhow::Error::from_boxed(e))
           });
         }
       };
 
-      let shutdown = async || notifier.notified().await;
-
       loop {
         tokio::select! {
           _ = accepting() => {},
-          _ = shutdown() => { break },
+          _ = shutdown() => {
+            // Graceful shutdown for the TcpListener.
+            break
+          },
         }
       }
-      // here the TcpListener dropped so the socket closed.
+
+      // Here the TcpListener is dropped, so listening socket is closed.
       Ok(())
     };
 
@@ -160,9 +150,13 @@ impl HyperListener {
   }
 }
 
-impl plugin::ListenerTrait for HyperListener {
-  fn serve(&mut self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-    let listening_join_set = self.listening_join_set.clone();
+impl plugin::Listening for HyperListener {
+  fn shutdown_handle(&self) -> plugin::ShutdownHandle {
+    self.shutdown_handle.clone()
+  }
+
+  fn start(&mut self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+    let listening_set = self.listening_set.clone();
     for addr in &self.addresses {
       let addr = addr.clone();
       let service = self.service.clone();
@@ -170,16 +164,17 @@ impl plugin::ListenerTrait for HyperListener {
         Err(e) => return Box::pin(future::ready(Err(e))),
         Ok(f) => f,
       };
-      listening_join_set.borrow_mut().spawn_local(serve_addr_fut);
+      listening_set.borrow_mut().spawn_local(serve_addr_fut);
     }
 
-    let conn_join_set = self.conn_join_set.clone();
-    let shutdown = self.shutdown.clone();
+    let conn_serving_set = self.conn_serving_set.clone();
+    let shutdown = self.shutdown_handle.clone();
     Box::pin(async move {
+      // Waiting for graceful shutdown.
       shutdown.notified().await;
 
       while let Some(res) =
-        listening_join_set.borrow_mut().join_next().await
+        listening_set.borrow_mut().join_next().await
       {
         match res {
           Err(e) => {
@@ -194,15 +189,15 @@ impl plugin::ListenerTrait for HyperListener {
         }
       }
 
-      while let Some(res) = conn_join_set.borrow_mut().join_next().await
+      while let Some(res) = conn_serving_set.borrow_mut().join_next().await
       {
         match res {
           Err(e) => {
-            error!("listening join error: {e}")
+            error!("connection join error: {e}")
           }
           Ok(res) => match res {
             Err(e) => {
-              error!("listening error: {e}")
+              error!("connection error: {e}")
             }
             Ok(_) => {}
           },
@@ -212,24 +207,40 @@ impl plugin::ListenerTrait for HyperListener {
       Ok(())
     })
   }
+
+  fn stop(&mut self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+    todo!()
+  }
 }
 
-struct HyperPlugin {}
+struct HyperPlugin {
+  listener_builders:
+    HashMap<&'static str, Box<dyn plugin::BuildListener>>,
+}
 
-impl<'a> plugin::Plugin<'a> for HyperPlugin {
-  fn name(&self) -> &'a str {
-    "hyper"
-  }
-
-  fn listener_factories(
-    &self,
-  ) -> HashMap<&'a str, Box<dyn plugin::ListenerFactory>> {
-    let boxed: Box<dyn plugin::ListenerFactory> =
+impl HyperPlugin {
+  fn new() -> Self {
+    let builder: Box<dyn plugin::BuildListener> =
       Box::new(HyperListener::new);
-    HashMap::from([("hyper", boxed)])
+    let listener_factories = HashMap::from([("listener", builder)]);
+
+    Self { listener_builders: listener_factories }
   }
 }
 
-pub fn create_plugin() -> Box<dyn plugin::Plugin<'static>> {
-  Box::new(HyperPlugin {})
+impl plugin::Plugin for HyperPlugin {
+  fn listener_builder(
+    &self,
+    name: &str,
+  ) -> Option<&Box<dyn plugin::BuildListener>> {
+    self.listener_builders.get(name)
+  }
+}
+
+pub fn plugin_name() -> &'static str {
+  "hyper"
+}
+
+pub fn create_plugin() -> Box<dyn plugin::Plugin> {
+  Box::new(HyperPlugin::new())
 }

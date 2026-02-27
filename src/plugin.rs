@@ -1,36 +1,60 @@
-use std::collections::hash_map::HashMap;
-use std::error::Error as StdError;
+use std::error::Error;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use anyhow::Result;
 use bytes::{Buf, Bytes};
 use http_body::{Body, Frame, SizeHint};
 use http_body_util::combinators::UnsyncBoxBody;
+use tokio::sync;
+
+/// Shutdown Handle for `Listener`s.
+pub struct ShutdownHandle(Arc<sync::Notify>);
+
+impl ShutdownHandle {
+  pub fn new() -> Self {
+    Self(Arc::new(sync::Notify::new()))
+  }
+
+  pub fn shutdown(&self) {
+    self.0.notify_waiters()
+  }
+
+  pub async fn notified(&self) {
+    self.0.notified().await
+  }
+}
+
+impl Clone for ShutdownHandle {
+  fn clone(&self) -> Self {
+    Self(self.0.clone())
+  }
+}
 
 /// A wrapper for `Bytes` based `Body` types like `Full<Bytes>`,
 /// `Empty<Bytes>`, etc in crate `http_body_util`. Through this wrapper,
 /// different `Body` implements can be converted into `RequestBody` and
 /// `ResponseBody` handily.
-pub struct BytesBufBodyWrapper<B, E> {
-  inner: Pin<Box<dyn Body<Data = B, Error = E> + Send>>,
-}
+pub struct BytesBufBodyWrapper<B, E>(
+  Pin<Box<dyn Body<Data = B, Error = E> + Send>>,
+);
 
 impl<B, E> BytesBufBodyWrapper<B, E> {
   pub fn new<T>(b: T) -> Self
   where
     T: Body<Data = B, Error = E> + Send + 'static,
     B: Buf,
-    E: StdError + Send + Sync,
+    E: Error + Send + Sync,
   {
-    Self { inner: Box::pin(b) }
+    Self(Box::pin(b))
   }
 }
 
 impl<B, E> Body for BytesBufBodyWrapper<B, E>
 where
   B: Buf,
-  E: StdError + Send + Sync + 'static,
+  E: Error + Send + Sync + 'static,
 {
   type Data = B;
   type Error = anyhow::Error;
@@ -39,30 +63,28 @@ where
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-    self.inner.as_mut().poll_frame(cx).map_err(|e| e.into())
+    self.0.as_mut().poll_frame(cx).map_err(|e| e.into())
   }
 
   fn is_end_stream(&self) -> bool {
-    self.inner.is_end_stream()
+    self.0.is_end_stream()
   }
 
   fn size_hint(&self) -> SizeHint {
-    self.inner.size_hint()
+    self.0.size_hint()
   }
 }
 
 pub type RequestBody = UnsyncBoxBody<Bytes, anyhow::Error>;
 pub type ResponseBody = UnsyncBoxBody<Bytes, anyhow::Error>;
-pub type Request = hyper::Request<RequestBody>;
-pub type Response = hyper::Response<ResponseBody>;
-pub type RequestWithoutBody = hyper::Request<()>;
-pub type ResponseWithoutBody = hyper::Response<()>;
+pub type Request = http::Request<RequestBody>;
+pub type Response = http::Response<ResponseBody>;
 
-/// To add clone function to the `Service`. The `Clone` trait can not be
-/// added into the type definition of the `Service` directly, in rust
-/// only the auto traits like `Send`, `Sync` etc can be added in to type
+/// To add `clone()` function to the `Service`. The `Clone` trait can
+/// not be added into the type definition of the `Service` directly, in
+/// rust only auto traits like `Send`, `Sync` etc can be added into type
 /// definitions.
-trait ClonableService:
+trait CloneService:
   tower::Service<
     Request,
     Error = anyhow::Error,
@@ -70,18 +92,10 @@ trait ClonableService:
     Future = Pin<Box<dyn Future<Output = Result<Response>>>>,
   >
 {
-  fn clone_boxed(
-    &self,
-  ) -> Box<
-    dyn ClonableService<
-        Error = Self::Error,
-        Response = Self::Response,
-        Future = Pin<Box<dyn Future<Output = Result<Self::Response>>>>,
-      >,
-  >;
+  fn clone_boxed(&self) -> Box<dyn CloneService>;
 }
 
-impl<S> ClonableService for S
+impl<S> CloneService for S
 where
   S: tower::Service<
       Request,
@@ -91,31 +105,17 @@ where
     > + Clone
     + 'static,
 {
-  fn clone_boxed(
-    &self,
-  ) -> Box<
-    dyn ClonableService<
-        Error = anyhow::Error,
-        Response = Response,
-        Future = Pin<Box<dyn Future<Output = Result<Response>>>>,
-      >,
-  > {
+  fn clone_boxed(&self) -> Box<dyn CloneService> {
     Box::new(self.clone())
   }
 }
 
-/// The `Service` that plugins should be implemented. It is non-`Sync`
-/// and clonable. Plugins should implement a `tower::Service` and wrap
-/// it by this struct.
-pub struct Service {
-  inner: Box<
-    dyn ClonableService<
-        Error = anyhow::Error,
-        Response = Response,
-        Future = Pin<Box<dyn Future<Output = Result<Response>>>>,
-      >,
-  >,
-}
+/// The `Service` that plugins should implement.
+/// It is non-`Sync` and `Clone`. Plugins should implement a
+/// `tower::Service` and wrap it in this struct.
+/// Note: `Service` is a lightweight object that can be cloned and
+/// created temporarily, even for each request.
+pub struct Service(Box<dyn CloneService>);
 
 impl Service {
   pub fn new<S>(inner: S) -> Self
@@ -128,27 +128,27 @@ impl Service {
       > + Clone
       + 'static,
   {
-    Self { inner: Box::new(inner) }
+    Self(Box::new(inner))
   }
 }
 
 impl tower::Service<Request> for Service {
   type Error = anyhow::Error;
-  type Future = Pin<Box<dyn Future<Output = Result<Response>>>>;
+  type Future = Pin<Box<dyn Future<Output = Result<Self::Response>>>>;
   type Response = Response;
 
   fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
-    self.inner.poll_ready(cx)
+    self.0.poll_ready(cx)
   }
 
   fn call(&mut self, req: Request) -> Self::Future {
-    self.inner.call(req)
+    self.0.call(req)
   }
 }
 
 impl Clone for Service {
   fn clone(&self) -> Self {
-    Self { inner: self.inner.clone_boxed() }
+    Self(self.0.clone_boxed())
   }
 }
 
@@ -158,57 +158,130 @@ impl std::fmt::Debug for Service {
   }
 }
 
-pub trait ListenerCloserTrait {
-  fn shutdown(&self);
+pub trait Listening {
+  fn shutdown_handle(&self) -> ShutdownHandle;
+  fn stop(&mut self) -> Pin<Box<dyn Future<Output = Result<()>>>>;
+  fn start(&mut self) -> Pin<Box<dyn Future<Output = Result<()>>>>;
 }
 
-pub trait ListenerTrait {
-  fn serve(&mut self) -> Pin<Box<dyn Future<Output = Result<()>>>>;
-}
+pub struct Listener(Box<dyn Listening>);
 
-pub type Listener = Box<dyn ListenerTrait>;
-pub type ListenerCloser = Box<dyn ListenerCloserTrait>;
+impl Listener {
+  pub fn new<L>(l: L) -> Self
+  where
+    L: Listening + 'static,
+  {
+    Self(Box::new(l))
+  }
+
+  pub fn shutdown_handle(&self) -> ShutdownHandle {
+    self.0.shutdown_handle()
+  }
+
+  pub fn stop(&mut self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+    self.0.stop()
+  }
+
+  pub fn start(&mut self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+    self.0.start()
+  }
+}
 
 pub type SerializedArgs = serde_yaml::Value;
 
 /// an alias for shorten complex trait definition.
-pub trait ServiceFactory:
-  Fn(SerializedArgs) -> Result<Service> + Sync + Send
-{
-}
+pub trait BuildService: Fn(SerializedArgs) -> Result<Service> {}
 
-impl<F> ServiceFactory for F where
-  F: Fn(SerializedArgs) -> Result<Service> + Sync + Send
-{
+impl<F> BuildService for F where F: Fn(SerializedArgs) -> Result<Service>
+{}
+
+pub struct ServiceBuilder(Box<dyn BuildService>);
+
+impl ServiceBuilder {
+  pub fn new<BS>(bs: BS) -> Self
+  where
+    BS: BuildService + 'static,
+  {
+    Self(Box::new(bs))
+  }
+
+  pub fn build(&self, args: SerializedArgs) -> Result<Service> {
+    self.0(args)
+  }
 }
 
 /// an alias for shorten complex trait definition.
-pub trait ListenerFactory:
-  Fn(SerializedArgs, Service) -> Result<(Listener, ListenerCloser)>
-  + Sync
-  + Send
+pub trait BuildListener:
+  Fn(SerializedArgs, Service) -> Result<Listener>
 {
 }
 
-impl<F> ListenerFactory for F where
-  F: Fn(SerializedArgs, Service) -> Result<(Listener, ListenerCloser)>
-    + Sync
-    + Send
+impl<F> BuildListener for F where
+  F: Fn(SerializedArgs, Service) -> Result<Listener>
 {
 }
 
-pub trait Plugin<'a> {
-  fn name(&self) -> &'a str;
+pub struct ListenerBuilder(Box<dyn BuildListener>);
 
-  fn listener_factories(
-    &self,
-  ) -> HashMap<&'a str, Box<dyn ListenerFactory>> {
-    HashMap::new()
+impl ListenerBuilder {
+  pub fn new<BL>(bl: BL) -> Self
+  where
+    BL: BuildListener + 'static,
+  {
+    Self(Box::new(bl))
   }
 
-  fn service_factories(
+  pub fn build(
     &self,
-  ) -> HashMap<&'a str, Box<dyn ServiceFactory>> {
-    HashMap::new()
+    args: SerializedArgs,
+    svc: Service,
+  ) -> Result<Listener> {
+    self.0(args, svc)
+  }
+}
+
+pub trait Plugin {
+  fn service_builder(
+    &self,
+    name: &str,
+  ) -> Option<&Box<dyn BuildService>> {
+    None
+  }
+
+  fn listener_builder(
+    &self,
+    name: &str,
+  ) -> Option<&Box<dyn BuildListener>> {
+    None
+  }
+
+  fn finalize(&mut self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+    Box::pin(async { Ok(()) })
+  }
+}
+
+/// an alias for shorten complex trait definition.
+pub trait BuildPlugin:
+  Fn() -> Box<dyn Plugin> + Sync + Send
+{
+}
+
+impl<F> BuildPlugin for F where
+  F: Fn() -> Box<dyn Plugin> + Sync + Send
+{
+}
+
+pub struct PluginBuilder(Box<dyn BuildPlugin>);
+
+impl PluginBuilder {
+  pub fn new<BP>(bl: BP) -> Self
+  where
+    BP: BuildPlugin + 'static,
+  {
+    Self(Box::new(bl))
+  }
+
+  pub fn build(&self) -> Box<dyn Plugin> {
+    self.0()
   }
 }

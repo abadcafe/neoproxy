@@ -849,6 +849,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
 
 [[package]]
+name = "local-channel"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6cbc85e69b8df4b8bb8b89ec634e7189099cea8927a276b7384ce5488e53ec8"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "local-waker",
+]
+
+[[package]]
+name = "local-waker"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d873d7c67ce09b42110d801813efbc9364414e356be9935700d368351657487"
+
+[[package]]
 name = "lock_api"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -918,6 +935,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "clap",
+ "futures-core",
  "h3",
  "h3-quinn",
  "http",
@@ -925,6 +943,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "local-channel",
  "quinn",
  "rustls",
  "rustls-native-certs",
@@ -933,6 +952,7 @@ dependencies = [
  "serde_yaml",
  "time",
  "tokio",
+ "tokio-util",
  "tower",
  "tracing",
  "tracing-appender",
@@ -1722,9 +1742,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-util"
-version = "0.7.13"
+version = "0.7.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7fcaa8d55a2bdd6b83ace262b016eca0d79ee02818c5c1bcdf0305114081078"
+checksum = "2efa149fe76073d6e8fd97ef4f4eca7b67f599660115591483572e406e165594"
 dependencies = [
  "bytes",
  "futures-core",

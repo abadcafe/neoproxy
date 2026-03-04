@@ -151,11 +151,7 @@ impl HyperListener {
 }
 
 impl plugin::Listening for HyperListener {
-  fn shutdown_handle(&self) -> plugin::ShutdownHandle {
-    self.shutdown_handle.clone()
-  }
-
-  fn start(&mut self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+  fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
     let listening_set = self.listening_set.clone();
     for addr in &self.addresses {
       let addr = addr.clone();
@@ -173,8 +169,7 @@ impl plugin::Listening for HyperListener {
       // Waiting for graceful shutdown.
       shutdown.notified().await;
 
-      while let Some(res) =
-        listening_set.borrow_mut().join_next().await
+      while let Some(res) = listening_set.borrow_mut().join_next().await
       {
         match res {
           Err(e) => {
@@ -189,7 +184,8 @@ impl plugin::Listening for HyperListener {
         }
       }
 
-      while let Some(res) = conn_serving_set.borrow_mut().join_next().await
+      while let Some(res) =
+        conn_serving_set.borrow_mut().join_next().await
       {
         match res {
           Err(e) => {
@@ -208,8 +204,8 @@ impl plugin::Listening for HyperListener {
     })
   }
 
-  fn stop(&mut self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-    todo!()
+  fn stop(&self) {
+    self.shutdown_handle.shutdown()
   }
 }
 

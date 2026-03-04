@@ -159,9 +159,8 @@ impl std::fmt::Debug for Service {
 }
 
 pub trait Listening {
-  fn shutdown_handle(&self) -> ShutdownHandle;
-  fn stop(&mut self) -> Pin<Box<dyn Future<Output = Result<()>>>>;
-  fn start(&mut self) -> Pin<Box<dyn Future<Output = Result<()>>>>;
+  fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>>;
+  fn stop(&self);
 }
 
 pub struct Listener(Box<dyn Listening>);
@@ -174,16 +173,12 @@ impl Listener {
     Self(Box::new(l))
   }
 
-  pub fn shutdown_handle(&self) -> ShutdownHandle {
-    self.0.shutdown_handle()
-  }
-
-  pub fn stop(&mut self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-    self.0.stop()
-  }
-
-  pub fn start(&mut self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+  pub fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
     self.0.start()
+  }
+
+  pub fn stop(&self) {
+    self.0.stop()
   }
 }
 
@@ -261,15 +256,9 @@ pub trait Plugin {
 }
 
 /// an alias for shorten complex trait definition.
-pub trait BuildPlugin:
-  Fn() -> Box<dyn Plugin> + Sync + Send
-{
-}
+pub trait BuildPlugin: Fn() -> Box<dyn Plugin> + Sync + Send {}
 
-impl<F> BuildPlugin for F where
-  F: Fn() -> Box<dyn Plugin> + Sync + Send
-{
-}
+impl<F> BuildPlugin for F where F: Fn() -> Box<dyn Plugin> + Sync + Send {}
 
 pub struct PluginBuilder(Box<dyn BuildPlugin>);
 

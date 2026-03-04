@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::{runtime, sync, task};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::plugin;
@@ -62,7 +63,7 @@ async fn server_thread_main(shutdown: Arc<sync::Notify>) -> Result<()> {
   }
   info!("created services:\n{services:#?}\n");
 
-  let mut listener_shutdowns = vec![];
+  let mut listeners: Vec<Rc<plugin::Listener>> = Vec::new();
   let mut listener_waitings = task::JoinSet::new();
   for sc in &Config::global().servers {
     for lc in &sc.listeners {
@@ -79,17 +80,21 @@ async fn server_thread_main(shutdown: Arc<sync::Notify>) -> Result<()> {
       }
       let builder = builder.unwrap();
 
-      let mut l: plugin::Listener = builder(
+      let l: plugin::Listener = builder(
         lc.args.clone(),
         services.get(sc.service.as_str()).unwrap().clone(),
       )?;
-      listener_shutdowns.push(l.shutdown_handle());
+      let l = Rc::new(l);
+      listeners.push(Rc::clone(&l));
       listener_waitings.spawn_local(l.start());
     }
   }
 
   shutdown.notified().await;
-  listener_shutdowns.iter().for_each(|s| s.shutdown());
+
+  for l in &listeners {
+    l.stop();
+  }
 
   let res = listener_waitings.join_all().await;
   res.iter().for_each(|r| {

@@ -1,0 +1,16 @@
+worker_threads: 1
+log_directory: 'logs/'
+
+services:
+  - name: connect_tcp
+    kind: connect_tcp.connect_tcp
+
+servers:
+  - name: http_connect
+    listeners:
+      - kind: hyper.listener
+        args:
+          addresses: ['127.0.0.1:8080']
+          protocols: [http]
+          hostnames: []
+    service: connect_tcp

@@ -373,7 +373,7 @@ impl tower::Service<plugin::Request> for Http3ChainService {
     let (req_headers, req_body) = req.into_parts();
     let shutdown = self.shutdown_handle.clone();
     Box::pin(async move {
-      let (host, port) = utils::is_connect_method(&req_headers)?;
+      let (host, port) = utils::parse_connect_target(&req_headers)?;
       let mut requester = pg.borrow_mut().get_proxy_conn().await?;
       let proxy_req =
         http::Request::connect(format!("{host}:{port}")).body(())?;

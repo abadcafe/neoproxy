@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use anyhow::{Result, anyhow};
-
 use crate::plugin;
 
-mod connect_tcp;
-mod echo;
-mod http3_chain;
-mod hyper;
-mod utils;
+pub mod connect_tcp;
+pub mod echo;
+pub mod fast_socks5;
+pub mod http3_chain;
+pub mod hyper;
+pub mod hyper_h3;
+pub mod utils;
 
 pub struct PluginBuilderSet {
   builders: HashMap<&'static str, Box<dyn plugin::BuildPlugin>>,

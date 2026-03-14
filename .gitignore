@@ -1,3 +1,6 @@
 /target/
 /logs/
 /*.sublime-*
+/tmp/
+/working/
+*/__pycache__/

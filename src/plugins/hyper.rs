@@ -126,7 +126,7 @@ impl HyperListener {
           conn_serving_set.borrow_mut().spawn_local(async move {
             // Do not need any graceful shutdown actions here for
             // connections. The `Service`s should do this instead.
-            let conn = builder.serve_connection(io, svc);
+            let conn = builder.serve_connection_with_upgrades(io, svc);
             conn.await.map_err(|e| anyhow::Error::from_boxed(e))
           });
         }

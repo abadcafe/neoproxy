@@ -1,14 +1,17 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use anyhow::Result;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper_util::rt::TokioIo;
-use tokio::{io, net, task};
-use tracing::warn;
+use tokio::task::JoinSet;
+use tokio::{io, net};
+use tracing::{error, warn};
 
 use super::utils::{self, ConnectTargetError};
 use crate::plugin;
@@ -38,13 +41,129 @@ fn build_error_response(
   resp
 }
 
+/// Tunnel 任务追踪器
+///
+/// 追踪所有活跃的 tunnel 任务，支持优雅关闭。
+/// 当收到关闭通知时，直接关闭所有 tunnel 连接（TCP 双向关闭），
+/// 不等待数据传输完成。
+///
+/// # 资源清理
+///
+/// 当调用 `shutdown()` 时：
+/// 1. 触发关闭通知，通知所有 tunnel 任务
+/// 2. 调用 `abort_all()` 强制终止所有 tunnel 任务
+/// 3. TCP 连接会随着任务终止而自动关闭（双向关闭）
+///
+/// # 示例
+///
+/// ```ignore
+/// let tracker = TunnelTracker::new();
+///
+/// // 注册 tunnel 任务
+/// tracker.register(async move {
+///     // 处理 tunnel 数据传输
+/// });
+///
+/// // 关闭所有 tunnel
+/// tracker.shutdown();
+/// ```
+pub struct TunnelTracker {
+  /// 活跃的 tunnel 任务
+  tunnels: Rc<RefCell<JoinSet<()>>>,
+  /// 关闭通知（复用现有 plugin::ShutdownHandle）
+  shutdown_handle: plugin::ShutdownHandle,
+}
+
+impl TunnelTracker {
+  /// 创建新的 TunnelTracker
+  pub fn new() -> Self {
+    Self {
+      tunnels: Rc::new(RefCell::new(JoinSet::new())),
+      shutdown_handle: plugin::ShutdownHandle::new(),
+    }
+  }
+
+  /// 注册新的 tunnel 任务
+  ///
+  /// 将 tunnel 任务加入追踪列表，任务会在后台执行。
+  /// 当调用 `shutdown()` 时，所有注册的任务会被强制终止。
+  pub fn register(
+    &self,
+    tunnel_future: impl Future<Output = ()> + 'static,
+  ) {
+    self.tunnels.borrow_mut().spawn_local(tunnel_future);
+  }
+
+  /// 关闭所有 tunnel
+  ///
+  /// # 行为
+  ///
+  /// 1. 触发关闭通知
+  /// 2. 直接关闭所有 tunnel 连接（TCP 双向关闭）
+  /// 3. 不等待数据传输完成
+  ///
+  /// # 资源清理
+  ///
+  /// 调用此方法后，所有 tunnel 任务会被强制终止，
+  /// TCP 连接会随之关闭。
+  ///
+  /// # 注意
+  ///
+  /// 此方法是同步的，会触发关闭通知并 abort 所有任务。
+  /// 由于 `JoinSet::abort_all()` 的行为，任务可能仍留在 set 中
+  /// 直到被 joined。如果需要等待任务完全清理，请使用
+  /// `wait_shutdown()` 方法。
+  pub fn shutdown(&self) {
+    self.shutdown_handle.shutdown();
+    self.tunnels.borrow_mut().abort_all();
+  }
+
+  /// 等待所有 tunnel 任务清理完成
+  ///
+  /// 在调用 `shutdown()` 后使用此方法来等待所有任务
+  /// 从 `JoinSet` 中移除。
+  pub async fn wait_shutdown(&self) {
+    while self.tunnels.borrow_mut().join_next().await.is_some() {}
+  }
+
+  /// 获取关闭句柄
+  ///
+  /// 返回的 ShutdownHandle 可用于在 tunnel 任务内部
+  /// 监听关闭通知。
+  pub fn shutdown_handle(&self) -> plugin::ShutdownHandle {
+    self.shutdown_handle.clone()
+  }
+
+  /// 获取当前活跃的 tunnel 数量
+  pub fn active_count(&self) -> usize {
+    self.tunnels.borrow().len()
+  }
+}
+
+impl Default for TunnelTracker {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 #[derive(Clone)]
-struct ConnectTcpService {}
+struct ConnectTcpService {
+  /// Tunnel 任务追踪器
+  tunnel_tracker: Rc<TunnelTracker>,
+}
 
 impl ConnectTcpService {
   fn new(sargs: plugin::SerializedArgs) -> Result<plugin::Service> {
     let _args: () = serde_yaml::from_value(sargs)?;
-    Ok(plugin::Service::new(Self {}))
+    Ok(plugin::Service::new(Self {
+      tunnel_tracker: Rc::new(TunnelTracker::new()),
+    }))
+  }
+
+  /// Create a ConnectTcpService directly for testing purposes.
+  #[cfg(test)]
+  fn new_for_test() -> Self {
+    Self { tunnel_tracker: Rc::new(TunnelTracker::new()) }
   }
 }
 
@@ -58,6 +177,8 @@ impl tower::Service<plugin::Request> for ConnectTcpService {
   }
 
   fn call(&mut self, mut req: plugin::Request) -> Self::Future {
+    let tunnel_tracker = self.tunnel_tracker.clone();
+
     Box::pin(async move {
       // 获取 OnUpgrade future
       let on_upgrade = hyper::upgrade::on(&mut req);
@@ -87,14 +208,17 @@ impl tower::Service<plugin::Request> for ConnectTcpService {
       // 构造 200 空响应
       let resp = build_empty_response(http::StatusCode::OK);
 
+      // 获取关闭句柄，用于在 tunnel 任务中监听关闭通知
+      let shutdown_handle = tunnel_tracker.shutdown_handle();
+
       // 关键：在后台任务中等待 upgrade 并处理隧道
       // 必须先返回响应，on_upgrade 才会完成，否则会死锁
-      task::spawn_local(async move {
+      tunnel_tracker.register(async move {
         // 等待 upgrade 完成
         let upgraded = match on_upgrade.await {
           Ok(upgraded) => upgraded,
           Err(e) => {
-            warn!("upgrade failed: {e}");
+            warn!("tunnel upgrade failed: {e}");
             return;
           }
         };
@@ -104,7 +228,7 @@ impl tower::Service<plugin::Request> for ConnectTcpService {
         let target_stream = match net::TcpStream::connect(&addr).await {
           Ok(stream) => stream,
           Err(e) => {
-            warn!("connect to target {addr} failed: {e}");
+            warn!("tunnel connect to target {addr} failed: {e}");
             return;
           }
         };
@@ -114,9 +238,26 @@ impl tower::Service<plugin::Request> for ConnectTcpService {
         // TcpStream 已经实现了 tokio 的 AsyncRead/AsyncWrite，不需要包装
         let mut upgraded = TokioIo::new(upgraded);
         let mut target_stream = target_stream;
-        let _ =
-          io::copy_bidirectional(&mut upgraded, &mut target_stream)
-            .await;
+
+        // 执行双向数据传输，监听关闭通知
+        let result = tokio::select! {
+          res = io::copy_bidirectional(
+            &mut upgraded,
+            &mut target_stream
+          ) => {
+            res
+          }
+          _ = shutdown_handle.notified() => {
+            // 收到关闭通知，直接结束 tunnel
+            warn!("tunnel to {addr} shutdown by notification");
+            return;
+          }
+        };
+
+        // 记录传输错误
+        if let Err(e) = result {
+          error!("tunnel to {addr} transfer error: {e}");
+        }
       });
 
       // 立即返回响应
@@ -180,6 +321,104 @@ mod tests {
     }
   }
 
+  // ============== TunnelTracker Tests ==============
+
+  #[test]
+  fn test_tunnel_tracker_new() {
+    let tracker = TunnelTracker::new();
+    assert_eq!(tracker.active_count(), 0);
+  }
+
+  #[test]
+  fn test_tunnel_tracker_default() {
+    let tracker = TunnelTracker::default();
+    assert_eq!(tracker.active_count(), 0);
+  }
+
+  #[tokio::test]
+  async fn test_tunnel_tracker_register() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let tracker = TunnelTracker::new();
+        tracker.register(async {});
+        // Need to yield for the task to be spawned
+        tokio::task::yield_now().await;
+        assert_eq!(tracker.active_count(), 1);
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_tunnel_tracker_register_multiple() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let tracker = TunnelTracker::new();
+        tracker.register(async {});
+        tracker.register(async {});
+        tracker.register(async {});
+        tokio::task::yield_now().await;
+        assert_eq!(tracker.active_count(), 3);
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_tunnel_tracker_shutdown() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let tracker = TunnelTracker::new();
+        tracker.register(async {
+          // Long-running task
+          std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(tracker.active_count(), 1);
+
+        tracker.shutdown();
+        // After shutdown, wait for tasks to be cleaned up
+        tracker.wait_shutdown().await;
+        assert_eq!(tracker.active_count(), 0);
+      })
+      .await;
+  }
+
+  #[test]
+  fn test_tunnel_tracker_shutdown_empty() {
+    let tracker = TunnelTracker::new();
+    // Should not panic
+    tracker.shutdown();
+    assert_eq!(tracker.active_count(), 0);
+  }
+
+  #[test]
+  fn test_tunnel_tracker_shutdown_handle() {
+    let tracker = TunnelTracker::new();
+    let _handle = tracker.shutdown_handle();
+    // ShutdownHandle should be clonable
+  }
+
+  #[tokio::test]
+  async fn test_tunnel_tracker_active_count_after_task_completes() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let tracker = TunnelTracker::new();
+        tracker.register(async {});
+        tokio::task::yield_now().await;
+        assert_eq!(tracker.active_count(), 1);
+
+        // Wait for task to complete and be removed from JoinSet
+        tracker.wait_shutdown().await;
+        assert_eq!(tracker.active_count(), 0);
+      })
+      .await;
+  }
+
+  // ============== ConnectTcpService Tests ==============
+
   #[test]
   fn test_connect_tcp_service_new_default_args() {
     let result = ConnectTcpService::new(serde_yaml::Value::Null);
@@ -188,10 +427,11 @@ mod tests {
 
   #[test]
   fn test_connect_tcp_service_poll_ready() {
-    let mut service = ConnectTcpService {};
+    let mut service =
+      ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
     let waker = dummy_waker();
     let mut cx = Context::from_waker(&waker);
-    let result = service.poll_ready(&mut cx);
+    let result = Service::poll_ready(&mut service, &mut cx);
     assert!(matches!(result, Poll::Ready(Ok(()))));
   }
 
@@ -280,56 +520,99 @@ mod tests {
 
   #[tokio::test]
   async fn test_service_call_not_connect_method() {
-    let mut service = ConnectTcpService {};
-    let req = make_connect_request(http::Method::GET, "/");
-    let fut = service.call(req);
-    let resp = fut.await.unwrap();
-    assert_eq!(resp.status(), http::StatusCode::METHOD_NOT_ALLOWED);
-    let content_type = resp.headers().get(http::header::CONTENT_TYPE);
-    assert_eq!(content_type.unwrap().to_str().unwrap(), "text/plain");
-    let body = collect_body(resp.into_body()).await;
-    assert_eq!(body, Bytes::from("Only CONNECT method is supported"));
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let mut service =
+          ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
+        let req = make_connect_request(http::Method::GET, "/");
+        let fut = service.call(req);
+        let resp = fut.await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::METHOD_NOT_ALLOWED);
+        let content_type =
+          resp.headers().get(http::header::CONTENT_TYPE);
+        assert_eq!(
+          content_type.unwrap().to_str().unwrap(),
+          "text/plain"
+        );
+        let body = collect_body(resp.into_body()).await;
+        assert_eq!(
+          body,
+          Bytes::from("Only CONNECT method is supported")
+        );
+      })
+      .await;
   }
 
   #[tokio::test]
   async fn test_service_call_no_authority() {
-    let mut service = ConnectTcpService {};
-    let req = make_connect_request(http::Method::CONNECT, "/");
-    let fut = service.call(req);
-    let resp = fut.await.unwrap();
-    assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
-    let content_type = resp.headers().get(http::header::CONTENT_TYPE);
-    assert_eq!(content_type.unwrap().to_str().unwrap(), "text/plain");
-    let body = collect_body(resp.into_body()).await;
-    assert_eq!(body, Bytes::from("Invalid target address"));
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let mut service =
+          ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
+        let req = make_connect_request(http::Method::CONNECT, "/");
+        let fut = service.call(req);
+        let resp = fut.await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+        let content_type =
+          resp.headers().get(http::header::CONTENT_TYPE);
+        assert_eq!(
+          content_type.unwrap().to_str().unwrap(),
+          "text/plain"
+        );
+        let body = collect_body(resp.into_body()).await;
+        assert_eq!(body, Bytes::from("Invalid target address"));
+      })
+      .await;
   }
 
   #[tokio::test]
   async fn test_service_call_no_port() {
-    let mut service = ConnectTcpService {};
-    let req =
-      make_connect_request(http::Method::CONNECT, "example.com");
-    let fut = service.call(req);
-    let resp = fut.await.unwrap();
-    assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
-    let content_type = resp.headers().get(http::header::CONTENT_TYPE);
-    assert_eq!(content_type.unwrap().to_str().unwrap(), "text/plain");
-    let body = collect_body(resp.into_body()).await;
-    assert_eq!(body, Bytes::from("Invalid target address"));
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let mut service =
+          ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
+        let req =
+          make_connect_request(http::Method::CONNECT, "example.com");
+        let fut = service.call(req);
+        let resp = fut.await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+        let content_type =
+          resp.headers().get(http::header::CONTENT_TYPE);
+        assert_eq!(
+          content_type.unwrap().to_str().unwrap(),
+          "text/plain"
+        );
+        let body = collect_body(resp.into_body()).await;
+        assert_eq!(body, Bytes::from("Invalid target address"));
+      })
+      .await;
   }
 
   #[tokio::test]
   async fn test_service_call_port_zero() {
-    let mut service = ConnectTcpService {};
-    let req =
-      make_connect_request(http::Method::CONNECT, "example.com:0");
-    let fut = service.call(req);
-    let resp = fut.await.unwrap();
-    assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
-    let content_type = resp.headers().get(http::header::CONTENT_TYPE);
-    assert_eq!(content_type.unwrap().to_str().unwrap(), "text/plain");
-    let body = collect_body(resp.into_body()).await;
-    assert_eq!(body, Bytes::from("Invalid target address"));
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let mut service =
+          ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
+        let req =
+          make_connect_request(http::Method::CONNECT, "example.com:0");
+        let fut = service.call(req);
+        let resp = fut.await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+        let content_type =
+          resp.headers().get(http::header::CONTENT_TYPE);
+        assert_eq!(
+          content_type.unwrap().to_str().unwrap(),
+          "text/plain"
+        );
+        let body = collect_body(resp.into_body()).await;
+        assert_eq!(body, Bytes::from("Invalid target address"));
+      })
+      .await;
   }
 
   #[tokio::test]
@@ -337,7 +620,8 @@ mod tests {
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
-        let mut service = ConnectTcpService {};
+        let mut service =
+          ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
         let req = make_connect_request(
           http::Method::CONNECT,
           "example.com:443",
@@ -363,7 +647,8 @@ mod tests {
         // Drop the listener so the port is free and connection will fail
         drop(listener);
 
-        let mut service = ConnectTcpService {};
+        let mut service =
+          ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
         let req = make_connect_request(
           http::Method::CONNECT,
           &format!("127.0.0.1:{}", addr.port()),
@@ -372,6 +657,41 @@ mod tests {
         let resp = fut.await.unwrap();
         // upgrade will fail, but we still get 200 response
         assert_eq!(resp.status(), http::StatusCode::OK);
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_service_tunnel_tracker_tracking() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let service = ConnectTcpService::new_for_test();
+        // Initially no active tunnels
+        assert_eq!(service.tunnel_tracker.active_count(), 0);
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_service_tunnel_tracker_shutdown() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let service = ConnectTcpService::new_for_test();
+
+        // Register a pending tunnel
+        service.tunnel_tracker.register(async {
+          std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(service.tunnel_tracker.active_count(), 1);
+
+        // Shutdown should abort all tunnels
+        service.tunnel_tracker.shutdown();
+        // Wait for tasks to be cleaned up
+        service.tunnel_tracker.wait_shutdown().await;
+        assert_eq!(service.tunnel_tracker.active_count(), 0);
       })
       .await;
   }
@@ -410,7 +730,8 @@ mod tests {
         let _http_addr = http_listener.local_addr().unwrap();
 
         // Create the service and request
-        let mut service = ConnectTcpService {};
+        let mut service =
+          ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
         let req = make_connect_request(
           http::Method::CONNECT,
           &format!("127.0.0.1:{}", target_addr.port()),
@@ -498,7 +819,8 @@ mod tests {
           .await;
 
         // Now test our ConnectTcpService
-        let mut service = ConnectTcpService {};
+        let mut service =
+          ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
         let req = make_connect_request(
           http::Method::CONNECT,
           &format!("127.0.0.1:{}", target_addr.port()),

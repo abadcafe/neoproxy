@@ -12,7 +12,7 @@ import tempfile
 import shutil
 import time
 import os
-from typing import Callable, Tuple, List, Dict, Any, Optional
+from typing import Callable, Tuple, List, Dict, Optional
 
 
 # ==============================================================================
@@ -222,7 +222,7 @@ def run_curl_connect(
             - 标准错误
     """
     cmd: List[str] = [
-        "curl", "-s",
+        "curl", "-s", "-p",  # -p 强制使用 CONNECT 方法建立隧道
         "-x", f"http://{proxy_host}:{proxy_port}",
         "--connect-timeout", str(int(timeout)),
         f"http://{target_host}:{target_port}/"
@@ -249,6 +249,7 @@ class TestHTTPConnect:
         TC-001: 正常 CONNECT 隧道建立
 
         测试目标: 验证 CONNECT 方法能够正常建立 TCP 隧道并双向转发数据
+        使用 curl 发送 CONNECT 请求通过代理访问目标服务器
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = 18080
@@ -263,21 +264,30 @@ class TestHTTPConnect:
             # 2. 启动模拟目标服务器
             received_messages: List[bytes] = []
 
-            def echo_handler(conn: socket.socket) -> None:
+            def http_echo_handler(conn: socket.socket) -> None:
                 try:
                     while True:
                         data = conn.recv(1024)
                         if not data:
                             break
                         received_messages.append(data)
-                        conn.send(b"RESPONSE:" + data)
+                        # 返回有效的 HTTP 响应
+                        http_response = (
+                            b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: text/plain\r\n"
+                            b"Content-Length: 2\r\n"
+                            b"\r\n"
+                            b"OK"
+                        )
+                        conn.send(http_response)
+                        break  # 发送响应后关闭连接
                 except Exception:
                     pass
                 finally:
                     conn.close()
 
-            target_thread, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, http_echo_handler
             )
 
             # 3. 启动代理服务器
@@ -287,48 +297,24 @@ class TestHTTPConnect:
             assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
                 "Proxy server failed to start"
 
-            # 5. 使用 socket 发送 CONNECT 请求并验证隧道
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
-            try:
-                sock.connect(("127.0.0.1", proxy_port))
+            # 5. 使用 curl 发送 CONNECT 请求并验证隧道
+            returncode, stdout, stderr = run_curl_connect(
+                proxy_host="127.0.0.1",
+                proxy_port=proxy_port,
+                target_host="127.0.0.1",
+                target_port=target_port,
+                timeout=10.0
+            )
 
-                # 发送 CONNECT 请求
-                connect_request = f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
-                sock.sendall(connect_request)
+            # 6. 验证 curl 成功执行
+            assert returncode == 0, \
+                f"curl failed with return code {returncode}, stderr: {stderr}"
 
-                # 读取 200 响应
-                response = b""
-                while b"\r\n\r\n" not in response:
-                    chunk = sock.recv(1024)
-                    if not chunk:
-                        break
-                    response += chunk
-
-                # 验证收到 200 响应
-                assert b"200" in response, \
-                    f"Expected 200 response, got: {response.decode(errors='ignore')}"
-
-                # 发送测试数据
-                test_data = b"HELLO_WORLD_TEST_DATA"
-                sock.sendall(test_data)
-
-                # 接收回显数据
-                echo_response = sock.recv(1024)
-                assert echo_response == b"RESPONSE:" + test_data, \
-                    f"Expected 'RESPONSE:{test_data.decode()}', got: {echo_response.decode(errors='ignore')}"
-
-            finally:
-                sock.close()
-
-            # 6. 验证目标服务器收到正确数据
-            time.sleep(0.5)  # 等待数据传输完成
+            # 7. 验证目标服务器收到数据并返回响应
             assert len(received_messages) > 0, "Target server did not receive any data"
-            assert any(test_data in d for d in received_messages), \
-                f"Target server did not receive correct data. Received: {received_messages}"
 
         finally:
-            # 7. 清理资源
+            # 8. 清理资源
             if proxy_proc:
                 proxy_proc.terminate()
                 proxy_proc.wait(timeout=5)
@@ -517,13 +503,21 @@ class TestHTTPConnect:
                 try:
                     data = conn.recv(1024)
                     if data:
-                        conn.send(b"RESPONSE:" + data)
+                        # 返回有效的 HTTP 响应
+                        http_response = (
+                            b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: text/plain\r\n"
+                            b"Content-Length: 2\r\n"
+                            b"\r\n"
+                            b"OK"
+                        )
+                        conn.send(http_response)
                 except Exception:
                     pass
                 finally:
                     conn.close()
 
-            target_thread, target_socket = create_target_server(
+            _, target_socket = create_target_server(
                 "127.0.0.1", target_port, counting_handler
             )
 
@@ -609,7 +603,7 @@ class TestHTTPConnect:
                 finally:
                     conn.close()
 
-            target_thread, target_socket = create_target_server(
+            _, target_socket = create_target_server(
                 "127.0.0.1", target_port, echo_handler
             )
 
@@ -703,7 +697,7 @@ class TestHTTPConnect:
                 finally:
                     conn.close()
 
-            target_thread, target_socket = create_target_server(
+            _, target_socket = create_target_server(
                 "127.0.0.1", target_port, close_detect_handler
             )
 

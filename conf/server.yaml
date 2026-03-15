@@ -7,7 +7,7 @@ services:
   args: {}
 
 - name: http3_chain
-  kind: http3_chain
+  kind: http3_chain.http3_chain
   args:
     proxy_group:
     - address: 127.0.0.1:8088
@@ -29,9 +29,9 @@ services:
 servers:
 - name: default
   listeners:
-  - kind: hyper.hyper
+  - kind: hyper.listener
     args:
-      addresses: [ 0.0.0.0:8081, 0.0.0.0:111111 ]
+      addresses: [ 0.0.0.0:8081 ]
       protocols: [ http ]
       hostnames: []
       certificates: []
@@ -39,7 +39,7 @@ servers:
 
 - name: http_connect
   listeners:
-  - kind: hyper.hyper
+  - kind: hyper.listener
     args:
       addresses: [ 0.0.0.0:8080 ]
       protocols: [ http ]

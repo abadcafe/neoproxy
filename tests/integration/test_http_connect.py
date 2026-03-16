@@ -12,190 +12,22 @@ import tempfile
 import shutil
 import time
 import os
+import signal
 from typing import Callable, Tuple, List, Dict, Optional
 
+from .utils.helpers import (
+    NEOPROXY_BINARY,
+    start_proxy,
+    wait_for_proxy,
+    create_target_server,
+    send_raw_request,
+    create_test_config,
+)
+
 
 # ==============================================================================
-# 测试辅助函数
+# 测试辅助函数（本模块特有）
 # ==============================================================================
-
-
-def start_proxy(
-    config_path: str,
-    binary_path: str = "target/debug/neoproxy"
-) -> subprocess.Popen:
-    """
-    启动代理服务器进程。
-
-    Args:
-        config_path: 配置文件的绝对路径
-        binary_path: neoproxy 可执行文件的路径
-
-    Returns:
-        subprocess.Popen: 代理服务器进程对象
-    """
-    proc = subprocess.Popen(
-        [binary_path, "--config", config_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=False
-    )
-    return proc
-
-
-def wait_for_proxy(
-    host: str,
-    port: int,
-    timeout: float = 5.0,
-    interval: float = 0.1
-) -> bool:
-    """
-    等待代理服务器就绪。
-
-    Args:
-        host: 代理服务器监听地址
-        port: 代理服务器监听端口
-        timeout: 最大等待时间（秒）
-        interval: 检查间隔（秒）
-
-    Returns:
-        bool: True 表示服务器就绪，False 表示超时
-    """
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(1.0)
-            result = sock.connect_ex((host, port))
-            sock.close()
-            if result == 0:
-                return True
-        except Exception:
-            pass
-        time.sleep(interval)
-    return False
-
-
-def create_target_server(
-    host: str,
-    port: int,
-    handler: Callable[[socket.socket], None]
-) -> Tuple[threading.Thread, socket.socket]:
-    """
-    创建模拟目标服务器。
-
-    Args:
-        host: 监听地址
-        port: 监听端口
-        handler: 处理客户端连接的回调函数，接收 socket 对象
-
-    Returns:
-        Tuple[threading.Thread, socket.socket]:
-            - 服务器线程对象
-            - 服务器监听 socket
-    """
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind((host, port))
-    server_socket.listen(5)
-
-    running = threading.Event()
-    running.set()
-
-    def server_loop() -> None:
-        while running.is_set():
-            try:
-                server_socket.settimeout(0.5)
-                conn, _ = server_socket.accept()
-                thread = threading.Thread(target=handler, args=(conn,))
-                thread.daemon = True
-                thread.start()
-            except socket.timeout:
-                continue
-            except Exception:
-                break
-
-    thread = threading.Thread(target=server_loop)
-    thread.daemon = True
-    thread.start()
-
-    return thread, server_socket
-
-
-def send_raw_request(
-    host: str,
-    port: int,
-    request: bytes,
-    timeout: float = 5.0
-) -> bytes:
-    """
-    发送原始 HTTP 请求并读取响应。
-
-    Args:
-        host: 目标主机地址
-        port: 目标端口
-        request: 原始 HTTP 请求字节
-        timeout: 套接字超时时间（秒）
-
-    Returns:
-        bytes: 服务器响应数据
-    """
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-    try:
-        sock.connect((host, port))
-        sock.sendall(request)
-        response = b""
-        # 读取直到收到完整的 HTTP 响应头或连接关闭
-        while True:
-            data = sock.recv(4096)
-            if not data:
-                break
-            response += data
-            # 如果收到了完整的 HTTP 响应头（以 \r\n\r\n 结尾），就停止
-            if b"\r\n\r\n" in response:
-                break
-        return response
-    finally:
-        sock.close()
-
-
-def create_test_config(
-    proxy_port: int,
-    temp_dir: str
-) -> str:
-    """
-    创建测试专用配置文件。
-
-    Args:
-        proxy_port: 代理服务器监听端口
-        temp_dir: 临时目录路径
-
-    Returns:
-        str: 配置文件绝对路径
-    """
-    config_content = f"""worker_threads: 2
-log_directory: "{temp_dir}/logs"
-
-services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
-
-servers:
-- name: http_connect
-  listeners:
-  - kind: hyper.listener
-    args:
-      addresses: [ "0.0.0.0:{proxy_port}" ]
-      protocols: [ http ]
-      hostnames: []
-      certificates: []
-  service: connect_tcp
-"""
-    config_path = os.path.join(temp_dir, "test_config.yaml")
-    with open(config_path, "w") as f:
-        f.write(config_content)
-    return config_path
 
 
 def run_curl_connect(
@@ -259,7 +91,7 @@ class TestHTTPConnect:
 
         try:
             # 1. 创建配置文件
-            config_path = create_test_config(proxy_port, temp_dir)
+            config_path = create_test_config(proxy_port, temp_dir, worker_threads=2)
 
             # 2. 启动模拟目标服务器
             received_messages: List[bytes] = []
@@ -334,7 +166,7 @@ class TestHTTPConnect:
 
         try:
             # 1. 创建配置文件
-            config_path = create_test_config(proxy_port, temp_dir)
+            config_path = create_test_config(proxy_port, temp_dir, worker_threads=2)
 
             # 2. 启动代理服务器
             proxy_proc = start_proxy(config_path)
@@ -379,7 +211,7 @@ class TestHTTPConnect:
 
         try:
             # 1. 创建配置文件
-            config_path = create_test_config(proxy_port, temp_dir)
+            config_path = create_test_config(proxy_port, temp_dir, worker_threads=2)
 
             # 2. 启动代理服务器
             proxy_proc = start_proxy(config_path)
@@ -423,7 +255,7 @@ class TestHTTPConnect:
 
         try:
             # 1. 创建配置文件
-            config_path = create_test_config(proxy_port, temp_dir)
+            config_path = create_test_config(proxy_port, temp_dir, worker_threads=2)
 
             # 2. 启动代理服务器
             proxy_proc = start_proxy(config_path)
@@ -473,8 +305,14 @@ class TestHTTPConnect:
         finally:
             # 6. 清理资源
             if proxy_proc:
-                proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                # Use SIGTERM for graceful shutdown and wait longer
+                # since tunnel tasks may need time to cleanup
+                proxy_proc.send_signal(signal.SIGTERM)
+                try:
+                    proxy_proc.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proxy_proc.kill()
+                    proxy_proc.wait()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_tc005_concurrent_tunnels(self) -> None:
@@ -491,7 +329,7 @@ class TestHTTPConnect:
 
         try:
             # 1. 创建配置文件
-            config_path = create_test_config(proxy_port, temp_dir)
+            config_path = create_test_config(proxy_port, temp_dir, worker_threads=2)
 
             # 2. 启动模拟目标服务器
             connections_count: Dict[str, int] = {"count": 0}
@@ -585,7 +423,7 @@ class TestHTTPConnect:
 
         try:
             # 1. 创建配置文件
-            config_path = create_test_config(proxy_port, temp_dir)
+            config_path = create_test_config(proxy_port, temp_dir, worker_threads=2)
 
             # 2. 启动模拟目标服务器
             received_data: List[bytes] = []
@@ -674,7 +512,7 @@ class TestHTTPConnect:
 
         try:
             # 1. 创建配置文件
-            config_path = create_test_config(proxy_port, temp_dir)
+            config_path = create_test_config(proxy_port, temp_dir, worker_threads=2)
 
             # 2. 启动模拟目标服务器
             target_socket_closed = threading.Event()

@@ -10,13 +10,12 @@ import tempfile
 import os
 from typing import Tuple, Optional
 
+from .utils.helpers import NEOPROXY_BINARY
+
 
 # ==============================================================================
 # Test helper functions
 # ==============================================================================
-
-
-NEOPROXY_BINARY = "target/debug/neoproxy"
 
 
 def run_neoproxy_with_config(
@@ -254,7 +253,8 @@ servers:
             f"Expected exit code 1, got {returncode}"
 
         # Verify error message contains "listener builder ... not found"
-        assert "listener builder 'unknown_listener' not found" in stderr, \
+        # The error includes the full kind name (e.g., 'hyper.unknown_listener')
+        assert "listener builder 'hyper.unknown_listener' not found" in stderr, \
             f"Expected 'listener builder not found' in error, got: {stderr}"
 
     def test_config_service_not_found(self) -> None:

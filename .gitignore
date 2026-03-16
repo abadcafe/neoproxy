@@ -3,5 +3,5 @@
 /*.sublime-*
 /tmp/
 /working/
-*/__pycache__/
+**/__pycache__/
 /archived/

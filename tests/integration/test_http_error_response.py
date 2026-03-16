@@ -13,183 +13,14 @@ import time
 import os
 from typing import Optional
 
-
-# ==============================================================================
-# Test helper functions
-# ==============================================================================
-
-
-NEOPROXY_BINARY = "target/debug/neoproxy"
-
-
-def create_echo_config(proxy_port: int, temp_dir: str) -> str:
-    """
-    Create echo service configuration file.
-
-    Args:
-        proxy_port: Port for the proxy server
-        temp_dir: Temporary directory for logs
-
-    Returns:
-        str: Path to the configuration file
-    """
-    config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
-
-services:
-- name: echo
-  kind: echo.echo
-
-servers:
-- name: echo_server
-  listeners:
-  - kind: hyper.listener
-    args:
-      addresses: [ "0.0.0.0:{proxy_port}" ]
-      protocols: [ http ]
-      hostnames: []
-      certificates: []
-  service: echo
-"""
-    config_path = os.path.join(temp_dir, "echo_config.yaml")
-    with open(config_path, "w") as f:
-        f.write(config_content)
-    return config_path
-
-
-def create_connect_tcp_config(proxy_port: int, temp_dir: str) -> str:
-    """
-    Create connect_tcp service configuration file.
-
-    Args:
-        proxy_port: Port for the proxy server
-        temp_dir: Temporary directory for logs
-
-    Returns:
-        str: Path to the configuration file
-    """
-    config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
-
-services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
-
-servers:
-- name: http_connect
-  listeners:
-  - kind: hyper.listener
-    args:
-      addresses: [ "0.0.0.0:{proxy_port}" ]
-      protocols: [ http ]
-      hostnames: []
-      certificates: []
-  service: connect_tcp
-"""
-    config_path = os.path.join(temp_dir, "connect_config.yaml")
-    with open(config_path, "w") as f:
-        f.write(config_content)
-    return config_path
-
-
-def start_proxy(config_path: str) -> subprocess.Popen:
-    """
-    Start proxy server process.
-
-    Args:
-        config_path: Path to configuration file
-
-    Returns:
-        subprocess.Popen: Proxy server process
-    """
-    proc = subprocess.Popen(
-        [NEOPROXY_BINARY, "--config", config_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=False
-    )
-    return proc
-
-
-def wait_for_proxy(
-    host: str,
-    port: int,
-    timeout: float = 5.0,
-    interval: float = 0.1
-) -> bool:
-    """
-    Wait for proxy server to be ready.
-
-    Args:
-        host: Proxy server host
-        port: Proxy server port
-        timeout: Maximum wait time in seconds
-        interval: Check interval in seconds
-
-    Returns:
-        bool: True if server is ready, False if timeout
-    """
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(1.0)
-            result = sock.connect_ex((host, port))
-            sock.close()
-            if result == 0:
-                return True
-        except Exception:
-            pass
-        time.sleep(interval)
-    return False
-
-
-def send_raw_request(
-    host: str,
-    port: int,
-    request: bytes,
-    timeout: float = 5.0,
-    read_timeout: float = 5.0
-) -> bytes:
-    """
-    Send raw HTTP request and read response.
-
-    Args:
-        host: Target host
-        port: Target port
-        request: Raw HTTP request bytes
-        timeout: Connection timeout
-        read_timeout: Read timeout
-
-    Returns:
-        bytes: Response data
-    """
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-    try:
-        sock.connect((host, port))
-        sock.sendall(request)
-
-        sock.settimeout(read_timeout)
-        response = b""
-
-        # Try to read response with timeout
-        try:
-            while True:
-                data = sock.recv(4096)
-                if not data:
-                    break
-                response += data
-                # If we got a complete HTTP response header, stop
-                if b"\r\n\r\n" in response:
-                    # For HEAD or short responses, we might have all the data
-                    break
-        except socket.timeout:
-            pass
-
-        return response
-    finally:
-        sock.close()
+from .utils.helpers import (
+    NEOPROXY_BINARY,
+    start_proxy,
+    wait_for_proxy,
+    send_raw_request,
+    create_echo_config,
+    create_test_config,
+)
 
 
 # ==============================================================================
@@ -266,7 +97,7 @@ class TestHTTPErrorResponse:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            config_path = create_connect_tcp_config(proxy_port, temp_dir)
+            config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
             assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
@@ -301,7 +132,7 @@ class TestHTTPErrorResponse:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            config_path = create_connect_tcp_config(proxy_port, temp_dir)
+            config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
             assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \

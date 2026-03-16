@@ -12,6 +12,7 @@ import tempfile
 import time
 import os
 import signal
+import sys
 from typing import Optional, Tuple, List, Callable, Generator
 
 # ==============================================================================
@@ -19,6 +20,37 @@ from typing import Optional, Tuple, List, Callable, Generator
 # ==============================================================================
 
 NEOPROXY_BINARY = "target/debug/neoproxy"
+
+
+# ==============================================================================
+# Binary Check
+# ==============================================================================
+
+
+def check_binary_exists() -> bool:
+    """
+    Check if the neoproxy binary exists.
+
+    Returns:
+        bool: True if binary exists, False otherwise
+    """
+    return os.path.exists(NEOPROXY_BINARY)
+
+
+def assert_binary_exists() -> None:
+    """
+    Assert that the neoproxy binary exists.
+
+    Raises:
+        AssertionError: If binary does not exist
+    """
+    if not check_binary_exists():
+        print(
+            f"\nERROR: neoproxy binary not found at {NEOPROXY_BINARY}\n"
+            f"Please run 'cargo build' before running integration tests.\n",
+            file=sys.stderr
+        )
+        sys.exit(1)
 
 # Listener shutdown timeout: 3 seconds (per design doc)
 LISTENER_SHUTDOWN_TIMEOUT = 3

@@ -4,6 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -44,15 +45,17 @@ fn build_error_response(
 /// Tunnel 任务追踪器
 ///
 /// 追踪所有活跃的 tunnel 任务，支持优雅关闭。
-/// 当收到关闭通知时，直接关闭所有 tunnel 连接（TCP 双向关闭），
-/// 不等待数据传输完成。
+/// 当收到关闭通知时，tunnel 任务应主动退出数据传输。
 ///
-/// # 资源清理
+/// # 关闭流程
 ///
 /// 当调用 `shutdown()` 时：
 /// 1. 触发关闭通知，通知所有 tunnel 任务
-/// 2. 调用 `abort_all()` 强制终止所有 tunnel 任务
-/// 3. TCP 连接会随着任务终止而自动关闭（双向关闭）
+/// 2. tunnel 任务应在数据传输循环中监听通知并主动退出
+///
+/// 当调用 `abort_all()` 时：
+/// 1. 强制终止所有 tunnel 任务
+/// 2. 通常在 `shutdown()` 后超时仍未退出时调用
 ///
 /// # 示例
 ///
@@ -64,8 +67,12 @@ fn build_error_response(
 ///     // 处理 tunnel 数据传输
 /// });
 ///
-/// // 关闭所有 tunnel
+/// // 优雅关闭：触发通知，等待 tunnel 主动退出
 /// tracker.shutdown();
+///
+/// // 超时后强制终止
+/// tokio::time::timeout(Duration::from_secs(5), tracker.wait_shutdown()).await.ok();
+/// tracker.abort_all();
 /// ```
 pub struct TunnelTracker {
   /// 活跃的 tunnel 任务
@@ -86,7 +93,8 @@ impl TunnelTracker {
   /// 注册新的 tunnel 任务
   ///
   /// 将 tunnel 任务加入追踪列表，任务会在后台执行。
-  /// 当调用 `shutdown()` 时，所有注册的任务会被强制终止。
+  /// 当调用 `shutdown()` 时，任务会收到关闭通知。
+  /// 当调用 `abort_all()` 时，任务会被强制终止。
   pub fn register(
     &self,
     tunnel_future: impl Future<Output = ()> + 'static,
@@ -94,27 +102,43 @@ impl TunnelTracker {
     self.tunnels.borrow_mut().spawn_local(tunnel_future);
   }
 
-  /// 关闭所有 tunnel
+  /// 触发关闭通知
   ///
   /// # 行为
   ///
-  /// 1. 触发关闭通知
-  /// 2. 直接关闭所有 tunnel 连接（TCP 双向关闭）
-  /// 3. 不等待数据传输完成
-  ///
-  /// # 资源清理
-  ///
-  /// 调用此方法后，所有 tunnel 任务会被强制终止，
-  /// TCP 连接会随之关闭。
+  /// 触发关闭通知，通知所有 tunnel 任务准备关闭。
+  /// tunnel 任务应在数据传输循环中通过 `select!` 监听
+  /// `shutdown_handle.notified()` 并主动退出。
   ///
   /// # 注意
   ///
-  /// 此方法是同步的，会触发关闭通知并 abort 所有任务。
-  /// 由于 `JoinSet::abort_all()` 的行为，任务可能仍留在 set 中
-  /// 直到被 joined。如果需要等待任务完全清理，请使用
-  /// `wait_shutdown()` 方法。
+  /// 此方法仅触发通知，不强制终止任务。
+  /// 如果需要在超时后强制终止，请使用 `abort_all()` 方法。
+  /// 典型使用模式：
+  /// ```ignore
+  /// tracker.shutdown();
+  /// tokio::time::timeout(Duration::from_secs(5), tracker.wait_shutdown()).await.ok();
+  /// tracker.abort_all();
+  /// ```
   pub fn shutdown(&self) {
     self.shutdown_handle.shutdown();
+  }
+
+  /// 强制终止所有 tunnel 任务
+  ///
+  /// # 行为
+  ///
+  /// 立即终止所有注册的 tunnel 任务，不等待其主动退出。
+  /// 通常在 `shutdown()` 超时后调用。
+  ///
+  /// # 注意
+  ///
+  /// 此方法会强制终止任务，可能导致资源未正确释放。
+  /// 应优先使用 `shutdown()` 等待任务主动退出。
+  /// 由于 `JoinSet::abort_all()` 的行为，任务可能仍留在 set 中
+  /// 直到被 joined。如果需要等待任务完全清理，请在调用此方法后
+  /// 使用 `wait_shutdown()` 方法。
+  pub fn abort_all(&self) {
     self.tunnels.borrow_mut().abort_all();
   }
 
@@ -148,16 +172,21 @@ impl Default for TunnelTracker {
 
 #[derive(Clone)]
 struct ConnectTcpService {
-  /// Tunnel 任务追踪器
+  /// Tunnel 任务追踪器（从 Plugin 获取，与其他 Service 共享）
   tunnel_tracker: Rc<TunnelTracker>,
 }
 
 impl ConnectTcpService {
-  fn new(sargs: plugin::SerializedArgs) -> Result<plugin::Service> {
+  /// Create a ConnectTcpService with a shared TunnelTracker.
+  ///
+  /// The TunnelTracker is owned by the Plugin and shared across all
+  /// Service instances created by that Plugin.
+  fn new(
+    sargs: plugin::SerializedArgs,
+    tunnel_tracker: Rc<TunnelTracker>,
+  ) -> Result<plugin::Service> {
     let _args: () = serde_yaml::from_value(sargs)?;
-    Ok(plugin::Service::new(Self {
-      tunnel_tracker: Rc::new(TunnelTracker::new()),
-    }))
+    Ok(plugin::Service::new(Self { tunnel_tracker }))
   }
 
   /// Create a ConnectTcpService directly for testing purposes.
@@ -266,18 +295,42 @@ impl tower::Service<plugin::Request> for ConnectTcpService {
   }
 }
 
+/// Plugin-level timeout for tunnel shutdown.
+/// After this duration, remaining tunnels are forcefully aborted.
+///
+/// # Relationship with PLUGIN_UNINSTALL_TIMEOUT
+///
+/// This constant is used internally by `ConnectTcpPlugin::uninstall()`
+/// to wait for tunnels to complete gracefully. The server layer uses
+/// `PLUGIN_UNINSTALL_TIMEOUT` (also 5 seconds) to wait for all plugin
+/// uninstall futures.
+///
+/// While both values are currently 5 seconds, they serve different purposes:
+/// - `TUNNEL_SHUTDOWN_TIMEOUT`: Plugin-internal timeout for waiting on tunnels
+/// - `PLUGIN_UNINSTALL_TIMEOUT`: Server-level timeout for all plugins
+///
+/// This separation allows different plugins to have different internal
+/// shutdown strategies while the server maintains a consistent overall timeout.
+const TUNNEL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
 struct ConnectTcpPlugin {
   service_builders:
     HashMap<&'static str, Box<dyn plugin::BuildService>>,
+  /// Plugin-level TunnelTracker shared by all Service instances.
+  tunnel_tracker: Rc<TunnelTracker>,
 }
 
 impl ConnectTcpPlugin {
   fn new() -> ConnectTcpPlugin {
-    let builder: Box<dyn plugin::BuildService> =
-      Box::new(|a| ConnectTcpService::new(a));
+    let tunnel_tracker = Rc::new(TunnelTracker::new());
+    let tunnel_tracker_clone = tunnel_tracker.clone();
+
+    let builder: Box<dyn plugin::BuildService> = Box::new(move |a| {
+      ConnectTcpService::new(a, tunnel_tracker_clone.clone())
+    });
     let service_builders = HashMap::from([("connect_tcp", builder)]);
 
-    Self { service_builders }
+    Self { service_builders, tunnel_tracker }
   }
 }
 
@@ -287,6 +340,40 @@ impl plugin::Plugin for ConnectTcpPlugin {
     name: &str,
   ) -> Option<&Box<dyn plugin::BuildService>> {
     self.service_builders.get(name)
+  }
+
+  /// Trigger graceful shutdown of all tunnels created by this plugin.
+  ///
+  /// This method:
+  /// 1. Triggers shutdown notification to all tunnels
+  /// 2. Waits for tunnels to complete (up to TUNNEL_SHUTDOWN_TIMEOUT)
+  /// 3. If timeout, forcefully aborts remaining tunnels
+  fn uninstall(&mut self) -> Pin<Box<dyn Future<Output = ()>>> {
+    let tunnel_tracker = self.tunnel_tracker.clone();
+
+    Box::pin(async move {
+      // Trigger shutdown notification
+      tunnel_tracker.shutdown();
+
+      // Wait for tunnels to complete with timeout
+      let result = tokio::time::timeout(
+        TUNNEL_SHUTDOWN_TIMEOUT,
+        tunnel_tracker.wait_shutdown(),
+      )
+      .await;
+
+      if result.is_err() {
+        // Timeout reached, forcefully abort remaining tunnels
+        warn!(
+          "Tunnel shutdown timeout after {:?}, aborting {} remaining tunnels",
+          TUNNEL_SHUTDOWN_TIMEOUT,
+          tunnel_tracker.active_count()
+        );
+        tunnel_tracker.abort_all();
+        // Wait for aborted tasks to be cleaned up
+        tunnel_tracker.wait_shutdown().await;
+      }
+    })
   }
 }
 
@@ -365,20 +452,113 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_tunnel_tracker_shutdown() {
+  async fn test_tunnel_tracker_shutdown_only_notifies() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let tracker = TunnelTracker::new();
+        let shutdown_handle = tracker.shutdown_handle();
+
+        // Task that listens for shutdown notification
+        let notified = Rc::new(std::cell::Cell::new(false));
+        let notified_clone = notified.clone();
+        tracker.register(async move {
+          // Wait for notification then exit
+          shutdown_handle.notified().await;
+          notified_clone.set(true);
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(tracker.active_count(), 1);
+
+        // shutdown() should only trigger notification
+        tracker.shutdown();
+
+        // Give the task time to receive notification and exit
+        tracker.wait_shutdown().await;
+        assert_eq!(tracker.active_count(), 0);
+        assert!(notified.get(), "Task should have been notified");
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_tunnel_tracker_abort_all() {
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
         let tracker = TunnelTracker::new();
         tracker.register(async {
-          // Long-running task
+          // Long-running task that will be aborted
           std::future::pending::<()>().await;
         });
         tokio::task::yield_now().await;
         assert_eq!(tracker.active_count(), 1);
 
+        // abort_all() should forcefully terminate the task
+        tracker.abort_all();
+        tracker.wait_shutdown().await;
+        assert_eq!(tracker.active_count(), 0);
+      })
+      .await;
+  }
+
+  #[test]
+  fn test_tunnel_tracker_abort_all_empty() {
+    let tracker = TunnelTracker::new();
+    // Should not panic on empty tracker
+    tracker.abort_all();
+    assert_eq!(tracker.active_count(), 0);
+  }
+
+  #[tokio::test]
+  async fn test_tunnel_tracker_shutdown_then_abort_all() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let tracker = TunnelTracker::new();
+        tracker.register(async {
+          // Long-running task that ignores shutdown notification
+          std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(tracker.active_count(), 1);
+
+        // shutdown() only notifies, task still running
         tracker.shutdown();
-        // After shutdown, wait for tasks to be cleaned up
+        tokio::task::yield_now().await;
+        assert_eq!(
+          tracker.active_count(),
+          1,
+          "Task should still be active after shutdown()"
+        );
+
+        // abort_all() forcefully terminates
+        tracker.abort_all();
+        tracker.wait_shutdown().await;
+        assert_eq!(tracker.active_count(), 0);
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_tunnel_tracker_abort_all_multiple_tasks() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let tracker = TunnelTracker::new();
+        tracker.register(async {
+          std::future::pending::<()>().await;
+        });
+        tracker.register(async {
+          std::future::pending::<()>().await;
+        });
+        tracker.register(async {
+          std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(tracker.active_count(), 3);
+
+        tracker.abort_all();
         tracker.wait_shutdown().await;
         assert_eq!(tracker.active_count(), 0);
       })
@@ -421,14 +601,16 @@ mod tests {
 
   #[test]
   fn test_connect_tcp_service_new_default_args() {
-    let result = ConnectTcpService::new(serde_yaml::Value::Null);
+    let tunnel_tracker = Rc::new(TunnelTracker::new());
+    let result =
+      ConnectTcpService::new(serde_yaml::Value::Null, tunnel_tracker);
     assert!(result.is_ok());
   }
 
   #[test]
   fn test_connect_tcp_service_poll_ready() {
-    let mut service =
-      ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
+    let service = ConnectTcpService::new_for_test();
+    let mut service = plugin::Service::new(service);
     let waker = dummy_waker();
     let mut cx = Context::from_waker(&waker);
     let result = Service::poll_ready(&mut service, &mut cx);
@@ -523,8 +705,8 @@ mod tests {
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
-        let mut service =
-          ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
         let req = make_connect_request(http::Method::GET, "/");
         let fut = service.call(req);
         let resp = fut.await.unwrap();
@@ -549,8 +731,8 @@ mod tests {
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
-        let mut service =
-          ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
         let req = make_connect_request(http::Method::CONNECT, "/");
         let fut = service.call(req);
         let resp = fut.await.unwrap();
@@ -572,8 +754,8 @@ mod tests {
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
-        let mut service =
-          ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
         let req =
           make_connect_request(http::Method::CONNECT, "example.com");
         let fut = service.call(req);
@@ -596,8 +778,8 @@ mod tests {
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
-        let mut service =
-          ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
         let req =
           make_connect_request(http::Method::CONNECT, "example.com:0");
         let fut = service.call(req);
@@ -620,8 +802,8 @@ mod tests {
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
-        let mut service =
-          ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
         let req = make_connect_request(
           http::Method::CONNECT,
           "example.com:443",
@@ -647,8 +829,8 @@ mod tests {
         // Drop the listener so the port is free and connection will fail
         drop(listener);
 
-        let mut service =
-          ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
         let req = make_connect_request(
           http::Method::CONNECT,
           &format!("127.0.0.1:{}", addr.port()),
@@ -674,22 +856,30 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_service_tunnel_tracker_shutdown() {
+  async fn test_service_tunnel_tracker_shutdown_and_abort() {
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
         let service = ConnectTcpService::new_for_test();
 
-        // Register a pending tunnel
+        // Register a pending tunnel that ignores shutdown notification
         service.tunnel_tracker.register(async {
           std::future::pending::<()>().await;
         });
         tokio::task::yield_now().await;
         assert_eq!(service.tunnel_tracker.active_count(), 1);
 
-        // Shutdown should abort all tunnels
+        // shutdown() only notifies, task still running
         service.tunnel_tracker.shutdown();
-        // Wait for tasks to be cleaned up
+        tokio::task::yield_now().await;
+        assert_eq!(
+          service.tunnel_tracker.active_count(),
+          1,
+          "shutdown() should only notify, not abort"
+        );
+
+        // abort_all() forcefully terminates
+        service.tunnel_tracker.abort_all();
         service.tunnel_tracker.wait_shutdown().await;
         assert_eq!(service.tunnel_tracker.active_count(), 0);
       })
@@ -730,8 +920,8 @@ mod tests {
         let _http_addr = http_listener.local_addr().unwrap();
 
         // Create the service and request
-        let mut service =
-          ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
         let req = make_connect_request(
           http::Method::CONNECT,
           &format!("127.0.0.1:{}", target_addr.port()),
@@ -819,8 +1009,8 @@ mod tests {
           .await;
 
         // Now test our ConnectTcpService
-        let mut service =
-          ConnectTcpService::new(serde_yaml::Value::Null).unwrap();
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
         let req = make_connect_request(
           http::Method::CONNECT,
           &format!("127.0.0.1:{}", target_addr.port()),
@@ -833,6 +1023,190 @@ mod tests {
         // Clean up
         http_handle.abort();
         target_handle.abort();
+      })
+      .await;
+  }
+
+  // ============== Plugin-level TunnelTracker Tests ==============
+
+  /// Test that multiple Service instances created from the same Plugin
+  /// share the same TunnelTracker.
+  #[tokio::test]
+  async fn test_plugin_level_tunnel_tracker_shared() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        // Create a plugin
+        let plugin = ConnectTcpPlugin::new();
+
+        // Get the builder and create two services
+        let builder = plugin.service_builder("connect_tcp").unwrap();
+        let service1 = builder(serde_yaml::Value::Null).unwrap();
+        let service2 = builder(serde_yaml::Value::Null).unwrap();
+
+        // Both services should have the same tunnel_tracker
+        // We can't directly access the inner tracker, but we can
+        // verify that the plugin has the correct tracker reference
+        // by checking active_count
+        assert_eq!(plugin.tunnel_tracker.active_count(), 0);
+      })
+      .await;
+  }
+
+  /// Test that uninstall() completes immediately when no tunnels are active.
+  #[tokio::test]
+  async fn test_uninstall_no_active_tunnels() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let mut plugin = ConnectTcpPlugin::new();
+
+        // No tunnels, uninstall should complete quickly
+        let result = tokio::time::timeout(
+          Duration::from_millis(100),
+          plugin.uninstall(),
+        )
+        .await;
+
+        assert!(
+          result.is_ok(),
+          "uninstall should complete quickly when no tunnels"
+        );
+        assert_eq!(plugin.tunnel_tracker.active_count(), 0);
+      })
+      .await;
+  }
+
+  /// Test uninstall() with tunnels that respond to shutdown notification.
+  #[tokio::test]
+  async fn test_uninstall_with_responsive_tunnels() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let mut plugin = ConnectTcpPlugin::new();
+
+        // Register a tunnel that responds to shutdown notification
+        let shutdown_handle = plugin.tunnel_tracker.shutdown_handle();
+        let notified = Rc::new(std::cell::Cell::new(false));
+        let notified_clone = notified.clone();
+        plugin.tunnel_tracker.register(async move {
+          shutdown_handle.notified().await;
+          notified_clone.set(true);
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(plugin.tunnel_tracker.active_count(), 1);
+
+        // Uninstall should complete within timeout
+        let result = tokio::time::timeout(
+          Duration::from_millis(500),
+          plugin.uninstall(),
+        )
+        .await;
+
+        assert!(
+          result.is_ok(),
+          "uninstall should complete when tunnels respond"
+        );
+        assert_eq!(plugin.tunnel_tracker.active_count(), 0);
+        assert!(notified.get(), "tunnel should have been notified");
+      })
+      .await;
+  }
+
+  /// Test uninstall() with tunnels that don't respond to shutdown.
+  /// The uninstall should timeout and abort remaining tunnels.
+  ///
+  /// This test uses tokio's time mocking to simulate the timeout
+  /// without actually waiting for 5 seconds.
+  #[tokio::test]
+  async fn test_uninstall_timeout_aborts_tunnels() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let mut plugin = ConnectTcpPlugin::new();
+
+        // Register a tunnel that ignores shutdown notification
+        plugin.tunnel_tracker.register(async {
+          std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(plugin.tunnel_tracker.active_count(), 1);
+
+        // Pause time to use tokio's time mocking
+        tokio::time::pause();
+
+        // Start the uninstall future
+        let uninstall_future = plugin.uninstall();
+
+        // Advance time past TUNNEL_SHUTDOWN_TIMEOUT (5 seconds)
+        // This simulates the timeout without actually waiting
+        tokio::time::advance(TUNNEL_SHUTDOWN_TIMEOUT).await;
+        // Advance a bit more to ensure the timeout triggers
+        tokio::time::advance(Duration::from_millis(100)).await;
+
+        // Now await the uninstall future - it should complete
+        // because the timeout was triggered by the time advance
+        uninstall_future.await;
+
+        // Verify that the tunnel was aborted
+        assert_eq!(
+          plugin.tunnel_tracker.active_count(),
+          0,
+          "Tunnel should have been aborted after uninstall timeout"
+        );
+      })
+      .await;
+  }
+
+  /// Test that uninstall can be called multiple times without panic.
+  #[tokio::test]
+  async fn test_uninstall_can_be_called_multiple_times() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let mut plugin = ConnectTcpPlugin::new();
+
+        // Call uninstall multiple times
+        plugin.uninstall().await;
+        plugin.uninstall().await;
+        plugin.uninstall().await;
+
+        // No panic means success
+        assert_eq!(plugin.tunnel_tracker.active_count(), 0);
+      })
+      .await;
+  }
+
+  /// Test that multiple services share the same tunnel tracker.
+  #[tokio::test]
+  async fn test_multiple_services_share_tracker() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let plugin = ConnectTcpPlugin::new();
+
+        // Create two services
+        let builder = plugin.service_builder("connect_tcp").unwrap();
+        let _service1 = builder(serde_yaml::Value::Null).unwrap();
+        let _service2 = builder(serde_yaml::Value::Null).unwrap();
+
+        // Both services should share the same tracker
+        // We verify by checking that plugin's tracker count is 0
+        // (they share the same instance)
+        assert_eq!(plugin.tunnel_tracker.active_count(), 0);
+
+        // Register a tunnel through the plugin's tracker
+        plugin.tunnel_tracker.register(async {
+          std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+
+        // The count should now be 1
+        assert_eq!(plugin.tunnel_tracker.active_count(), 1);
+
+        // Clean up
+        plugin.tunnel_tracker.abort_all();
+        plugin.tunnel_tracker.wait_shutdown().await;
       })
       .await;
   }

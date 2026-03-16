@@ -207,12 +207,12 @@ impl ServiceBuilder {
 
 /// an alias for shorten complex trait definition.
 pub trait BuildListener:
-  Fn(SerializedArgs, Service) -> Result<Listener>
+  Fn(SerializedArgs, Service) -> Result<Listener> + Sync + Send
 {
 }
 
 impl<F> BuildListener for F where
-  F: Fn(SerializedArgs, Service) -> Result<Listener>
+  F: Fn(SerializedArgs, Service) -> Result<Listener> + Sync + Send
 {
 }
 
@@ -243,15 +243,8 @@ pub trait Plugin {
     None
   }
 
-  fn listener_builder(
-    &self,
-    name: &str,
-  ) -> Option<&Box<dyn BuildListener>> {
-    None
-  }
-
-  fn finalize(&mut self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-    Box::pin(async { Ok(()) })
+  fn uninstall(&mut self) -> Pin<Box<dyn Future<Output = ()>>> {
+    Box::pin(async {})
   }
 }
 
@@ -272,5 +265,295 @@ impl PluginBuilder {
 
   pub fn build(&self) -> Box<dyn Plugin> {
     self.0()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::sync::Arc;
+  use std::sync::atomic::{AtomicBool, Ordering};
+  use std::time::Duration;
+
+  /// A simple test plugin that uses the default uninstall implementation.
+  struct TestPlugin;
+
+  impl Plugin for TestPlugin {
+    fn service_builder(
+      &self,
+      _name: &str,
+    ) -> Option<&Box<dyn BuildService>> {
+      None
+    }
+  }
+
+  /// A test plugin that uses default implementations for both methods.
+  /// Used to test the default behavior of the Plugin trait.
+  struct DefaultOnlyPlugin;
+
+  impl Plugin for DefaultOnlyPlugin {}
+
+  /// A test plugin with a custom uninstall implementation that completes
+  /// immediately with a marker to verify it was called.
+  struct CustomUninstallPlugin {
+    uninstalled: Arc<AtomicBool>,
+  }
+
+  impl CustomUninstallPlugin {
+    fn new() -> Self {
+      Self { uninstalled: Arc::new(AtomicBool::new(false)) }
+    }
+
+    fn get_uninstalled_flag(&self) -> Arc<AtomicBool> {
+      self.uninstalled.clone()
+    }
+  }
+
+  impl Plugin for CustomUninstallPlugin {
+    fn service_builder(
+      &self,
+      _name: &str,
+    ) -> Option<&Box<dyn BuildService>> {
+      None
+    }
+
+    fn uninstall(&mut self) -> Pin<Box<dyn Future<Output = ()>>> {
+      let flag = self.uninstalled.clone();
+      Box::pin(async move {
+        flag.store(true, Ordering::SeqCst);
+      })
+    }
+  }
+
+  /// A test plugin with a custom uninstall that has async delay.
+  struct DelayedUninstallPlugin {
+    delay_ms: u64,
+  }
+
+  impl DelayedUninstallPlugin {
+    fn new(delay_ms: u64) -> Self {
+      Self { delay_ms }
+    }
+  }
+
+  impl Plugin for DelayedUninstallPlugin {
+    fn service_builder(
+      &self,
+      _name: &str,
+    ) -> Option<&Box<dyn BuildService>> {
+      None
+    }
+
+    fn uninstall(&mut self) -> Pin<Box<dyn Future<Output = ()>>> {
+      let delay = self.delay_ms;
+      Box::pin(async move {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+      })
+    }
+  }
+
+  #[tokio::test]
+  async fn test_uninstall_default_completes_immediately() {
+    // Arrange: Create a plugin with default uninstall implementation
+    let mut plugin = TestPlugin;
+
+    // Act: Call uninstall and verify it completes within a very short timeout
+    let future = plugin.uninstall();
+
+    // Assert: Future completes immediately (within 1ms), proving it doesn't
+    // hang or have any async wait
+    let result =
+      tokio::time::timeout(Duration::from_millis(1), future).await;
+    assert!(
+      result.is_ok(),
+      "Default uninstall should complete immediately"
+    );
+  }
+
+  #[tokio::test]
+  async fn test_uninstall_default_returns_unit() {
+    // Arrange: Create a plugin with default uninstall implementation
+    let mut plugin = TestPlugin;
+
+    // Act: Call uninstall and get the future
+    let future = plugin.uninstall();
+
+    // Assert: The future output type is ()
+    let result: () = future.await;
+    assert_eq!(result, ());
+  }
+
+  #[tokio::test]
+  async fn test_uninstall_returns_pinned_future() {
+    // Arrange: Create a plugin
+    let mut plugin = TestPlugin;
+
+    // Act: Call uninstall
+    let mut future = plugin.uninstall();
+
+    // Assert: Verify the future can be polled and completes successfully
+    // This is a runtime verification, not just type system check
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+    fn dummy_raw_waker() -> RawWaker {
+      fn no_op(_: *const ()) -> RawWaker {
+        dummy_raw_waker()
+      }
+      fn no_op_clone(_: *const ()) -> RawWaker {
+        dummy_raw_waker()
+      }
+      fn no_op_action(_: *const ()) {}
+
+      static VTABLE: RawWakerVTable = RawWakerVTable::new(
+        no_op_clone,
+        no_op_action,
+        no_op_action,
+        no_op_action,
+      );
+      RawWaker::new(std::ptr::null(), &VTABLE)
+    }
+
+    let waker = unsafe { Waker::from_raw(dummy_raw_waker()) };
+    let mut cx = Context::from_waker(&waker);
+
+    // Poll the future - it should be ready immediately
+    match future.as_mut().poll(&mut cx) {
+      Poll::Ready(()) => { /* Success - future completed */ }
+      Poll::Pending => {
+        panic!("Default uninstall future should be Ready immediately")
+      }
+    }
+  }
+
+  #[tokio::test]
+  async fn test_uninstall_custom_implementation_is_called() {
+    // Arrange: Create a plugin with custom uninstall that sets a flag
+    let mut plugin = CustomUninstallPlugin::new();
+    let flag = plugin.get_uninstalled_flag();
+
+    // Assert: Flag is initially false
+    assert!(!flag.load(Ordering::SeqCst));
+
+    // Act: Call uninstall and await
+    plugin.uninstall().await;
+
+    // Assert: Flag should be set to true by custom implementation
+    assert!(flag.load(Ordering::SeqCst));
+  }
+
+  #[tokio::test]
+  async fn test_uninstall_custom_implementation_completes() {
+    // Arrange: Create a plugin with custom uninstall
+    let mut plugin = CustomUninstallPlugin::new();
+    let flag = plugin.get_uninstalled_flag();
+
+    // Act: Call uninstall and await with timeout
+    let result = tokio::time::timeout(
+      Duration::from_millis(100),
+      plugin.uninstall(),
+    )
+    .await;
+
+    // Assert: Should complete within timeout and flag should be set
+    assert!(result.is_ok(), "Custom uninstall should complete");
+    assert!(flag.load(Ordering::SeqCst));
+  }
+
+  #[tokio::test]
+  async fn test_uninstall_delayed_implementation() {
+    // Arrange: Create a plugin with a delayed uninstall (50ms delay)
+    let mut plugin = DelayedUninstallPlugin::new(50);
+
+    // Act & Assert: Should not complete within 10ms
+    let result_short = tokio::time::timeout(
+      Duration::from_millis(10),
+      plugin.uninstall(),
+    )
+    .await;
+    assert!(
+      result_short.is_err(),
+      "Delayed uninstall should not complete within short timeout"
+    );
+
+    // Arrange: Create another plugin with delayed uninstall
+    let mut plugin2 = DelayedUninstallPlugin::new(50);
+
+    // Act & Assert: Should complete within 200ms
+    let result_long = tokio::time::timeout(
+      Duration::from_millis(200),
+      plugin2.uninstall(),
+    )
+    .await;
+    assert!(
+      result_long.is_ok(),
+      "Delayed uninstall should complete within long timeout"
+    );
+  }
+
+  #[tokio::test]
+  async fn test_uninstall_default_can_be_called_multiple_times() {
+    // Arrange: Create a plugin with default uninstall
+    let mut plugin = TestPlugin;
+
+    // Act: Call uninstall multiple times
+    plugin.uninstall().await;
+    plugin.uninstall().await;
+    plugin.uninstall().await;
+
+    // Assert: No panic or error (implicit success)
+  }
+
+  #[tokio::test]
+  async fn test_uninstall_custom_can_be_called_multiple_times() {
+    // Arrange: Create a plugin with custom uninstall
+    let mut plugin = CustomUninstallPlugin::new();
+    let flag = plugin.get_uninstalled_flag();
+
+    // Act: Call uninstall first time
+    plugin.uninstall().await;
+    assert!(flag.load(Ordering::SeqCst));
+
+    // Reset flag
+    flag.store(false, Ordering::SeqCst);
+
+    // Act: Call uninstall second time
+    plugin.uninstall().await;
+    // Assert: Flag should be set again
+    assert!(flag.load(Ordering::SeqCst));
+  }
+
+  #[test]
+  fn test_default_service_builder_returns_none() {
+    // Arrange: Create a plugin that uses default service_builder
+    let plugin = DefaultOnlyPlugin;
+
+    // Act: Call service_builder with any name
+    let result = plugin.service_builder("any_name");
+
+    // Assert: Default implementation should return None
+    assert!(
+      result.is_none(),
+      "Default service_builder should return None"
+    );
+  }
+
+  #[tokio::test]
+  async fn test_default_uninstall_completes_immediately_for_default_only_plugin()
+   {
+    // Arrange: Create a plugin that uses all default implementations
+    let mut plugin = DefaultOnlyPlugin;
+
+    // Act: Call uninstall and verify it completes immediately
+    let result = tokio::time::timeout(
+      Duration::from_millis(1),
+      plugin.uninstall(),
+    )
+    .await;
+
+    // Assert: Should complete immediately
+    assert!(
+      result.is_ok(),
+      "Default uninstall should complete immediately"
+    );
   }
 }

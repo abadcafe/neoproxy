@@ -9,6 +9,7 @@ use serde::Deserialize;
 use crate::config_validator::{
   ConfigErrorCollector, ConfigErrorKind, parse_kind,
 };
+use crate::listeners::ListenerBuilderSet;
 use crate::plugin;
 use crate::plugins::PluginBuilderSet;
 
@@ -219,7 +220,7 @@ impl Config {
     let args_location = format!("{}.args", location);
 
     // Validate kind format
-    let (plugin_name, listener_name) =
+    let (_plugin_name, _listener_name) =
       match parse_kind(&listener.kind, &kind_location) {
         Ok(parts) => parts,
         Err(e) => {
@@ -228,27 +229,13 @@ impl Config {
         }
       };
 
-    // Check plugin existence
-    let Some(plugin_builder) =
-      PluginBuilderSet::global().plugin_builder(plugin_name)
+    // Check listener builder existence directly using the full kind
+    let Some(builder) =
+      ListenerBuilderSet::global().listener_builder(&listener.kind)
     else {
       collector.add(
         kind_location,
-        format!("plugin '{}' not found", plugin_name),
-        ConfigErrorKind::NotFound,
-      );
-      return;
-    };
-
-    // Create plugin instance and check listener builder
-    let plugin = plugin_builder();
-    let Some(builder) = plugin.listener_builder(listener_name) else {
-      collector.add(
-        kind_location,
-        format!(
-          "listener builder '{}' not found in plugin '{}'",
-          listener_name, plugin_name
-        ),
+        format!("listener builder '{}' not found", listener.kind),
         ConfigErrorKind::NotFound,
       );
       return;
@@ -556,7 +543,11 @@ worker_threads: [
     let errors = collector.errors();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].kind, ConfigErrorKind::NotFound);
-    assert!(errors[0].message.contains("listener builder"));
+    assert!(
+      errors[0]
+        .message
+        .contains("listener builder 'hyper.nonexistent' not found")
+    );
   }
 
   #[test]
@@ -848,7 +839,9 @@ worker_threads: [
     let errors = collector.errors();
     assert_eq!(errors.len(), 1);
     assert!(
-      errors[0].message.contains("plugin 'nonexistent' not found")
+      errors[0]
+        .message
+        .contains("listener builder 'nonexistent.listener' not found")
     );
   }
 

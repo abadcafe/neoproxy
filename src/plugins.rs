@@ -7,7 +7,6 @@ pub mod connect_tcp;
 pub mod echo;
 pub mod fast_socks5;
 pub mod http3_chain;
-pub mod hyper;
 pub mod hyper_h3;
 pub mod utils;
 
@@ -25,8 +24,6 @@ impl PluginBuilderSet {
       Box::new(connect_tcp::create_plugin),
     );
     builders.insert(echo::plugin_name(), Box::new(echo::create_plugin));
-    builders
-      .insert(hyper::plugin_name(), Box::new(hyper::create_plugin));
 
     plugin_manager
   }

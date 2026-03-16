@@ -7,7 +7,7 @@ edition = "2024"
 anyhow = "1.0.95"
 bytes = "1.11.0"
 clap = { version = "4.5.28", features = ["derive"] }
-tokio = { version = "1.43.0", features = ["full"] }
+tokio = { version = "1.43.0", features = ["full", "test-util"] }
 http = "1.2.0"
 http-body = "1.0.1"
 http-body-util = "0.1.2"

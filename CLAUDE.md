@@ -113,9 +113,3 @@ Config files are YAML. Default path: `conf/server.yaml`.
 
 Services are referenced by `kind` as `plugin_name.service_name`.
 Listeners are referenced by `kind` as `plugin_name.listener_name`.
-
-## 代码导航策略
-
-- 用 Grep/Glob 做发现（找文件、搜模式）
-- 用 LSP 做理解（定义跳转、引用查找、类型信息）
-- 找到文件后，优先用 LSP 导航，而不是读取整个文件

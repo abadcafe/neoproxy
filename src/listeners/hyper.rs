@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -17,19 +16,9 @@ use tracing::{error, warn};
 
 use crate::plugin;
 
-/// Default graceful shutdown timeout in seconds
-const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT: Duration =
-  Duration::from_secs(5);
-
-/// Extension trait for Listening that supports connection tracking
-/// and graceful shutdown.
-pub trait ListeningExt: plugin::Listening {
-  /// Get the current number of active connections.
-  fn active_connections(&self) -> usize;
-
-  /// Set the graceful shutdown timeout.
-  fn set_graceful_shutdown_timeout(&mut self, timeout: Duration);
-}
+/// Listener shutdown timeout in seconds.
+/// This is the timeout for Phase 1 of graceful shutdown.
+const LISTENER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
 struct HyperServiceAdaptor {
   s: plugin::Service,
@@ -114,7 +103,7 @@ impl HyperListener {
       conn_serving_set: Rc::new(RefCell::new(task::JoinSet::new())),
       shutdown_handle: plugin::ShutdownHandle::new(),
       service: svc,
-      graceful_shutdown_timeout: DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT,
+      graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
     }))
   }
 
@@ -141,7 +130,7 @@ impl HyperListener {
       conn_serving_set: Rc::new(RefCell::new(task::JoinSet::new())),
       shutdown_handle: plugin::ShutdownHandle::new(),
       service: svc,
-      graceful_shutdown_timeout: DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT,
+      graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
     })
   }
 
@@ -269,46 +258,12 @@ impl plugin::Listening for HyperListener {
   }
 }
 
-impl ListeningExt for HyperListener {
-  fn active_connections(&self) -> usize {
-    self.conn_serving_set.borrow().len()
-  }
-
-  fn set_graceful_shutdown_timeout(&mut self, dur: Duration) {
-    self.graceful_shutdown_timeout = dur;
-  }
+pub fn listener_name() -> &'static str {
+  "hyper.listener"
 }
 
-struct HyperPlugin {
-  listener_builders:
-    HashMap<&'static str, Box<dyn plugin::BuildListener>>,
-}
-
-impl HyperPlugin {
-  fn new() -> Self {
-    let builder: Box<dyn plugin::BuildListener> =
-      Box::new(HyperListener::new);
-    let listener_factories = HashMap::from([("listener", builder)]);
-
-    Self { listener_builders: listener_factories }
-  }
-}
-
-impl plugin::Plugin for HyperPlugin {
-  fn listener_builder(
-    &self,
-    name: &str,
-  ) -> Option<&Box<dyn plugin::BuildListener>> {
-    self.listener_builders.get(name)
-  }
-}
-
-pub fn plugin_name() -> &'static str {
-  "hyper"
-}
-
-pub fn create_plugin() -> Box<dyn plugin::Plugin> {
-  Box::new(HyperPlugin::new())
+pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
+  Box::new(HyperListener::new)
 }
 
 #[cfg(test)]
@@ -362,15 +317,17 @@ mod tests {
   }
 
   #[test]
-  fn test_plugin_name() {
-    assert_eq!(plugin_name(), "hyper");
+  fn test_listener_name() {
+    assert_eq!(listener_name(), "hyper.listener");
   }
 
   #[test]
-  fn test_create_plugin() {
-    let plugin = create_plugin();
-    assert!(plugin.listener_builder("listener").is_some());
-    assert!(plugin.listener_builder("nonexistent").is_none());
+  fn test_create_listener_builder() {
+    let builder = create_listener_builder();
+    let args = create_test_listener_args();
+    let svc = create_test_service();
+    let result = builder(args, svc);
+    assert!(result.is_ok());
   }
 
   #[test]
@@ -407,32 +364,12 @@ mod tests {
     let svc = create_test_service();
     let listener = HyperListener::new_for_test(args, svc).unwrap();
     // active_connections should be 0 initially
-    assert_eq!(listener.active_connections(), 0);
+    assert_eq!(listener.conn_serving_set.borrow().len(), 0);
   }
 
   #[test]
-  fn test_set_graceful_shutdown_timeout() {
-    let args = create_test_listener_args();
-    let svc = create_test_service();
-    let mut listener = HyperListener::new_for_test(args, svc).unwrap();
-    // Test set_graceful_shutdown_timeout via ListeningExt trait
-    listener.set_graceful_shutdown_timeout(Duration::from_secs(10));
-    // The timeout should be updated
-  }
-
-  #[test]
-  fn test_listening_ext_trait_bounds() {
-    // Verify that ListeningExt is object-safe and can be used
-    fn assert_listening_ext<T: ListeningExt>() {}
-    assert_listening_ext::<HyperListener>();
-  }
-
-  #[test]
-  fn test_default_graceful_shutdown_timeout() {
-    assert_eq!(
-      DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT,
-      Duration::from_secs(5)
-    );
+  fn test_listener_shutdown_timeout_constant() {
+    assert_eq!(LISTENER_SHUTDOWN_TIMEOUT, Duration::from_secs(3));
   }
 
   #[test]
@@ -474,23 +411,6 @@ hostnames:
   }
 
   #[test]
-  fn test_hyper_plugin_new() {
-    let plugin = HyperPlugin::new();
-    assert!(plugin.listener_builders.contains_key("listener"));
-  }
-
-  #[test]
-  fn test_listening_ext_active_connections() {
-    // Create listener with zero port (will bind to random port)
-    let args = create_test_listener_args();
-    let svc = create_test_service();
-    let listener = HyperListener::new_for_test(args, svc).unwrap();
-
-    // active_connections should be 0 initially
-    assert_eq!(listener.active_connections(), 0);
-  }
-
-  #[test]
   fn test_listener_stop_and_start() {
     // This test verifies the listener can be created and stopped
     let args = create_test_listener_args();
@@ -509,6 +429,7 @@ hostnames:
     handle1.shutdown();
     // After shutdown, notified should return immediately
     // (but we don't test async behavior here)
+    drop(handle2);
   }
 
   #[test]
@@ -523,18 +444,6 @@ hostnames:
   }
 
   #[test]
-  fn test_graceful_shutdown_timeout_mutable() {
-    let args = create_test_listener_args();
-    let svc = create_test_service();
-    let mut listener = HyperListener::new_for_test(args, svc).unwrap();
-
-    // Test set_graceful_shutdown_timeout via ListeningExt trait
-    listener.set_graceful_shutdown_timeout(Duration::from_secs(10));
-    // The timeout should be updated (we can't verify directly without
-    // starting the listener)
-  }
-
-  #[test]
   fn test_listening_trait_implementation() {
     // Verify HyperListener implements Listening
     fn assert_listening<T: plugin::Listening>() {}
@@ -542,9 +451,9 @@ hostnames:
   }
 
   #[test]
-  fn test_listening_ext_implementation() {
-    // Verify HyperListener implements ListeningExt
-    fn assert_listening_ext<T: ListeningExt>() {}
-    assert_listening_ext::<HyperListener>();
+  fn test_graceful_shutdown_timeout_is_3_seconds() {
+    // Verify the constant is 3 seconds as per requirements
+    assert_eq!(LISTENER_SHUTDOWN_TIMEOUT.as_secs(), 3);
+    assert_eq!(LISTENER_SHUTDOWN_TIMEOUT.as_millis(), 3000);
   }
 }

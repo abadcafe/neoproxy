@@ -362,6 +362,11 @@ fn check_worker_threads(
 }
 
 fn main() -> Result<()> {
+  // Install rustls crypto provider before any TLS operations
+  rustls::crypto::ring::default_provider()
+    .install_default()
+    .expect("Failed to install rustls crypto provider");
+
   let _guard = init_log();
   info!("server started with config:\n{:#?}\n", &Config::global());
 

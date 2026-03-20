@@ -24,6 +24,10 @@ impl PluginBuilderSet {
       Box::new(connect_tcp::create_plugin),
     );
     builders.insert(echo::plugin_name(), Box::new(echo::create_plugin));
+    builders.insert(
+      http3_chain::plugin_name(),
+      Box::new(http3_chain::create_plugin),
+    );
 
     plugin_manager
   }

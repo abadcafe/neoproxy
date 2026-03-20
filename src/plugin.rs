@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use anyhow::Result;
@@ -10,25 +11,40 @@ use http_body_util::combinators::UnsyncBoxBody;
 use tokio::sync;
 
 /// Shutdown Handle for `Listener`s.
-pub struct ShutdownHandle(Arc<sync::Notify>);
+pub struct ShutdownHandle {
+  notify: Arc<sync::Notify>,
+  is_shutdown: Arc<AtomicBool>,
+}
 
 impl ShutdownHandle {
   pub fn new() -> Self {
-    Self(Arc::new(sync::Notify::new()))
+    Self {
+      notify: Arc::new(sync::Notify::new()),
+      is_shutdown: Arc::new(AtomicBool::new(false)),
+    }
   }
 
   pub fn shutdown(&self) {
-    self.0.notify_waiters()
+    self.is_shutdown.store(true, Ordering::SeqCst);
+    self.notify.notify_waiters()
   }
 
   pub async fn notified(&self) {
-    self.0.notified().await
+    self.notify.notified().await
+  }
+
+  /// Check if shutdown has been triggered
+  pub fn is_shutdown(&self) -> bool {
+    self.is_shutdown.load(Ordering::SeqCst)
   }
 }
 
 impl Clone for ShutdownHandle {
   fn clone(&self) -> Self {
-    Self(self.0.clone())
+    Self {
+      notify: self.notify.clone(),
+      is_shutdown: self.is_shutdown.clone(),
+    }
   }
 }
 
@@ -554,6 +570,118 @@ mod tests {
     assert!(
       result.is_ok(),
       "Default uninstall should complete immediately"
+    );
+  }
+
+  // ============== ShutdownHandle Tests ==============
+
+  #[test]
+  fn test_shutdown_handle_new_is_not_shutdown() {
+    // Arrange & Act: Create a new ShutdownHandle
+    let handle = ShutdownHandle::new();
+
+    // Assert: Should not be in shutdown state initially
+    assert!(
+      !handle.is_shutdown(),
+      "New ShutdownHandle should not be in shutdown state"
+    );
+  }
+
+  #[test]
+  fn test_shutdown_handle_is_shutdown_after_shutdown() {
+    // Arrange: Create a new ShutdownHandle
+    let handle = ShutdownHandle::new();
+
+    // Act: Trigger shutdown
+    handle.shutdown();
+
+    // Assert: Should be in shutdown state
+    assert!(
+      handle.is_shutdown(),
+      "ShutdownHandle should be in shutdown state after shutdown() is called"
+    );
+  }
+
+  #[test]
+  fn test_shutdown_handle_clone_shares_state() {
+    // Arrange: Create a new ShutdownHandle and clone it
+    let handle = ShutdownHandle::new();
+    let cloned = handle.clone();
+
+    // Act: Trigger shutdown on original
+    handle.shutdown();
+
+    // Assert: Clone should also show shutdown state
+    assert!(
+      cloned.is_shutdown(),
+      "Cloned ShutdownHandle should share shutdown state"
+    );
+  }
+
+  #[test]
+  fn test_shutdown_handle_multiple_shutdown_calls() {
+    // Arrange: Create a new ShutdownHandle
+    let handle = ShutdownHandle::new();
+
+    // Act: Call shutdown multiple times
+    handle.shutdown();
+    handle.shutdown();
+    handle.shutdown();
+
+    // Assert: Should still be in shutdown state (no panic or error)
+    assert!(
+      handle.is_shutdown(),
+      "Multiple shutdown calls should not cause issues"
+    );
+  }
+
+  #[test]
+  fn test_shutdown_handle_multiple_clones() {
+    // Arrange: Create a new ShutdownHandle and multiple clones
+    let handle = ShutdownHandle::new();
+    let clone1 = handle.clone();
+    let clone2 = clone1.clone();
+    let clone3 = handle.clone();
+
+    // Act: Trigger shutdown on one clone
+    clone2.shutdown();
+
+    // Assert: All handles should show shutdown state
+    assert!(handle.is_shutdown(), "Original should show shutdown");
+    assert!(clone1.is_shutdown(), "Clone1 should show shutdown");
+    assert!(clone2.is_shutdown(), "Clone2 should show shutdown");
+    assert!(clone3.is_shutdown(), "Clone3 should show shutdown");
+  }
+
+  #[tokio::test]
+  async fn test_shutdown_handle_notified_after_shutdown() {
+    // Arrange: Create a new ShutdownHandle
+    let handle = ShutdownHandle::new();
+    let handle_clone = handle.clone();
+
+    // Act: Spawn a task that waits for notification
+    let notified = tokio::spawn(async move {
+      handle_clone.notified().await;
+      true
+    });
+
+    // Give the task time to start waiting
+    tokio::task::yield_now().await;
+
+    // Trigger shutdown
+    handle.shutdown();
+
+    // Assert: The notified task should complete quickly
+    let result =
+      tokio::time::timeout(Duration::from_millis(100), notified).await;
+
+    assert!(
+      result.is_ok(),
+      "notified() should complete after shutdown()"
+    );
+    assert!(
+      result.unwrap().unwrap(),
+      "notified() should have completed"
     );
   }
 }

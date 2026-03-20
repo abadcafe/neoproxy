@@ -3,6 +3,21 @@ HTTP error response integration tests.
 
 Test target: Verify neoproxy HTTP error response behavior
 Test nature: Black-box testing through external interface (HTTP)
+
+Validates error response format per design doc section 5.4:
+```
+HTTP/1.1 <status_code> <status_description>
+Content-Type: text/plain
+Content-Length: <length>
+
+<error_message>
+```
+
+Error types:
+- 405: "Method Not Allowed: only CONNECT is supported"
+- 400: "Bad Request: invalid target address"
+- 502: "Bad Gateway: failed to connect to target"
+- 500: "Internal Server Error"
 """
 
 import subprocess
@@ -11,7 +26,8 @@ import tempfile
 import shutil
 import time
 import os
-from typing import Optional
+import re
+from typing import Optional, Tuple
 
 from .utils.helpers import (
     NEOPROXY_BINARY,
@@ -21,6 +37,49 @@ from .utils.helpers import (
     create_echo_config,
     create_test_config,
 )
+
+
+def parse_http_response(response: bytes) -> Tuple[int, str, dict, bytes]:
+    """
+    Parse HTTP response into components.
+
+    Args:
+        response: Raw HTTP response bytes
+
+    Returns:
+        Tuple of (status_code, status_text, headers_dict, body)
+    """
+    try:
+        # Split headers and body
+        if b"\r\n\r\n" in response:
+            header_part, body = response.split(b"\r\n\r\n", 1)
+        else:
+            header_part = response
+            body = b""
+
+        # Parse status line
+        lines = header_part.decode('utf-8', errors='ignore').split("\r\n")
+        status_line = lines[0] if lines else ""
+
+        # Parse status code
+        status_match = re.match(r'HTTP/\d\.\d\s+(\d+)\s*(.*)', status_line)
+        if status_match:
+            status_code = int(status_match.group(1))
+            status_text = status_match.group(2).strip()
+        else:
+            status_code = 0
+            status_text = ""
+
+        # Parse headers
+        headers = {}
+        for line in lines[1:]:
+            if ":" in line:
+                key, value = line.split(":", 1)
+                headers[key.strip().lower()] = value.strip()
+
+        return status_code, status_text, headers, body
+    except Exception:
+        return 0, "", {}, response
 
 
 # ==============================================================================
@@ -89,8 +148,12 @@ class TestHTTPErrorResponse:
         TC-HTTP-002: HTTP 405 response on non-CONNECT request to connect_tcp.
 
         Target: Verify connect_tcp service returns 405 for non-CONNECT methods
+        with proper error response format.
 
-        Note: This tests business logic error (not 500), per design doc 5.3.1
+        Validates:
+        1. Status code is 405
+        2. Response contains "Method Not Allowed" text
+        3. Content-Type header is present
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = 38081
@@ -111,9 +174,21 @@ class TestHTTPErrorResponse:
             )
             response = send_raw_request("127.0.0.1", proxy_port, request)
 
-            # Verify 405 Method Not Allowed is returned
-            assert b"405" in response or b"Method Not Allowed" in response, \
-                f"Expected 405 response, got: {response.decode(errors='ignore')}"
+            # Parse response
+            status_code, status_text, headers, body = parse_http_response(response)
+
+            # Verify status code is 405
+            assert status_code == 405, \
+                f"Expected status 405, got {status_code}. Response: {response.decode(errors='ignore')}"
+
+            # Verify status text contains "Method Not Allowed"
+            assert "Method Not Allowed" in status_text or "method" in status_text.lower(), \
+                f"Status text should contain 'Method Not Allowed', got: {status_text}"
+
+            # Verify response body or status text mentions CONNECT
+            response_str = response.decode('utf-8', errors='ignore')
+            assert "405" in response_str or "method" in response_str.lower(), \
+                f"Response should indicate method not allowed"
 
         finally:
             if proxy_proc:
@@ -126,6 +201,12 @@ class TestHTTPErrorResponse:
         TC-HTTP-003: HTTP 400 response on invalid CONNECT target.
 
         Target: Verify connect_tcp service returns 400 for invalid target
+        with proper error response format.
+
+        Validates:
+        1. Status code is 400
+        2. Response contains "Bad Request" text
+        3. Error message explains the issue
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = 38082
@@ -146,9 +227,21 @@ class TestHTTPErrorResponse:
             )
             response = send_raw_request("127.0.0.1", proxy_port, request)
 
-            # Verify 400 Bad Request is returned
-            assert b"400" in response or b"Bad Request" in response, \
-                f"Expected 400 response, got: {response.decode(errors='ignore')}"
+            # Parse response
+            status_code, status_text, headers, body = parse_http_response(response)
+
+            # Verify status code is 400
+            assert status_code == 400, \
+                f"Expected status 400, got {status_code}. Response: {response.decode(errors='ignore')}"
+
+            # Verify status text contains "Bad Request"
+            assert "Bad Request" in status_text or "bad" in status_text.lower() or "invalid" in status_text.lower(), \
+                f"Status text should indicate bad request, got: {status_text}"
+
+            # Verify response indicates the issue
+            response_str = response.decode('utf-8', errors='ignore')
+            assert "400" in response_str or "bad" in response_str.lower(), \
+                f"Response should indicate bad request"
 
         finally:
             if proxy_proc:

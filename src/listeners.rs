@@ -3,6 +3,7 @@ use std::sync::LazyLock;
 
 use crate::plugin;
 
+pub mod http3;
 pub mod hyper;
 
 pub struct ListenerBuilderSet {
@@ -17,6 +18,10 @@ impl ListenerBuilderSet {
     builders.insert(
       hyper::listener_name(),
       Box::new(hyper::create_listener_builder()),
+    );
+    builders.insert(
+      http3::listener_name(),
+      Box::new(http3::create_listener_builder()),
     );
 
     listener_manager
@@ -44,12 +49,20 @@ mod tests {
   fn test_listener_builder_set_new() {
     let set = ListenerBuilderSet::new();
     assert!(set.builders.contains_key("hyper.listener"));
+    assert!(set.builders.contains_key("http3.listener"));
   }
 
   #[test]
   fn test_listener_builder_set_get_existing() {
     let set = ListenerBuilderSet::new();
     let builder = set.listener_builder("hyper.listener");
+    assert!(builder.is_some());
+  }
+
+  #[test]
+  fn test_listener_builder_set_get_http3_listener() {
+    let set = ListenerBuilderSet::new();
+    let builder = set.listener_builder("http3.listener");
     assert!(builder.is_some());
   }
 
@@ -64,6 +77,7 @@ mod tests {
   fn test_listener_builder_set_global() {
     let global_set = ListenerBuilderSet::global();
     assert!(global_set.listener_builder("hyper.listener").is_some());
+    assert!(global_set.listener_builder("http3.listener").is_some());
   }
 
   #[test]

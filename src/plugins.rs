@@ -5,7 +5,6 @@ use crate::plugin;
 
 pub mod connect_tcp;
 pub mod echo;
-pub mod fast_socks5;
 pub mod http3_chain;
 pub mod hyper_h3;
 pub mod utils;

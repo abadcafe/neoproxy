@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
+use std::io;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
@@ -8,13 +10,15 @@ use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
+use fast_socks5::ReplyError;
 use http_body_util::Full;
 use hyper_util::rt::TokioIo;
 use tokio::task::JoinSet;
-use tokio::{io, net};
+use tokio::{self, net};
 use tracing::{error, warn};
 
 use super::utils::{self, ConnectTargetError};
+use crate::listeners::fast_socks5::Socks5StreamCell;
 use crate::plugin;
 
 fn build_empty_response(status: http::StatusCode) -> plugin::Response {
@@ -40,6 +44,87 @@ fn build_error_response(
     http::header::HeaderValue::from_static("text/plain"),
   );
   resp
+}
+
+/// Builds a SOCKS5 reply packet according to RFC 1928.
+///
+/// # Arguments
+///
+/// * `reply_code` - The SOCKS5 reply code (0x00-0x08)
+/// * `bind_addr` - The BND.ADDR and BND.PORT to include in the reply
+///
+/// # Returns
+///
+/// A Vec<u8> containing the complete SOCKS5 reply packet.
+fn build_socks5_reply(reply_code: u8, bind_addr: SocketAddr) -> Vec<u8> {
+  let (addr_type, mut ip_oct, mut port) = match bind_addr {
+    SocketAddr::V4(sock) => (
+      fast_socks5::consts::SOCKS5_ADDR_TYPE_IPV4,
+      sock.ip().octets().to_vec(),
+      sock.port().to_be_bytes().to_vec(),
+    ),
+    SocketAddr::V6(sock) => (
+      fast_socks5::consts::SOCKS5_ADDR_TYPE_IPV6,
+      sock.ip().octets().to_vec(),
+      sock.port().to_be_bytes().to_vec(),
+    ),
+  };
+
+  let mut reply = vec![
+    fast_socks5::consts::SOCKS5_VERSION,
+    reply_code,
+    0x00, // reserved
+    addr_type,
+  ];
+  reply.append(&mut ip_oct);
+  reply.append(&mut port);
+  reply
+}
+
+/// Maps an IO error to a SOCKS5 ReplyError.
+///
+/// This mapping follows the architecture document specification:
+/// - Connection refused: REP=0x05
+/// - Network unreachable: REP=0x03
+/// - Host unreachable: REP=0x04 (including DNS resolution failure)
+/// - Timed out: REP=0x01
+/// - Address not available: REP=0x02
+/// - Other errors: REP=0x01
+///
+/// # DNS Resolution Failure Detection
+///
+/// DNS resolution failures are detected by examining the error message.
+/// On most systems, DNS failures return `io::ErrorKind::Other` with messages
+/// containing patterns like "failed to lookup address information".
+/// The architecture document requires DNS resolution failures to return
+/// REP=0x04 (Host Unreachable).
+fn io_error_to_reply_error(err: &io::Error) -> ReplyError {
+  match err.kind() {
+    io::ErrorKind::ConnectionRefused => ReplyError::ConnectionRefused,
+    io::ErrorKind::NetworkUnreachable => ReplyError::NetworkUnreachable,
+    io::ErrorKind::HostUnreachable => ReplyError::HostUnreachable,
+    io::ErrorKind::TimedOut => ReplyError::GeneralFailure,
+    io::ErrorKind::AddrNotAvailable => ReplyError::ConnectionNotAllowed,
+    io::ErrorKind::Other | io::ErrorKind::InvalidInput => {
+      // Check for DNS resolution failure
+      // On Unix/Linux, DNS failures typically have messages like:
+      // "failed to lookup address information: Name or service not known"
+      // On Windows, they might have different messages
+      let err_str = err.to_string().to_lowercase();
+      if err_str.contains("failed to lookup address information")
+        || err_str.contains("name or service not known")
+        || err_str.contains("nodename nor servname provided")
+        || err_str.contains("no such host is known")
+        || err_str.contains("temporary failure in name resolution")
+        || err_str.contains("dns name does not exist")
+      {
+        ReplyError::HostUnreachable
+      } else {
+        ReplyError::GeneralFailure
+      }
+    }
+    _ => ReplyError::GeneralFailure,
+  }
 }
 
 /// Tunnel 任务追踪器
@@ -208,6 +293,97 @@ impl tower::Service<plugin::Request> for ConnectTcpService {
   fn call(&mut self, mut req: plugin::Request) -> Self::Future {
     let tunnel_tracker = self.tunnel_tracker.clone();
 
+    // Check for SOCKS5 mode by looking for Socks5StreamCell in extensions
+    let socks5_cell = req.extensions_mut().remove::<Socks5StreamCell>();
+
+    if let Some(mut cell) = socks5_cell {
+      // SOCKS5 mode: handle SOCKS5 CONNECT request
+      return Box::pin(async move {
+        // Take the protocol and target address from Socks5StreamCell
+        let (proto, target_addr) = match cell.take_proto() {
+          Some((proto, addr)) => (proto, addr),
+          None => {
+            warn!("Socks5StreamCell was already taken");
+            return Ok(build_empty_response(http::StatusCode::INTERNAL_SERVER_ERROR));
+          }
+        };
+
+        // Extract host and port from target address
+        let (host, port) = match &target_addr {
+          fast_socks5::util::target_addr::TargetAddr::Ip(addr) => {
+            (addr.ip().to_string(), addr.port())
+          }
+          fast_socks5::util::target_addr::TargetAddr::Domain(domain, port) => {
+            (domain.clone(), *port)
+          }
+        };
+
+        // Build and return 200 response immediately
+        let resp = build_empty_response(http::StatusCode::OK);
+
+        // Get shutdown handle for graceful shutdown notification
+        let shutdown_handle = tunnel_tracker.shutdown_handle();
+
+        // Spawn tunnel task in background
+        tunnel_tracker.register(async move {
+          // Connect to target server
+          let addr_str = format!("{host}:{port}");
+          let target_result = net::TcpStream::connect(&addr_str).await;
+
+          match target_result {
+            Ok(mut target_stream) => {
+              // Send SOCKS5 success reply (REP=0x00) and get the stream
+              let mut client_stream = match proto
+                .reply_success("0.0.0.0:0".parse().unwrap())
+                .await
+              {
+                Ok(stream) => stream,
+                Err(e) => {
+                  warn!("Failed to send SOCKS5 success reply to client: {e}");
+                  return;
+                }
+              };
+
+              // Bidirectional data transfer with shutdown notification
+              let result = tokio::select! {
+                res = tokio::io::copy_bidirectional(
+                  &mut client_stream,
+                  &mut target_stream
+                ) => {
+                  res
+                }
+                _ = shutdown_handle.notified() => {
+                  warn!("SOCKS5 tunnel to {addr_str} shutdown by notification");
+                  return;
+                }
+              };
+
+              if let Err(e) = result {
+                error!("SOCKS5 tunnel to {addr_str} transfer error: {e}");
+              }
+            }
+            Err(e) => {
+              // Map IO error to SOCKS5 reply error
+              let reply_error = io_error_to_reply_error(&e);
+              // Send SOCKS5 error reply and close connection
+              if let Err(reply_err) = proto
+                .reply_error(&reply_error.into())
+                .await
+              {
+                warn!(
+                  "Failed to send SOCKS5 error reply to client: {reply_err} (original error: {e})"
+                );
+              }
+              warn!("SOCKS5 connect to target {addr_str} failed: {e}");
+            }
+          }
+        });
+
+        Ok(resp)
+      });
+    }
+
+    // HTTP CONNECT mode: existing logic
     Box::pin(async move {
       // 获取 OnUpgrade future
       let on_upgrade = hyper::upgrade::on(&mut req);
@@ -270,7 +446,7 @@ impl tower::Service<plugin::Request> for ConnectTcpService {
 
         // 执行双向数据传输，监听关闭通知
         let result = tokio::select! {
-          res = io::copy_bidirectional(
+          res = tokio::io::copy_bidirectional(
             &mut upgraded,
             &mut target_stream
           ) => {
@@ -1207,6 +1383,986 @@ mod tests {
         // Clean up
         plugin.tunnel_tracker.abort_all();
         plugin.tunnel_tracker.wait_shutdown().await;
+      })
+      .await;
+  }
+
+  // ============== SOCKS5 Mode Tests ==============
+
+  #[test]
+  fn test_build_socks5_reply_succeeded_ipv4() {
+    let reply = build_socks5_reply(
+      fast_socks5::consts::SOCKS5_REPLY_SUCCEEDED,
+      "127.0.0.1:8080".parse().unwrap(),
+    );
+    // Verify the reply structure:
+    // VER(1) + REP(1) + RSV(1) + ATYP(1) + IPv4(4) + PORT(2) = 10 bytes
+    assert_eq!(reply.len(), 10);
+    assert_eq!(reply[0], fast_socks5::consts::SOCKS5_VERSION);
+    assert_eq!(reply[1], fast_socks5::consts::SOCKS5_REPLY_SUCCEEDED);
+    assert_eq!(reply[2], 0x00); // reserved
+    assert_eq!(reply[3], fast_socks5::consts::SOCKS5_ADDR_TYPE_IPV4);
+  }
+
+  #[test]
+  fn test_build_socks5_reply_succeeded_ipv6() {
+    let reply = build_socks5_reply(
+      fast_socks5::consts::SOCKS5_REPLY_SUCCEEDED,
+      "[::1]:8080".parse().unwrap(),
+    );
+    // Verify the reply structure:
+    // VER(1) + REP(1) + RSV(1) + ATYP(1) + IPv6(16) + PORT(2) = 22 bytes
+    assert_eq!(reply.len(), 22);
+    assert_eq!(reply[0], fast_socks5::consts::SOCKS5_VERSION);
+    assert_eq!(reply[1], fast_socks5::consts::SOCKS5_REPLY_SUCCEEDED);
+    assert_eq!(reply[2], 0x00); // reserved
+    assert_eq!(reply[3], fast_socks5::consts::SOCKS5_ADDR_TYPE_IPV6);
+  }
+
+  #[test]
+  fn test_build_socks5_reply_connection_refused() {
+    let reply = build_socks5_reply(
+      fast_socks5::consts::SOCKS5_REPLY_CONNECTION_REFUSED,
+      "0.0.0.0:0".parse().unwrap(),
+    );
+    assert_eq!(reply.len(), 10);
+    assert_eq!(reply[0], fast_socks5::consts::SOCKS5_VERSION);
+    assert_eq!(reply[1], fast_socks5::consts::SOCKS5_REPLY_CONNECTION_REFUSED);
+  }
+
+  #[test]
+  fn test_build_socks5_reply_host_unreachable() {
+    let reply = build_socks5_reply(
+      fast_socks5::consts::SOCKS5_REPLY_HOST_UNREACHABLE,
+      "0.0.0.0:0".parse().unwrap(),
+    );
+    assert_eq!(reply[1], fast_socks5::consts::SOCKS5_REPLY_HOST_UNREACHABLE);
+  }
+
+  #[test]
+  fn test_build_socks5_reply_network_unreachable() {
+    let reply = build_socks5_reply(
+      fast_socks5::consts::SOCKS5_REPLY_NETWORK_UNREACHABLE,
+      "0.0.0.0:0".parse().unwrap(),
+    );
+    assert_eq!(
+      reply[1],
+      fast_socks5::consts::SOCKS5_REPLY_NETWORK_UNREACHABLE
+    );
+  }
+
+  #[test]
+  fn test_build_socks5_reply_general_failure() {
+    let reply = build_socks5_reply(
+      fast_socks5::consts::SOCKS5_REPLY_GENERAL_FAILURE,
+      "0.0.0.0:0".parse().unwrap(),
+    );
+    assert_eq!(reply[1], fast_socks5::consts::SOCKS5_REPLY_GENERAL_FAILURE);
+  }
+
+  #[test]
+  fn test_io_error_to_reply_error_connection_refused() {
+    let err = io::Error::new(io::ErrorKind::ConnectionRefused, "test");
+    let reply = io_error_to_reply_error(&err);
+    assert_eq!(reply.as_u8(), fast_socks5::consts::SOCKS5_REPLY_CONNECTION_REFUSED);
+  }
+
+  #[test]
+  fn test_io_error_to_reply_error_network_unreachable() {
+    let err = io::Error::new(io::ErrorKind::NetworkUnreachable, "test");
+    let reply = io_error_to_reply_error(&err);
+    assert_eq!(reply.as_u8(), fast_socks5::consts::SOCKS5_REPLY_NETWORK_UNREACHABLE);
+  }
+
+  #[test]
+  fn test_io_error_to_reply_error_host_unreachable() {
+    let err = io::Error::new(io::ErrorKind::HostUnreachable, "test");
+    let reply = io_error_to_reply_error(&err);
+    assert_eq!(reply.as_u8(), fast_socks5::consts::SOCKS5_REPLY_HOST_UNREACHABLE);
+  }
+
+  #[test]
+  fn test_io_error_to_reply_error_timed_out() {
+    let err = io::Error::new(io::ErrorKind::TimedOut, "test");
+    let reply = io_error_to_reply_error(&err);
+    assert_eq!(reply.as_u8(), fast_socks5::consts::SOCKS5_REPLY_GENERAL_FAILURE);
+  }
+
+  #[test]
+  fn test_io_error_to_reply_error_addr_not_available() {
+    let err = io::Error::new(io::ErrorKind::AddrNotAvailable, "test");
+    let reply = io_error_to_reply_error(&err);
+    assert_eq!(reply.as_u8(), fast_socks5::consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED);
+  }
+
+  #[test]
+  fn test_io_error_to_reply_error_other() {
+    let err = io::Error::new(io::ErrorKind::Other, "test");
+    let reply = io_error_to_reply_error(&err);
+    assert_eq!(reply.as_u8(), fast_socks5::consts::SOCKS5_REPLY_GENERAL_FAILURE);
+  }
+
+  #[test]
+  fn test_io_error_to_reply_error_unexpected_eof() {
+    // Test the catch-all _ => ReplyError::GeneralFailure branch
+    let err = io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected eof");
+    let reply = io_error_to_reply_error(&err);
+    assert_eq!(
+      reply.as_u8(),
+      fast_socks5::consts::SOCKS5_REPLY_GENERAL_FAILURE
+    );
+  }
+
+  #[test]
+  fn test_io_error_to_reply_error_broken_pipe() {
+    // Another error type that falls into the catch-all branch
+    let err = io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe");
+    let reply = io_error_to_reply_error(&err);
+    assert_eq!(
+      reply.as_u8(),
+      fast_socks5::consts::SOCKS5_REPLY_GENERAL_FAILURE
+    );
+  }
+
+  #[test]
+  fn test_io_error_to_reply_error_dns_failure_linux() {
+    // Simulate Linux DNS resolution failure message
+    let err = io::Error::new(
+      io::ErrorKind::Other,
+      "failed to lookup address information: Name or service not known",
+    );
+    let reply = io_error_to_reply_error(&err);
+    assert_eq!(
+      reply.as_u8(),
+      fast_socks5::consts::SOCKS5_REPLY_HOST_UNREACHABLE
+    );
+  }
+
+  #[test]
+  fn test_io_error_to_reply_error_dns_failure_name_not_known() {
+    // Another common DNS failure message
+    let err = io::Error::new(io::ErrorKind::Other, "Name or service not known");
+    let reply = io_error_to_reply_error(&err);
+    assert_eq!(
+      reply.as_u8(),
+      fast_socks5::consts::SOCKS5_REPLY_HOST_UNREACHABLE
+    );
+  }
+
+  #[test]
+  fn test_io_error_to_reply_error_dns_failure_temporary() {
+    // Temporary DNS failure
+    let err =
+      io::Error::new(io::ErrorKind::Other, "temporary failure in name resolution");
+    let reply = io_error_to_reply_error(&err);
+    assert_eq!(
+      reply.as_u8(),
+      fast_socks5::consts::SOCKS5_REPLY_HOST_UNREACHABLE
+    );
+  }
+
+  #[test]
+  fn test_io_error_to_reply_error_dns_failure_macos() {
+    // macOS DNS failure message
+    let err = io::Error::new(
+      io::ErrorKind::Other,
+      "nodename nor servname provided, or not known",
+    );
+    let reply = io_error_to_reply_error(&err);
+    assert_eq!(
+      reply.as_u8(),
+      fast_socks5::consts::SOCKS5_REPLY_HOST_UNREACHABLE
+    );
+  }
+
+  #[test]
+  fn test_io_error_to_reply_error_dns_failure_windows() {
+    // Windows DNS failure message
+    let err = io::Error::new(io::ErrorKind::Other, "No such host is known.");
+    let reply = io_error_to_reply_error(&err);
+    assert_eq!(
+      reply.as_u8(),
+      fast_socks5::consts::SOCKS5_REPLY_HOST_UNREACHABLE
+    );
+  }
+
+  #[test]
+  fn test_io_error_to_reply_error_invalid_input_dns_failure() {
+    // Some systems may use InvalidInput for DNS failures
+    let err = io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "failed to lookup address information",
+    );
+    let reply = io_error_to_reply_error(&err);
+    assert_eq!(
+      reply.as_u8(),
+      fast_socks5::consts::SOCKS5_REPLY_HOST_UNREACHABLE
+    );
+  }
+
+  #[test]
+  fn test_io_error_to_reply_error_invalid_input_non_dns() {
+    // InvalidInput but not a DNS failure
+    let err = io::Error::new(io::ErrorKind::InvalidInput, "invalid argument");
+    let reply = io_error_to_reply_error(&err);
+    assert_eq!(
+      reply.as_u8(),
+      fast_socks5::consts::SOCKS5_REPLY_GENERAL_FAILURE
+    );
+  }
+
+  /// Helper to create a socket pair for testing
+  async fn create_socket_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (server, _) = listener.accept().await.unwrap();
+    (client, server)
+  }
+
+  #[tokio::test]
+  async fn test_service_call_socks5_mode_returns_200() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let (client, server) = create_socket_pair().await;
+
+        // Create Socks5StreamCell with a domain target address
+        let target_addr = fast_socks5::util::target_addr::TargetAddr::Domain(
+          "example.com".to_string(),
+          443,
+        );
+        let cell = Socks5StreamCell::new_for_test(server, target_addr);
+
+        // Create a request with Socks5StreamCell in extensions
+        let mut req = http::Request::builder()
+          .method(http::Method::CONNECT)
+          .uri("example.com:443")
+          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+            http_body_util::Empty::new(),
+          )))
+          .unwrap();
+        req.extensions_mut().insert(cell);
+
+        // Create service and call
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
+        let resp = service.call(req).await.unwrap();
+
+        // Should return 200 immediately
+        assert_eq!(resp.status(), http::StatusCode::OK);
+
+        // Clean up
+        drop(client);
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_service_call_socks5_mode_ipv4_target() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let (client, server) = create_socket_pair().await;
+
+        // Create Socks5StreamCell with an IPv4 target address
+        let target_addr = fast_socks5::util::target_addr::TargetAddr::Ip(
+          "127.0.0.1:8080".parse().unwrap(),
+        );
+        let cell = Socks5StreamCell::new_for_test(server, target_addr);
+
+        // Create a request with Socks5StreamCell in extensions
+        let mut req = http::Request::builder()
+          .method(http::Method::CONNECT)
+          .uri("127.0.0.1:8080")
+          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+            http_body_util::Empty::new(),
+          )))
+          .unwrap();
+        req.extensions_mut().insert(cell);
+
+        // Create service and call
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
+        let resp = service.call(req).await.unwrap();
+
+        // Should return 200
+        assert_eq!(resp.status(), http::StatusCode::OK);
+
+        // Clean up
+        drop(client);
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_service_call_socks5_mode_taken_cell_returns_500() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let (_client, server) = create_socket_pair().await;
+
+        // Create Socks5StreamCell and take its contents
+        let target_addr = fast_socks5::util::target_addr::TargetAddr::Domain(
+          "example.com".to_string(),
+          443,
+        );
+        let mut cell = Socks5StreamCell::new_for_test(server, target_addr);
+        // Take the stream - this makes the cell empty
+        let _ = cell.take_stream_for_test();
+
+        // Create a request with empty Socks5StreamCell in extensions
+        let mut req = http::Request::builder()
+          .method(http::Method::CONNECT)
+          .uri("example.com:443")
+          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+            http_body_util::Empty::new(),
+          )))
+          .unwrap();
+        req.extensions_mut().insert(cell);
+
+        // Create service and call
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
+        let resp = service.call(req).await.unwrap();
+
+        // Should return 500 because cell is empty
+        assert_eq!(
+          resp.status(),
+          http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_service_call_http_connect_mode_still_works() {
+    // Verify that regular HTTP CONNECT mode still works after adding SOCKS5 support
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
+
+        // Create a regular HTTP CONNECT request without Socks5StreamCell
+        let req = http::Request::builder()
+          .method(http::Method::CONNECT)
+          .uri("example.com:443")
+          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+            http_body_util::Empty::new(),
+          )))
+          .unwrap();
+
+        let resp = service.call(req).await.unwrap();
+        // Should return 200 for regular HTTP CONNECT mode
+        assert_eq!(resp.status(), http::StatusCode::OK);
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_service_call_socks5_sends_reply_on_success() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        // Create a target server that accepts connections
+        let target_listener =
+          tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+
+        // Spawn a task to accept the target connection
+        let accept_handle = tokio::spawn(async move {
+          let (mut target_stream, _) = target_listener.accept().await.unwrap();
+          // Simple echo: read and write back
+          let mut buf = [0u8; 1024];
+          if let Ok(n) = target_stream.read(&mut buf).await {
+            if n > 0 {
+              let _ = target_stream.write_all(&buf[..n]).await;
+            }
+          }
+          drop(target_stream);
+          drop(target_listener);
+        });
+
+        // Create socket pair for SOCKS5 client
+        let (mut client, server) = create_socket_pair().await;
+
+        // Create Socks5StreamCell with the target address
+        let target_addr_socks5 =
+          fast_socks5::util::target_addr::TargetAddr::Ip(target_addr);
+        let cell = Socks5StreamCell::new_for_test(server, target_addr_socks5);
+
+        // Create a request with Socks5StreamCell in extensions
+        let mut req = http::Request::builder()
+          .method(http::Method::CONNECT)
+          .uri(&format!("127.0.0.1:{}", target_addr.port()))
+          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+            http_body_util::Empty::new(),
+          )))
+          .unwrap();
+        req.extensions_mut().insert(cell);
+
+        // Create service and call
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
+        let resp = service.call(req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+
+        // Read SOCKS5 reply from client with timeout
+        let mut reply_buf = [0u8; 10];
+        let read_result =
+          tokio::time::timeout(Duration::from_secs(5), client.read(&mut reply_buf))
+            .await;
+        assert!(read_result.is_ok(), "Should receive SOCKS5 reply within timeout");
+        let n = read_result.unwrap().unwrap();
+        assert!(n >= 10, "Should receive at least 10 bytes for SOCKS5 reply");
+
+        // Verify SOCKS5 reply
+        assert_eq!(reply_buf[0], fast_socks5::consts::SOCKS5_VERSION);
+        assert_eq!(reply_buf[1], fast_socks5::consts::SOCKS5_REPLY_SUCCEEDED);
+
+        // Clean up
+        drop(client);
+        accept_handle.abort();
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_service_call_socks5_sends_reply_on_failure() {
+    use tokio::io::AsyncReadExt;
+
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        // Create a listener and get its port, then drop it so connection will fail
+        let listener =
+          tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener); // Make the port unavailable
+
+        // Create socket pair for SOCKS5 client
+        let (mut client, server) = create_socket_pair().await;
+
+        // Create Socks5StreamCell with the unavailable target address
+        let target_addr = fast_socks5::util::target_addr::TargetAddr::Ip(addr);
+        let cell = Socks5StreamCell::new_for_test(server, target_addr);
+
+        // Create a request with Socks5StreamCell in extensions
+        let mut req = http::Request::builder()
+          .method(http::Method::CONNECT)
+          .uri(&format!("127.0.0.1:{}", addr.port()))
+          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+            http_body_util::Empty::new(),
+          )))
+          .unwrap();
+        req.extensions_mut().insert(cell);
+
+        // Create service and call
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
+        let resp = service.call(req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+
+        // Give the background task time to attempt connection and send error reply
+        tokio::task::yield_now().await;
+
+        // Read SOCKS5 error reply from client
+        let mut reply_buf = [0u8; 10];
+        let n = client.read(&mut reply_buf).await.unwrap();
+        assert!(n >= 10, "Should receive at least 10 bytes for SOCKS5 reply");
+
+        // Verify SOCKS5 error reply
+        assert_eq!(reply_buf[0], fast_socks5::consts::SOCKS5_VERSION);
+        // The reply code should be non-zero (error)
+        assert_ne!(
+          reply_buf[1],
+          fast_socks5::consts::SOCKS5_REPLY_SUCCEEDED
+        );
+
+        // Clean up
+        drop(client);
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_service_call_socks5_tunnel_tracker_increments() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        // Create a listener and get its port, then drop it so connection will fail quickly
+        let listener =
+          tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let (client, server) = create_socket_pair().await;
+
+        // Create Socks5StreamCell with an unavailable port
+        let target_addr = fast_socks5::util::target_addr::TargetAddr::Ip(addr);
+        let cell = Socks5StreamCell::new_for_test(server, target_addr);
+
+        // Create a request with Socks5StreamCell
+        let mut req = http::Request::builder()
+          .method(http::Method::CONNECT)
+          .uri(&format!("127.0.0.1:{}", addr.port()))
+          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+            http_body_util::Empty::new(),
+          )))
+          .unwrap();
+        req.extensions_mut().insert(cell);
+
+        // Create service with a tunnel tracker
+        let tunnel_tracker = Rc::new(TunnelTracker::new());
+        let service = ConnectTcpService {
+          tunnel_tracker: tunnel_tracker.clone(),
+        };
+        let mut service = plugin::Service::new(service);
+
+        // Call the service
+        let _ = service.call(req).await;
+
+        // Give the task time to be spawned
+        tokio::task::yield_now().await;
+
+        // Verify tunnel was registered
+        assert_eq!(tunnel_tracker.active_count(), 1);
+
+        // Wait for tunnel to complete (connection will fail quickly)
+        tokio::time::timeout(
+          Duration::from_secs(5),
+          tunnel_tracker.wait_shutdown(),
+        )
+        .await
+        .ok();
+        assert_eq!(tunnel_tracker.active_count(), 0);
+
+        // Clean up
+        drop(client);
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_service_call_socks5_shutdown_notification() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        // Create a listener that will accept connections
+        let target_listener =
+          tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+
+        // Create a local task to accept the target connection in LocalSet
+        let (accept_tx, mut accept_rx) = tokio::sync::oneshot::channel();
+        let accept_task = tokio::task::spawn_local(async move {
+          if let Ok((stream, _)) = target_listener.accept().await {
+            let _ = accept_tx.send(());
+            // Keep the connection open by pending
+            std::future::pending::<()>().await;
+            drop(stream);
+          }
+          drop(target_listener);
+        });
+
+        let (client, server) = create_socket_pair().await;
+
+        // Create Socks5StreamCell with the target address
+        let target_addr_cell =
+          fast_socks5::util::target_addr::TargetAddr::Ip(target_addr);
+        let cell = Socks5StreamCell::new_for_test(server, target_addr_cell);
+
+        // Create a request with Socks5StreamCell
+        let mut req = http::Request::builder()
+          .method(http::Method::CONNECT)
+          .uri(&format!("127.0.0.1:{}", target_addr.port()))
+          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+            http_body_util::Empty::new(),
+          )))
+          .unwrap();
+        req.extensions_mut().insert(cell);
+
+        // Create service with a tunnel tracker
+        let tunnel_tracker = Rc::new(TunnelTracker::new());
+        let service = ConnectTcpService {
+          tunnel_tracker: tunnel_tracker.clone(),
+        };
+        let mut service = plugin::Service::new(service);
+
+        // Call the service
+        let _ = service.call(req).await;
+        tokio::task::yield_now().await;
+        assert_eq!(tunnel_tracker.active_count(), 1);
+
+        // Wait for connection to be established
+        let _ = tokio::time::timeout(Duration::from_secs(2), &mut accept_rx)
+          .await;
+
+        // Trigger shutdown
+        tunnel_tracker.shutdown();
+
+        // Wait for tunnel to complete with timeout
+        let wait_result = tokio::time::timeout(
+          Duration::from_secs(5),
+          tunnel_tracker.wait_shutdown(),
+        )
+        .await;
+        assert!(wait_result.is_ok(), "tunnel should complete after shutdown");
+        assert_eq!(tunnel_tracker.active_count(), 0);
+
+        // Clean up
+        drop(client);
+        accept_task.abort();
+      })
+      .await;
+  }
+
+  /// Test that bidirectional transfer works correctly in SOCKS5 mode.
+  #[tokio::test]
+  async fn test_service_call_socks5_bidirectional_transfer() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        // Create a target server that echoes data
+        let target_listener =
+          tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+
+        // Spawn target server task
+        let target_task = tokio::task::spawn_local(async move {
+          if let Ok((mut stream, _)) = target_listener.accept().await {
+            // Echo server: read data and write it back
+            let mut buf = [0u8; 1024];
+            loop {
+              match stream.read(&mut buf).await {
+                Ok(0) => break, // Connection closed
+                Ok(n) => {
+                  if stream.write_all(&buf[..n]).await.is_err() {
+                    break;
+                  }
+                }
+                Err(_) => break,
+              }
+            }
+          }
+          drop(target_listener);
+        });
+
+        // Create socket pair for SOCKS5 client
+        let (mut client, server) = create_socket_pair().await;
+
+        // Create Socks5StreamCell with the target address
+        let target_addr_socks5 =
+          fast_socks5::util::target_addr::TargetAddr::Ip(target_addr);
+        let cell = Socks5StreamCell::new_for_test(server, target_addr_socks5);
+
+        // Create a request with Socks5StreamCell
+        let mut req = http::Request::builder()
+          .method(http::Method::CONNECT)
+          .uri(&format!("127.0.0.1:{}", target_addr.port()))
+          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+            http_body_util::Empty::new(),
+          )))
+          .unwrap();
+        req.extensions_mut().insert(cell);
+
+        // Create service and call
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
+        let resp = service.call(req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+
+        // Read SOCKS5 success reply
+        let mut reply_buf = [0u8; 10];
+        let n = client.read(&mut reply_buf).await.unwrap();
+        assert!(n >= 10, "Should receive SOCKS5 reply");
+        assert_eq!(reply_buf[0], fast_socks5::consts::SOCKS5_VERSION);
+        assert_eq!(reply_buf[1], fast_socks5::consts::SOCKS5_REPLY_SUCCEEDED);
+
+        // Now test bidirectional data transfer
+        let test_data = b"Hello, SOCKS5!";
+        client.write_all(test_data).await.unwrap();
+
+        let mut response_buf = [0u8; 1024];
+        let n = client.read(&mut response_buf).await.unwrap();
+        assert_eq!(&response_buf[..n], test_data);
+
+        // Clean up
+        drop(client);
+        target_task.abort();
+      })
+      .await;
+  }
+
+  /// Test that sending SOCKS5 success reply fails when client disconnects.
+  #[tokio::test]
+  async fn test_service_call_socks5_reply_send_failure_on_success() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        // Create a target server that accepts connections
+        let target_listener =
+          tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+
+        // Spawn task to accept and immediately close
+        let accept_task = tokio::task::spawn_local(async move {
+          if let Ok((stream, _)) = target_listener.accept().await {
+            drop(stream); // Immediately close
+          }
+          drop(target_listener);
+        });
+
+        // Create socket pair for SOCKS5 client
+        let (client, server) = create_socket_pair().await;
+
+        // Create Socks5StreamCell with the target address
+        let target_addr_socks5 =
+          fast_socks5::util::target_addr::TargetAddr::Ip(target_addr);
+        let cell = Socks5StreamCell::new_for_test(server, target_addr_socks5);
+
+        // Create a request with Socks5StreamCell
+        let mut req = http::Request::builder()
+          .method(http::Method::CONNECT)
+          .uri(&format!("127.0.0.1:{}", target_addr.port()))
+          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+            http_body_util::Empty::new(),
+          )))
+          .unwrap();
+        req.extensions_mut().insert(cell);
+
+        // Create service with tunnel tracker
+        let tunnel_tracker = Rc::new(TunnelTracker::new());
+        let service = ConnectTcpService {
+          tunnel_tracker: tunnel_tracker.clone(),
+        };
+        let mut service = plugin::Service::new(service);
+
+        // Drop client before response is sent - this should cause write failure
+        drop(client);
+
+        // Call the service
+        let resp = service.call(req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+
+        // Give the tunnel task time to complete
+        tokio::task::yield_now().await;
+
+        // Wait for tunnel to complete
+        tokio::time::timeout(
+          Duration::from_secs(5),
+          tunnel_tracker.wait_shutdown(),
+        )
+        .await
+        .ok();
+
+        // Clean up
+        accept_task.abort();
+      })
+      .await;
+  }
+
+  /// Test that sending SOCKS5 error reply fails when client disconnects.
+  #[tokio::test]
+  async fn test_service_call_socks5_reply_send_failure_on_error() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        // Create a listener and get its port, then drop it so connection will fail
+        let listener =
+          tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        // Create socket pair for SOCKS5 client
+        let (client, server) = create_socket_pair().await;
+
+        // Create Socks5StreamCell with the unavailable target address
+        let target_addr =
+          fast_socks5::util::target_addr::TargetAddr::Ip(addr);
+        let cell = Socks5StreamCell::new_for_test(server, target_addr);
+
+        // Create a request with Socks5StreamCell in extensions
+        let mut req = http::Request::builder()
+          .method(http::Method::CONNECT)
+          .uri(&format!("127.0.0.1:{}", addr.port()))
+          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+            http_body_util::Empty::new(),
+          )))
+          .unwrap();
+        req.extensions_mut().insert(cell);
+
+        // Create service with tunnel tracker
+        let tunnel_tracker = Rc::new(TunnelTracker::new());
+        let service = ConnectTcpService {
+          tunnel_tracker: tunnel_tracker.clone(),
+        };
+        let mut service = plugin::Service::new(service);
+
+        // Drop client before error response is sent
+        drop(client);
+
+        // Call the service
+        let resp = service.call(req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+
+        // Give the tunnel task time to complete
+        tokio::task::yield_now().await;
+
+        // Wait for tunnel to complete
+        tokio::time::timeout(
+          Duration::from_secs(5),
+          tunnel_tracker.wait_shutdown(),
+        )
+        .await
+        .ok();
+      })
+      .await;
+  }
+
+  /// Test that uninstall logs warning when tunnels don't respond to shutdown.
+  #[tokio::test]
+  async fn test_uninstall_timeout_logs_warning() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let mut plugin = ConnectTcpPlugin::new();
+
+        // Register a tunnel that ignores shutdown notification
+        plugin.tunnel_tracker.register(async {
+          std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(plugin.tunnel_tracker.active_count(), 1);
+
+        // Pause time for tokio time mocking
+        tokio::time::pause();
+
+        // Start uninstall
+        let uninstall_future = plugin.uninstall();
+
+        // Advance time past TUNNEL_SHUTDOWN_TIMEOUT
+        tokio::time::advance(TUNNEL_SHUTDOWN_TIMEOUT).await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+
+        // Complete the uninstall
+        uninstall_future.await;
+
+        // Verify tunnel was aborted
+        assert_eq!(plugin.tunnel_tracker.active_count(), 0);
+      })
+      .await;
+  }
+
+  /// Test SOCKS5 mode with domain target address (DNS resolution).
+  #[tokio::test]
+  async fn test_service_call_socks5_domain_target() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let (client, server) = create_socket_pair().await;
+
+        // Create Socks5StreamCell with a domain target address
+        let target_addr = fast_socks5::util::target_addr::TargetAddr::Domain(
+          "localhost".to_string(),
+          1, // Port 1 - unlikely to be listening, but tests domain handling
+        );
+        let cell = Socks5StreamCell::new_for_test(server, target_addr);
+
+        // Create a request with Socks5StreamCell
+        let mut req = http::Request::builder()
+          .method(http::Method::CONNECT)
+          .uri("localhost:1")
+          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+            http_body_util::Empty::new(),
+          )))
+          .unwrap();
+        req.extensions_mut().insert(cell);
+
+        // Create service and call
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
+        let resp = service.call(req).await.unwrap();
+
+        // Should return 200 immediately
+        assert_eq!(resp.status(), http::StatusCode::OK);
+
+        // Clean up
+        drop(client);
+      })
+      .await;
+  }
+
+  /// Test that bidirectional transfer error is logged when connection is reset.
+  #[tokio::test]
+  async fn test_service_call_socks5_transfer_error() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        // Create a target server that accepts connections then immediately closes
+        let target_listener =
+          tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+
+        // Spawn target server that closes connection after reading first data
+        let target_task = tokio::task::spawn_local(async move {
+          if let Ok((mut stream, _)) = target_listener.accept().await {
+            // Read some data then close abruptly
+            let mut buf = [0u8; 1024];
+            if stream.read(&mut buf).await.is_ok() {
+              // Close connection immediately without responding
+              // This will cause a transfer error
+            }
+          }
+          drop(target_listener);
+        });
+
+        // Create socket pair for SOCKS5 client
+        let (mut client, server) = create_socket_pair().await;
+
+        // Create Socks5StreamCell with the target address
+        let target_addr_socks5 =
+          fast_socks5::util::target_addr::TargetAddr::Ip(target_addr);
+        let cell = Socks5StreamCell::new_for_test(server, target_addr_socks5);
+
+        // Create a request with Socks5StreamCell
+        let mut req = http::Request::builder()
+          .method(http::Method::CONNECT)
+          .uri(&format!("127.0.0.1:{}", target_addr.port()))
+          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+            http_body_util::Empty::new(),
+          )))
+          .unwrap();
+        req.extensions_mut().insert(cell);
+
+        // Create service and call
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
+        let resp = service.call(req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+
+        // Read SOCKS5 success reply
+        let mut reply_buf = [0u8; 10];
+        let n = client.read(&mut reply_buf).await.unwrap();
+        assert!(n >= 10, "Should receive SOCKS5 reply");
+        assert_eq!(reply_buf[0], fast_socks5::consts::SOCKS5_VERSION);
+        assert_eq!(reply_buf[1], fast_socks5::consts::SOCKS5_REPLY_SUCCEEDED);
+
+        // Send data to trigger transfer error
+        let _ = client.write_all(b"test data").await;
+        // Give time for data to be sent and for target to close
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Clean up
+        drop(client);
+        target_task.abort();
       })
       .await;
   }

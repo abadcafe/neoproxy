@@ -32,6 +32,7 @@ futures-core = "0.3.31"
 local-channel = "0.1.5"
 bcrypt = "0.16"
 base64 = "0.22"
+fast-socks5 = "1.0.0"
 
 [dev-dependencies]
 tempfile = "3"

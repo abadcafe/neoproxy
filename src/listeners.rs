@@ -3,6 +3,7 @@ use std::sync::LazyLock;
 
 use crate::plugin;
 
+pub mod fast_socks5;
 pub mod http3;
 pub mod hyper;
 
@@ -22,6 +23,10 @@ impl ListenerBuilderSet {
     builders.insert(
       http3::listener_name(),
       Box::new(http3::create_listener_builder()),
+    );
+    builders.insert(
+      fast_socks5::listener_name(),
+      Box::new(fast_socks5::create_listener_builder()),
     );
 
     listener_manager
@@ -50,6 +55,7 @@ mod tests {
     let set = ListenerBuilderSet::new();
     assert!(set.builders.contains_key("hyper.listener"));
     assert!(set.builders.contains_key("http3.listener"));
+    assert!(set.builders.contains_key("fast_socks5.listener"));
   }
 
   #[test]
@@ -67,6 +73,13 @@ mod tests {
   }
 
   #[test]
+  fn test_listener_builder_set_get_fast_socks5_listener() {
+    let set = ListenerBuilderSet::new();
+    let builder = set.listener_builder("fast_socks5.listener");
+    assert!(builder.is_some());
+  }
+
+  #[test]
   fn test_listener_builder_set_get_nonexistent() {
     let set = ListenerBuilderSet::new();
     let builder = set.listener_builder("nonexistent");
@@ -78,6 +91,7 @@ mod tests {
     let global_set = ListenerBuilderSet::global();
     assert!(global_set.listener_builder("hyper.listener").is_some());
     assert!(global_set.listener_builder("http3.listener").is_some());
+    assert!(global_set.listener_builder("fast_socks5.listener").is_some());
   }
 
   #[test]

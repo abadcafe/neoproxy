@@ -21,6 +21,7 @@ use crate::plugin;
 /// The error_message parameter is intended for logging purposes,
 /// but the response body is fixed to avoid exposing internal
 /// error details to clients.
+#[allow(dead_code)]
 pub fn build_500_response(_error_message: &str) -> plugin::Response {
   let full = Full::new(Bytes::from("Internal Server Error"));
   let bytes_buf = plugin::BytesBufBodyWrapper::new(full);
@@ -46,6 +47,7 @@ pub fn build_500_response(_error_message: &str) -> plugin::Response {
 ///     Ok(response)
 /// }).await;
 /// ```
+#[allow(dead_code)]
 pub async fn handle_service_error<F>(f: F) -> Result<plugin::Response>
 where
   F: Future<Output = Result<plugin::Response>>,
@@ -63,6 +65,7 @@ where
 struct EchoService {}
 
 impl EchoService {
+  #[allow(clippy::new_ret_no_self)]
   fn new(_args: plugin::SerializedArgs) -> Result<plugin::Service> {
     Ok(plugin::Service::new(Self {}))
   }
@@ -77,7 +80,7 @@ impl tower::Service<plugin::Request> for EchoService {
     &mut self,
     cx: &mut Context<'_>,
   ) -> Poll<Result<(), Self::Error>> {
-    cx.waker().clone().wake();
+    cx.waker().wake_by_ref();
     Poll::Ready(Ok(()))
   }
 
@@ -103,7 +106,7 @@ struct EchoPlugin {
 impl EchoPlugin {
   fn new() -> Self {
     let builder: Box<dyn plugin::BuildService> =
-      Box::new(move |a| EchoService::new(a));
+      Box::new(EchoService::new);
     let service_builders = HashMap::from([("echo", builder)]);
     Self { service_builders }
   }

@@ -1,3 +1,4 @@
+#![allow(clippy::await_holding_refcell_ref)]
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::{self, Future};
@@ -48,6 +49,7 @@ const H3_NO_ERROR_CODE: u32 = 0x100;
 /// # Returns
 ///
 /// A Vec<u8> containing the complete SOCKS5 reply packet.
+#[allow(dead_code)]
 fn build_socks5_reply(reply_code: u8, bind_addr: SocketAddr) -> Vec<u8> {
   let (addr_type, mut ip_oct, mut port) = match bind_addr {
     SocketAddr::V4(sock) => (
@@ -263,11 +265,8 @@ impl ProxyGroup {
               proxy.address
             );
           }
-          Ok(res) => match res {
-            Err(e) => {
-              info!("connection of {} finished: {e}", proxy.address);
-            }
-            Ok(_) => {}
+          Ok(res) => if let Err(e) = res {
+            info!("connection of {} finished: {e}", proxy.address);
           },
         }
       } else {
@@ -393,7 +392,7 @@ impl io::AsyncWrite for H3SendingStreamWriter {
     Box::pin(fut)
       .as_mut()
       .poll(cx)
-      .map_err(|e| std::io::Error::other(e))
+      .map_err(std::io::Error::other)
   }
 }
 
@@ -418,6 +417,7 @@ struct Http3ChainService {
 }
 
 impl Http3ChainService {
+  #[allow(clippy::new_ret_no_self)]
   fn new(
     sargs: plugin::SerializedArgs,
     stream_tracker: Rc<StreamTracker>,
@@ -603,7 +603,7 @@ impl tower::Service<plugin::Request> for Http3ChainService {
         // Convert H3ReceivingStreamBody (Body) to AsyncRead via StreamReader
         let proxy_reader = tokio_util::io::StreamReader::new(
           H3ReceivingStreamBody::new(receiving_stream)
-            .map_err(|e| std::io::Error::other(e))
+            .map_err(std::io::Error::other)
             .into_data_stream(),
         );
         ts.borrow_mut().new_transfering(proxy_reader, client_writer)?;
@@ -647,7 +647,7 @@ impl tower::Service<plugin::Request> for Http3ChainService {
       ts.borrow_mut().new_transfering(
         tokio_util::io::StreamReader::new(
           req_body
-            .map_err(|e| std::io::Error::other(e))
+            .map_err(std::io::Error::other)
             .into_data_stream(),
         ),
         H3SendingStreamWriter::new(sending_stream),

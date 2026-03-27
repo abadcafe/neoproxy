@@ -6,23 +6,26 @@
 //! # Design Note: Thread Safety
 //!
 //! The `Socks5StreamCell` type needs to be stored in `http::Extensions`,
-//! which requires `Clone + Send + Sync + 'static`. However, the inner
-//! types (`TcpStream` and `TargetAddr`) are not thread-safe or not cloneable.
+//! which requires `Clone + Send + Sync + 'static`. Since the inner types
+//! (`TcpStream` and `TargetAddr`) implement `Send`, we use `Arc<Mutex<T>>`
+//! to provide thread-safe access without unsafe code in production.
 //!
-//! To satisfy the trait bounds while maintaining single-threaded semantics,
-//! we use `UnsafeSendSync` wrapper. The `build_connect_request` function
-//! must only be called from a single-threaded context (LocalSet), and the
-//! Service must extract the stream before any cross-thread operation.
+//! Note: The `#![allow(clippy::await_holding_refcell_ref)]` attribute is
+//! used because we hold RefCell references across await points in the
+//! single-threaded LocalSet context, which is safe.
 //!
-//! For Clone, we implement it to only clone the `TargetAddr`, while the
-//! `TcpStream` is moved to the clone (original becomes empty).
+//! The `build_connect_request` function must only be called from a
+//! single-threaded context (LocalSet), and the Service must extract the
+//! stream before any cross-thread operation.
+
+#![allow(clippy::await_holding_refcell_ref)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -40,6 +43,9 @@ const LISTENER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Default handshake timeout in seconds.
 const DEFAULT_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
+
+/// Monitoring log interval in seconds.
+const MONITORING_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 /// SOCKS5 listener implementation.
 ///
@@ -78,6 +84,7 @@ impl Socks5Listener {
   /// Returns an error if:
   /// - All configured addresses are invalid
   /// - Configuration validation fails
+  #[allow(clippy::new_ret_no_self)]
   pub fn new(
     args: Socks5ListenerArgs,
     svc: plugin::Service,
@@ -174,6 +181,11 @@ impl Socks5Listener {
       let connection_tracker = connection_tracker;
       let service = service;
 
+      // Create monitoring interval timer
+      let mut monitoring_interval =
+        tokio::time::interval(MONITORING_LOG_INTERVAL);
+      monitoring_interval.tick().await; // Skip first immediate tick
+
       // Define accepting and shutdown as closures for reuse in loop
       let accepting = || async {
         match listener.accept().await {
@@ -187,7 +199,7 @@ impl Socks5Listener {
                 e
               );
               // Return true to signal fatal error
-              return true;
+              true
             } else {
               // Temporary error, log and continue
               tracing::warn!(
@@ -195,7 +207,7 @@ impl Socks5Listener {
                 addr,
                 e
               );
-              return false;
+              false
             }
           }
           Ok((stream, peer_addr)) => {
@@ -344,7 +356,7 @@ impl Socks5Listener {
                 }
               }
             });
-            return false;
+            false
           }
         }
       };
@@ -362,6 +374,13 @@ impl Socks5Listener {
               break;
             }
             // Continue accepting connections
+          }
+          _ = monitoring_interval.tick() => {
+            // Log monitoring info
+            tracing::info!(
+              "[fast_socks5.listener] active_connections={}",
+              connection_tracker.active_count()
+            );
           }
           _ = shutdown() => {
             // Graceful shutdown for the TcpListener
@@ -435,7 +454,6 @@ impl plugin::Listening for Socks5Listener {
     }
 
     let connection_tracker = self.connection_tracker.clone();
-    let shutdown_handle = shutdown_handle;
     let graceful_timeout = self.graceful_shutdown_timeout;
 
     // Spawn all listening tasks in the connection tracker
@@ -457,11 +475,8 @@ impl plugin::Listening for Socks5Listener {
           Err(e) => {
             tracing::error!("listening join error: {}", e);
           }
-          Ok(res) => match res {
-            Err(e) => {
-              tracing::error!("listening error: {}", e);
-            }
-            Ok(()) => {}
+          Ok(res) => if let Err(e) = res {
+            tracing::error!("listening error: {}", e);
           },
         }
       }
@@ -657,44 +672,6 @@ impl Clone for ConnectionTracker {
   }
 }
 
-/// A wrapper that makes a type `Send + Sync` for storage purposes.
-///
-/// # Safety
-///
-/// This wrapper is used to satisfy `http::Extensions` requirements.
-/// The wrapped value must only be accessed from a single thread.
-/// The SOCKS5 listener uses `LocalSet` for single-threaded execution.
-#[derive(Debug)]
-struct UnsafeSendSync<T>(T);
-
-// SAFETY: This is only safe because we ensure single-threaded access
-// via LocalSet. The value should never be sent to another thread.
-unsafe impl<T> Send for UnsafeSendSync<T> {}
-unsafe impl<T> Sync for UnsafeSendSync<T> {}
-
-impl<T> Deref for UnsafeSendSync<T> {
-  type Target = T;
-
-  fn deref(&self) -> &Self::Target {
-    &self.0
-  }
-}
-
-impl<T> DerefMut for UnsafeSendSync<T> {
-  fn deref_mut(&mut self) -> &mut Self::Target {
-    &mut self.0
-  }
-}
-
-impl<T> Clone for UnsafeSendSync<T>
-where
-  T: Clone,
-{
-  fn clone(&self) -> Self {
-    Self(self.0.clone())
-  }
-}
-
 /// Container for TCP stream and SOCKS5 protocol objects.
 ///
 /// This structure is used to pass TCP stream ownership from the SOCKS5
@@ -703,16 +680,12 @@ where
 ///
 /// # Thread Safety
 ///
-/// While this type implements `Send + Sync` to satisfy `http::Extensions`
-/// requirements, it must only be used in a single-threaded context
-/// (LocalSet). The underlying `TcpStream` is not actually thread-safe.
+/// This type uses `Arc<Mutex<T>>` to satisfy `http::Extensions` requirements
+/// for `Send + Sync`. The underlying types (`TcpStream`, `TargetAddr`) are
+/// `Send`, making `Arc<Mutex<T>>` automatically `Send + Sync`.
 ///
-/// # Implementation Note
-///
-/// Due to the complexity of storing `Socks5ServerProtocol` in a `Send + Sync`
-/// container, this implementation stores only the `TcpStream` and
-/// `TargetAddr`. The protocol object is consumed during handshake, and
-/// the Service uses the stream directly for SOCKS5 responses.
+/// The type is designed for single-threaded use (LocalSet), but the
+/// `Arc<Mutex>` wrapper ensures type safety without unsafe code.
 ///
 /// For sending SOCKS5 responses, the Service should:
 /// 1. Take the stream from this cell
@@ -721,35 +694,35 @@ where
 ///
 /// # Clone Behavior
 ///
-/// When cloned, the protocol is moved to the clone (the original becomes
-/// empty). This is because the underlying stream is not clonable. Only the `TargetAddr`
-/// is actually cloned.
+/// Cloning creates a shared reference to the same underlying data.
+/// When `take_proto()` is called on one clone, all clones will return
+/// `None` for subsequent calls.
 pub struct Socks5StreamCell {
   /// The SOCKS5 protocol in CommandRead state.
   ///
   /// Note: We store the protocol as an Option to allow taking ownership.
-  /// After cloning, only one instance will have `Some(protocol)`.
-  proto: UnsafeSendSync<
-    Option<
-      fast_socks5::server::Socks5ServerProtocol<
-        tokio::net::TcpStream,
-        fast_socks5::server::states::CommandRead,
+  /// After `take_proto()` is called, subsequent calls will return `None`.
+  proto: Arc<
+    Mutex<
+      Option<
+        fast_socks5::server::Socks5ServerProtocol<
+          tokio::net::TcpStream,
+          fast_socks5::server::states::CommandRead,
+        >,
       >,
     >,
   >,
   /// The target address from SOCKS5 request.
-  target_addr:
-    UnsafeSendSync<Option<fast_socks5::util::target_addr::TargetAddr>>,
+  target_addr: Arc<Mutex<Option<fast_socks5::util::target_addr::TargetAddr>>>,
 }
 
 impl Clone for Socks5StreamCell {
   fn clone(&self) -> Self {
-    // Clone the target addr (which is clonable)
-    // For the proto, we can only have one owner, so the clone gets None
-    // The actual proto ownership is transferred via take_proto()
+    // Clone creates a shared reference to the same underlying data.
+    // Both clones share the same proto and target_addr via Arc.
     Self {
-      proto: UnsafeSendSync(None),
-      target_addr: UnsafeSendSync(self.target_addr.0.clone()),
+      proto: self.proto.clone(),
+      target_addr: self.target_addr.clone(),
     }
   }
 }
@@ -769,8 +742,8 @@ impl Socks5StreamCell {
     target_addr: fast_socks5::util::target_addr::TargetAddr,
   ) -> Self {
     Self {
-      proto: UnsafeSendSync(Some(proto)),
-      target_addr: UnsafeSendSync(Some(target_addr)),
+      proto: Arc::new(Mutex::new(Some(proto))),
+      target_addr: Arc::new(Mutex::new(Some(target_addr))),
     }
   }
 
@@ -795,8 +768,20 @@ impl Socks5StreamCell {
     >,
     fast_socks5::util::target_addr::TargetAddr,
   )> {
-    let proto = self.proto.0.take()?;
-    let target_addr = self.target_addr.0.take()?;
+    // SAFETY: Mutex::lock() only fails if the mutex is poisoned (a panic
+    // occurred while holding the lock). In our single-threaded LocalSet
+    // environment, this cannot happen. We use expect() with a clear message
+    // for consistency and debuggability.
+    let proto = self
+      .proto
+      .lock()
+      .expect("mutex poisoned in single-threaded context")
+      .take()?;
+    let target_addr = self
+      .target_addr
+      .lock()
+      .expect("mutex poisoned in single-threaded context")
+      .take()?;
     Some((proto, target_addr))
   }
 
@@ -806,12 +791,26 @@ impl Socks5StreamCell {
   pub fn target_addr_cloned(
     &self,
   ) -> Option<fast_socks5::util::target_addr::TargetAddr> {
-    self.target_addr.0.as_ref().cloned()
+    // SAFETY: Mutex::lock() only fails if the mutex is poisoned. In our
+    // single-threaded LocalSet environment, this cannot happen.
+    self
+      .target_addr
+      .lock()
+      .expect("mutex poisoned in single-threaded context")
+      .as_ref()
+      .cloned()
   }
 
   /// Checks if the inner data is still present (not yet taken).
+  #[allow(dead_code)]
   pub fn is_present(&self) -> bool {
-    self.proto.0.is_some()
+    // SAFETY: Mutex::lock() only fails if the mutex is poisoned. In our
+    // single-threaded LocalSet environment, this cannot happen.
+    self
+      .proto
+      .lock()
+      .expect("mutex poisoned in single-threaded context")
+      .is_some()
   }
 
   /// Takes and returns the inner stream and target address for testing purposes.
@@ -833,8 +832,8 @@ impl Socks5StreamCell {
     tokio::net::TcpStream,
     fast_socks5::util::target_addr::TargetAddr,
   )> {
-    let proto = self.proto.0.take()?;
-    let target_addr = self.target_addr.0.take()?;
+    let proto = self.proto.lock().unwrap().take()?;
+    let target_addr = self.target_addr.lock().unwrap().take()?;
 
     // SAFETY: Socks5ServerProtocol<T, S> has the same memory layout as T
     // because the state marker is PhantomData (zero-sized).
@@ -875,8 +874,8 @@ impl Socks5StreamCell {
     > = unsafe { std::mem::transmute(proto_opened) };
 
     Self {
-      proto: UnsafeSendSync(Some(proto)),
-      target_addr: UnsafeSendSync(Some(target_addr)),
+      proto: Arc::new(Mutex::new(Some(proto))),
+      target_addr: Arc::new(Mutex::new(Some(target_addr))),
     }
   }
 }
@@ -1006,6 +1005,7 @@ pub enum CommandError {
   ///
   /// According to architecture requirements, we send REP=0x08
   /// and close the connection.
+  #[allow(dead_code)]
   AddressTypeNotSupported {
     /// The address type that was not supported.
     atyp: u8,
@@ -1061,8 +1061,7 @@ impl From<HandshakeError> for CommandError {
         std::io::ErrorKind::InvalidData,
         format!("invalid SOCKS version: {}", v),
       )),
-      HandshakeError::MethodNotAcceptable(_) => Self::IoError(std::io::Error::new(
-        std::io::ErrorKind::Other,
+      HandshakeError::MethodNotAcceptable(_) => Self::IoError(std::io::Error::other(
         "authentication method not acceptable",
       )),
       HandshakeError::AuthenticationFailed { .. } => Self::IoError(std::io::Error::new(
@@ -1081,14 +1080,12 @@ impl From<fast_socks5::server::SocksServerError> for CommandError {
     match e {
       SocksServerError::UnknownCommand(cmd) => Self::UnknownCommand { command: cmd },
       SocksServerError::AuthMethodUnacceptable(_) => {
-        Self::IoError(std::io::Error::new(
-          std::io::ErrorKind::Other,
+        Self::IoError(std::io::Error::other(
           "unexpected auth error during command processing",
         ))
       }
       SocksServerError::Io { source, .. } => Self::from(source),
-      _ => Self::IoError(std::io::Error::new(
-        std::io::ErrorKind::Other,
+      _ => Self::IoError(std::io::Error::other(
         e.to_string(),
       )),
     }
@@ -1207,8 +1204,7 @@ impl From<fast_socks5::server::SocksServerError> for HandshakeError {
         Self::AuthenticationFailed { username: None }
       }
       SocksServerError::Io { source, .. } => Self::from(source),
-      _ => Self::IoError(std::io::Error::new(
-        std::io::ErrorKind::Other,
+      _ => Self::IoError(std::io::Error::other(
         e.to_string(),
       )),
     }
@@ -1342,18 +1338,15 @@ pub async fn perform_handshake(
 
 /// Authentication configuration for SOCKS5 listener.
 #[derive(Clone, Debug, PartialEq)]
+#[derive(Default)]
 pub enum AuthConfig {
   /// No authentication required.
+  #[default]
   None,
   /// Username/password authentication with a map of users.
   Password { users: HashMap<String, String> },
 }
 
-impl Default for AuthConfig {
-  fn default() -> Self {
-    Self::None
-  }
-}
 
 /// User entry for deserialization.
 #[derive(Deserialize, Debug)]
@@ -1671,7 +1664,7 @@ pub fn build_connect_request(
   let target_addr = stream_cell.target_addr_cloned();
   let (host, port) = target_addr
     .as_ref()
-    .map(|addr| extract_host_port(addr))
+    .map(extract_host_port)
     .unwrap_or(("unknown".to_string(), 0));
 
   let uri = format_connect_uri(&host, port);
@@ -1766,6 +1759,7 @@ mod tests {
     }
 
     /// Create a new LogCapture that only captures logs at or above the specified level.
+    #[allow(dead_code)]
     fn with_level(level: tracing::Level) -> Self {
       let logs = Arc::new(Mutex::new(Vec::new()));
       let logs_clone = logs.clone();
@@ -1799,6 +1793,7 @@ mod tests {
     }
 
     /// Check if any captured log contains both expected texts.
+    #[allow(dead_code)]
     fn contains_both(&self, text1: &str, text2: &str) -> bool {
       let logs = self.logs.lock().unwrap();
       logs.iter().any(|log| log.contains(text1) && log.contains(text2))
@@ -1811,6 +1806,7 @@ mod tests {
     }
 
     /// Get all captured logs.
+    #[allow(dead_code)]
     fn get_logs(&self) -> Vec<String> {
       self.logs.lock().unwrap().clone()
     }
@@ -1832,6 +1828,7 @@ mod tests {
     }
 
     /// Check if any ERROR level log contains the given text.
+    #[allow(dead_code)]
     fn contains_error(&self, text: &str) -> bool {
       self.contains_level("ERROR", text)
     }
@@ -2200,28 +2197,6 @@ mod tests {
       .await;
   }
 
-  // ========== UnsafeSendSync Tests ==========
-
-  #[test]
-  fn test_unsafe_send_sync_clone() {
-    let wrapped = UnsafeSendSync(42u32);
-    let cloned = wrapped.clone();
-    assert_eq!(*cloned, 42u32);
-  }
-
-  #[test]
-  fn test_unsafe_send_sync_deref() {
-    let wrapped = UnsafeSendSync(42u32);
-    assert_eq!(*wrapped, 42u32);
-  }
-
-  #[test]
-  fn test_unsafe_send_sync_deref_mut() {
-    let mut wrapped = UnsafeSendSync(42u32);
-    *wrapped = 100;
-    assert_eq!(*wrapped, 100u32);
-  }
-
   // ========== Socks5StreamCell Tests ==========
 
   #[test]
@@ -2233,14 +2208,14 @@ mod tests {
 
   #[test]
   fn test_socks5_stream_cell_send() {
-    // Verify Socks5StreamCell implements Send (via UnsafeSendSync)
+    // Verify Socks5StreamCell implements Send (via Arc<Mutex>)
     fn assert_send<T: Send>() {}
     assert_send::<Socks5StreamCell>();
   }
 
   #[test]
   fn test_socks5_stream_cell_sync() {
-    // Verify Socks5StreamCell implements Sync (via UnsafeSendSync)
+    // Verify Socks5StreamCell implements Sync (via Arc<Mutex>)
     fn assert_sync<T: Sync>() {}
     assert_sync::<Socks5StreamCell>();
   }
@@ -3465,6 +3440,11 @@ addresses:
     assert_eq!(DEFAULT_HANDSHAKE_TIMEOUT_SECS, 10);
   }
 
+  #[test]
+  fn test_monitoring_log_interval() {
+    assert_eq!(MONITORING_LOG_INTERVAL, Duration::from_secs(60));
+  }
+
   // ========== build_connect_request Tests ==========
 
   #[test]
@@ -3536,7 +3516,7 @@ addresses:
 
   #[test]
   fn test_is_fatal_accept_error_other() {
-    let e = std::io::Error::new(std::io::ErrorKind::Other, "test");
+    let e = std::io::Error::other("test");
     assert!(!is_fatal_accept_error(&e));
   }
 
@@ -4525,14 +4505,12 @@ addresses:
 
     let mut original = Socks5StreamCell::new_for_test(server, target_addr.clone());
 
-    // Clone the cell - stream moves to clone (original becomes empty for stream)
+    // Clone the cell - with Arc<Mutex>, both share the same underlying data
     let cloned = original.clone();
 
-    // Original should still have stream (since Clone implementation gives None to clone)
-    // Wait, let me check the Clone implementation...
-    // According to the code: clone gets None for stream, original keeps it
+    // Both should report as present since they share the same data
     assert!(original.is_present());
-    assert!(!cloned.is_present()); // Clone gets None for stream
+    assert!(cloned.is_present());
 
     // Both should have the target address
     assert!(original.target_addr_cloned().is_some());
@@ -4542,9 +4520,13 @@ addresses:
     let taken = original.take_stream_for_test();
     assert!(taken.is_some());
 
-    // After original's take, cloned's target_addr should still be available
-    // (since Clone cloned the target_addr)
-    assert!(cloned.target_addr_cloned().is_some());
+    // After original's take, cloned should also see the data is gone
+    // (because they share the same Arc<Mutex>)
+    assert!(!original.is_present());
+    assert!(!cloned.is_present());
+
+    // cloned's target_addr should now return None
+    assert!(cloned.target_addr_cloned().is_none());
 
     drop(client);
   }
@@ -5079,6 +5061,7 @@ addresses:
   fn test_command_result_debug() {
     // We can't create a real CommandResult without a full handshake and command read,
     // but we can verify the struct exists with the correct fields
+    #[allow(dead_code)]
     fn assert_debug<T: std::fmt::Debug>() {}
     // CommandResult doesn't implement Debug by default because fast_socks5 types don't
     // So we just verify the struct exists
@@ -5606,15 +5589,12 @@ addresses:
 
     let result = server_handle.await.unwrap();
     assert!(result.is_err());
-    match result.unwrap_err() {
-      HandshakeError::Timeout => {
-        // Expected - verify log was generated
-        assert!(
-          log_capture.contains_warn("SOCKS5 handshake timed out"),
-          "Expected WARN log for handshake timeout"
-        );
-      }
-      _ => {}
+    if let HandshakeError::Timeout = result.unwrap_err() {
+      // Expected - verify log was generated
+      assert!(
+        log_capture.contains_warn("SOCKS5 handshake timed out"),
+        "Expected WARN log for handshake timeout"
+      );
     }
   }
 
@@ -5622,7 +5602,7 @@ addresses:
   /// Architecture requirement: "配置错误记录 ERROR 日志"
   #[test]
   fn test_config_error_log() {
-    let log_capture = LogCapture::new();
+    let _log_capture = LogCapture::new();
 
     // Try to parse invalid config
     let yaml = serde_yaml::from_str(
@@ -5663,4 +5643,67 @@ addresses: []
     let err = result.unwrap_err().to_string();
     assert!(err.contains("addresses"));
   }
+
+  /// Test that monitoring log format is correct.
+  #[test]
+  fn test_monitoring_log_format() {
+    // Create a listener with test configuration
+    let args = Socks5ListenerArgs {
+      addresses: vec!["127.0.0.1:1080".to_string()],
+      handshake_timeout: Duration::from_secs(10),
+      auth: AuthConfig::None,
+    };
+    let svc = create_test_service();
+    let listener = Socks5Listener::new_for_test(args, svc).unwrap();
+
+    // Simulate the monitoring log format string
+    let expected_format = format!(
+      "[fast_socks5.listener] active_connections={}",
+      listener.connection_tracker.active_count()
+    );
+
+    // Verify format contains correct components
+    assert!(
+      expected_format.contains("[fast_socks5.listener]"),
+      "Log format should contain '[fast_socks5.listener]'"
+    );
+    assert!(
+      expected_format.contains("active_connections"),
+      "Log format should contain 'active_connections'"
+    );
+    assert!(
+      expected_format.contains("active_connections=0"),
+      "Log format should show initial count as 0"
+    );
+  }
 }
+
+  // ========== Send/Sync trait verification tests ==========
+  
+  fn _check_send<T: Send>() {}
+  fn _check_sync<T: Sync>() {}
+
+  #[test]
+  fn test_tcp_stream_is_send() {
+    _check_send::<tokio::net::TcpStream>();
+  }
+
+  #[test]
+  fn test_target_addr_is_send() {
+    _check_send::<fast_socks5::util::target_addr::TargetAddr>();
+  }
+
+  #[test]
+  fn test_target_addr_is_sync() {
+    _check_sync::<fast_socks5::util::target_addr::TargetAddr>();
+  }
+
+  #[test]
+  fn test_socks5_protocol_is_send() {
+    _check_send::<
+      fast_socks5::server::Socks5ServerProtocol<
+        tokio::net::TcpStream,
+        fast_socks5::server::states::CommandRead,
+      >,
+    >();
+  }

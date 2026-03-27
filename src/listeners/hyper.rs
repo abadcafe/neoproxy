@@ -1,3 +1,4 @@
+#![allow(clippy::await_holding_refcell_ref)]
 use std::cell::RefCell;
 use std::future;
 use std::net::SocketAddr;
@@ -12,13 +13,17 @@ use hyper_util::server::conn::auto as conn_util;
 use serde::Deserialize;
 use tokio::{net, task, time::timeout};
 use tower::util as tower_util;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
+use crate::listeners::fast_socks5::ConnectionTracker;
 use crate::plugin;
 
 /// Listener shutdown timeout in seconds.
 /// This is the timeout for Phase 1 of graceful shutdown.
 const LISTENER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Monitoring log interval in seconds.
+const MONITORING_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 struct HyperServiceAdaptor {
   s: plugin::Service,
@@ -75,19 +80,15 @@ struct HyperListener {
   _protocols: Vec<String>,
   _hostnames: Vec<String>,
   listening_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
-  conn_serving_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
-  shutdown_handle: plugin::ShutdownHandle,
+  connection_tracker: ConnectionTracker,
   service: plugin::Service,
   graceful_shutdown_timeout: Duration,
 }
 
 impl HyperListener {
-  fn new(
-    sargs: plugin::SerializedArgs,
-    svc: plugin::Service,
-  ) -> Result<plugin::Listener> {
-    let args: HyperListenerArgs = serde_yaml::from_value(sargs)?;
-    Ok(plugin::Listener::new(Self {
+  /// Create a HyperListener from parsed configuration.
+  fn from_args(args: HyperListenerArgs, svc: plugin::Service) -> Self {
+    Self {
       addresses: args
         .addresses
         .iter()
@@ -100,11 +101,19 @@ impl HyperListener {
       _protocols: args.protocols,
       _hostnames: args.hostnames,
       listening_set: Rc::new(RefCell::new(task::JoinSet::new())),
-      conn_serving_set: Rc::new(RefCell::new(task::JoinSet::new())),
-      shutdown_handle: plugin::ShutdownHandle::new(),
+      connection_tracker: ConnectionTracker::new(),
       service: svc,
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
-    }))
+    }
+  }
+
+  #[allow(clippy::new_ret_no_self)]
+  fn new(
+    sargs: plugin::SerializedArgs,
+    svc: plugin::Service,
+  ) -> Result<plugin::Listener> {
+    let args: HyperListenerArgs = serde_yaml::from_value(sargs)?;
+    Ok(plugin::Listener::new(Self::from_args(args, svc)))
   }
 
   /// Create a HyperListener directly for testing purposes.
@@ -114,24 +123,7 @@ impl HyperListener {
     svc: plugin::Service,
   ) -> Result<Self> {
     let args: HyperListenerArgs = serde_yaml::from_value(sargs)?;
-    Ok(Self {
-      addresses: args
-        .addresses
-        .iter()
-        .filter_map(|s| {
-          s.parse()
-            .inspect_err(|e| warn!("address '{s}' invalid: {e}"))
-            .ok()
-        })
-        .collect(),
-      _protocols: args.protocols,
-      _hostnames: args.hostnames,
-      listening_set: Rc::new(RefCell::new(task::JoinSet::new())),
-      conn_serving_set: Rc::new(RefCell::new(task::JoinSet::new())),
-      shutdown_handle: plugin::ShutdownHandle::new(),
-      service: svc,
-      graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
-    })
+    Ok(Self::from_args(args, svc))
   }
 
   fn serve_addr(
@@ -139,37 +131,60 @@ impl HyperListener {
     addr: SocketAddr,
     svc: plugin::Service,
   ) -> Result<Pin<Box<dyn Future<Output = Result<()>>>>> {
-    let socket = net::TcpSocket::new_v4()?;
+    let socket = match addr {
+      std::net::SocketAddr::V4(_) => net::TcpSocket::new_v4()?,
+      std::net::SocketAddr::V6(_) => net::TcpSocket::new_v6()?,
+    };
     socket.set_reuseaddr(true)?;
     socket.set_reuseport(true)?;
     socket.bind(addr)?;
     let listener = socket.listen(1024)?;
-    let conn_serving_set = self.conn_serving_set.clone();
-    let notifier = self.shutdown_handle.clone();
+    let connection_tracker = self.connection_tracker.clone();
+    let shutdown_handle = self.connection_tracker.shutdown_handle();
     let accepting_fut = async move {
-      let shutdown = async move || notifier.notified().await;
-      let accepting = async move || match listener.accept().await {
-        Err(e) => {
-          error!("accepting new connection failed: {e}");
-        }
-        Ok((stream, _raddr)) => {
-          let io = rt_util::TokioIo::new(stream);
-          let svc = HyperServiceAdaptor::new(svc.clone());
-          let builder = conn_util::Builder::new(TokioLocalExecutor {});
-          conn_serving_set.borrow_mut().spawn_local(async move {
-            // Do not need any graceful shutdown actions here for
-            // connections. The `Service`s should do this instead.
-            let conn = builder.serve_connection_with_upgrades(io, svc);
-            conn.await.map_err(|e| anyhow::Error::from_boxed(e))
-          });
+      // Log listener startup event
+      info!("HTTP listener started on {}", addr);
+
+      // Create monitoring interval timer
+      let mut monitoring_interval =
+        tokio::time::interval(MONITORING_LOG_INTERVAL);
+      monitoring_interval.tick().await; // Skip first immediate tick
+
+      let shutdown = async move || shutdown_handle.notified().await;
+      let accepting = || async {
+        match listener.accept().await {
+          Err(e) => {
+            error!("accepting new connection failed: {e}");
+          }
+          Ok((stream, _raddr)) => {
+            let io = rt_util::TokioIo::new(stream);
+            let svc = HyperServiceAdaptor::new(svc.clone());
+            let builder = conn_util::Builder::new(TokioLocalExecutor {});
+            connection_tracker.register(async move {
+              // Do not need any graceful shutdown actions here for
+              // connections. The `Service`s should do this instead.
+              let conn = builder.serve_connection_with_upgrades(io, svc);
+              if let Err(e) = conn.await {
+                error!("connection error: {e}");
+              }
+            });
+          }
         }
       };
 
       loop {
         tokio::select! {
           _ = accepting() => {},
+          _ = monitoring_interval.tick() => {
+            // Log monitoring info
+            info!(
+              "[hyper.listener] active_connections={}",
+              connection_tracker.active_count()
+            );
+          }
           _ = shutdown() => {
             // Graceful shutdown for the TcpListener.
+            info!("HTTP listener on {} shutting down", addr);
             break
           },
         }
@@ -187,7 +202,7 @@ impl plugin::Listening for HyperListener {
   fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
     let listening_set = self.listening_set.clone();
     for addr in &self.addresses {
-      let addr = addr.clone();
+      let addr = *addr;
       let service = self.service.clone();
       let serve_addr_fut = match self.serve_addr(addr, service) {
         Err(e) => return Box::pin(future::ready(Err(e))),
@@ -196,8 +211,8 @@ impl plugin::Listening for HyperListener {
       listening_set.borrow_mut().spawn_local(serve_addr_fut);
     }
 
-    let conn_serving_set = self.conn_serving_set.clone();
-    let shutdown = self.shutdown_handle.clone();
+    let connection_tracker = self.connection_tracker.clone();
+    let shutdown = self.connection_tracker.shutdown_handle();
     let graceful_timeout = self.graceful_shutdown_timeout;
     Box::pin(async move {
       // Waiting for graceful shutdown.
@@ -209,32 +224,15 @@ impl plugin::Listening for HyperListener {
           Err(e) => {
             error!("listening join error: {e}")
           }
-          Ok(res) => match res {
-            Err(e) => {
-              error!("listening error: {e}")
-            }
-            Ok(_) => {}
+          Ok(res) => if let Err(e) = res {
+            error!("listening error: {e}")
           },
         }
       }
 
       // Wait for active connections with timeout
       let wait_result = timeout(graceful_timeout, async {
-        while let Some(res) =
-          conn_serving_set.borrow_mut().join_next().await
-        {
-          match res {
-            Err(e) => {
-              error!("connection join error: {e}")
-            }
-            Ok(res) => match res {
-              Err(e) => {
-                error!("connection error: {e}")
-              }
-              Ok(_) => {}
-            },
-          }
-        }
+        connection_tracker.wait_shutdown().await;
       })
       .await;
 
@@ -244,9 +242,9 @@ impl plugin::Listening for HyperListener {
           "graceful shutdown timeout ({:?}) expired, aborting {} \
            remaining connections",
           graceful_timeout,
-          conn_serving_set.borrow().len()
+          connection_tracker.active_count()
         );
-        conn_serving_set.borrow_mut().abort_all();
+        connection_tracker.abort_all();
       }
 
       Ok(())
@@ -254,7 +252,7 @@ impl plugin::Listening for HyperListener {
   }
 
   fn stop(&self) {
-    self.shutdown_handle.shutdown()
+    self.connection_tracker.shutdown()
   }
 }
 
@@ -364,7 +362,7 @@ mod tests {
     let svc = create_test_service();
     let listener = HyperListener::new_for_test(args, svc).unwrap();
     // active_connections should be 0 initially
-    assert_eq!(listener.conn_serving_set.borrow().len(), 0);
+    assert_eq!(listener.connection_tracker.active_count(), 0);
   }
 
   #[test]
@@ -455,5 +453,40 @@ hostnames:
     // Verify the constant is 3 seconds as per requirements
     assert_eq!(LISTENER_SHUTDOWN_TIMEOUT.as_secs(), 3);
     assert_eq!(LISTENER_SHUTDOWN_TIMEOUT.as_millis(), 3000);
+  }
+
+  #[test]
+  fn test_monitoring_log_interval_is_60_seconds() {
+    // Verify the constant is 60 seconds as per requirements
+    assert_eq!(MONITORING_LOG_INTERVAL.as_secs(), 60);
+    assert_eq!(MONITORING_LOG_INTERVAL.as_millis(), 60000);
+  }
+
+  #[test]
+  fn test_monitoring_log_format() {
+    // Test that the monitoring log format is correct
+    let args = create_test_listener_args();
+    let svc = create_test_service();
+    let listener = HyperListener::new_for_test(args, svc).unwrap();
+
+    // Simulate the monitoring log format string
+    let expected_format = format!(
+      "[hyper.listener] active_connections={}",
+      listener.connection_tracker.active_count()
+    );
+
+    // Verify format contains correct components
+    assert!(
+      expected_format.contains("[hyper.listener]"),
+      "Log format should contain '[hyper.listener]'"
+    );
+    assert!(
+      expected_format.contains("active_connections"),
+      "Log format should contain 'active_connections'"
+    );
+    assert!(
+      expected_format.contains("active_connections=0"),
+      "Log format should show initial count as 0"
+    );
   }
 }

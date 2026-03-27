@@ -398,17 +398,15 @@ impl Config {
     collector: &mut ConfigErrorCollector,
   ) {
     // Validate address format
-    if let Some(address) = args.get("address") {
-      if let Some(addr_str) = address.as_str() {
-        if addr_str.parse::<std::net::SocketAddr>().is_err() {
+    if let Some(address) = args.get("address")
+      && let Some(addr_str) = address.as_str()
+        && addr_str.parse::<std::net::SocketAddr>().is_err() {
           collector.add(
             format!("{}.args.address", location),
             format!("invalid address '{}'", addr_str),
             ConfigErrorKind::InvalidAddress,
           );
         }
-      }
-    }
 
     // Validate certificate path and get content for matching check
     let cert_content = if let Some(cert_path) = args.get("cert_path") {
@@ -623,69 +621,59 @@ impl Config {
     collector: &mut ConfigErrorCollector,
   ) {
     // Validate max_concurrent_bidi_streams
-    if let Some(v) = quic.get("max_concurrent_bidi_streams") {
-      if let Some(n) = v.as_u64() {
-        if n < 1 || n > 10000 {
+    if let Some(v) = quic.get("max_concurrent_bidi_streams")
+      && let Some(n) = v.as_u64()
+        && (!(1..=10000).contains(&n)) {
           collector.add(
             format!("{}.max_concurrent_bidi_streams", location),
             format!("invalid value {}, expected range 1-10000", n),
             ConfigErrorKind::InvalidFormat,
           );
         }
-      }
-    }
 
     // Validate max_idle_timeout_ms
-    if let Some(v) = quic.get("max_idle_timeout_ms") {
-      if let Some(n) = v.as_u64() {
-        if n == 0 {
+    if let Some(v) = quic.get("max_idle_timeout_ms")
+      && let Some(n) = v.as_u64()
+        && n == 0 {
           collector.add(
             format!("{}.max_idle_timeout_ms", location),
             "invalid value 0, expected value > 0".to_string(),
             ConfigErrorKind::InvalidFormat,
           );
         }
-      }
-    }
 
     // Validate initial_mtu
-    if let Some(v) = quic.get("initial_mtu") {
-      if let Some(n) = v.as_u64() {
-        if n < 1200 || n > 9000 {
+    if let Some(v) = quic.get("initial_mtu")
+      && let Some(n) = v.as_u64()
+        && (!(1200..=9000).contains(&n)) {
           collector.add(
             format!("{}.initial_mtu", location),
             format!("invalid value {}, expected range 1200-9000", n),
             ConfigErrorKind::InvalidFormat,
           );
         }
-      }
-    }
 
     // Validate send_window
-    if let Some(v) = quic.get("send_window") {
-      if let Some(n) = v.as_u64() {
-        if n == 0 {
+    if let Some(v) = quic.get("send_window")
+      && let Some(n) = v.as_u64()
+        && n == 0 {
           collector.add(
             format!("{}.send_window", location),
             "invalid value 0, expected value > 0".to_string(),
             ConfigErrorKind::InvalidFormat,
           );
         }
-      }
-    }
 
     // Validate receive_window
-    if let Some(v) = quic.get("receive_window") {
-      if let Some(n) = v.as_u64() {
-        if n == 0 {
+    if let Some(v) = quic.get("receive_window")
+      && let Some(n) = v.as_u64()
+        && n == 0 {
           collector.add(
             format!("{}.receive_window", location),
             "invalid value 0, expected value > 0".to_string(),
             ConfigErrorKind::InvalidFormat,
           );
         }
-      }
-    }
   }
 
   /// Validate HTTP/3 authentication configuration
@@ -715,7 +703,7 @@ impl Config {
             for (idx, cred) in creds.iter().enumerate() {
               if let Some(cred_map) = cred.as_mapping() {
                 // Check username
-                if !cred_map.contains_key(&serde_yaml::Value::String(
+                if !cred_map.contains_key(serde_yaml::Value::String(
                   "username".to_string(),
                 )) {
                   collector.add(
@@ -728,7 +716,7 @@ impl Config {
                   );
                 }
                 // Check password_hash field exists
-                if !cred_map.contains_key(&serde_yaml::Value::String(
+                if !cred_map.contains_key(serde_yaml::Value::String(
                   "password_hash".to_string(),
                 )) {
                   collector.add(
@@ -740,26 +728,23 @@ impl Config {
                     ConfigErrorKind::MissingField,
                   );
                 } else if let Some(hash_value) =
-                  cred_map.get(&serde_yaml::Value::String(
+                  cred_map.get(serde_yaml::Value::String(
                     "password_hash".to_string(),
                   ))
                 {
                   // Validate password hash format (bcrypt)
-                  if let Some(hash_str) = hash_value.as_str() {
-                    if !is_valid_bcrypt_hash(hash_str) {
+                  if let Some(hash_str) = hash_value.as_str()
+                    && !is_valid_bcrypt_hash(hash_str) {
                       collector.add(
                         format!(
                           "{}.args.auth.credentials[{}].password_hash",
                           location, idx
                         ),
-                        format!(
-                          "invalid bcrypt hash format, expected format \
-                           like $2a$12$... or $bcrypt$v=98$r=12$..."
-                        ),
+                        "invalid bcrypt hash format, expected format \
+                           like $2a$12$... or $bcrypt$v=98$r=12$...".to_string(),
                         ConfigErrorKind::InvalidFormat,
                       );
                     }
-                  }
                 }
               }
             }

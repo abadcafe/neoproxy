@@ -1,3 +1,4 @@
+#![allow(clippy::borrowed_box)]
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -40,7 +41,7 @@ impl PluginBuilderSet {
 
   pub fn global() -> &'static LazyLock<PluginBuilderSet> {
     static PLUGIN_MANAGER: LazyLock<PluginBuilderSet> =
-      LazyLock::new(|| PluginBuilderSet::new());
+      LazyLock::new(PluginBuilderSet::new);
     &PLUGIN_MANAGER
   }
 }

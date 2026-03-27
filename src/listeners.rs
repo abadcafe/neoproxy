@@ -1,3 +1,4 @@
+#![allow(clippy::borrowed_box)]
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -41,7 +42,7 @@ impl ListenerBuilderSet {
 
   pub fn global() -> &'static LazyLock<ListenerBuilderSet> {
     static LISTENER_MANAGER: LazyLock<ListenerBuilderSet> =
-      LazyLock::new(|| ListenerBuilderSet::new());
+      LazyLock::new(ListenerBuilderSet::new);
     &LISTENER_MANAGER
   }
 }

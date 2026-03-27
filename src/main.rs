@@ -21,6 +21,7 @@ mod plugins;
 mod server;
 
 /// Graceful shutdown timeout in seconds.
+#[allow(dead_code)]
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Thread check interval for detecting worker thread exit.
@@ -49,11 +50,11 @@ fn determine_exit_code(exit_reasons: &[ExitReason]) -> i32 {
     return 0;
   }
 
-  if exit_reasons.iter().any(|r| *r == ExitReason::Panic) {
+  if exit_reasons.contains(&ExitReason::Panic) {
     return 1;
   }
 
-  if exit_reasons.iter().any(|r| *r == ExitReason::Error) {
+  if exit_reasons.contains(&ExitReason::Error) {
     return 2;
   }
 
@@ -112,6 +113,7 @@ fn init_log() -> tracing_appender::non_blocking::WorkerGuard {
 /// Waits for all server threads to finish with a timeout.
 /// Returns true if all threads finished successfully, false if timeout
 /// occurred.
+#[allow(dead_code)]
 async fn join_all_threads(
   handles: Vec<thread::JoinHandle<Result<()>>>,
 ) -> bool {
@@ -288,23 +290,20 @@ async fn main_loop_with_signal(
 ///
 /// Returns true if all threads have been joined.
 fn check_worker_threads(
-  handles: &mut Vec<thread::JoinHandle<Result<()>>>,
+  handles: &mut [thread::JoinHandle<Result<()>>],
   joined_indices: &mut HashSet<usize>,
   exit_reasons: &mut Vec<ExitReason>,
   shutdown_triggered: &Arc<AtomicBool>,
   shutdown_notify: &Arc<sync::Notify>,
 ) -> bool {
-  for idx in 0..handles.len() {
+  for (idx, handle) in handles.iter_mut().enumerate() {
     // Skip already joined threads
     if joined_indices.contains(&idx) {
       continue;
     }
 
     // Check if thread has finished (without holding a reference)
-    let finished = {
-      let handle = &handles[idx];
-      handle.is_finished()
-    };
+    let finished = handle.is_finished();
 
     if !finished {
       continue;
@@ -312,8 +311,7 @@ fn check_worker_threads(
 
     // Thread has finished, take ownership of the handle
     // This is safe because we only do this once per index
-    let handle =
-      std::mem::replace(&mut handles[idx], thread::spawn(|| Ok(())));
+    let handle = std::mem::replace(handle, thread::spawn(|| Ok(())));
 
     // Get thread name before joining (ownership transferred)
     // We need to copy the name to avoid borrowing issues
@@ -438,7 +436,7 @@ mod tests {
   #[test]
   fn test_exit_reason_clone() {
     let reason = ExitReason::Panic;
-    let cloned = reason.clone();
+    let cloned = reason;
     assert_eq!(reason, cloned);
   }
 

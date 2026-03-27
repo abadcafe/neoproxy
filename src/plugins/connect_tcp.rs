@@ -1,3 +1,4 @@
+#![allow(clippy::await_holding_refcell_ref)]
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
@@ -56,6 +57,7 @@ fn build_error_response(
 /// # Returns
 ///
 /// A Vec<u8> containing the complete SOCKS5 reply packet.
+#[allow(dead_code)]
 fn build_socks5_reply(reply_code: u8, bind_addr: SocketAddr) -> Vec<u8> {
   let (addr_type, mut ip_oct, mut port) = match bind_addr {
     SocketAddr::V4(sock) => (
@@ -266,6 +268,7 @@ impl ConnectTcpService {
   ///
   /// The TunnelTracker is owned by the Plugin and shared across all
   /// Service instances created by that Plugin.
+  #[allow(clippy::new_ret_no_self)]
   fn new(
     sargs: plugin::SerializedArgs,
     tunnel_tracker: Rc<TunnelTracker>,
@@ -367,7 +370,7 @@ impl tower::Service<plugin::Request> for ConnectTcpService {
               let reply_error = io_error_to_reply_error(&e);
               // Send SOCKS5 error reply and close connection
               if let Err(reply_err) = proto
-                .reply_error(&reply_error.into())
+                .reply_error(&reply_error)
                 .await
               {
                 warn!(
@@ -1217,8 +1220,8 @@ mod tests {
 
         // Get the builder and create two services
         let builder = plugin.service_builder("connect_tcp").unwrap();
-        let service1 = builder(serde_yaml::Value::Null).unwrap();
-        let service2 = builder(serde_yaml::Value::Null).unwrap();
+        let _service1 = builder(serde_yaml::Value::Null).unwrap();
+        let _service2 = builder(serde_yaml::Value::Null).unwrap();
 
         // Both services should have the same tunnel_tracker
         // We can't directly access the inner tracker, but we can
@@ -1497,7 +1500,7 @@ mod tests {
 
   #[test]
   fn test_io_error_to_reply_error_other() {
-    let err = io::Error::new(io::ErrorKind::Other, "test");
+    let err = io::Error::other("test");
     let reply = io_error_to_reply_error(&err);
     assert_eq!(reply.as_u8(), fast_socks5::consts::SOCKS5_REPLY_GENERAL_FAILURE);
   }
@@ -1527,8 +1530,7 @@ mod tests {
   #[test]
   fn test_io_error_to_reply_error_dns_failure_linux() {
     // Simulate Linux DNS resolution failure message
-    let err = io::Error::new(
-      io::ErrorKind::Other,
+    let err = io::Error::other(
       "failed to lookup address information: Name or service not known",
     );
     let reply = io_error_to_reply_error(&err);
@@ -1541,7 +1543,7 @@ mod tests {
   #[test]
   fn test_io_error_to_reply_error_dns_failure_name_not_known() {
     // Another common DNS failure message
-    let err = io::Error::new(io::ErrorKind::Other, "Name or service not known");
+    let err = io::Error::other("Name or service not known");
     let reply = io_error_to_reply_error(&err);
     assert_eq!(
       reply.as_u8(),
@@ -1552,8 +1554,7 @@ mod tests {
   #[test]
   fn test_io_error_to_reply_error_dns_failure_temporary() {
     // Temporary DNS failure
-    let err =
-      io::Error::new(io::ErrorKind::Other, "temporary failure in name resolution");
+    let err = io::Error::other("temporary failure in name resolution");
     let reply = io_error_to_reply_error(&err);
     assert_eq!(
       reply.as_u8(),
@@ -1564,8 +1565,7 @@ mod tests {
   #[test]
   fn test_io_error_to_reply_error_dns_failure_macos() {
     // macOS DNS failure message
-    let err = io::Error::new(
-      io::ErrorKind::Other,
+    let err = io::Error::other(
       "nodename nor servname provided, or not known",
     );
     let reply = io_error_to_reply_error(&err);
@@ -1578,7 +1578,7 @@ mod tests {
   #[test]
   fn test_io_error_to_reply_error_dns_failure_windows() {
     // Windows DNS failure message
-    let err = io::Error::new(io::ErrorKind::Other, "No such host is known.");
+    let err = io::Error::other("No such host is known.");
     let reply = io_error_to_reply_error(&err);
     assert_eq!(
       reply.as_u8(),
@@ -1777,10 +1777,10 @@ mod tests {
           let (mut target_stream, _) = target_listener.accept().await.unwrap();
           // Simple echo: read and write back
           let mut buf = [0u8; 1024];
-          if let Ok(n) = target_stream.read(&mut buf).await {
-            if n > 0 {
-              let _ = target_stream.write_all(&buf[..n]).await;
-            }
+          if let Ok(n) = target_stream.read(&mut buf).await
+            && n > 0
+          {
+            let _ = target_stream.write_all(&buf[..n]).await;
           }
           drop(target_stream);
           drop(target_listener);
@@ -1797,7 +1797,7 @@ mod tests {
         // Create a request with Socks5StreamCell in extensions
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
-          .uri(&format!("127.0.0.1:{}", target_addr.port()))
+          .uri(format!("127.0.0.1:{}", target_addr.port()))
           .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
             http_body_util::Empty::new(),
           )))
@@ -1853,7 +1853,7 @@ mod tests {
         // Create a request with Socks5StreamCell in extensions
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
-          .uri(&format!("127.0.0.1:{}", addr.port()))
+          .uri(format!("127.0.0.1:{}", addr.port()))
           .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
             http_body_util::Empty::new(),
           )))
@@ -1908,7 +1908,7 @@ mod tests {
         // Create a request with Socks5StreamCell
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
-          .uri(&format!("127.0.0.1:{}", addr.port()))
+          .uri(format!("127.0.0.1:{}", addr.port()))
           .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
             http_body_util::Empty::new(),
           )))
@@ -1978,7 +1978,7 @@ mod tests {
         // Create a request with Socks5StreamCell
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
-          .uri(&format!("127.0.0.1:{}", target_addr.port()))
+          .uri(format!("127.0.0.1:{}", target_addr.port()))
           .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
             http_body_util::Empty::new(),
           )))
@@ -2064,7 +2064,7 @@ mod tests {
         // Create a request with Socks5StreamCell
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
-          .uri(&format!("127.0.0.1:{}", target_addr.port()))
+          .uri(format!("127.0.0.1:{}", target_addr.port()))
           .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
             http_body_util::Empty::new(),
           )))
@@ -2129,7 +2129,7 @@ mod tests {
         // Create a request with Socks5StreamCell
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
-          .uri(&format!("127.0.0.1:{}", target_addr.port()))
+          .uri(format!("127.0.0.1:{}", target_addr.port()))
           .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
             http_body_util::Empty::new(),
           )))
@@ -2190,7 +2190,7 @@ mod tests {
         // Create a request with Socks5StreamCell in extensions
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
-          .uri(&format!("127.0.0.1:{}", addr.port()))
+          .uri(format!("127.0.0.1:{}", addr.port()))
           .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
             http_body_util::Empty::new(),
           )))
@@ -2335,7 +2335,7 @@ mod tests {
         // Create a request with Socks5StreamCell
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
-          .uri(&format!("127.0.0.1:{}", target_addr.port()))
+          .uri(format!("127.0.0.1:{}", target_addr.port()))
           .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
             http_body_util::Empty::new(),
           )))

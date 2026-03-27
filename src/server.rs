@@ -1,3 +1,4 @@
+#![allow(clippy::borrowed_box)]
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::rc::Rc;

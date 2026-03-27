@@ -1,3 +1,4 @@
+#![allow(clippy::borrowed_box)]
 use std::error::Error;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -206,8 +207,10 @@ pub trait BuildService: Fn(SerializedArgs) -> Result<Service> {}
 impl<F> BuildService for F where F: Fn(SerializedArgs) -> Result<Service>
 {}
 
+#[allow(dead_code)]
 pub struct ServiceBuilder(Box<dyn BuildService>);
 
+#[allow(dead_code)]
 impl ServiceBuilder {
   pub fn new<BS>(bs: BS) -> Self
   where
@@ -232,8 +235,10 @@ impl<F> BuildListener for F where
 {
 }
 
+#[allow(dead_code)]
 pub struct ListenerBuilder(Box<dyn BuildListener>);
 
+#[allow(dead_code)]
 impl ListenerBuilder {
   pub fn new<BL>(bl: BL) -> Self
   where
@@ -254,7 +259,7 @@ impl ListenerBuilder {
 pub trait Plugin {
   fn service_builder(
     &self,
-    name: &str,
+    _name: &str,
   ) -> Option<&Box<dyn BuildService>> {
     None
   }
@@ -269,8 +274,10 @@ pub trait BuildPlugin: Fn() -> Box<dyn Plugin> + Sync + Send {}
 
 impl<F> BuildPlugin for F where F: Fn() -> Box<dyn Plugin> + Sync + Send {}
 
+#[allow(dead_code)]
 pub struct PluginBuilder(Box<dyn BuildPlugin>);
 
+#[allow(dead_code)]
 impl PluginBuilder {
   pub fn new<BP>(bl: BP) -> Self
   where
@@ -412,6 +419,7 @@ mod tests {
     use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
     fn dummy_raw_waker() -> RawWaker {
+      #[allow(dead_code)]
       fn no_op(_: *const ()) -> RawWaker {
         dummy_raw_waker()
       }

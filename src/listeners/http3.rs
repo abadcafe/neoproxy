@@ -1,3 +1,4 @@
+#![allow(clippy::await_holding_refcell_ref)]
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
@@ -49,7 +50,7 @@ const DEFAULT_SEND_WINDOW: u64 = 10485760;
 const DEFAULT_RECEIVE_WINDOW: u64 = 10485760;
 
 /// Graceful shutdown timeout for HTTP/3 Listener
-const LISTENER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const LISTENER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Monitoring log interval in seconds
 const MONITORING_LOG_INTERVAL: Duration = Duration::from_secs(60);
@@ -115,7 +116,7 @@ impl QuicConfigArgs {
   pub fn validate_and_apply_defaults(&self) -> Result<QuicConfig> {
     let max_concurrent_bidi_streams =
       match self.max_concurrent_bidi_streams {
-        Some(v) if v >= 1 && v <= 10000 => v,
+        Some(v) if (1..=10000).contains(&v) => v,
         Some(v) => {
           bail!(
             "Invalid max_concurrent_bidi_streams: {}, expected range \
@@ -135,7 +136,7 @@ impl QuicConfigArgs {
     };
 
     let initial_mtu = match self.initial_mtu {
-      Some(v) if v >= 1200 && v <= 9000 => v,
+      Some(v) if (1200..=9000).contains(&v) => v,
       Some(v) => {
         bail!("Invalid initial_mtu: {}, expected range 1200-9000", v);
       }
@@ -771,7 +772,7 @@ async fn send_error_response<S>(
   S: h3::quic::SendStream<Bytes>,
 {
   let status = http::StatusCode::from_u16(status_code)
-    .unwrap_or_else(|_| http::StatusCode::INTERNAL_SERVER_ERROR);
+    .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
   let resp = build_error_response(status, &message);
   if let Err(e) = send_h3_response(stream, resp, finish_stream).await {
     warn!("Failed to send {} response: {}", status_code, e);
@@ -1288,6 +1289,7 @@ pub struct Http3Listener {
 
 impl Http3Listener {
   /// Create a new HTTP/3 Listener
+  #[allow(clippy::new_ret_no_self)]
   pub fn new(
     sargs: plugin::SerializedArgs,
     svc: plugin::Service,
@@ -1351,8 +1353,7 @@ impl plugin::Listening for Http3Listener {
           )
           .map_err(|e| {
             anyhow!("Invalid max_concurrent_bidi_streams: {}", e)
-          })?
-          .into(),
+          })?,
         )
         .max_idle_timeout(Some(
           quinn::VarInt::try_from(quic_config.max_idle_timeout_ms)
@@ -1387,7 +1388,7 @@ impl plugin::Listening for Http3Listener {
           _ = monitoring_interval.tick() => {
             // Log monitoring info
             info!(
-              "[http3_listener] active_connections={}, active_streams={}",
+              "[http3.listener] active_connections={}, active_streams={}",
               stream_tracker.connection_count(),
               stream_tracker.active_count()
             );
@@ -2484,7 +2485,7 @@ password_hash: "{}"
 
   #[test]
   fn test_listener_shutdown_timeout() {
-    assert_eq!(LISTENER_SHUTDOWN_TIMEOUT, Duration::from_secs(5));
+    assert_eq!(LISTENER_SHUTDOWN_TIMEOUT, Duration::from_secs(3));
   }
 
   #[test]
@@ -3166,7 +3167,7 @@ key_path: "/path/to/key.pem"
     local_set
       .run_until(async {
         let tracker = StreamTracker::new();
-        let shutdown_handle = tracker.shutdown_handle();
+        let _shutdown_handle = tracker.shutdown_handle();
 
         // Register a pending task that will wait for shutdown
         tracker.register(async move {
@@ -4551,15 +4552,15 @@ key_path: "/path/to/key.pem"
   fn test_tls_client_cert_verify_result_clone() {
     // Test Clone trait implementation
     let result = TlsClientCertVerifyResult::Valid;
-    let cloned = result.clone();
+    let cloned = result;
     assert_eq!(result, cloned);
 
     let result = TlsClientCertVerifyResult::Missing;
-    let cloned = result.clone();
+    let cloned = result;
     assert_eq!(result, cloned);
 
     let result = TlsClientCertVerifyResult::InvalidType;
-    let cloned = result.clone();
+    let cloned = result;
     assert_eq!(result, cloned);
   }
 
@@ -5270,7 +5271,7 @@ key_path: "/path/to/key.pem"
     // After registering tasks, counts should reflect that
     // (tested in other tests, but format verification is here)
     let expected_format = format!(
-      "[http3_listener] active_connections={}, active_streams={}",
+      "[http3.listener] active_connections={}, active_streams={}",
       tracker.connection_count(),
       tracker.active_count()
     );

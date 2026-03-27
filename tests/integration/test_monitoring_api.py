@@ -12,7 +12,7 @@ and stream metrics through logs and internal APIs. These tests verify:
 1. Active connection count appears in logs with specific values
 2. Connection lifecycle events are properly logged
 3. Metrics format is correct according to design spec:
-   `[http3_listener] active_connections=X, active_streams=Y`
+   `[http3.listener] active_connections=X, active_streams=Y`
 4. Log entries contain accurate numerical values
 """
 
@@ -48,7 +48,7 @@ def parse_monitoring_entries(log_content: str) -> List[dict]:
     """
     Parse monitoring log entries from log content.
 
-    Expected format: [http3_listener] active_connections=X, active_streams=Y
+    Expected format: [http3.listener] active_connections=X, active_streams=Y
 
     Args:
         log_content: Raw log content
@@ -57,7 +57,7 @@ def parse_monitoring_entries(log_content: str) -> List[dict]:
         List of parsed monitoring entries with connection/stream counts
     """
     entries = []
-    pattern = r'\[http3_listener\]\s+active_connections=(\d+),\s+active_streams=(\d+)'
+    pattern = r'\[http3\.listener\]\s+active_connections=(\d+),\s+active_streams=(\d+)'
 
     for match in re.finditer(pattern, log_content, re.IGNORECASE):
         entries.append({

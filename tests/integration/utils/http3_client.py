@@ -368,6 +368,9 @@ async def perform_h3_connection_test(
     """
     Perform HTTP/3 connection test.
 
+    This function establishes a QUIC connection and verifies TLS handshake
+    by sending an HTTP/3 request after the connection is established.
+
     Args:
         host: Server host
         port: Server port
@@ -394,15 +397,97 @@ async def perform_h3_connection_test(
 
     configuration.idle_timeout = 30.0
 
+    h3_events_store: Dict[int, List[H3Event]] = defaultdict(list)
+    h3_events_received: Dict[int, asyncio.Event] = defaultdict(asyncio.Event)
+
+    class H3ConnTestProtocol(QuicConnectionProtocol):
+        """Protocol for HTTP/3 connection testing."""
+
+        def __init__(
+            self,
+            quic: QuicConnection,
+            stream_handler: Optional[Callable] = None,
+        ) -> None:
+            super().__init__(quic, stream_handler)
+            self._h3: Optional[H3Connection] = None
+
+        def quic_event_received(self, event: QuicEvent) -> None:
+            if isinstance(event, StreamDataReceived):
+                reader = self._stream_readers.get(event.stream_id, None)
+                if reader is not None:
+                    reader.feed_data(event.data)
+                    if event.end_stream:
+                        reader.feed_eof()
+
+            if self._h3 is not None:
+                events = self._h3.handle_event(event)
+                for h3_event in events:
+                    stream_id = getattr(h3_event, 'stream_id', 0)
+                    h3_events_store[stream_id].append(h3_event)
+                    h3_events_received[stream_id].set()
+
     try:
         async with asyncio.timeout(timeout):
             async with connect(
                 host=host,
                 port=port,
                 configuration=configuration,
+                create_protocol=H3ConnTestProtocol,
             ) as protocol:
-                # Connection established successfully
-                return True, "QUIC handshake successful"
+                await protocol.wait_connected()
+
+                # Create H3 connection and send a simple GET request
+                # to verify TLS handshake completed successfully
+                quic_connection = protocol._quic
+                h3_conn = H3Connection(quic_connection)
+                protocol._h3 = h3_conn
+
+                # Send a simple GET request
+                headers: List[Tuple[bytes, bytes]] = [
+                    (b":method", b"GET"),
+                    (b":scheme", b"https"),
+                    (b":authority", f"{host}:{port}".encode()),
+                    (b":path", b"/"),
+                ]
+
+                stream_id = quic_connection.get_next_available_stream_id()
+                h3_conn.send_headers(stream_id, headers, end_stream=True)
+                protocol.transmit()
+
+                # Wait for response
+                status_code: int = 0
+                response_received: bool = False
+                start_time = asyncio.get_event_loop().time()
+                event_timeout: float = 5.0
+
+                while asyncio.get_event_loop().time() - start_time < event_timeout:
+                    events = h3_events_store.get(stream_id, [])
+                    for h3_event in events:
+                        if isinstance(h3_event, HeadersReceived):
+                            for name, value in h3_event.headers:
+                                if name == b":status":
+                                    status_code = int(value)
+                            response_received = True
+                            break
+                        elif isinstance(h3_event, DataReceived):
+                            response_received = True
+                            break
+                    if response_received:
+                        break
+                    try:
+                        await asyncio.wait_for(
+                            h3_events_received[stream_id].wait(),
+                            timeout=0.5
+                        )
+                        h3_events_received[stream_id].clear()
+                    except asyncio.TimeoutError:
+                        pass
+
+                if response_received:
+                    return True, "QUIC handshake and HTTP/3 request successful"
+                else:
+                    return False, "No response received - TLS handshake may have failed"
+
     except asyncio.TimeoutError:
         return False, "Connection timeout"
     except Exception as e:
@@ -1072,7 +1157,8 @@ async def perform_h3_tls_client_cert_test(
     Test TLS client certificate authentication with HTTP/3.
 
     This function attempts to connect to an HTTP/3 listener with
-    a client certificate and verifies whether the connection succeeds.
+    a client certificate and verifies whether the TLS handshake succeeds
+    by sending an HTTP/3 request after the QUIC connection is established.
 
     Args:
         proxy_host: Proxy server host
@@ -1100,15 +1186,97 @@ async def perform_h3_tls_client_cert_test(
     )
     configuration.idle_timeout = 30.0
 
+    h3_events_store: Dict[int, List[H3Event]] = defaultdict(list)
+    h3_events_received: Dict[int, asyncio.Event] = defaultdict(asyncio.Event)
+
+    class H3ClientCertProtocol(QuicConnectionProtocol):
+        """Protocol for TLS client cert testing with HTTP/3."""
+
+        def __init__(
+            self,
+            quic: QuicConnection,
+            stream_handler: Optional[Callable] = None,
+        ) -> None:
+            super().__init__(quic, stream_handler)
+            self._h3: Optional[H3Connection] = None
+
+        def quic_event_received(self, event: QuicEvent) -> None:
+            if isinstance(event, StreamDataReceived):
+                reader = self._stream_readers.get(event.stream_id, None)
+                if reader is not None:
+                    reader.feed_data(event.data)
+                    if event.end_stream:
+                        reader.feed_eof()
+
+            if self._h3 is not None:
+                events = self._h3.handle_event(event)
+                for h3_event in events:
+                    stream_id = getattr(h3_event, 'stream_id', 0)
+                    h3_events_store[stream_id].append(h3_event)
+                    h3_events_received[stream_id].set()
+
     try:
         async with asyncio.timeout(timeout):
             async with connect(
                 host=proxy_host,
                 port=proxy_port,
                 configuration=configuration,
+                create_protocol=H3ClientCertProtocol,
             ) as protocol:
                 await protocol.wait_connected()
-                return True, "TLS client certificate authentication successful"
+
+                # Create H3 connection and send a simple GET request
+                # to verify TLS handshake completed successfully
+                quic_connection = protocol._quic
+                h3_conn = H3Connection(quic_connection)
+                protocol._h3 = h3_conn
+
+                # Send a simple GET request
+                headers: List[Tuple[bytes, bytes]] = [
+                    (b":method", b"GET"),
+                    (b":scheme", b"https"),
+                    (b":authority", f"{proxy_host}:{proxy_port}".encode()),
+                    (b":path", b"/"),
+                ]
+
+                stream_id = quic_connection.get_next_available_stream_id()
+                h3_conn.send_headers(stream_id, headers, end_stream=True)
+                protocol.transmit()
+
+                # Wait for response
+                status_code: int = 0
+                response_received: bool = False
+                start_time = asyncio.get_event_loop().time()
+                event_timeout: float = 5.0
+
+                while asyncio.get_event_loop().time() - start_time < event_timeout:
+                    events = h3_events_store.get(stream_id, [])
+                    for h3_event in events:
+                        if isinstance(h3_event, HeadersReceived):
+                            for name, value in h3_event.headers:
+                                if name == b":status":
+                                    status_code = int(value)
+                            response_received = True
+                            break
+                        elif isinstance(h3_event, DataReceived):
+                            response_received = True
+                            break
+                    if response_received:
+                        break
+                    try:
+                        await asyncio.wait_for(
+                            h3_events_received[stream_id].wait(),
+                            timeout=0.5
+                        )
+                        h3_events_received[stream_id].clear()
+                    except asyncio.TimeoutError:
+                        pass
+
+                if response_received:
+                    return True, "TLS client certificate authentication successful"
+                else:
+                    return False, "No response received - TLS handshake may have failed"
+
     except asyncio.TimeoutError:
         return False, "Connection timeout"
     except Exception as e:

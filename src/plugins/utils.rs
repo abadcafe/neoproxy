@@ -1,3 +1,4 @@
+#![allow(dead_code, clippy::let_underscore_future)]
 use std::fmt;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -14,6 +15,7 @@ use tracing::{info, warn};
 use crate::plugin;
 
 /// Graceful shutdown timeout for TransferingSet operations
+#[allow(dead_code)]
 const TRANSFERING_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// CONNECT 目标地址解析错误
@@ -89,7 +91,7 @@ impl Transfering {
     w: Pin<Box<dyn io::AsyncWrite>>,
     shutdown: plugin::ShutdownHandle,
   ) -> Self {
-    Self { reader: r, writer: w, shutdown: shutdown }
+    Self { reader: r, writer: w, shutdown }
   }
 
   async fn run(&mut self) -> Result<u64> {
@@ -352,7 +354,7 @@ impl TransferingSet {
     loop {
       tokio::select! {
         ret = rx.recv(), if !channel_closed => {
-          if let None = ret {
+          if ret.is_none() {
             channel_closed = true;
             continue;
           }
@@ -395,6 +397,7 @@ pub struct FramingReaderStream<R> {
   rs: tokio_util_io::ReaderStream<R>,
 }
 
+#[allow(dead_code)]
 impl<R> FramingReaderStream<R>
 where
   R: io::AsyncRead + Unpin,
@@ -416,7 +419,7 @@ where
   ) -> Poll<Option<Self::Item>> {
     Pin::new(&mut self.rs)
       .poll_next(cx)
-      .map_ok(|b| http_body::Frame::data(b))
+      .map_ok(http_body::Frame::data)
       .map_err(|e| e.into())
   }
 
@@ -778,10 +781,11 @@ mod tests {
         // Using a custom reader that respects cancellation
         struct SlowReader;
         impl io::AsyncRead for SlowReader {
+          #[allow(unused_mut, unused_variables)]
           fn poll_read(
-            mut self: Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-            buf: &mut io::ReadBuf,
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut io::ReadBuf,
           ) -> std::task::Poll<Result<(), std::io::Error>> {
             // Provide data slowly - this simulates slow I/O
             // that can be interrupted by shutdown

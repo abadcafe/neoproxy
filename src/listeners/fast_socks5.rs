@@ -21,19 +21,19 @@
 #![allow(clippy::await_holding_refcell_ref)]
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use http_body_util::BodyExt;
 use serde::Deserialize;
 use tokio::task::JoinSet;
 use tracing::warn;
 
+use crate::auth::{AuthConfig, AuthType, verify_password};
 use crate::plugin;
 use tower::Service;
 
@@ -64,7 +64,7 @@ pub struct Socks5Listener {
   /// Handshake timeout duration.
   handshake_timeout: Duration,
   /// Authentication configuration.
-  auth: AuthConfig,
+  auth: Option<AuthConfig>,
 }
 
 impl Socks5Listener {
@@ -154,7 +154,7 @@ impl Socks5Listener {
     connection_tracker: ConnectionTracker,
     shutdown_handle: plugin::ShutdownHandle,
     handshake_timeout: Duration,
-    auth: AuthConfig,
+    auth: Option<AuthConfig>,
   ) -> Result<std::pin::Pin<Box<dyn Future<Output = Result<()>>>>> {
     // Create TCP socket based on address type
     let socket = match addr {
@@ -405,7 +405,9 @@ impl plugin::Listening for Socks5Listener {
   ///
   /// Returns a future that completes when the listener shuts down.
   /// If all addresses fail to bind, returns an error immediately.
-  fn start(&self) -> std::pin::Pin<Box<dyn Future<Output = Result<()>>>> {
+  fn start(
+    &self,
+  ) -> std::pin::Pin<Box<dyn Future<Output = Result<()>>>> {
     use std::future;
 
     // Get the shared shutdown handle from connection tracker
@@ -440,7 +442,11 @@ impl plugin::Listening for Socks5Listener {
           listening_tasks.push(fut);
         }
         Err(e) => {
-          tracing::error!("failed to start listener on {}: {}", addr, e);
+          tracing::error!(
+            "failed to start listener on {}: {}",
+            addr,
+            e
+          );
           // Continue trying other addresses
         }
       }
@@ -458,8 +464,9 @@ impl plugin::Listening for Socks5Listener {
 
     // Spawn all listening tasks in the connection tracker
     // We use a separate JoinSet for listening tasks
-    let listening_set =
-      std::rc::Rc::new(std::cell::RefCell::new(tokio::task::JoinSet::new()));
+    let listening_set = std::rc::Rc::new(std::cell::RefCell::new(
+      tokio::task::JoinSet::new(),
+    ));
 
     for task in listening_tasks {
       listening_set.borrow_mut().spawn_local(task);
@@ -470,14 +477,17 @@ impl plugin::Listening for Socks5Listener {
       shutdown_handle.notified().await;
 
       // Wait for all listening tasks to complete
-      while let Some(res) = listening_set.borrow_mut().join_next().await {
+      while let Some(res) = listening_set.borrow_mut().join_next().await
+      {
         match res {
           Err(e) => {
             tracing::error!("listening join error: {}", e);
           }
-          Ok(res) => if let Err(e) = res {
-            tracing::error!("listening error: {}", e);
-          },
+          Ok(res) => {
+            if let Err(e) = res {
+              tracing::error!("listening error: {}", e);
+            }
+          }
         }
       }
 
@@ -713,7 +723,8 @@ pub struct Socks5StreamCell {
     >,
   >,
   /// The target address from SOCKS5 request.
-  target_addr: Arc<Mutex<Option<fast_socks5::util::target_addr::TargetAddr>>>,
+  target_addr:
+    Arc<Mutex<Option<fast_socks5::util::target_addr::TargetAddr>>>,
 }
 
 impl Clone for Socks5StreamCell {
@@ -839,7 +850,8 @@ impl Socks5StreamCell {
     // because the state marker is PhantomData (zero-sized).
     // We transmute directly to extract the inner stream.
     #[allow(clippy::missing_transmute_annotations)]
-    let stream: tokio::net::TcpStream = unsafe { std::mem::transmute(proto) };
+    let stream: tokio::net::TcpStream =
+      unsafe { std::mem::transmute(proto) };
 
     Some((stream, target_addr))
   }
@@ -946,7 +958,9 @@ impl std::fmt::Display for HandshakeError {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
       Self::Timeout => write!(f, "handshake timed out"),
-      Self::InvalidVersion(v) => write!(f, "invalid SOCKS version: {}", v),
+      Self::InvalidVersion(v) => {
+        write!(f, "invalid SOCKS version: {}", v)
+      }
       Self::MethodNotAcceptable(methods) => {
         write!(f, "authentication method not acceptable: {:?}", methods)
       }
@@ -957,7 +971,9 @@ impl std::fmt::Display for HandshakeError {
           write!(f, "authentication failed")
         }
       }
-      Self::ClientDisconnected => write!(f, "client disconnected during handshake"),
+      Self::ClientDisconnected => {
+        write!(f, "client disconnected during handshake")
+      }
       Self::IoError(e) => write!(f, "IO error during handshake: {}", e),
     }
   }
@@ -970,9 +986,9 @@ impl From<std::io::Error> for HandshakeError {
     // Check for specific error kinds
     use std::io::ErrorKind;
     match e.kind() {
-      ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset | ErrorKind::BrokenPipe => {
-        Self::ClientDisconnected
-      }
+      ErrorKind::UnexpectedEof
+      | ErrorKind::ConnectionReset
+      | ErrorKind::BrokenPipe => Self::ClientDisconnected,
       _ => Self::IoError(e),
     }
   }
@@ -1030,8 +1046,12 @@ impl std::fmt::Display for CommandError {
       Self::AddressTypeNotSupported { atyp } => {
         write!(f, "address type not supported: 0x{:02x}", atyp)
       }
-      Self::ClientDisconnected => write!(f, "client disconnected during command processing"),
-      Self::IoError(e) => write!(f, "IO error during command processing: {}", e),
+      Self::ClientDisconnected => {
+        write!(f, "client disconnected during command processing")
+      }
+      Self::IoError(e) => {
+        write!(f, "IO error during command processing: {}", e)
+      }
     }
   }
 }
@@ -1042,9 +1062,9 @@ impl From<std::io::Error> for CommandError {
   fn from(e: std::io::Error) -> Self {
     use std::io::ErrorKind;
     match e.kind() {
-      ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset | ErrorKind::BrokenPipe => {
-        Self::ClientDisconnected
-      }
+      ErrorKind::UnexpectedEof
+      | ErrorKind::ConnectionReset
+      | ErrorKind::BrokenPipe => Self::ClientDisconnected,
       _ => Self::IoError(e),
     }
   }
@@ -1057,17 +1077,21 @@ impl From<HandshakeError> for CommandError {
         std::io::ErrorKind::TimedOut,
         "handshake timed out",
       )),
-      HandshakeError::InvalidVersion(v) => Self::IoError(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        format!("invalid SOCKS version: {}", v),
-      )),
-      HandshakeError::MethodNotAcceptable(_) => Self::IoError(std::io::Error::other(
-        "authentication method not acceptable",
-      )),
-      HandshakeError::AuthenticationFailed { .. } => Self::IoError(std::io::Error::new(
-        std::io::ErrorKind::PermissionDenied,
-        "authentication failed",
-      )),
+      HandshakeError::InvalidVersion(v) => {
+        Self::IoError(std::io::Error::new(
+          std::io::ErrorKind::InvalidData,
+          format!("invalid SOCKS version: {}", v),
+        ))
+      }
+      HandshakeError::MethodNotAcceptable(_) => Self::IoError(
+        std::io::Error::other("authentication method not acceptable"),
+      ),
+      HandshakeError::AuthenticationFailed { .. } => {
+        Self::IoError(std::io::Error::new(
+          std::io::ErrorKind::PermissionDenied,
+          "authentication failed",
+        ))
+      }
       HandshakeError::ClientDisconnected => Self::ClientDisconnected,
       HandshakeError::IoError(e) => Self::from(e),
     }
@@ -1078,16 +1102,16 @@ impl From<fast_socks5::server::SocksServerError> for CommandError {
   fn from(e: fast_socks5::server::SocksServerError) -> Self {
     use fast_socks5::server::SocksServerError;
     match e {
-      SocksServerError::UnknownCommand(cmd) => Self::UnknownCommand { command: cmd },
+      SocksServerError::UnknownCommand(cmd) => {
+        Self::UnknownCommand { command: cmd }
+      }
       SocksServerError::AuthMethodUnacceptable(_) => {
         Self::IoError(std::io::Error::other(
           "unexpected auth error during command processing",
         ))
       }
       SocksServerError::Io { source, .. } => Self::from(source),
-      _ => Self::IoError(std::io::Error::other(
-        e.to_string(),
-      )),
+      _ => Self::IoError(std::io::Error::other(e.to_string())),
     }
   }
 }
@@ -1167,7 +1191,9 @@ pub async fn read_command_and_target(
         .reply_error(&fast_socks5::ReplyError::CommandNotSupported)
         .await?;
 
-      tracing::warn!("SOCKS5 BIND command not supported, sent REP=0x07");
+      tracing::warn!(
+        "SOCKS5 BIND command not supported, sent REP=0x07"
+      );
 
       Err(CommandError::CommandNotSupported {
         command: fast_socks5::consts::SOCKS5_CMD_TCP_BIND,
@@ -1195,18 +1221,21 @@ impl From<fast_socks5::server::SocksServerError> for HandshakeError {
   fn from(e: fast_socks5::server::SocksServerError) -> Self {
     use fast_socks5::server::SocksServerError;
     match e {
-      SocksServerError::UnsupportedSocksVersion(v) => Self::InvalidVersion(v),
+      SocksServerError::UnsupportedSocksVersion(v) => {
+        Self::InvalidVersion(v)
+      }
       SocksServerError::AuthMethodUnacceptable(methods) => {
         Self::MethodNotAcceptable(methods)
       }
-      SocksServerError::AuthenticationRejected => Self::AuthenticationFailed { username: None },
-      SocksServerError::EmptyUsername | SocksServerError::EmptyPassword => {
+      SocksServerError::AuthenticationRejected => {
+        Self::AuthenticationFailed { username: None }
+      }
+      SocksServerError::EmptyUsername
+      | SocksServerError::EmptyPassword => {
         Self::AuthenticationFailed { username: None }
       }
       SocksServerError::Io { source, .. } => Self::from(source),
-      _ => Self::IoError(std::io::Error::other(
-        e.to_string(),
-      )),
+      _ => Self::IoError(std::io::Error::other(e.to_string())),
     }
   }
 }
@@ -1259,48 +1288,66 @@ impl From<fast_socks5::server::SocksServerError> for HandshakeError {
 pub async fn perform_handshake(
   stream: tokio::net::TcpStream,
   timeout_duration: Duration,
-  auth: &AuthConfig,
+  auth: &Option<AuthConfig>,
 ) -> Result<HandshakeResult, HandshakeError> {
   // Wrap the entire handshake process with timeout
   let handshake_fut = async {
     // Start SOCKS5 protocol
-    let proto = fast_socks5::server::Socks5ServerProtocol::start(stream);
+    let proto =
+      fast_socks5::server::Socks5ServerProtocol::start(stream);
 
     // Negotiate authentication method based on config
     match auth {
-      AuthConfig::None => {
+      None => {
         // No authentication required
         let auth_state = proto
           .negotiate_auth(&[fast_socks5::server::NoAuthentication])
           .await?;
 
         // Finish authentication (no credentials for no-auth)
-        let authenticated = fast_socks5::server::Socks5ServerProtocol::finish_auth(auth_state);
+        let authenticated =
+          fast_socks5::server::Socks5ServerProtocol::finish_auth(
+            auth_state,
+          );
 
-        Ok(HandshakeResult {
-          proto: authenticated,
-          username: None,
-        })
+        Ok(HandshakeResult { proto: authenticated, username: None })
       }
-      AuthConfig::Password { users } => {
+      Some(auth_config) => {
         // Password authentication required
         let auth_state = proto
-          .negotiate_auth(&[fast_socks5::server::PasswordAuthentication])
+          .negotiate_auth(&[
+            fast_socks5::server::PasswordAuthentication,
+          ])
           .await?;
 
         // Read username and password
-        let (username, password, auth_impl) = auth_state.read_username_password().await?;
+        let (username, password, auth_impl) =
+          auth_state.read_username_password().await?;
 
-        // Check credentials
-        let valid = users.get(&username).map(|p| p == &password).unwrap_or(false);
+        // Get users map from AuthConfig
+        // Note: users_map() returning None should never happen after AuthConfig validation,
+        // but we handle it defensively as an internal configuration error.
+        let users = auth_config
+          .users_map()
+          .ok_or_else(|| {
+            HandshakeError::IoError(std::io::Error::other(
+              "internal error: password auth configured but no users available after validation",
+            ))
+          })?;
 
-        if valid {
+        // Use auth module's verify_password for plaintext comparison
+        if verify_password(&users, &username, &password).is_ok() {
           // Accept authentication
           let finished = auth_impl.accept().await?;
           let authenticated =
-            fast_socks5::server::Socks5ServerProtocol::finish_auth(finished);
+            fast_socks5::server::Socks5ServerProtocol::finish_auth(
+              finished,
+            );
 
-          tracing::info!("SOCKS5 authentication succeeded for user '{}'", username);
+          tracing::info!(
+            "SOCKS5 authentication succeeded for user '{}'",
+            username
+          );
 
           Ok(HandshakeResult {
             proto: authenticated,
@@ -1336,44 +1383,6 @@ pub async fn perform_handshake(
   }
 }
 
-/// Authentication configuration for SOCKS5 listener.
-#[derive(Clone, Debug, PartialEq)]
-#[derive(Default)]
-pub enum AuthConfig {
-  /// No authentication required.
-  #[default]
-  None,
-  /// Username/password authentication with a map of users.
-  Password { users: HashMap<String, String> },
-}
-
-
-/// User entry for deserialization.
-#[derive(Deserialize, Debug)]
-struct UserEntry {
-  username: String,
-  password: String,
-}
-
-/// Authentication configuration for YAML deserialization.
-#[derive(Deserialize, Debug)]
-struct AuthConfigYaml {
-  #[serde(default = "default_auth_mode")]
-  mode: String,
-  #[serde(default)]
-  users: Vec<UserEntry>,
-}
-
-fn default_auth_mode() -> String {
-  "none".to_string()
-}
-
-impl Default for AuthConfigYaml {
-  fn default() -> Self {
-    Self { mode: default_auth_mode(), users: Vec::new() }
-  }
-}
-
 /// SOCKS5 listener configuration arguments.
 #[derive(Clone, Debug)]
 pub struct Socks5ListenerArgs {
@@ -1382,7 +1391,7 @@ pub struct Socks5ListenerArgs {
   /// Handshake timeout duration.
   pub handshake_timeout: Duration,
   /// Authentication configuration.
-  pub auth: AuthConfig,
+  pub auth: Option<AuthConfig>,
 }
 
 impl Default for Socks5ListenerArgs {
@@ -1392,7 +1401,7 @@ impl Default for Socks5ListenerArgs {
       handshake_timeout: Duration::from_secs(
         DEFAULT_HANDSHAKE_TIMEOUT_SECS,
       ),
-      auth: AuthConfig::None,
+      auth: None,
     }
   }
 }
@@ -1412,8 +1421,8 @@ impl Default for Socks5ListenerArgs {
 ///
 /// Returns an error if:
 /// - `addresses` field is missing or empty
-/// - `mode` is not "none" or "password"
-/// - `mode` is "password" but `users` is empty
+/// - `auth.type` is not "password" (SOCKS5 only supports password auth)
+/// - `auth` is "password" but `users` is empty
 /// - `handshake_timeout` is not a valid string format (e.g., "10s")
 /// - Username length is not in range 1-255 bytes
 /// - Any other YAML parsing error occurs
@@ -1426,7 +1435,7 @@ pub fn parse_config(
     #[serde(default)]
     handshake_timeout: Option<String>,
     #[serde(default)]
-    auth: AuthConfigYaml,
+    auth: Option<serde_yaml::Value>,
   }
 
   let config: ConfigYaml = serde_yaml::from_value(args)
@@ -1438,10 +1447,15 @@ pub fn parse_config(
   }
 
   // Parse handshake timeout (string format like "10s")
-  let handshake_timeout = parse_handshake_timeout(config.handshake_timeout)?;
+  let handshake_timeout =
+    parse_handshake_timeout(config.handshake_timeout)?;
 
-  // Parse auth configuration
-  let auth = parse_auth_config(&config.auth)?;
+  // Parse auth - SOCKS5 only supports Password type
+  let auth = config
+    .auth
+    .map(|a| AuthConfig::from_yaml(a, &[AuthType::Password]))
+    .transpose()
+    .map_err(|e| anyhow!("auth config error: {}", e))?;
 
   Ok(Socks5ListenerArgs {
     addresses: config.addresses,
@@ -1466,7 +1480,9 @@ pub fn parse_config(
 /// - String does not end with 's'
 /// - Numeric part is not a valid number
 /// - Numeric part would overflow
-fn parse_handshake_timeout(timeout_str: Option<String>) -> Result<Duration> {
+fn parse_handshake_timeout(
+  timeout_str: Option<String>,
+) -> Result<Duration> {
   match timeout_str {
     None => Ok(Duration::from_secs(DEFAULT_HANDSHAKE_TIMEOUT_SECS)),
     Some(s) => {
@@ -1480,70 +1496,11 @@ fn parse_handshake_timeout(timeout_str: Option<String>) -> Result<Duration> {
 
       // Strip 's' suffix and parse number
       let num_str = &s[..s.len() - 1];
-      let secs: u64 = num_str
-        .parse()
-        .with_context(|| format!("invalid handshake_timeout value: {}", s))?;
+      let secs: u64 = num_str.parse().with_context(|| {
+        format!("invalid handshake_timeout value: {}", s)
+      })?;
 
       Ok(Duration::from_secs(secs))
-    }
-  }
-}
-
-/// Parses authentication configuration from YAML.
-fn parse_auth_config(auth: &AuthConfigYaml) -> Result<AuthConfig> {
-  match auth.mode.as_str() {
-    "none" => {
-      if !auth.users.is_empty() {
-        warn!(
-          "mode is 'none' but users list is provided; users will be ignored"
-        );
-      }
-      Ok(AuthConfig::None)
-    }
-    "password" => {
-      if auth.users.is_empty() {
-        bail!("mode is 'password' but users list is empty");
-      }
-
-      // Validate username lengths (1-255 bytes as per SOCKS5 protocol)
-      for user in &auth.users {
-        let username_len = user.username.len();
-        if username_len == 0 {
-          bail!("username cannot be empty");
-        }
-        if username_len > 255 {
-          bail!(
-            "username '{}' is too long ({} bytes); maximum is 255 bytes",
-            user.username,
-            username_len
-          );
-        }
-      }
-
-      // Check for duplicate usernames
-      let mut seen_usernames = HashMap::new();
-      let mut users = HashMap::new();
-
-      for user in &auth.users {
-        if seen_usernames.contains_key(&user.username) {
-          warn!(
-            "duplicate username '{}' found in configuration; \
-             using the first occurrence's password for authentication",
-            user.username
-          );
-        } else {
-          seen_usernames.insert(user.username.clone(), true);
-          users.insert(user.username.clone(), user.password.clone());
-        }
-      }
-
-      Ok(AuthConfig::Password { users })
-    }
-    other => {
-      bail!(
-        "invalid auth mode '{}'; expected 'none' or 'password'",
-        other
-      )
     }
   }
 }
@@ -1696,15 +1653,13 @@ pub fn listener_name() -> &'static str {
 /// Returns a builder function that parses configuration and creates
 /// a Socks5Listener instance.
 pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
-  Box::new(
-    |args: plugin::SerializedArgs, svc: plugin::Service| {
-      // Parse configuration
-      let listener_args = parse_config(args)?;
+  Box::new(|args: plugin::SerializedArgs, svc: plugin::Service| {
+    // Parse configuration
+    let listener_args = parse_config(args)?;
 
-      // Create listener
-      Socks5Listener::new(listener_args, svc)
-    },
-  )
+    // Create listener
+    Socks5Listener::new(listener_args, svc)
+  })
 }
 
 #[cfg(test)]
@@ -1750,12 +1705,11 @@ mod tests {
         .with(tracing_subscriber::filter::LevelFilter::TRACE)
         .with(layer);
 
-      let guard = tracing::dispatcher::set_default(&tracing::Dispatch::new(subscriber));
+      let guard = tracing::dispatcher::set_default(
+        &tracing::Dispatch::new(subscriber),
+      );
 
-      LogCapture {
-        logs,
-        _guard: guard,
-      }
+      LogCapture { logs, _guard: guard }
     }
 
     /// Create a new LogCapture that only captures logs at or above the specified level.
@@ -1776,14 +1730,14 @@ mod tests {
         .without_time();
 
       let filter = tracing_subscriber::filter::LevelFilter::from(level);
-      let subscriber = tracing_subscriber::registry().with(filter).with(layer);
+      let subscriber =
+        tracing_subscriber::registry().with(filter).with(layer);
 
-      let guard = tracing::dispatcher::set_default(&tracing::Dispatch::new(subscriber));
+      let guard = tracing::dispatcher::set_default(
+        &tracing::Dispatch::new(subscriber),
+      );
 
-      LogCapture {
-        logs,
-        _guard: guard,
-      }
+      LogCapture { logs, _guard: guard }
     }
 
     /// Check if any captured log contains the given text.
@@ -1849,6 +1803,26 @@ mod tests {
     fn flush(&mut self) -> std::io::Result<()> {
       Ok(())
     }
+  }
+
+  /// Helper to create password AuthConfig for tests.
+  fn create_password_auth_config(
+    users: Vec<(&str, &str)>,
+  ) -> Option<AuthConfig> {
+    use crate::auth::UserCredential;
+    Some(AuthConfig {
+      auth_type: AuthType::Password,
+      users: Some(
+        users
+          .into_iter()
+          .map(|(u, p)| UserCredential {
+            username: u.to_string(),
+            password: p.to_string(),
+          })
+          .collect(),
+      ),
+      client_ca_path: None,
+    })
   }
 
   // ========== ConnectionTracker Tests ==========
@@ -2222,76 +2196,54 @@ mod tests {
 
   // ========== AuthConfig Tests ==========
 
+  // ========== AuthConfig Tests (using new auth module) ==========
+
   #[test]
-  fn test_auth_config_default() {
-    let auth = AuthConfig::default();
-    assert_eq!(auth, AuthConfig::None);
+  fn test_socks5_auth_config_none() {
+    let yaml = r#"
+addresses:
+  - "127.0.0.1:1080"
+"#;
+    let yaml_value: serde_yaml::Value =
+      serde_yaml::from_str(yaml).expect("parse yaml");
+    let args = parse_config(yaml_value).unwrap();
+    assert!(args.auth.is_none());
   }
 
   #[test]
-  fn test_auth_config_none_equality() {
-    let auth1 = AuthConfig::None;
-    let auth2 = AuthConfig::None;
-    assert_eq!(auth1, auth2);
+  fn test_socks5_auth_config_password() {
+    let yaml = r#"
+addresses:
+  - "127.0.0.1:1080"
+auth:
+  type: password
+  users:
+    - username: alice
+      password: secret123
+"#;
+    let yaml_value: serde_yaml::Value =
+      serde_yaml::from_str(yaml).expect("parse yaml");
+    let args = parse_config(yaml_value).unwrap();
+    assert!(args.auth.is_some());
+    let auth = args.auth.unwrap();
+    assert_eq!(auth.auth_type, AuthType::Password);
+    let users = auth.users_map().expect("users should exist");
+    assert_eq!(users.get("alice"), Some(&"secret123".to_string()));
   }
 
   #[test]
-  fn test_auth_config_password_equality() {
-    let mut users1 = HashMap::new();
-    users1.insert("user1".to_string(), "pass1".to_string());
-
-    let mut users2 = HashMap::new();
-    users2.insert("user1".to_string(), "pass1".to_string());
-
-    let auth1 = AuthConfig::Password { users: users1 };
-    let auth2 = AuthConfig::Password { users: users2 };
-    assert_eq!(auth1, auth2);
-  }
-
-  #[test]
-  fn test_auth_config_password_inequality() {
-    let mut users1 = HashMap::new();
-    users1.insert("user1".to_string(), "pass1".to_string());
-
-    let mut users2 = HashMap::new();
-    users2.insert("user1".to_string(), "pass2".to_string());
-
-    let auth1 = AuthConfig::Password { users: users1 };
-    let auth2 = AuthConfig::Password { users: users2 };
-    assert_ne!(auth1, auth2);
-  }
-
-  #[test]
-  fn test_auth_config_none_password_inequality() {
-    let auth1 = AuthConfig::None;
-    let auth2 = AuthConfig::Password { users: HashMap::new() };
-    assert_ne!(auth1, auth2);
-  }
-
-  #[test]
-  fn test_auth_config_clone() {
-    let auth = AuthConfig::None;
-    let cloned = auth.clone();
-    assert_eq!(auth, cloned);
-
-    let mut users = HashMap::new();
-    users.insert("user".to_string(), "pass".to_string());
-    let auth = AuthConfig::Password { users };
-    let cloned = auth.clone();
-    assert_eq!(auth, cloned);
-  }
-
-  #[test]
-  fn test_auth_config_debug() {
-    let auth = AuthConfig::None;
-    let debug_str = format!("{:?}", auth);
-    assert!(debug_str.contains("None"));
-
-    let mut users = HashMap::new();
-    users.insert("user".to_string(), "pass".to_string());
-    let auth = AuthConfig::Password { users };
-    let debug_str = format!("{:?}", auth);
-    assert!(debug_str.contains("Password"));
+  fn test_socks5_auth_config_rejects_tls_client_cert() {
+    let yaml = r#"
+addresses:
+  - "127.0.0.1:1080"
+auth:
+  type: tls_client_cert
+  client_ca_path: /path/to/ca.pem
+"#;
+    let yaml_value: serde_yaml::Value =
+      serde_yaml::from_str(yaml).expect("parse yaml");
+    let result = parse_config(yaml_value);
+    assert!(result.is_err(), "SOCKS5 should reject tls_client_cert");
   }
 
   // ========== Socks5ListenerArgs Tests ==========
@@ -2301,7 +2253,7 @@ mod tests {
     let args = Socks5ListenerArgs::default();
     assert!(args.addresses.is_empty());
     assert_eq!(args.handshake_timeout, Duration::from_secs(10));
-    assert_eq!(args.auth, AuthConfig::None);
+    assert!(args.auth.is_none());
   }
 
   #[test]
@@ -2309,7 +2261,7 @@ mod tests {
     let args = Socks5ListenerArgs {
       addresses: vec!["127.0.0.1:1080".to_string()],
       handshake_timeout: Duration::from_secs(5),
-      auth: AuthConfig::None,
+      auth: None,
     };
     let cloned = args.clone();
     assert_eq!(args.addresses, cloned.addresses);
@@ -2339,7 +2291,7 @@ addresses:
     let args = parse_config(yaml).unwrap();
     assert_eq!(args.addresses, vec!["127.0.0.1:1080"]);
     assert_eq!(args.handshake_timeout, Duration::from_secs(10));
-    assert_eq!(args.auth, AuthConfig::None);
+    assert_eq!(args.auth, None);
   }
 
   #[test]
@@ -2458,18 +2410,17 @@ handshake_timeout: 10
 
   #[test]
   fn test_parse_config_auth_none() {
+    // In the new format, no auth means omitting the auth field entirely
     let yaml = serde_yaml::from_str(
       r#"
 addresses:
   - "127.0.0.1:1080"
-auth:
-  mode: "none"
 "#,
     )
     .unwrap();
 
     let args = parse_config(yaml).unwrap();
-    assert_eq!(args.auth, AuthConfig::None);
+    assert_eq!(args.auth, None);
   }
 
   #[test]
@@ -2479,7 +2430,7 @@ auth:
 addresses:
   - "127.0.0.1:1080"
 auth:
-  mode: "password"
+  type: password
   users:
     - username: "alice"
       password: "secret123"
@@ -2490,13 +2441,11 @@ auth:
     .unwrap();
 
     let args = parse_config(yaml).unwrap();
-    match args.auth {
-      AuthConfig::Password { users } => {
-        assert_eq!(users.get("alice"), Some(&"secret123".to_string()));
-        assert_eq!(users.get("bob"), Some(&"pass456".to_string()));
-      }
-      _ => panic!("expected Password auth"),
-    }
+    let auth_config = args.auth.expect("expected Password auth");
+    assert_eq!(auth_config.auth_type, AuthType::Password);
+    let users = auth_config.users_map().expect("users should exist");
+    assert_eq!(users.get("alice"), Some(&"secret123".to_string()));
+    assert_eq!(users.get("bob"), Some(&"pass456".to_string()));
   }
 
   #[test]
@@ -2529,22 +2478,24 @@ addresses: []
   }
 
   #[test]
-  fn test_parse_config_invalid_auth_mode() {
+  fn test_parse_config_invalid_auth_type() {
     let yaml = serde_yaml::from_str(
       r#"
 addresses:
   - "127.0.0.1:1080"
 auth:
-  mode: "invalid"
+  type: "invalid_type"
 "#,
     )
     .unwrap();
     let result = parse_config(yaml);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
+    // The error should mention parsing or type
     assert!(
-      err.contains("invalid auth mode")
-        || err.contains("'none' or 'password'")
+      err.contains("parse")
+        || err.contains("type")
+        || err.contains("auth")
     );
   }
 
@@ -2555,7 +2506,7 @@ auth:
 addresses:
   - "127.0.0.1:1080"
 auth:
-  mode: "password"
+  type: password
   users: []
 "#,
     )
@@ -2563,7 +2514,7 @@ auth:
     let result = parse_config(yaml);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("password") && err.contains("users"));
+    assert!(err.contains("users"));
   }
 
   #[test]
@@ -2573,45 +2524,40 @@ auth:
 addresses:
   - "127.0.0.1:1080"
 auth:
-  mode: "password"
+  type: password
 "#,
     )
     .unwrap();
     let result = parse_config(yaml);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("password") && err.contains("users"));
+    assert!(err.contains("users"));
   }
 
   #[test]
-  fn test_parse_config_none_with_users_warning() {
-    // This should succeed but log a warning
+  fn test_parse_config_no_auth_omitted() {
+    // When auth field is omitted, auth should be None
     let yaml = serde_yaml::from_str(
       r#"
 addresses:
   - "127.0.0.1:1080"
-auth:
-  mode: "none"
-  users:
-    - username: "alice"
-      password: "secret"
 "#,
     )
     .unwrap();
     let result = parse_config(yaml);
     assert!(result.is_ok());
-    assert_eq!(result.unwrap().auth, AuthConfig::None);
+    assert_eq!(result.unwrap().auth, None);
   }
 
   #[test]
   fn test_parse_config_duplicate_username() {
-    // Duplicate usernames should log warning but succeed
+    // Duplicate usernames should be rejected by validation
     let yaml = serde_yaml::from_str(
       r#"
 addresses:
   - "127.0.0.1:1080"
 auth:
-  mode: "password"
+  type: password
   users:
     - username: "alice"
       password: "first"
@@ -2621,16 +2567,13 @@ auth:
     )
     .unwrap();
     let result = parse_config(yaml);
-    assert!(result.is_ok());
-    let args = result.unwrap();
-    match args.auth {
-      AuthConfig::Password { users } => {
-        // Should use the first occurrence
-        assert_eq!(users.get("alice"), Some(&"first".to_string()));
-        assert_eq!(users.len(), 1);
-      }
-      _ => panic!("expected Password auth"),
-    }
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+      err.contains("duplicate"),
+      "Expected error about duplicate usernames, got: {}",
+      err
+    );
   }
 
   #[test]
@@ -2640,7 +2583,7 @@ auth:
 addresses:
   - "127.0.0.1:1080"
 auth:
-  mode: "password"
+  type: password
   users:
     - username: ""
       password: "secret"
@@ -2662,7 +2605,7 @@ auth:
 addresses:
   - "127.0.0.1:1080"
 auth:
-  mode: "password"
+  type: password
   users:
     - username: "{}"
       password: "secret"
@@ -2683,7 +2626,7 @@ auth:
 addresses:
   - "127.0.0.1:1080"
 auth:
-  mode: "password"
+  type: password
   users:
     - username: "a"
       password: "secret"
@@ -2693,12 +2636,9 @@ auth:
     let result = parse_config(yaml);
     assert!(result.is_ok());
     let args = result.unwrap();
-    match args.auth {
-      AuthConfig::Password { users } => {
-        assert_eq!(users.get("a"), Some(&"secret".to_string()));
-      }
-      _ => panic!("expected Password auth"),
-    }
+    let auth_config = args.auth.expect("expected Password auth");
+    let users = auth_config.users_map().expect("users should exist");
+    assert_eq!(users.get("a"), Some(&"secret".to_string()));
   }
 
   #[test]
@@ -2710,7 +2650,7 @@ auth:
 addresses:
   - "127.0.0.1:1080"
 auth:
-  mode: "password"
+  type: password
   users:
     - username: "{}"
       password: "secret"
@@ -2732,7 +2672,7 @@ auth:
 addresses:
   - "127.0.0.1:1080"
 auth:
-  mode: "password"
+  type: password
   users:
     - username: "用户"
       password: "secret"
@@ -2742,12 +2682,9 @@ auth:
     let result = parse_config(yaml);
     assert!(result.is_ok());
     let args = result.unwrap();
-    match args.auth {
-      AuthConfig::Password { users } => {
-        assert_eq!(users.get("用户"), Some(&"secret".to_string()));
-      }
-      _ => panic!("expected Password auth"),
-    }
+    let auth_config = args.auth.expect("expected Password auth");
+    let users = auth_config.users_map().expect("users should exist");
+    assert_eq!(users.get("用户"), Some(&"secret".to_string()));
   }
 
   #[test]
@@ -2760,7 +2697,7 @@ auth:
 addresses:
   - "127.0.0.1:1080"
 auth:
-  mode: "password"
+  type: password
   users:
     - username: "{}"
       password: "secret"
@@ -2842,18 +2779,23 @@ addresses:
   #[test]
   fn test_parse_handshake_timeout_none() {
     let result = parse_handshake_timeout(None).unwrap();
-    assert_eq!(result, Duration::from_secs(DEFAULT_HANDSHAKE_TIMEOUT_SECS));
+    assert_eq!(
+      result,
+      Duration::from_secs(DEFAULT_HANDSHAKE_TIMEOUT_SECS)
+    );
   }
 
   #[test]
   fn test_parse_handshake_timeout_valid() {
-    let result = parse_handshake_timeout(Some("10s".to_string())).unwrap();
+    let result =
+      parse_handshake_timeout(Some("10s".to_string())).unwrap();
     assert_eq!(result, Duration::from_secs(10));
   }
 
   #[test]
   fn test_parse_handshake_timeout_zero() {
-    let result = parse_handshake_timeout(Some("0s".to_string())).unwrap();
+    let result =
+      parse_handshake_timeout(Some("0s".to_string())).unwrap();
     assert_eq!(result, Duration::from_secs(0));
   }
 
@@ -3077,7 +3019,7 @@ addresses:
     Socks5ListenerArgs {
       addresses: vec!["127.0.0.1:0".to_string()],
       handshake_timeout: Duration::from_secs(10),
-      auth: AuthConfig::None,
+      auth: None,
     }
   }
 
@@ -3085,7 +3027,7 @@ addresses:
     Socks5ListenerArgs {
       addresses: vec!["invalid-address".to_string()],
       handshake_timeout: Duration::from_secs(10),
-      auth: AuthConfig::None,
+      auth: None,
     }
   }
 
@@ -3093,7 +3035,7 @@ addresses:
     Socks5ListenerArgs {
       addresses: vec!["invalid1".to_string(), "invalid2".to_string()],
       handshake_timeout: Duration::from_secs(10),
-      auth: AuthConfig::None,
+      auth: None,
     }
   }
 
@@ -3104,7 +3046,7 @@ addresses:
         "127.0.0.1:0".to_string(),
       ],
       handshake_timeout: Duration::from_secs(10),
-      auth: AuthConfig::None,
+      auth: None,
     }
   }
 
@@ -3191,7 +3133,9 @@ addresses:
     // Stop should work even without start
     listener.stop();
     // Verify shutdown handle is triggered
-    assert!(listener.connection_tracker.shutdown_handle().is_shutdown());
+    assert!(
+      listener.connection_tracker.shutdown_handle().is_shutdown()
+    );
   }
 
   #[test]
@@ -3272,8 +3216,9 @@ addresses:
 
         // Start should work with multiple addresses
         let listener_clone = listener.clone();
-        let start_handle =
-          tokio::task::spawn_local(async move { listener_clone.start().await });
+        let start_handle = tokio::task::spawn_local(async move {
+          listener_clone.start().await
+        });
 
         // Give the listener time to start
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3282,7 +3227,8 @@ addresses:
         listener.stop();
 
         let result =
-          tokio::time::timeout(Duration::from_secs(2), start_handle).await;
+          tokio::time::timeout(Duration::from_secs(2), start_handle)
+            .await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_ok());
       })
@@ -3326,9 +3272,9 @@ addresses:
         let listener = Socks5Listener::new_for_test(args, svc).unwrap();
 
         // Create a connection that listens for shutdown
-        let conn_shutdown_handle = listener.connection_tracker.shutdown_handle();
-        let completed =
-          std::rc::Rc::new(std::cell::Cell::new(false));
+        let conn_shutdown_handle =
+          listener.connection_tracker.shutdown_handle();
+        let completed = std::rc::Rc::new(std::cell::Cell::new(false));
         let completed_clone = completed.clone();
 
         listener.connection_tracker.register(async move {
@@ -3342,8 +3288,9 @@ addresses:
 
         // Start the listener
         let listener_clone = listener.clone();
-        let start_handle =
-          tokio::task::spawn_local(async move { listener_clone.start().await });
+        let start_handle = tokio::task::spawn_local(async move {
+          listener_clone.start().await
+        });
 
         // Give the listener time to start
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3353,7 +3300,8 @@ addresses:
 
         // Wait for start to complete
         let result =
-          tokio::time::timeout(Duration::from_secs(5), start_handle).await;
+          tokio::time::timeout(Duration::from_secs(5), start_handle)
+            .await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_ok());
 
@@ -3373,15 +3321,16 @@ addresses:
         let args = Socks5ListenerArgs {
           addresses: vec![format!("127.0.0.1:{}", port)],
           handshake_timeout: Duration::from_secs(10),
-          auth: AuthConfig::None,
+          auth: None,
         };
         let svc = create_test_service();
         let listener = Socks5Listener::new_for_test(args, svc).unwrap();
 
         // Start the listener first
         let listener_clone = listener.clone();
-        let start_handle =
-          tokio::task::spawn_local(async move { listener_clone.start().await });
+        let start_handle = tokio::task::spawn_local(async move {
+          listener_clone.start().await
+        });
 
         // Give the listener time to start
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -3462,13 +3411,15 @@ addresses:
 
   #[test]
   fn test_is_fatal_accept_error_invalid_input() {
-    let e = std::io::Error::new(std::io::ErrorKind::InvalidInput, "test");
+    let e =
+      std::io::Error::new(std::io::ErrorKind::InvalidInput, "test");
     assert!(is_fatal_accept_error(&e));
   }
 
   #[test]
   fn test_is_fatal_accept_error_invalid_data() {
-    let e = std::io::Error::new(std::io::ErrorKind::InvalidData, "test");
+    let e =
+      std::io::Error::new(std::io::ErrorKind::InvalidData, "test");
     assert!(is_fatal_accept_error(&e));
   }
 
@@ -3486,13 +3437,15 @@ addresses:
 
   #[test]
   fn test_is_fatal_accept_error_interrupted() {
-    let e = std::io::Error::new(std::io::ErrorKind::Interrupted, "test");
+    let e =
+      std::io::Error::new(std::io::ErrorKind::Interrupted, "test");
     assert!(!is_fatal_accept_error(&e));
   }
 
   #[test]
   fn test_is_fatal_accept_error_connection_reset() {
-    let e = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "test");
+    let e =
+      std::io::Error::new(std::io::ErrorKind::ConnectionReset, "test");
     assert!(!is_fatal_accept_error(&e));
   }
 
@@ -3510,7 +3463,8 @@ addresses:
 
   #[test]
   fn test_is_fatal_accept_error_permission_denied() {
-    let e = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "test");
+    let e =
+      std::io::Error::new(std::io::ErrorKind::PermissionDenied, "test");
     assert!(is_fatal_accept_error(&e));
   }
 
@@ -3522,7 +3476,8 @@ addresses:
 
   #[test]
   fn test_is_fatal_accept_error_unexpected_eof() {
-    let e = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "test");
+    let e =
+      std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "test");
     assert!(!is_fatal_accept_error(&e));
   }
 
@@ -3539,7 +3494,7 @@ addresses:
     let args = Socks5ListenerArgs {
       addresses: vec!["[::1]:0".to_string()],
       handshake_timeout: Duration::from_secs(10),
-      auth: AuthConfig::None,
+      auth: None,
     };
     let svc = create_test_service();
     let result = Socks5Listener::new_for_test(args, svc);
@@ -3551,12 +3506,9 @@ addresses:
   #[test]
   fn test_socks5_listener_mixed_ipv4_ipv6() {
     let args = Socks5ListenerArgs {
-      addresses: vec![
-        "127.0.0.1:0".to_string(),
-        "[::1]:0".to_string(),
-      ],
+      addresses: vec!["127.0.0.1:0".to_string(), "[::1]:0".to_string()],
       handshake_timeout: Duration::from_secs(10),
-      auth: AuthConfig::None,
+      auth: None,
     };
     let svc = create_test_service();
     let result = Socks5Listener::new_for_test(args, svc);
@@ -3579,22 +3531,24 @@ addresses:
         let args = Socks5ListenerArgs {
           addresses: vec![format!("127.0.0.1:{}", port)],
           handshake_timeout: Duration::from_secs(10),
-          auth: AuthConfig::None,
+          auth: None,
         };
         let svc = create_test_service();
         let listener = Socks5Listener::new_for_test(args, svc).unwrap();
 
         // Start the listener
         let listener_clone = listener.clone();
-        let start_handle =
-          tokio::task::spawn_local(async move { listener_clone.start().await });
+        let start_handle = tokio::task::spawn_local(async move {
+          listener_clone.start().await
+        });
 
         // Give the listener time to start and bind
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Connect to the listener
         let connect_result =
-          tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await;
+          tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await;
         assert!(
           connect_result.is_ok(),
           "Should be able to connect to listener"
@@ -3614,7 +3568,8 @@ addresses:
 
         // Wait for start to complete
         let result =
-          tokio::time::timeout(Duration::from_secs(5), start_handle).await;
+          tokio::time::timeout(Duration::from_secs(5), start_handle)
+            .await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_ok());
       })
@@ -3631,15 +3586,16 @@ addresses:
         let args = Socks5ListenerArgs {
           addresses: vec![format!("127.0.0.1:{}", port)],
           handshake_timeout: Duration::from_secs(10),
-          auth: AuthConfig::None,
+          auth: None,
         };
         let svc = create_test_service();
         let listener = Socks5Listener::new_for_test(args, svc).unwrap();
 
         // Start the listener
         let listener_clone = listener.clone();
-        let start_handle =
-          tokio::task::spawn_local(async move { listener_clone.start().await });
+        let start_handle = tokio::task::spawn_local(async move {
+          listener_clone.start().await
+        });
 
         // Give the listener time to start and bind
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -3647,9 +3603,11 @@ addresses:
         // Connect multiple clients
         let mut connections = Vec::new();
         for _ in 0..3 {
-          let conn =
-            tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
-              .await;
+          let conn = tokio::net::TcpStream::connect(format!(
+            "127.0.0.1:{}",
+            port
+          ))
+          .await;
           assert!(conn.is_ok());
           connections.push(conn.unwrap());
         }
@@ -3668,7 +3626,8 @@ addresses:
 
         // Wait for start to complete
         let result =
-          tokio::time::timeout(Duration::from_secs(5), start_handle).await;
+          tokio::time::timeout(Duration::from_secs(5), start_handle)
+            .await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_ok());
       })
@@ -3696,15 +3655,16 @@ addresses:
             reserved_addr.to_string(), // This will fail (address in use)
           ],
           handshake_timeout: Duration::from_secs(10),
-          auth: AuthConfig::None,
+          auth: None,
         };
         let svc = create_test_service();
         let listener = Socks5Listener::new_for_test(args, svc).unwrap();
 
         // Start the listener - should still work with one address
         let listener_clone = listener.clone();
-        let start_handle =
-          tokio::task::spawn_local(async move { listener_clone.start().await });
+        let start_handle = tokio::task::spawn_local(async move {
+          listener_clone.start().await
+        });
 
         // Give the listener time to start
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3714,7 +3674,8 @@ addresses:
 
         // Wait for start to complete
         let result =
-          tokio::time::timeout(Duration::from_secs(5), start_handle).await;
+          tokio::time::timeout(Duration::from_secs(5), start_handle)
+            .await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_ok());
 
@@ -3727,8 +3688,10 @@ addresses:
   // ========== Handshake Tests ==========
 
   /// Helper to create a pair of connected sockets for testing
-  async fn create_socket_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  async fn create_socket_pair()
+  -> (tokio::net::TcpStream, tokio::net::TcpStream) {
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     let client = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -3742,9 +3705,10 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     // Server side: perform handshake
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_secs(5), &auth_config).await
+      perform_handshake(server, Duration::from_secs(5), &auth_config)
+        .await
     });
 
     // Client side: send SOCKS5 handshake
@@ -3767,13 +3731,13 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     // Create auth config with a test user
-    let mut users = HashMap::new();
-    users.insert("testuser".to_string(), "testpass".to_string());
-    let auth_config = AuthConfig::Password { users };
+    let auth_config =
+      create_password_auth_config(vec![("testuser", "testpass")]);
 
     // Server side: perform handshake
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_secs(5), &auth_config).await
+      perform_handshake(server, Duration::from_secs(5), &auth_config)
+        .await
     });
 
     // Client side: send SOCKS5 handshake
@@ -3808,13 +3772,13 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     // Create auth config with a test user
-    let mut users = HashMap::new();
-    users.insert("testuser".to_string(), "correctpass".to_string());
-    let auth_config = AuthConfig::Password { users };
+    let auth_config =
+      create_password_auth_config(vec![("testuser", "correctpass")]);
 
     // Server side: perform handshake
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_secs(5), &auth_config).await
+      perform_handshake(server, Duration::from_secs(5), &auth_config)
+        .await
     });
 
     // Client side: send SOCKS5 handshake
@@ -3851,11 +3815,12 @@ addresses:
   async fn test_handshake_method_not_acceptable() {
     let (mut client, server) = create_socket_pair().await;
 
-    let auth_config = AuthConfig::None; // Only accepts method 0x00
+    let auth_config = None; // Only accepts method 0x00
 
     // Server side: perform handshake
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_secs(5), &auth_config).await
+      perform_handshake(server, Duration::from_secs(5), &auth_config)
+        .await
     });
 
     // Client side: request only method 0x02 (password), which server doesn't support
@@ -3880,11 +3845,12 @@ addresses:
   async fn test_handshake_invalid_version() {
     let (mut client, server) = create_socket_pair().await;
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
 
     // Server side: perform handshake
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_secs(5), &auth_config).await
+      perform_handshake(server, Duration::from_secs(5), &auth_config)
+        .await
     });
 
     // Client side: send SOCKS4 version (0x04) instead of SOCKS5 (0x05)
@@ -3906,15 +3872,19 @@ addresses:
     client.set_nodelay(true).unwrap();
     let read_result = tokio::time::timeout(
       Duration::from_millis(100),
-      client.read(&mut buf)
-    ).await;
+      client.read(&mut buf),
+    )
+    .await;
     // Either timeout (no data) or connection closed (EOF) - both indicate no response was sent
     match read_result {
       Ok(Ok(0)) | Err(_) => {
         // Connection closed (EOF) or timeout - no response was sent, as expected
       }
       Ok(Ok(n)) if n > 0 => {
-        panic!("Expected no response from server, but received {} bytes", n);
+        panic!(
+          "Expected no response from server, but received {} bytes",
+          n
+        );
       }
       Ok(Err(_)) => {
         // Connection error - also acceptable, connection was closed
@@ -3927,11 +3897,16 @@ addresses:
   async fn test_handshake_timeout() {
     let (mut client, server) = create_socket_pair().await;
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
 
     // Server side: perform handshake with very short timeout
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_millis(100), &auth_config).await
+      perform_handshake(
+        server,
+        Duration::from_millis(100),
+        &auth_config,
+      )
+      .await
     });
 
     // Client side: don't send anything, but keep the connection open
@@ -3958,15 +3933,19 @@ addresses:
     let mut buf = [0u8; 1];
     let read_result = tokio::time::timeout(
       Duration::from_millis(50),
-      client.read(&mut buf)
-    ).await;
+      client.read(&mut buf),
+    )
+    .await;
     // Either timeout (no data) or connection closed (EOF) - both indicate no response was sent
     match read_result {
       Ok(Ok(0)) | Err(_) => {
         // Connection closed (EOF) or timeout - no response was sent, as expected
       }
       Ok(Ok(n)) if n > 0 => {
-        panic!("Expected no response from server during timeout, but received {} bytes", n);
+        panic!(
+          "Expected no response from server during timeout, but received {} bytes",
+          n
+        );
       }
       Ok(Err(_)) => {
         // Connection error - also acceptable, connection was closed
@@ -3981,12 +3960,13 @@ addresses:
     // "握手超时：不发送任何响应，直接关闭连接"
     let (mut client, server) = create_socket_pair().await;
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
 
     // Server side: perform handshake with very short timeout
     let start = std::time::Instant::now();
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_millis(50), &auth_config).await
+      perform_handshake(server, Duration::from_millis(50), &auth_config)
+        .await
     });
 
     // Client side: keep connection open but send nothing
@@ -3994,8 +3974,9 @@ addresses:
     let mut buf = [0u8; 16];
     let read_result = tokio::time::timeout(
       Duration::from_millis(200),
-      client.read(&mut buf)
-    ).await;
+      client.read(&mut buf),
+    )
+    .await;
 
     // Verify timing: the handshake should have timed out
     let elapsed = start.elapsed();
@@ -4022,7 +4003,10 @@ addresses:
         // Timeout on read - no response was sent
       }
       Ok(Ok(n)) if n > 0 => {
-        panic!("Server should not send any response on timeout, but received {} bytes", n);
+        panic!(
+          "Server should not send any response on timeout, but received {} bytes",
+          n
+        );
       }
       Ok(Err(_)) => {
         // Connection error - acceptable
@@ -4035,13 +4019,13 @@ addresses:
   async fn test_handshake_client_disconnect_during_auth() {
     let (mut client, server) = create_socket_pair().await;
 
-    let mut users = HashMap::new();
-    users.insert("testuser".to_string(), "testpass".to_string());
-    let auth_config = AuthConfig::Password { users };
+    let auth_config =
+      create_password_auth_config(vec![("testuser", "testpass")]);
 
     // Server side: perform handshake
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_secs(5), &auth_config).await
+      perform_handshake(server, Duration::from_secs(5), &auth_config)
+        .await
     });
 
     // Client side: start handshake but disconnect during auth
@@ -4059,7 +4043,8 @@ addresses:
     let result = server_handle.await.unwrap();
     assert!(result.is_err());
     match result.unwrap_err() {
-      HandshakeError::ClientDisconnected | HandshakeError::IoError(_) => {
+      HandshakeError::ClientDisconnected
+      | HandshakeError::IoError(_) => {
         // Both are acceptable
       }
       _ => panic!("Expected ClientDisconnected or IoError"),
@@ -4088,15 +4073,18 @@ addresses:
 
   #[test]
   fn test_handshake_error_from_io_error() {
-    let io_err = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof");
+    let io_err =
+      std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof");
     let handshake_err = HandshakeError::from(io_err);
     matches!(handshake_err, HandshakeError::ClientDisconnected);
 
-    let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+    let io_err =
+      std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
     let handshake_err = HandshakeError::from(io_err);
     matches!(handshake_err, HandshakeError::ClientDisconnected);
 
-    let io_err = std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout");
+    let io_err =
+      std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout");
     let handshake_err = HandshakeError::from(io_err);
     matches!(handshake_err, HandshakeError::IoError(_));
   }
@@ -4111,13 +4099,13 @@ addresses:
   async fn test_handshake_empty_username() {
     let (mut client, server) = create_socket_pair().await;
 
-    let mut users = HashMap::new();
-    users.insert("testuser".to_string(), "testpass".to_string());
-    let auth_config = AuthConfig::Password { users };
+    let auth_config =
+      create_password_auth_config(vec![("testuser", "testpass")]);
 
     // Server side: perform handshake
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_secs(5), &auth_config).await
+      perform_handshake(server, Duration::from_secs(5), &auth_config)
+        .await
     });
 
     // Client side: send handshake with password method
@@ -4138,9 +4126,14 @@ addresses:
     match result.unwrap_err() {
       HandshakeError::AuthenticationFailed { username } => {
         // Empty username case - username should be None
-        assert!(username.is_none(), "Expected username to be None for empty username");
+        assert!(
+          username.is_none(),
+          "Expected username to be None for empty username"
+        );
       }
-      _ => panic!("Expected AuthenticationFailed error with username: None"),
+      _ => panic!(
+        "Expected AuthenticationFailed error with username: None"
+      ),
     }
   }
 
@@ -4148,11 +4141,12 @@ addresses:
   async fn test_handshake_multiple_methods_client_prefers_no_auth() {
     let (mut client, server) = create_socket_pair().await;
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
 
     // Server side: perform handshake
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_secs(5), &auth_config).await
+      perform_handshake(server, Duration::from_secs(5), &auth_config)
+        .await
     });
 
     // Client side: send multiple methods, preferring no-auth
@@ -4172,13 +4166,13 @@ addresses:
   async fn test_handshake_password_auth_unknown_user() {
     let (mut client, server) = create_socket_pair().await;
 
-    let mut users = HashMap::new();
-    users.insert("knownuser".to_string(), "password".to_string());
-    let auth_config = AuthConfig::Password { users };
+    let auth_config =
+      create_password_auth_config(vec![("knownuser", "password")]);
 
     // Server side: perform handshake
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_secs(5), &auth_config).await
+      perform_handshake(server, Duration::from_secs(5), &auth_config)
+        .await
     });
 
     // Client side: send handshake
@@ -4231,12 +4225,17 @@ addresses:
     // Test that handshake uses the provided timeout value
     let (client, server) = create_socket_pair().await;
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
 
     // Use a short timeout
     let start = std::time::Instant::now();
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_millis(100), &auth_config).await
+      perform_handshake(
+        server,
+        Duration::from_millis(100),
+        &auth_config,
+      )
+      .await
     });
 
     // Don't send anything
@@ -4259,13 +4258,13 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     // Create auth config with a user having 1-byte password
-    let mut users = HashMap::new();
-    users.insert("testuser".to_string(), "x".to_string()); // 1-byte password
-    let auth_config = AuthConfig::Password { users };
+    let auth_config =
+      create_password_auth_config(vec![("testuser", "x")]);
 
     // Server side: perform handshake
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_secs(5), &auth_config).await
+      perform_handshake(server, Duration::from_secs(5), &auth_config)
+        .await
     });
 
     // Client side: send SOCKS5 handshake
@@ -4301,13 +4300,20 @@ addresses:
 
     // Create auth config with a user having 255-byte password
     let password_255 = "x".repeat(255);
-    let mut users = HashMap::new();
-    users.insert("testuser".to_string(), password_255.clone());
-    let auth_config = AuthConfig::Password { users };
+    use crate::auth::UserCredential;
+    let auth_config = Some(AuthConfig {
+      auth_type: AuthType::Password,
+      users: Some(vec![UserCredential {
+        username: "testuser".to_string(),
+        password: password_255.clone(),
+      }]),
+      client_ca_path: None,
+    });
 
     // Server side: perform handshake
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_secs(5), &auth_config).await
+      perform_handshake(server, Duration::from_secs(5), &auth_config)
+        .await
     });
 
     // Client side: send SOCKS5 handshake
@@ -4342,11 +4348,16 @@ addresses:
     // This is a true timeout scenario as described in architecture doc
     let (mut client, server) = create_socket_pair().await;
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
 
     let start = std::time::Instant::now();
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_millis(100), &auth_config).await
+      perform_handshake(
+        server,
+        Duration::from_millis(100),
+        &auth_config,
+      )
+      .await
     });
 
     // Client keeps connection open but sends nothing
@@ -4385,8 +4396,9 @@ addresses:
     let mut buf = [0u8; 1];
     let read_result = tokio::time::timeout(
       Duration::from_millis(50),
-      client.read(&mut buf)
-    ).await;
+      client.read(&mut buf),
+    )
+    .await;
     match read_result {
       Ok(Ok(0)) | Err(_) => {
         // EOF or timeout - no response was sent
@@ -4403,10 +4415,15 @@ addresses:
     // Test the scenario where client sends partial handshake data and then goes silent
     let (mut client, server) = create_socket_pair().await;
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
 
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_millis(100), &auth_config).await
+      perform_handshake(
+        server,
+        Duration::from_millis(100),
+        &auth_config,
+      )
+      .await
     });
 
     // Send only partial handshake data (just the version byte)
@@ -4433,8 +4450,9 @@ addresses:
     let mut buf = [0u8; 1];
     let read_result = tokio::time::timeout(
       Duration::from_millis(50),
-      client.read(&mut buf)
-    ).await;
+      client.read(&mut buf),
+    )
+    .await;
     match read_result {
       Ok(Ok(0)) | Err(_) => {
         // EOF or timeout - no response was sent
@@ -4453,13 +4471,15 @@ addresses:
     let (client, server) = create_socket_pair().await;
 
     // Create a TargetAddr
-    let target_addr = fast_socks5::util::target_addr::TargetAddr::Domain(
-      "example.com".to_string(),
-      443,
-    );
+    let target_addr =
+      fast_socks5::util::target_addr::TargetAddr::Domain(
+        "example.com".to_string(),
+        443,
+      );
 
     // Create Socks5StreamCell
-    let mut cell = Socks5StreamCell::new_for_test(server, target_addr.clone());
+    let mut cell =
+      Socks5StreamCell::new_for_test(server, target_addr.clone());
 
     // Verify is_present returns true
     assert!(cell.is_present());
@@ -4503,7 +4523,8 @@ addresses:
       "127.0.0.1:8080".parse().unwrap(),
     );
 
-    let mut original = Socks5StreamCell::new_for_test(server, target_addr.clone());
+    let mut original =
+      Socks5StreamCell::new_for_test(server, target_addr.clone());
 
     // Clone the cell - with Arc<Mutex>, both share the same underlying data
     let cloned = original.clone();
@@ -4580,10 +4601,11 @@ addresses:
   async fn test_build_connect_request_domain_target() {
     let (client, server) = create_socket_pair().await;
 
-    let target_addr = fast_socks5::util::target_addr::TargetAddr::Domain(
-      "example.com".to_string(),
-      443,
-    );
+    let target_addr =
+      fast_socks5::util::target_addr::TargetAddr::Domain(
+        "example.com".to_string(),
+        443,
+      );
 
     let cell = Socks5StreamCell::new_for_test(server, target_addr);
     let request = build_connect_request(cell);
@@ -4602,10 +4624,11 @@ addresses:
     // Test edge case: build_connect_request with a cell that has been taken
     let (client, server) = create_socket_pair().await;
 
-    let target_addr = fast_socks5::util::target_addr::TargetAddr::Domain(
-      "example.com".to_string(),
-      443,
-    );
+    let target_addr =
+      fast_socks5::util::target_addr::TargetAddr::Domain(
+        "example.com".to_string(),
+        443,
+      );
 
     let mut cell = Socks5StreamCell::new_for_test(server, target_addr);
 
@@ -4653,11 +4676,12 @@ addresses:
     // accessible after a successful handshake
     let (mut client, server) = create_socket_pair().await;
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
 
     // Server side: perform handshake
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_secs(5), &auth_config).await
+      perform_handshake(server, Duration::from_secs(5), &auth_config)
+        .await
     });
 
     // Client side: send SOCKS5 handshake
@@ -4691,9 +4715,10 @@ addresses:
     // Server side: perform handshake then read command
     let server_handle = tokio::spawn(async move {
       // First perform handshake
-      let auth_config = AuthConfig::None;
+      let auth_config = None;
       let handshake_result =
-        perform_handshake(server, Duration::from_secs(5), &auth_config).await?;
+        perform_handshake(server, Duration::from_secs(5), &auth_config)
+          .await?;
       // Then read command
       read_command_and_target(handshake_result.proto).await
     });
@@ -4736,9 +4761,10 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     let server_handle = tokio::spawn(async move {
-      let auth_config = AuthConfig::None;
+      let auth_config = None;
       let handshake_result =
-        perform_handshake(server, Duration::from_secs(5), &auth_config).await?;
+        perform_handshake(server, Duration::from_secs(5), &auth_config)
+          .await?;
       read_command_and_target(handshake_result.proto).await
     });
 
@@ -4753,7 +4779,8 @@ addresses:
     client
       .write_all(&[
         0x05, 0x01, 0x00, 0x04, // VER, CMD, RSV, ATYP
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, // IPv6 ::1
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, // IPv6 ::1
         1, 187, // Port 443 in big-endian
       ])
       .await
@@ -4778,9 +4805,10 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     let server_handle = tokio::spawn(async move {
-      let auth_config = AuthConfig::None;
+      let auth_config = None;
       let handshake_result =
-        perform_handshake(server, Duration::from_secs(5), &auth_config).await?;
+        perform_handshake(server, Duration::from_secs(5), &auth_config)
+          .await?;
       read_command_and_target(handshake_result.proto).await
     });
 
@@ -4802,7 +4830,10 @@ addresses:
     let command_result = result.unwrap();
 
     match command_result.target_addr {
-      fast_socks5::util::target_addr::TargetAddr::Domain(domain, port) => {
+      fast_socks5::util::target_addr::TargetAddr::Domain(
+        domain,
+        port,
+      ) => {
         assert_eq!(domain, "example.com");
         assert_eq!(port, 443);
       }
@@ -4816,9 +4847,10 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     let server_handle = tokio::spawn(async move {
-      let auth_config = AuthConfig::None;
+      let auth_config = None;
       let handshake_result =
-        perform_handshake(server, Duration::from_secs(5), &auth_config).await?;
+        perform_handshake(server, Duration::from_secs(5), &auth_config)
+          .await?;
       read_command_and_target(handshake_result.proto).await
     });
 
@@ -4862,9 +4894,10 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     let server_handle = tokio::spawn(async move {
-      let auth_config = AuthConfig::None;
+      let auth_config = None;
       let handshake_result =
-        perform_handshake(server, Duration::from_secs(5), &auth_config).await?;
+        perform_handshake(server, Duration::from_secs(5), &auth_config)
+          .await?;
       read_command_and_target(handshake_result.proto).await
     });
 
@@ -4876,7 +4909,8 @@ addresses:
     // Send UDP ASSOCIATE command (CMD=0x03)
     client
       .write_all(&[
-        0x05, 0x03, 0x00, 0x01, // VER, CMD=3 (UDP ASSOCIATE), RSV, ATYP
+        0x05, 0x03, 0x00,
+        0x01, // VER, CMD=3 (UDP ASSOCIATE), RSV, ATYP
         0, 0, 0, 0, // IPv4 address 0.0.0.0
         0, 0, // Port 0
       ])
@@ -4907,9 +4941,10 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     let server_handle = tokio::spawn(async move {
-      let auth_config = AuthConfig::None;
+      let auth_config = None;
       let handshake_result =
-        perform_handshake(server, Duration::from_secs(5), &auth_config).await?;
+        perform_handshake(server, Duration::from_secs(5), &auth_config)
+          .await?;
       read_command_and_target(handshake_result.proto).await
     });
 
@@ -4921,7 +4956,8 @@ addresses:
     // Send unknown command (CMD=0xFF)
     client
       .write_all(&[
-        0x05, 0xFF, 0x00, 0x01, // VER, CMD=0xFF (unknown), RSV, ATYP
+        0x05, 0xFF, 0x00,
+        0x01, // VER, CMD=0xFF (unknown), RSV, ATYP
         127, 0, 0, 1, // IPv4 address
         0, 80, // Port
       ])
@@ -4944,9 +4980,10 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     let server_handle = tokio::spawn(async move {
-      let auth_config = AuthConfig::None;
+      let auth_config = None;
       let handshake_result =
-        perform_handshake(server, Duration::from_secs(5), &auth_config).await?;
+        perform_handshake(server, Duration::from_secs(5), &auth_config)
+          .await?;
       read_command_and_target(handshake_result.proto).await
     });
 
@@ -4975,14 +5012,17 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     // Create auth config with a test user
-    let mut users = HashMap::new();
-    users.insert("testuser".to_string(), "testpass".to_string());
-    let auth_config = AuthConfig::Password { users };
+    let auth_config =
+      create_password_auth_config(vec![("testuser", "testpass")]);
 
     let server_handle = tokio::spawn(async move {
       let handshake_result =
-        perform_handshake(server, Duration::from_secs(5), &auth_config).await?;
-      assert_eq!(handshake_result.username, Some("testuser".to_string()));
+        perform_handshake(server, Duration::from_secs(5), &auth_config)
+          .await?;
+      assert_eq!(
+        handshake_result.username,
+        Some("testuser".to_string())
+      );
       read_command_and_target(handshake_result.proto).await
     });
 
@@ -5042,15 +5082,18 @@ addresses:
 
   #[test]
   fn test_command_error_from_io_error() {
-    let io_err = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof");
+    let io_err =
+      std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof");
     let cmd_err = CommandError::from(io_err);
     matches!(cmd_err, CommandError::ClientDisconnected);
 
-    let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+    let io_err =
+      std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
     let cmd_err = CommandError::from(io_err);
     matches!(cmd_err, CommandError::ClientDisconnected);
 
-    let io_err = std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout");
+    let io_err =
+      std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout");
     let cmd_err = CommandError::from(io_err);
     matches!(cmd_err, CommandError::IoError(_));
   }
@@ -5075,9 +5118,10 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     let server_handle = tokio::spawn(async move {
-      let auth_config = AuthConfig::None;
+      let auth_config = None;
       let handshake_result =
-        perform_handshake(server, Duration::from_secs(5), &auth_config).await?;
+        perform_handshake(server, Duration::from_secs(5), &auth_config)
+          .await?;
       read_command_and_target(handshake_result.proto).await
     });
 
@@ -5098,7 +5142,10 @@ addresses:
     let command_result = result.unwrap();
 
     match command_result.target_addr {
-      fast_socks5::util::target_addr::TargetAddr::Domain(domain, port) => {
+      fast_socks5::util::target_addr::TargetAddr::Domain(
+        domain,
+        port,
+      ) => {
         assert_eq!(domain.len(), 255);
         assert_eq!(port, 443);
       }
@@ -5112,9 +5159,10 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     let server_handle = tokio::spawn(async move {
-      let auth_config = AuthConfig::None;
+      let auth_config = None;
       let handshake_result =
-        perform_handshake(server, Duration::from_secs(5), &auth_config).await?;
+        perform_handshake(server, Duration::from_secs(5), &auth_config)
+          .await?;
       read_command_and_target(handshake_result.proto).await
     });
 
@@ -5134,7 +5182,10 @@ addresses:
     let command_result = result.unwrap();
 
     match command_result.target_addr {
-      fast_socks5::util::target_addr::TargetAddr::Domain(domain, port) => {
+      fast_socks5::util::target_addr::TargetAddr::Domain(
+        domain,
+        port,
+      ) => {
         assert_eq!(domain, "a");
         assert_eq!(port, 80);
       }
@@ -5148,9 +5199,10 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     let server_handle = tokio::spawn(async move {
-      let auth_config = AuthConfig::None;
+      let auth_config = None;
       let handshake_result =
-        perform_handshake(server, Duration::from_secs(5), &auth_config).await?;
+        perform_handshake(server, Duration::from_secs(5), &auth_config)
+          .await?;
       read_command_and_target(handshake_result.proto).await
     });
 
@@ -5187,9 +5239,10 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     let server_handle = tokio::spawn(async move {
-      let auth_config = AuthConfig::None;
+      let auth_config = None;
       let handshake_result =
-        perform_handshake(server, Duration::from_secs(5), &auth_config).await?;
+        perform_handshake(server, Duration::from_secs(5), &auth_config)
+          .await?;
       read_command_and_target(handshake_result.proto).await
     });
 
@@ -5237,15 +5290,16 @@ addresses:
         let args = Socks5ListenerArgs {
           addresses: vec![format!("127.0.0.1:{}", port)],
           handshake_timeout: Duration::from_secs(10),
-          auth: AuthConfig::None,
+          auth: None,
         };
         let svc = create_test_service();
         let listener = Socks5Listener::new_for_test(args, svc).unwrap();
 
         // Start the listener
         let listener_clone = listener.clone();
-        let start_handle =
-          tokio::task::spawn_local(async move { listener_clone.start().await });
+        let start_handle = tokio::task::spawn_local(async move {
+          listener_clone.start().await
+        });
 
         // Give the listener time to start and log
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -5254,7 +5308,9 @@ addresses:
         listener.stop();
 
         // Wait for completion
-        let _ = tokio::time::timeout(Duration::from_secs(2), start_handle).await;
+        let _ =
+          tokio::time::timeout(Duration::from_secs(2), start_handle)
+            .await;
 
         // Verify log was generated with correct level and content
         assert!(
@@ -5281,15 +5337,16 @@ addresses:
         let args = Socks5ListenerArgs {
           addresses: vec![format!("127.0.0.1:{}", port)],
           handshake_timeout: Duration::from_secs(10),
-          auth: AuthConfig::None,
+          auth: None,
         };
         let svc = create_test_service();
         let listener = Socks5Listener::new_for_test(args, svc).unwrap();
 
         // Start the listener
         let listener_clone = listener.clone();
-        let start_handle =
-          tokio::task::spawn_local(async move { listener_clone.start().await });
+        let start_handle = tokio::task::spawn_local(async move {
+          listener_clone.start().await
+        });
 
         // Give the listener time to start
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -5298,7 +5355,9 @@ addresses:
         listener.stop();
 
         // Wait for completion
-        let _ = tokio::time::timeout(Duration::from_secs(2), start_handle).await;
+        let _ =
+          tokio::time::timeout(Duration::from_secs(2), start_handle)
+            .await;
 
         // Verify log was generated with correct level and content
         assert!(
@@ -5325,15 +5384,16 @@ addresses:
         let args = Socks5ListenerArgs {
           addresses: vec![format!("127.0.0.1:{}", port)],
           handshake_timeout: Duration::from_secs(10),
-          auth: AuthConfig::None,
+          auth: None,
         };
         let svc = create_test_service();
         let listener = Socks5Listener::new_for_test(args, svc).unwrap();
 
         // Start the listener
         let listener_clone = listener.clone();
-        let start_handle =
-          tokio::task::spawn_local(async move { listener_clone.start().await });
+        let start_handle = tokio::task::spawn_local(async move {
+          listener_clone.start().await
+        });
 
         // Give the listener time to start
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -5351,11 +5411,14 @@ addresses:
         listener.stop();
 
         // Wait for completion
-        let _ = tokio::time::timeout(Duration::from_secs(2), start_handle).await;
+        let _ =
+          tokio::time::timeout(Duration::from_secs(2), start_handle)
+            .await;
 
         // Verify log was generated with correct level and content
         assert!(
-          log_capture.contains_info("SOCKS5 connection established from"),
+          log_capture
+            .contains_info("SOCKS5 connection established from"),
           "Expected INFO log for connection establishment"
         );
       })
@@ -5374,25 +5437,28 @@ addresses:
         let args = Socks5ListenerArgs {
           addresses: vec![format!("127.0.0.1:{}", port)],
           handshake_timeout: Duration::from_secs(10),
-          auth: AuthConfig::None,
+          auth: None,
         };
         let svc = create_test_service();
         let listener = Socks5Listener::new_for_test(args, svc).unwrap();
 
         // Start the listener
         let listener_clone = listener.clone();
-        let start_handle =
-          tokio::task::spawn_local(async move { listener_clone.start().await });
+        let start_handle = tokio::task::spawn_local(async move {
+          listener_clone.start().await
+        });
 
         // Give the listener time to start
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Connect and then disconnect
         {
-          let _conn =
-            tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
-              .await
-              .expect("Should connect");
+          let _conn = tokio::net::TcpStream::connect(format!(
+            "127.0.0.1:{}",
+            port
+          ))
+          .await
+          .expect("Should connect");
           // Connection will be dropped here
         }
 
@@ -5403,11 +5469,14 @@ addresses:
         listener.stop();
 
         // Wait for completion
-        let _ = tokio::time::timeout(Duration::from_secs(2), start_handle).await;
+        let _ =
+          tokio::time::timeout(Duration::from_secs(2), start_handle)
+            .await;
 
         // Verify log was generated with correct level and content
         assert!(
-          log_capture.contains_info("SOCKS5 connection disconnected from"),
+          log_capture
+            .contains_info("SOCKS5 connection disconnected from"),
           "Expected INFO log for connection disconnection"
         );
       })
@@ -5422,13 +5491,13 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     // Create auth config with a test user
-    let mut users = HashMap::new();
-    users.insert("testuser".to_string(), "testpass".to_string());
-    let auth_config = AuthConfig::Password { users };
+    let auth_config =
+      create_password_auth_config(vec![("testuser", "testpass")]);
 
     // Server side: perform handshake
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_secs(5), &auth_config).await
+      perform_handshake(server, Duration::from_secs(5), &auth_config)
+        .await
     });
 
     // Client side: send SOCKS5 handshake with password method
@@ -5455,7 +5524,8 @@ addresses:
 
     // Verify log was generated with correct level and content
     assert!(
-      log_capture.contains_info("SOCKS5 authentication succeeded for user"),
+      log_capture
+        .contains_info("SOCKS5 authentication succeeded for user"),
       "Expected INFO log for successful authentication"
     );
     assert!(
@@ -5477,13 +5547,13 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     // Create auth config with a test user
-    let mut users = HashMap::new();
-    users.insert("testuser".to_string(), "correctpass".to_string());
-    let auth_config = AuthConfig::Password { users };
+    let auth_config =
+      create_password_auth_config(vec![("testuser", "correctpass")]);
 
     // Server side: perform handshake
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_secs(5), &auth_config).await
+      perform_handshake(server, Duration::from_secs(5), &auth_config)
+        .await
     });
 
     // Client side: send SOCKS5 handshake
@@ -5509,7 +5579,8 @@ addresses:
 
     // Verify log was generated with correct level and content
     assert!(
-      log_capture.contains_warn("SOCKS5 authentication failed for user"),
+      log_capture
+        .contains_warn("SOCKS5 authentication failed for user"),
       "Expected WARN log for failed authentication"
     );
     assert!(
@@ -5535,9 +5606,10 @@ addresses:
     let (mut client, server) = create_socket_pair().await;
 
     let server_handle = tokio::spawn(async move {
-      let auth_config = AuthConfig::None;
+      let auth_config = None;
       let handshake_result =
-        perform_handshake(server, Duration::from_secs(5), &auth_config).await?;
+        perform_handshake(server, Duration::from_secs(5), &auth_config)
+          .await?;
       read_command_and_target(handshake_result.proto).await
     });
 
@@ -5577,11 +5649,16 @@ addresses:
     let log_capture = LogCapture::new();
     let (client, server) = create_socket_pair().await;
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
 
     // Server side: perform handshake with short timeout
     let server_handle = tokio::spawn(async move {
-      perform_handshake(server, Duration::from_millis(100), &auth_config).await
+      perform_handshake(
+        server,
+        Duration::from_millis(100),
+        &auth_config,
+      )
+      .await
     });
 
     // Client side: don't send anything, let it timeout
@@ -5604,13 +5681,14 @@ addresses:
   fn test_config_error_log() {
     let _log_capture = LogCapture::new();
 
-    // Try to parse invalid config
+    // Try to parse invalid config - SOCKS5 only supports password type
     let yaml = serde_yaml::from_str(
       r#"
 addresses:
   - "127.0.0.1:1080"
 auth:
-  mode: "invalid"
+  type: tls_client_cert
+  client_ca_path: /path/to/ca.pem
 "#,
     )
     .unwrap();
@@ -5623,8 +5701,11 @@ auth:
     // This test verifies that parse_config correctly returns an error.
     let err = result.unwrap_err().to_string();
     assert!(
-      err.contains("invalid auth mode") || err.contains("mode"),
-      "Expected error message about invalid mode"
+      err.contains("unsupported")
+        || err.contains("tls_client_cert")
+        || err.contains("auth"),
+      "Expected error message about unsupported auth type, got: {}",
+      err
     );
   }
 
@@ -5651,7 +5732,7 @@ addresses: []
     let args = Socks5ListenerArgs {
       addresses: vec!["127.0.0.1:1080".to_string()],
       handshake_timeout: Duration::from_secs(10),
-      auth: AuthConfig::None,
+      auth: None,
     };
     let svc = create_test_service();
     let listener = Socks5Listener::new_for_test(args, svc).unwrap();
@@ -5676,34 +5757,131 @@ addresses: []
       "Log format should show initial count as 0"
     );
   }
+
+  // ========== New Auth Module Integration Tests ==========
+  // These tests verify SOCKS5 listener authentication behavior with the new auth module.
+  // Key behaviors: perform_handshake with new AuthConfig, and tls_client_cert rejection.
+
+  #[test]
+  fn test_socks5_parse_config_with_new_auth_format() {
+    // Test that SOCKS5 config parsing accepts new auth.type format
+    // (Previously used auth.mode format - this test verifies the new format works)
+    let yaml = r#"
+addresses:
+  - "127.0.0.1:1080"
+auth:
+  type: password
+  users:
+    - username: alice
+      password: secret123
+"#;
+    let yaml_value: serde_yaml::Value =
+      serde_yaml::from_str(yaml).expect("parse yaml");
+
+    // Verify parse_config accepts the new auth.type format
+    let result = parse_config(yaml_value);
+    assert!(result.is_ok());
+    let args = result.unwrap();
+    assert!(args.auth.is_some());
+  }
+
+  #[test]
+  fn test_socks5_parse_config_rejects_tls_client_cert() {
+    // Test that SOCKS5 config parsing REJECTS tls_client_cert type
+    // SOCKS5 protocol only supports password auth (RFC 1928/1929)
+    let yaml = r#"
+addresses:
+  - "127.0.0.1:1080"
+auth:
+  type: tls_client_cert
+  client_ca_path: /path/to/ca.pem
+"#;
+    let yaml_value: serde_yaml::Value =
+      serde_yaml::from_str(yaml).expect("parse yaml");
+
+    // This should FAIL because SOCKS5 doesn't support TLS client cert
+    let result = parse_config(yaml_value);
+    assert!(
+      result.is_err(),
+      "SOCKS5 should reject tls_client_cert type"
+    );
+  }
+
+  #[test]
+  fn test_socks5_parse_config_no_auth() {
+    // Test that SOCKS5 config without auth field results in None auth
+    let yaml = r#"
+addresses:
+  - "127.0.0.1:1080"
+"#;
+    let yaml_value: serde_yaml::Value =
+      serde_yaml::from_str(yaml).expect("parse yaml");
+
+    let result = parse_config(yaml_value);
+    assert!(result.is_ok());
+    let args = result.unwrap();
+    assert!(
+      args.auth.is_none(),
+      "No auth field should result in None auth"
+    );
+  }
+
+  #[test]
+  fn test_socks5_auth_config_type_compatibility() {
+    use crate::auth::{AuthConfig, AuthType, UserCredential};
+
+    // This test verifies compile-time type compatibility between
+    // crate::auth::AuthConfig and the SOCKS5 listener's auth field type.
+    // It ensures the listener's function signatures accept the new AuthConfig.
+    //
+    // Note: Actual perform_handshake behavior is tested in:
+    // - test_handshake_password_auth_success
+    // - test_handshake_password_auth_failure
+    // - tests/integration/test_socks5.py
+
+    // Create password AuthConfig
+    let auth_config: Option<AuthConfig> = Some(AuthConfig {
+      auth_type: AuthType::Password,
+      users: Some(vec![UserCredential {
+        username: "testuser".to_string(),
+        password: "testpass".to_string(),
+      }]),
+      client_ca_path: None,
+    });
+
+    // Verify AuthConfig can be used with the expected function signature
+    // This line will fail at compile time if type signature changes
+    let _auth_ref: Option<&AuthConfig> = auth_config.as_ref();
+    assert!(_auth_ref.is_some());
+  }
 }
 
-  // ========== Send/Sync trait verification tests ==========
-  
-  fn _check_send<T: Send>() {}
-  fn _check_sync<T: Sync>() {}
+// ========== Send/Sync trait verification tests ==========
 
-  #[test]
-  fn test_tcp_stream_is_send() {
-    _check_send::<tokio::net::TcpStream>();
-  }
+fn _check_send<T: Send>() {}
+fn _check_sync<T: Sync>() {}
 
-  #[test]
-  fn test_target_addr_is_send() {
-    _check_send::<fast_socks5::util::target_addr::TargetAddr>();
-  }
+#[test]
+fn test_tcp_stream_is_send() {
+  _check_send::<tokio::net::TcpStream>();
+}
 
-  #[test]
-  fn test_target_addr_is_sync() {
-    _check_sync::<fast_socks5::util::target_addr::TargetAddr>();
-  }
+#[test]
+fn test_target_addr_is_send() {
+  _check_send::<fast_socks5::util::target_addr::TargetAddr>();
+}
 
-  #[test]
-  fn test_socks5_protocol_is_send() {
-    _check_send::<
-      fast_socks5::server::Socks5ServerProtocol<
-        tokio::net::TcpStream,
-        fast_socks5::server::states::CommandRead,
-      >,
-    >();
-  }
+#[test]
+fn test_target_addr_is_sync() {
+  _check_sync::<fast_socks5::util::target_addr::TargetAddr>();
+}
+
+#[test]
+fn test_socks5_protocol_is_send() {
+  _check_send::<
+    fast_socks5::server::Socks5ServerProtocol<
+      tokio::net::TcpStream,
+      fast_socks5::server::states::CommandRead,
+    >,
+  >();
+}

@@ -30,7 +30,6 @@ quinn = { version = "0.11.9", features = ["qlog", "rustls", "rustls-log"] }
 tokio-util = { version = "0.7.17", features = ["io"] }
 futures-core = "0.3.31"
 local-channel = "0.1.5"
-bcrypt = "0.16"
 base64 = "0.22"
 fast-socks5 = "1.0.0"
 

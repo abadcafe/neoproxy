@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -19,12 +18,12 @@ use h3::server;
 use http_body_util::BodyExt;
 use quinn::crypto::rustls::QuicServerConfig;
 use rustls::pki_types::CertificateDer;
-use rustls::{RootCertStore, server::WebPkiClientVerifier};
 use serde::Deserialize;
 use tokio::net;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
+use crate::auth::{AuthType, TlsClientCertVerifier, verify_password};
 use crate::plugin;
 
 // ============================================================================
@@ -75,8 +74,8 @@ pub struct Http3ListenerArgs {
   pub key_path: String,
   /// QUIC protocol parameters (optional)
   pub quic: Option<QuicConfigArgs>,
-  /// Authentication configuration (optional)
-  pub auth: Option<AuthConfigArgs>,
+  /// Authentication configuration (optional, raw YAML value)
+  pub auth: Option<serde_yaml::Value>,
 }
 
 /// QUIC protocol configuration arguments
@@ -184,110 +183,6 @@ impl Default for QuicConfig {
     QuicConfigArgs::default()
       .validate_and_apply_defaults()
       .expect("Default QuicConfigArgs should always be valid")
-  }
-}
-
-/// Authentication configuration arguments
-#[derive(Deserialize, Clone, Debug)]
-pub struct AuthConfigArgs {
-  /// Authentication type: "password" or "tls_client_cert"
-  #[serde(rename = "type")]
-  pub auth_type: String,
-  /// User credentials for password authentication
-  pub credentials: Option<Vec<Credential>>,
-  /// Client CA certificate path for TLS client cert authentication
-  pub client_ca_path: Option<String>,
-}
-
-/// User credential for password authentication
-#[derive(Deserialize, Clone, Debug)]
-pub struct Credential {
-  /// Username
-  pub username: String,
-  /// Password hash (bcrypt format)
-  pub password_hash: String,
-}
-
-/// Validated authentication configuration
-#[derive(Clone, Debug)]
-pub enum AuthConfig {
-  /// No authentication
-  None,
-  /// Password authentication with user credentials
-  Password { credentials: HashMap<String, String> },
-  /// TLS client certificate authentication
-  TlsClientCert { client_ca_path: PathBuf },
-}
-
-impl AuthConfig {
-  /// Parse and validate authentication configuration
-  ///
-  /// Returns validated AuthConfig or error.
-  pub fn from_args(args: Option<AuthConfigArgs>) -> Result<Self> {
-    match args {
-      None => Ok(AuthConfig::None),
-      Some(auth_args) => match auth_args.auth_type.as_str() {
-        "password" => {
-          // Check for conflicting configuration: client_ca_path should not
-          // be present for password authentication
-          if auth_args.client_ca_path.is_some() {
-            bail!(
-              "Configuration conflict: client_ca_path should not be \
-               configured when authentication type is 'password'"
-            );
-          }
-          let credentials = auth_args.credentials.ok_or_else(|| {
-            anyhow!(
-              "credentials is required for password authentication"
-            )
-          })?;
-          if credentials.is_empty() {
-            bail!(
-              "credentials cannot be empty for password authentication"
-            );
-          }
-          let mut cred_map = HashMap::new();
-          for cred in credentials {
-            // Validate password hash format (strict bcrypt format check)
-            // Per architecture document section 4.3, only $2a$, $2b$, $2y$
-            // standard formats and $bcrypt$ PHC format are accepted.
-            // Non-standard formats like $2x$, $2z$ are rejected.
-            if !is_valid_bcrypt_format(&cred.password_hash) {
-              bail!(
-                "Invalid password hash format for user '{}': expected \
-                 bcrypt format ($2a$, $2b$, $2y$ or $bcrypt$)",
-                cred.username
-              );
-            }
-            cred_map.insert(cred.username, cred.password_hash);
-          }
-          Ok(AuthConfig::Password { credentials: cred_map })
-        }
-        "tls_client_cert" => {
-          // Check for conflicting configuration: credentials should not
-          // be present for tls_client_cert authentication
-          if auth_args.credentials.is_some() {
-            bail!(
-              "Configuration conflict: credentials should not be \
-               configured when authentication type is 'tls_client_cert'"
-            );
-          }
-          let client_ca_path = auth_args
-            .client_ca_path
-            .ok_or_else(|| {
-              anyhow!(
-                "client_ca_path is required for tls_client_cert \
-                       authentication"
-              )
-            })?
-            .into();
-          Ok(AuthConfig::TlsClientCert { client_ca_path })
-        }
-        _ => {
-          bail!("Invalid authentication type: {}", auth_args.auth_type)
-        }
-      },
-    }
   }
 }
 
@@ -517,11 +412,12 @@ fn handle_password_auth(
 
   let (username, password) = parse_basic_auth(auth_header.clone())?;
 
-  if verify_password(credentials, &username, &password) {
-    Ok(())
-  } else {
-    bail!("Proxy Authentication Required - invalid credentials")
-  }
+  // Use plaintext password verification from auth module
+  verify_password(credentials, &username, &password).map_err(|_| {
+    anyhow!("Proxy Authentication Required - invalid credentials")
+  })?;
+
+  Ok(())
 }
 
 /// Perform HTTP authentication based on config
@@ -530,12 +426,20 @@ fn handle_password_auth(
 /// Err with error message otherwise.
 fn perform_authentication(
   req: &http::Request<()>,
-  auth_config: &AuthConfig,
+  auth_config: Option<&crate::auth::AuthConfig>,
 ) -> Result<()> {
   match auth_config {
-    AuthConfig::None | AuthConfig::TlsClientCert { .. } => Ok(()),
-    AuthConfig::Password { credentials } => {
-      handle_password_auth(req, credentials)
+    None => Ok(()), // No auth configured
+    Some(config) => {
+      match config.auth_type {
+        AuthType::Password => {
+          let users = config.users_map().ok_or_else(|| {
+            anyhow!("password auth configured but no users")
+          })?;
+          handle_password_auth(req, &users)
+        }
+        AuthType::TlsClientCert => Ok(()), // TLS cert handled at QUIC level
+      }
     }
   }
 }
@@ -571,7 +475,7 @@ enum ValidationError {
 /// Returns Ok(target_address) if validation passes, Err otherwise.
 fn validate_connect_request(
   req: &http::Request<()>,
-  auth_config: &AuthConfig,
+  auth_config: Option<&crate::auth::AuthConfig>,
 ) -> std::result::Result<String, ValidationError> {
   // Step 1: Validate CONNECT method
   if let Err(e) = validate_connect_method(req) {
@@ -714,7 +618,7 @@ async fn handle_h3_stream<S>(
   req: http::Request<()>,
   mut stream: server::RequestStream<S, Bytes>,
   _service: plugin::Service,
-  auth_config: AuthConfig,
+  auth_config: Option<crate::auth::AuthConfig>,
   shutdown_handle: plugin::ShutdownHandle,
 ) where
   S: h3::quic::BidiStream<Bytes> + Send + 'static,
@@ -722,13 +626,14 @@ async fn handle_h3_stream<S>(
   <S as h3::quic::BidiStream<Bytes>>::RecvStream: Send,
 {
   // Phase 1: Validate request
-  let target_addr = match validate_connect_request(&req, &auth_config) {
-    Ok(addr) => addr,
-    Err(e) => {
-      handle_validation_error(&mut stream, e).await;
-      return;
-    }
-  };
+  let target_addr =
+    match validate_connect_request(&req, auth_config.as_ref()) {
+      Ok(addr) => addr,
+      Err(e) => {
+        handle_validation_error(&mut stream, e).await;
+        return;
+      }
+    };
 
   // Phase 2: Connect to target
   let target_stream = match connect_to_target(&target_addr).await {
@@ -833,177 +738,6 @@ fn parse_basic_auth(
   Ok((username.to_string(), password.to_string()))
 }
 
-/// Verify password against stored hash
-fn verify_password(
-  credentials: &HashMap<String, String>,
-  username: &str,
-  password: &str,
-) -> bool {
-  match credentials.get(username) {
-    None => false,
-    Some(stored_hash) => {
-      // For simplicity, we accept both formats:
-      // - $2... (standard bcrypt)
-      // - $bcrypt$... (PHC format)
-      // In production, use the bcrypt crate for proper verification
-      // Here we implement a simple verification for testing
-      verify_bcrypt_password(password, stored_hash)
-    }
-  }
-}
-
-/// Check if the hash has a valid bcrypt format with complete structure.
-///
-/// Valid formats per architecture document section 4.3:
-/// - Standard bcrypt: $2a$, $2b$, $2y$ (must be exactly 60 characters)
-/// - PHC format: $bcrypt$v=98$r=<rounds>$<hash> (must have complete
-///   structure)
-///
-/// This function validates not just the prefix but also the structural
-/// integrity:
-/// - For standard bcrypt ($2a$, $2b$, $2y$): total length must be 60
-///   characters
-/// - For PHC format ($bcrypt$): must have exactly 5 parts with valid
-///   structure:
-///   - parts[1] = "bcrypt"
-///   - parts[2] = "v=98"
-///   - parts[3] = "r=<rounds>" where rounds is a valid number
-///   - parts[4] = non-empty hash part (53 characters for valid bcrypt)
-fn is_valid_bcrypt_format(hash: &str) -> bool {
-  // Standard bcrypt format: $2a$, $2b$, $2y$ (exactly 60 characters)
-  if hash.starts_with("$2a$")
-    || hash.starts_with("$2b$")
-    || hash.starts_with("$2y$")
-  {
-    return hash.len() == 60;
-  }
-
-  // PHC format: $bcrypt$v=98$r=<rounds>$<hash>
-  if hash.starts_with("$bcrypt$") {
-    return is_valid_phc_format(hash);
-  }
-
-  false
-}
-
-/// Validate PHC format bcrypt hash structure.
-///
-/// Expected format: $bcrypt$v=98$r=<rounds>$<hash>
-///
-/// Structure validation:
-/// - Exactly 5 parts when split by '$'
-/// - parts[1] = "bcrypt"
-/// - parts[2] = "v=98"
-/// - parts[3] = "r=<rounds>" where rounds is a valid integer
-/// - parts[4] = non-empty hash (should be 53 characters for valid bcrypt)
-fn is_valid_phc_format(hash: &str) -> bool {
-  let parts: Vec<&str> = hash.split('$').collect();
-
-  // Must have exactly 5 parts: "", "bcrypt", "v=98", "r=NN", "<hash>"
-  if parts.len() != 5 {
-    return false;
-  }
-
-  // Validate algorithm identifier
-  if parts[1] != "bcrypt" {
-    return false;
-  }
-
-  // Validate version (must be "v=98")
-  if parts[2] != "v=98" {
-    return false;
-  }
-
-  // Validate rounds format: must start with "r=" and have a valid number
-  let rounds_part = parts[3];
-  if !rounds_part.starts_with("r=") {
-    return false;
-  }
-  let rounds_str = &rounds_part[2..];
-  if rounds_str.is_empty() {
-    return false;
-  }
-  if rounds_str.parse::<u32>().is_err() {
-    return false;
-  }
-
-  // Validate hash part: must be non-empty
-  // Standard bcrypt hash part (after rounds) is 53 characters:
-  // 22 chars salt + 31 chars hash
-  let hash_part = parts[4];
-  if hash_part.is_empty() {
-    return false;
-  }
-
-  true
-}
-
-/// Verify password against bcrypt hash
-///
-/// Uses the bcrypt crate for proper verification.
-/// Supports both standard bcrypt format ($2a$, $2b$, $2y$) and
-/// PHC format ($bcrypt$v=98$r=<rounds>$<hash>).
-fn verify_bcrypt_password(password: &str, hash: &str) -> bool {
-  // Try standard bcrypt format first ($2a$, $2b$, $2y$)
-  if hash.starts_with("$2a$")
-    || hash.starts_with("$2b$")
-    || hash.starts_with("$2y$")
-  {
-    return bcrypt::verify(password, hash).unwrap_or(false);
-  }
-
-  // Handle PHC format: $bcrypt$v=98$r=<rounds>$<hash>
-  // Convert to standard format for bcrypt crate
-  if hash.starts_with("$bcrypt$") {
-    return verify_phc_bcrypt(password, hash);
-  }
-
-  false
-}
-
-/// Verify password against PHC format bcrypt hash
-///
-/// PHC format per architecture document: $bcrypt$v=98$r=<rounds>$<hash>
-/// Where <hash> is the complete bcrypt hash (salt + actual hash combined)
-///
-/// Parts after splitting by '$':
-/// - parts[0] = "" (empty, before first $)
-/// - parts[1] = "bcrypt" (algorithm identifier)
-/// - parts[2] = "v=98" (version)
-/// - parts[3] = "r=<rounds>" (rounds parameter)
-/// - parts[4] = <hash> (complete bcrypt hash: salt+hash combined)
-fn verify_phc_bcrypt(password: &str, phc_hash: &str) -> bool {
-  // Parse PHC format manually
-  // Expected: $bcrypt$v=98$r=<rounds>$<hash>
-  let parts: Vec<&str> = phc_hash.split('$').collect();
-
-  // Validate parts count: exactly 5 parts per architecture document
-  if parts.len() != 5 {
-    return false;
-  }
-
-  // Extract rounds from parts[3]
-  let rounds_part = parts[3];
-  let rounds = match rounds_part.strip_prefix("r=") {
-    Some(r) => match r.parse::<u32>() {
-      Ok(v) => v,
-      Err(_) => return false,
-    },
-    None => return false,
-  };
-
-  // Get the hash part from parts[4]
-  // This is the complete bcrypt hash (salt + actual hash combined)
-  let hash_part = parts[4];
-
-  // Build standard bcrypt hash
-  // Standard format: $2b$<rounds>$<hash>
-  // Note: bcrypt requires rounds to be formatted as two digits (e.g., 04, 12)
-  let standard_hash = format!("$2b${:02}${}", rounds, hash_part);
-
-  bcrypt::verify(password, &standard_hash).unwrap_or(false)
-}
-
 // ============================================================================
 // HTTP/3 Connection Handler
 // ============================================================================
@@ -1056,7 +790,7 @@ pub fn verify_tls_client_cert(
 async fn handle_h3_connection(
   conn: quinn::Connection,
   service: plugin::Service,
-  auth_config: AuthConfig,
+  auth_config: Option<crate::auth::AuthConfig>,
   stream_tracker: Rc<StreamTracker>,
   shutdown_handle: plugin::ShutdownHandle,
 ) {
@@ -1064,7 +798,9 @@ async fn handle_h3_connection(
   // This is required to prevent TLS client cert bypass vulnerability.
   // Per architecture doc section 5.3.2, when TlsClientCert auth is configured,
   // we must verify that the peer presented a valid client certificate.
-  if matches!(auth_config, AuthConfig::TlsClientCert { .. }) {
+  if let Some(ref config) = auth_config
+    && matches!(config.auth_type, AuthType::TlsClientCert)
+  {
     let verify_result = verify_tls_client_cert(conn.peer_identity());
     match verify_result {
       TlsClientCertVerifyResult::Valid => {
@@ -1197,7 +933,7 @@ fn verify_key_file_permissions(key_path: &str) -> Result<()> {
 fn load_tls_config(
   cert_path: &str,
   key_path: &str,
-  auth_config: &AuthConfig,
+  auth_config: Option<&crate::auth::AuthConfig>,
 ) -> Result<Arc<rustls::ServerConfig>> {
   // Verify private key file permissions before loading
   verify_key_file_permissions(key_path)?;
@@ -1222,43 +958,40 @@ fn load_tls_config(
 
   // Build TLS config based on auth type
   let tls_config = match auth_config {
-    AuthConfig::None | AuthConfig::Password { .. } => {
+    None => {
       let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
       config.alpn_protocols = vec![ALPN.to_vec()];
       config
     }
-    AuthConfig::TlsClientCert { client_ca_path } => {
-      let ca_file =
-        fs::File::open(client_ca_path).with_context(|| {
-          format!("Failed to open client CA file: {:?}", client_ca_path)
-        })?;
-      let mut ca_reader = std::io::BufReader::new(ca_file);
-      let ca_certs: Vec<CertificateDer> =
-        rustls_pemfile::certs(&mut ca_reader)
-          .collect::<Result<Vec<_>, _>>()
-          .with_context(|| "Failed to parse client CA certificates")?;
+    Some(config) => {
+      match config.auth_type {
+        AuthType::Password => {
+          let mut tls_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)?;
+          tls_config.alpn_protocols = vec![ALPN.to_vec()];
+          tls_config
+        }
+        AuthType::TlsClientCert => {
+          let client_ca_path =
+            config.client_ca_pathbuf().ok_or_else(|| {
+              anyhow!(
+                "client_ca_path required for tls_client_cert auth"
+              )
+            })?;
 
-      let mut root_store = RootCertStore::empty();
-      for cert in ca_certs {
-        root_store.add(cert)?;
+          // Use TlsClientCertVerifier from auth module
+          let verifier =
+            TlsClientCertVerifier::from_ca_path(&client_ca_path)?;
+          let mut tls_config = rustls::ServerConfig::builder()
+            .with_client_cert_verifier(verifier.verifier())
+            .with_single_cert(certs, key)?;
+          tls_config.alpn_protocols = vec![ALPN.to_vec()];
+          tls_config
+        }
       }
-
-      // Build the client certificate verifier.
-      // Note: We do NOT call allow_unauthenticated() here, which means
-      // the verifier will REJECT clients that do not present a valid
-      // certificate signed by the configured CA. This is the secure
-      // default behavior required for TLS client certificate authentication.
-      // Per rustls API: calling allow_unauthenticated() would allow
-      // clients without certificates to connect, which is NOT desired.
-      let verifier =
-        WebPkiClientVerifier::builder(root_store.into()).build()?;
-      let mut config = rustls::ServerConfig::builder()
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(certs, key)?;
-      config.alpn_protocols = vec![ALPN.to_vec()];
-      config
     }
   };
 
@@ -1277,8 +1010,8 @@ pub struct Http3Listener {
   tls_config: Arc<rustls::ServerConfig>,
   /// QUIC configuration
   quic_config: QuicConfig,
-  /// Authentication configuration
-  auth_config: AuthConfig,
+  /// Authentication configuration (None = no auth required)
+  auth_config: Option<crate::auth::AuthConfig>,
   /// Stream tracker
   stream_tracker: Rc<StreamTracker>,
   /// Shutdown handle
@@ -1309,11 +1042,23 @@ impl Http3Listener {
     };
 
     // Parse authentication config
-    let auth_config = AuthConfig::from_args(args.auth)?;
+    let auth_config: Option<crate::auth::AuthConfig> = args
+      .auth
+      .map(|a| {
+        crate::auth::AuthConfig::from_yaml(
+          a,
+          &[AuthType::Password, AuthType::TlsClientCert],
+        )
+      })
+      .transpose()
+      .map_err(|e| anyhow!("auth config validation failed: {}", e))?;
 
     // Load TLS config
-    let tls_config =
-      load_tls_config(&args.cert_path, &args.key_path, &auth_config)?;
+    let tls_config = load_tls_config(
+      &args.cert_path,
+      &args.key_path,
+      auth_config.as_ref(),
+    )?;
 
     Ok(plugin::Listener::new(Self {
       address,
@@ -1507,26 +1252,6 @@ mod tests {
   use super::*;
   use http_body::Body;
 
-  /// Helper function to generate a real bcrypt hash for testing.
-  /// Uses cost 4 for fast test execution.
-  fn make_test_bcrypt_hash(password: &str) -> String {
-    bcrypt::hash(password, 4).expect("Failed to generate bcrypt hash")
-  }
-
-  /// Helper function to generate a real bcrypt hash in $2a$ format.
-  fn make_test_bcrypt_hash_2a(password: &str) -> String {
-    let hash = make_test_bcrypt_hash(password);
-    // bcrypt crate generates $2b$ by default, convert to $2a$
-    hash.replace("$2b$", "$2a$")
-  }
-
-  /// Helper function to generate a real bcrypt hash in $2y$ format.
-  fn make_test_bcrypt_hash_2y(password: &str) -> String {
-    let hash = make_test_bcrypt_hash(password);
-    // bcrypt crate generates $2b$ by default, convert to $2y$
-    hash.replace("$2b$", "$2y$")
-  }
-
   // ============== QuicConfigArgs Tests ==============
 
   #[test]
@@ -1681,446 +1406,111 @@ mod tests {
   }
 
   // ============== AuthConfig Tests ==============
+  // Tests for the new auth module integration
 
   #[test]
   fn test_auth_config_none() {
-    let result = AuthConfig::from_args(None);
-    assert!(matches!(result, Ok(AuthConfig::None)));
+    // No auth configured (None) should work
+    let args = Http3ListenerArgs {
+      address: "0.0.0.0:443".to_string(),
+      cert_path: "/path/cert.pem".to_string(),
+      key_path: "/path/key.pem".to_string(),
+      auth: None,
+      quic: None,
+    };
+    assert!(args.auth.is_none());
   }
 
   #[test]
-  fn test_auth_config_password_valid() {
-    let hash = make_test_bcrypt_hash("test_password");
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![Credential {
-        username: "user".to_string(),
-        password_hash: hash,
-      }]),
-      client_ca_path: None,
-    };
-    let result = AuthConfig::from_args(Some(args));
-    match result {
-      Ok(AuthConfig::Password { credentials }) => {
-        assert!(credentials.contains_key("user"));
-        // Verify the hash is a valid 60-character bcrypt hash
-        let stored_hash = credentials.get("user").unwrap();
-        assert_eq!(stored_hash.len(), 60);
-        assert!(stored_hash.starts_with("$2b$"));
-      }
-      _ => panic!("Expected Password variant"),
-    }
-  }
-
-  #[test]
-  fn test_auth_config_password_missing_credentials() {
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: None,
-      client_ca_path: None,
-    };
-    let result = AuthConfig::from_args(Some(args));
-    assert!(result.is_err());
-  }
-
-  #[test]
-  fn test_auth_config_password_empty_credentials() {
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![]),
-      client_ca_path: None,
-    };
-    let result = AuthConfig::from_args(Some(args));
-    assert!(result.is_err());
-  }
-
-  #[test]
-  fn test_auth_config_password_invalid_hash_format() {
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![Credential {
-        username: "user".to_string(),
-        password_hash: "invalid_hash".to_string(),
-      }]),
-      client_ca_path: None,
-    };
-    let result = AuthConfig::from_args(Some(args));
-    assert!(result.is_err());
-  }
-
-  #[test]
-  fn test_auth_config_password_standard_bcrypt_2a_format() {
-    // Standard bcrypt $2a$ format should be accepted
-    let hash = make_test_bcrypt_hash_2a("test_password");
-    assert!(hash.starts_with("$2a$"));
-    assert_eq!(hash.len(), 60);
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![Credential {
-        username: "user".to_string(),
-        password_hash: hash,
-      }]),
-      client_ca_path: None,
-    };
-    let result = AuthConfig::from_args(Some(args));
+  fn test_auth_config_password_plaintext() {
+    // Test that plaintext password format works with new auth module
+    let yaml = r#"
+type: password
+users:
+  - username: admin
+    password: plaintext_secret
+"#;
+    let yaml_value: serde_yaml::Value =
+      serde_yaml::from_str(yaml).expect("parse yaml");
+    let result = crate::auth::AuthConfig::from_yaml(
+      yaml_value,
+      &[AuthType::Password, AuthType::TlsClientCert],
+    );
     assert!(result.is_ok());
+    let config = result.unwrap();
+    assert_eq!(config.auth_type, AuthType::Password);
+    let users = config.users_map().expect("users should exist");
+    assert_eq!(
+      users.get("admin"),
+      Some(&"plaintext_secret".to_string())
+    );
   }
 
   #[test]
-  fn test_auth_config_password_standard_bcrypt_2b_format() {
-    // Standard bcrypt $2b$ format should be accepted
-    let hash = make_test_bcrypt_hash("test_password");
-    assert!(hash.starts_with("$2b$"));
-    assert_eq!(hash.len(), 60);
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![Credential {
-        username: "user".to_string(),
-        password_hash: hash,
-      }]),
-      client_ca_path: None,
-    };
-    let result = AuthConfig::from_args(Some(args));
+  fn test_auth_config_tls_client_cert() {
+    // Test that TLS client cert format works with new auth module
+    let yaml = r#"
+type: tls_client_cert
+client_ca_path: /path/to/ca.pem
+"#;
+    let yaml_value: serde_yaml::Value =
+      serde_yaml::from_str(yaml).expect("parse yaml");
+    let result = crate::auth::AuthConfig::from_yaml(
+      yaml_value,
+      &[AuthType::Password, AuthType::TlsClientCert],
+    );
     assert!(result.is_ok());
+    let config = result.unwrap();
+    assert_eq!(config.auth_type, AuthType::TlsClientCert);
+    assert_eq!(
+      config.client_ca_pathbuf(),
+      Some(std::path::PathBuf::from("/path/to/ca.pem"))
+    );
   }
 
   #[test]
-  fn test_auth_config_password_standard_bcrypt_2y_format() {
-    // Standard bcrypt $2y$ format should be accepted
-    let hash = make_test_bcrypt_hash_2y("test_password");
-    assert!(hash.starts_with("$2y$"));
-    assert_eq!(hash.len(), 60);
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![Credential {
-        username: "user".to_string(),
-        password_hash: hash,
-      }]),
-      client_ca_path: None,
-    };
-    let result = AuthConfig::from_args(Some(args));
-    assert!(result.is_ok());
-  }
-
-  #[test]
-  fn test_auth_config_password_non_standard_2x_format_rejected() {
-    // Non-standard bcrypt $2x$ format should be rejected
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![Credential {
-        username: "user".to_string(),
-        password_hash: "$2x$12$N9qo8yuLO94gxOM6PZ".to_string(),
-      }]),
-      client_ca_path: None,
-    };
-    let result = AuthConfig::from_args(Some(args));
+  fn test_auth_config_password_missing_users() {
+    // Password auth without users should fail
+    let yaml = r#"
+type: password
+"#;
+    let yaml_value: serde_yaml::Value =
+      serde_yaml::from_str(yaml).expect("parse yaml");
+    let result = crate::auth::AuthConfig::from_yaml(
+      yaml_value,
+      &[AuthType::Password, AuthType::TlsClientCert],
+    );
     assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("Invalid password hash format"));
-  }
-
-  #[test]
-  fn test_auth_config_password_non_standard_2z_format_rejected() {
-    // Non-standard bcrypt $2z$ format should be rejected
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![Credential {
-        username: "user".to_string(),
-        password_hash: "$2z$12$N9qo8yuLO94gxOM6PZ".to_string(),
-      }]),
-      client_ca_path: None,
-    };
-    let result = AuthConfig::from_args(Some(args));
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("Invalid password hash format"));
-  }
-
-  #[test]
-  fn test_auth_config_password_non_standard_2_format_without_letter_rejected()
-   {
-    // Non-standard format $2$ (without letter) should be rejected
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![Credential {
-        username: "user".to_string(),
-        password_hash: "$2$12$N9qo8yuLO94gxOM6PZ".to_string(),
-      }]),
-      client_ca_path: None,
-    };
-    let result = AuthConfig::from_args(Some(args));
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("Invalid password hash format"));
-  }
-
-  #[test]
-  fn test_auth_config_password_phc_bcrypt_format() {
-    // PHC format $bcrypt$ should be accepted
-    // Generate a real bcrypt hash and convert to PHC format
-    let bcrypt_hash = make_test_bcrypt_hash("test_password");
-    // bcrypt_hash format: $2b$04$<22-char-salt><31-char-hash>
-    // Extract the salt+hash part (after $2b$04$)
-    // Position 7 onwards is the salt+hash (53 chars)
-    // PHC format: $bcrypt$v=98$r=4$<salt><hash>
-    let salt_hash_part = &bcrypt_hash[7..]; // Just the salt+hash
-    let phc_hash = format!("$bcrypt$v=98$r=4${}", salt_hash_part);
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![Credential {
-        username: "user".to_string(),
-        password_hash: phc_hash,
-      }]),
-      client_ca_path: None,
-    };
-    let result = AuthConfig::from_args(Some(args));
-    assert!(result.is_ok());
-  }
-
-  #[test]
-  fn test_auth_config_tls_client_cert_valid() {
-    let args = AuthConfigArgs {
-      auth_type: "tls_client_cert".to_string(),
-      credentials: None,
-      client_ca_path: Some("/path/to/ca.pem".to_string()),
-    };
-    let result = AuthConfig::from_args(Some(args));
-    match result {
-      Ok(AuthConfig::TlsClientCert { client_ca_path }) => {
-        assert_eq!(client_ca_path, PathBuf::from("/path/to/ca.pem"));
-      }
-      _ => panic!("Expected TlsClientCert variant"),
-    }
   }
 
   #[test]
   fn test_auth_config_tls_client_cert_missing_path() {
-    let args = AuthConfigArgs {
-      auth_type: "tls_client_cert".to_string(),
-      credentials: None,
-      client_ca_path: None,
-    };
-    let result = AuthConfig::from_args(Some(args));
+    // TLS client cert without path should fail
+    let yaml = r#"
+type: tls_client_cert
+"#;
+    let yaml_value: serde_yaml::Value =
+      serde_yaml::from_str(yaml).expect("parse yaml");
+    let result = crate::auth::AuthConfig::from_yaml(
+      yaml_value,
+      &[AuthType::Password, AuthType::TlsClientCert],
+    );
     assert!(result.is_err());
   }
 
   #[test]
   fn test_auth_config_invalid_type() {
-    let args = AuthConfigArgs {
-      auth_type: "invalid".to_string(),
-      credentials: None,
-      client_ca_path: None,
-    };
-    let result = AuthConfig::from_args(Some(args));
+    // Invalid auth type should fail
+    let yaml = r#"
+type: invalid_type
+"#;
+    let yaml_value: serde_yaml::Value =
+      serde_yaml::from_str(yaml).expect("parse yaml");
+    let result = crate::auth::AuthConfig::from_yaml(
+      yaml_value,
+      &[AuthType::Password, AuthType::TlsClientCert],
+    );
     assert!(result.is_err());
-  }
-
-  #[test]
-  fn test_auth_config_password_with_client_ca_path_conflict() {
-    let hash = make_test_bcrypt_hash("test_password");
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![Credential {
-        username: "user".to_string(),
-        password_hash: hash,
-      }]),
-      client_ca_path: Some("/path/to/ca.pem".to_string()),
-    };
-    let result = AuthConfig::from_args(Some(args));
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("Configuration conflict"));
-    assert!(err_msg.contains("client_ca_path"));
-    assert!(err_msg.contains("password"));
-  }
-
-  #[test]
-  fn test_auth_config_tls_client_cert_with_credentials_conflict() {
-    let hash = make_test_bcrypt_hash("test_password");
-    let args = AuthConfigArgs {
-      auth_type: "tls_client_cert".to_string(),
-      credentials: Some(vec![Credential {
-        username: "user".to_string(),
-        password_hash: hash,
-      }]),
-      client_ca_path: Some("/path/to/ca.pem".to_string()),
-    };
-    let result = AuthConfig::from_args(Some(args));
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("Configuration conflict"));
-    assert!(err_msg.contains("credentials"));
-    assert!(err_msg.contains("tls_client_cert"));
-  }
-
-  // ============== Password Verification with Real Hash Tests ==============
-
-  #[test]
-  fn test_password_verification_success_with_real_hash() {
-    // Test that password verification works with real bcrypt hashes
-    let password = "correct_password";
-    let hash = bcrypt::hash(password, 4).unwrap();
-
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![Credential {
-        username: "testuser".to_string(),
-        password_hash: hash.clone(),
-      }]),
-      client_ca_path: None,
-    };
-
-    // Parse config
-    let result = AuthConfig::from_args(Some(args)).unwrap();
-    match result {
-      AuthConfig::Password { credentials } => {
-        // Verify correct password
-        assert!(verify_password(&credentials, "testuser", password));
-        // Verify the hash is 60 characters
-        assert_eq!(credentials.get("testuser").unwrap().len(), 60);
-      }
-      _ => panic!("Expected Password variant"),
-    }
-  }
-
-  #[test]
-  fn test_password_verification_failure_wrong_password() {
-    // Test that password verification fails with wrong password
-    let correct_password = "correct_password";
-    let wrong_password = "wrong_password";
-    let hash = bcrypt::hash(correct_password, 4).unwrap();
-
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![Credential {
-        username: "testuser".to_string(),
-        password_hash: hash,
-      }]),
-      client_ca_path: None,
-    };
-
-    // Parse config
-    let result = AuthConfig::from_args(Some(args)).unwrap();
-    match result {
-      AuthConfig::Password { credentials } => {
-        // Verify wrong password fails
-        assert!(!verify_password(
-          &credentials,
-          "testuser",
-          wrong_password
-        ));
-      }
-      _ => panic!("Expected Password variant"),
-    }
-  }
-
-  #[test]
-  fn test_password_verification_failure_unknown_user() {
-    // Test that password verification fails for unknown user
-    let hash = bcrypt::hash("password", 4).unwrap();
-
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![Credential {
-        username: "known_user".to_string(),
-        password_hash: hash,
-      }]),
-      client_ca_path: None,
-    };
-
-    // Parse config
-    let result = AuthConfig::from_args(Some(args)).unwrap();
-    match result {
-      AuthConfig::Password { credentials } => {
-        // Verify unknown user fails
-        assert!(!verify_password(
-          &credentials,
-          "unknown_user",
-          "password"
-        ));
-      }
-      _ => panic!("Expected Password variant"),
-    }
-  }
-
-  #[test]
-  fn test_password_verification_multiple_users() {
-    // Test password verification with multiple users
-    let hash1 = bcrypt::hash("password1", 4).unwrap();
-    let hash2 = bcrypt::hash("password2", 4).unwrap();
-    let hash3 = bcrypt::hash("password3", 4).unwrap();
-
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![
-        Credential {
-          username: "user1".to_string(),
-          password_hash: hash1,
-        },
-        Credential {
-          username: "user2".to_string(),
-          password_hash: hash2,
-        },
-        Credential {
-          username: "user3".to_string(),
-          password_hash: hash3,
-        },
-      ]),
-      client_ca_path: None,
-    };
-
-    // Parse config
-    let result = AuthConfig::from_args(Some(args)).unwrap();
-    match result {
-      AuthConfig::Password { credentials } => {
-        // Verify each user with correct password
-        assert!(verify_password(&credentials, "user1", "password1"));
-        assert!(verify_password(&credentials, "user2", "password2"));
-        assert!(verify_password(&credentials, "user3", "password3"));
-
-        // Verify wrong passwords fail
-        assert!(!verify_password(&credentials, "user1", "wrong"));
-        assert!(!verify_password(&credentials, "user2", "password1"));
-        assert!(!verify_password(&credentials, "user3", "password2"));
-      }
-      _ => panic!("Expected Password variant"),
-    }
-  }
-
-  #[test]
-  fn test_password_verification_phc_format_real_hash() {
-    // Test password verification with real PHC format hash
-    let password = "test_password";
-    let bcrypt_hash = bcrypt::hash(password, 4).unwrap();
-
-    // Convert to PHC format
-    // bcrypt_hash format: $2b$04$<salt><hash>
-    // Position 0-6: "$2b$04$" (7 chars)
-    // Position 7 onwards: <salt><hash> (53 chars)
-    // PHC format: $bcrypt$v=98$r=4$<salt><hash>
-    let salt_hash_part = &bcrypt_hash[7..]; // Just the salt+hash, no leading $
-    let phc_hash = format!("$bcrypt$v=98$r=4${}", salt_hash_part);
-
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![Credential {
-        username: "user".to_string(),
-        password_hash: phc_hash,
-      }]),
-      client_ca_path: None,
-    };
-
-    // Parse config
-    let result = AuthConfig::from_args(Some(args)).unwrap();
-    match result {
-      AuthConfig::Password { credentials } => {
-        // Verify correct password with PHC format hash
-        assert!(verify_password(&credentials, "user", password));
-        // Verify wrong password fails
-        assert!(!verify_password(&credentials, "user", "wrong"));
-      }
-      _ => panic!("Expected Password variant"),
-    }
   }
 
   // ============== StreamTracker Tests ==============
@@ -2330,50 +1720,6 @@ mod tests {
     assert!(result.is_err());
   }
 
-  // ============== Password Verification Tests ==============
-
-  #[test]
-  fn test_verify_password_valid() {
-    // Create a real bcrypt hash for password "test_password"
-    // Using cost 4 for fast test execution
-    let hash =
-      bcrypt::hash("test_password", bcrypt::DEFAULT_COST).unwrap();
-    let mut credentials = HashMap::new();
-    credentials.insert("user".to_string(), hash);
-    assert!(verify_password(&credentials, "user", "test_password"));
-  }
-
-  #[test]
-  fn test_verify_password_user_not_found() {
-    let credentials = HashMap::new();
-    assert!(!verify_password(&credentials, "nonexistent", "password"));
-  }
-
-  #[test]
-  fn test_verify_password_wrong_password() {
-    let hash =
-      bcrypt::hash("correct_password", bcrypt::DEFAULT_COST).unwrap();
-    let mut credentials = HashMap::new();
-    credentials.insert("user".to_string(), hash);
-    assert!(!verify_password(&credentials, "user", "wrongpassword"));
-  }
-
-  #[test]
-  fn test_verify_bcrypt_password_standard_format() {
-    // Test standard bcrypt format ($2b$)
-    let hash =
-      bcrypt::hash("test_password", bcrypt::DEFAULT_COST).unwrap();
-    assert!(verify_bcrypt_password("test_password", &hash));
-    assert!(!verify_bcrypt_password("wrong_password", &hash));
-  }
-
-  #[test]
-  fn test_verify_bcrypt_password_invalid_hash() {
-    // Test with invalid hash format
-    assert!(!verify_bcrypt_password("password", "invalid_hash"));
-    assert!(!verify_bcrypt_password("password", ""));
-  }
-
   // ============== Listener Name Tests ==============
 
   #[test]
@@ -2405,12 +1751,7 @@ key_path: "/path/to/key.pem"
 
   #[test]
   fn test_http3_listener_args_deserialize_full() {
-    // Use real 60-character bcrypt hashes
-    let hash1 =
-      "$2b$04$3h3ttjZZG/A6RUab.r68VeU9EvGO9XbuhVG0LT8FhfDtC4p5c2wr.";
-    let hash2 = "$bcrypt$v=98$r=4$3h3ttjZZG/A6RUab.r68VeU9EvGO9XbuhVG0LT8FhfDtC4p5c2wr.";
-    let yaml = format!(
-      r#"
+    let yaml = r#"
 address: "0.0.0.0:443"
 cert_path: "/path/to/cert.pem"
 key_path: "/path/to/key.pem"
@@ -2421,25 +1762,17 @@ quic:
   send_window: 20971520
   receive_window: 20971520
 auth:
-  type: "password"
-  credentials:
-    - username: "user1"
-      password_hash: "{}"
-    - username: "user2"
-      password_hash: "{}"
-"#,
-      hash1, hash2
-    );
-    let args: Http3ListenerArgs = serde_yaml::from_str(&yaml).unwrap();
+  type: password
+  users:
+    - username: user1
+      password: secret123
+    - username: user2
+      password: secret456
+"#;
+    let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(args.address, "0.0.0.0:443");
     assert!(args.quic.is_some());
     assert!(args.auth.is_some());
-
-    let auth = args.auth.unwrap();
-    assert_eq!(auth.auth_type, "password");
-    assert!(auth.credentials.is_some());
-    let creds = auth.credentials.unwrap();
-    assert_eq!(creds.len(), 2);
   }
 
   #[test]
@@ -2450,26 +1783,6 @@ address: "0.0.0.0:443"
     let result: Result<Http3ListenerArgs, _> =
       serde_yaml::from_str(yaml);
     assert!(result.is_err());
-  }
-
-  // ============== Credential Tests ==============
-
-  #[test]
-  fn test_credential_deserialize() {
-    // Use a real 60-character bcrypt hash
-    let real_hash =
-      "$2b$04$iawht21wlD8wD2Otvv2lOOYb0J/hq5.E3LK.d1RVMEuO4HLwXzAOC";
-    let yaml = format!(
-      r#"
-username: "testuser"
-password_hash: "{}"
-"#,
-      real_hash
-    );
-    let cred: Credential = serde_yaml::from_str(&yaml).unwrap();
-    assert_eq!(cred.username, "testuser");
-    assert_eq!(cred.password_hash, real_hash);
-    assert_eq!(cred.password_hash.len(), 60);
   }
 
   // ============== Constants Tests ==============
@@ -2525,54 +1838,6 @@ password_hash: "{}"
     assert_eq!(resp.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
   }
 
-  // ============== Additional Password Verification Tests ==============
-
-  #[test]
-  fn test_verify_bcrypt_password_with_2a_format() {
-    // Test with $2a$ format
-    let hash = bcrypt::hash("password123", 4).unwrap();
-    // Convert $2b$ to $2a$ for testing
-    let hash_2a = hash.replace("$2b$", "$2a$");
-    assert!(verify_bcrypt_password("password123", &hash_2a));
-    assert!(!verify_bcrypt_password("wrong", &hash_2a));
-  }
-
-  #[test]
-  fn test_verify_bcrypt_password_with_2y_format() {
-    // Test with $2y$ format
-    let hash = bcrypt::hash("password123", 4).unwrap();
-    let hash_2y = hash.replace("$2b$", "$2y$");
-    assert!(verify_bcrypt_password("password123", &hash_2y));
-    assert!(!verify_bcrypt_password("wrong", &hash_2y));
-  }
-
-  #[test]
-  fn test_verify_password_with_real_bcrypt_hash() {
-    let hash = bcrypt::hash("mypassword", 4).unwrap();
-    let mut credentials = HashMap::new();
-    credentials.insert("user".to_string(), hash);
-    assert!(verify_password(&credentials, "user", "mypassword"));
-    assert!(!verify_password(&credentials, "user", "wrongpassword"));
-  }
-
-  #[test]
-  fn test_verify_bcrypt_password_empty_password() {
-    let hash = bcrypt::hash("", 4).unwrap();
-    assert!(verify_bcrypt_password("", &hash));
-    assert!(!verify_bcrypt_password("something", &hash));
-  }
-
-  #[test]
-  fn test_verify_bcrypt_password_empty_hash() {
-    assert!(!verify_bcrypt_password("password", ""));
-  }
-
-  #[test]
-  fn test_verify_bcrypt_password_malformed_hash() {
-    assert!(!verify_bcrypt_password("password", "$2a$invalid"));
-    assert!(!verify_bcrypt_password("password", "$bcrypt$invalid"));
-  }
-
   // ============== Additional StreamTracker Tests ==============
 
   #[tokio::test]
@@ -2625,65 +1890,6 @@ password_hash: "{}"
       .await;
   }
 
-  // ============== AuthConfig Additional Tests ==============
-
-  #[test]
-  fn test_auth_config_password_multiple_credentials() {
-    let hash1 = make_test_bcrypt_hash_2a("password1");
-    let hash2 = make_test_bcrypt_hash("password2");
-    let hash3 = make_test_bcrypt_hash_2y("password3");
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![
-        Credential {
-          username: "user1".to_string(),
-          password_hash: hash1,
-        },
-        Credential {
-          username: "user2".to_string(),
-          password_hash: hash2,
-        },
-        Credential {
-          username: "user3".to_string(),
-          password_hash: hash3,
-        },
-      ]),
-      client_ca_path: None,
-    };
-    let result = AuthConfig::from_args(Some(args));
-    match result {
-      Ok(AuthConfig::Password { credentials }) => {
-        assert_eq!(credentials.len(), 3);
-        assert!(credentials.contains_key("user1"));
-        assert!(credentials.contains_key("user2"));
-        assert!(credentials.contains_key("user3"));
-      }
-      _ => panic!("Expected Password variant"),
-    }
-  }
-
-  #[test]
-  fn test_auth_config_password_bcrypt_phc_format() {
-    // Test that PHC bcrypt format is accepted during config parsing
-    // Generate a real bcrypt hash and convert to PHC format
-    let bcrypt_hash = make_test_bcrypt_hash("test_password");
-    // Extract the salt+hash part (after $2b$04$)
-    // Position 7 onwards is the salt+hash (53 chars)
-    // PHC format: $bcrypt$v=98$r=4$<salt><hash>
-    let salt_hash_part = &bcrypt_hash[7..];
-    let phc_hash = format!("$bcrypt$v=98$r=4${}", salt_hash_part);
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![Credential {
-        username: "user".to_string(),
-        password_hash: phc_hash,
-      }]),
-      client_ca_path: None,
-    };
-    let result = AuthConfig::from_args(Some(args));
-    assert!(result.is_ok());
-  }
-
   // ============== QuicConfigArgs Edge Cases ==============
 
   #[test]
@@ -2729,7 +1935,7 @@ key_path: "/etc/ssl/key.pem"
 quic:
   max_concurrent_bidi_streams: 50
 auth:
-  type: "tls_client_cert"
+  type: tls_client_cert
   client_ca_path: "/etc/ssl/client-ca.pem"
 "#;
     let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
@@ -2739,395 +1945,6 @@ auth:
 
     let quic = args.quic.unwrap();
     assert_eq!(quic.max_concurrent_bidi_streams, Some(50));
-
-    let auth = args.auth.unwrap();
-    assert_eq!(auth.auth_type, "tls_client_cert");
-    assert_eq!(
-      auth.client_ca_path,
-      Some("/etc/ssl/client-ca.pem".to_string())
-    );
-  }
-
-  // ============== bcrypt Format Validation Tests ==============
-
-  #[test]
-  fn test_is_valid_bcrypt_format_standard_2a() {
-    let hash = make_test_bcrypt_hash_2a("test_password");
-    assert!(is_valid_bcrypt_format(&hash));
-    assert_eq!(hash.len(), 60);
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_standard_2b() {
-    let hash = make_test_bcrypt_hash("test_password");
-    assert!(is_valid_bcrypt_format(&hash));
-    assert_eq!(hash.len(), 60);
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_standard_2y() {
-    let hash = make_test_bcrypt_hash_2y("test_password");
-    assert!(is_valid_bcrypt_format(&hash));
-    assert_eq!(hash.len(), 60);
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_phc() {
-    // Generate real PHC format hash
-    let bcrypt_hash = make_test_bcrypt_hash("test_password");
-    // Position 7 onwards is the salt+hash
-    let salt_hash_part = &bcrypt_hash[7..];
-    let phc_hash = format!("$bcrypt$v=98$r=4${}", salt_hash_part);
-    assert!(is_valid_bcrypt_format(&phc_hash));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_non_standard_2x_rejected() {
-    // $2x$ is not a standard bcrypt format and should be rejected
-    assert!(!is_valid_bcrypt_format("$2x$12$N9qo8yuLO94gxOM6PZ"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_non_standard_2z_rejected() {
-    // $2z$ is not a standard bcrypt format and should be rejected
-    assert!(!is_valid_bcrypt_format("$2z$12$N9qo8yuLO94gxOM6PZ"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_non_standard_2_without_letter_rejected()
-   {
-    // $2$ without a letter is not a valid bcrypt format
-    assert!(!is_valid_bcrypt_format("$2$12$N9qo8yuLO94gxOM6PZ"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_invalid_prefix_rejected() {
-    // Completely invalid prefix should be rejected
-    assert!(!is_valid_bcrypt_format("invalid_hash"));
-    assert!(!is_valid_bcrypt_format("$3a$12$N9qo8yuLO94gxOM6PZ"));
-  }
-
-  // ============== Incomplete Hash Rejection Tests ==============
-  // These tests verify that incomplete bcrypt hashes are properly
-  // rejected, as per the fix for is_valid_bcrypt_format function.
-
-  #[test]
-  fn test_is_valid_bcrypt_format_incomplete_standard_only_prefix() {
-    // Only the prefix without any content should be rejected
-    assert!(!is_valid_bcrypt_format("$2b$"));
-    assert!(!is_valid_bcrypt_format("$2a$"));
-    assert!(!is_valid_bcrypt_format("$2y$"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_incomplete_standard_with_rounds() {
-    // Prefix with rounds but no salt/hash should be rejected
-    assert!(!is_valid_bcrypt_format("$2b$12$"));
-    assert!(!is_valid_bcrypt_format("$2a$04$"));
-    assert!(!is_valid_bcrypt_format("$2y$10$"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_incomplete_standard_short_hash() {
-    // Short hash (less than 60 chars) should be rejected
-    assert!(!is_valid_bcrypt_format("$2b$12$short"));
-    assert!(!is_valid_bcrypt_format("$2a$12$N9qo8yuLO94"));
-    assert!(!is_valid_bcrypt_format("$2y$12$N9qo8yuLO94gxOM6PZweY"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_incomplete_standard_long_hash() {
-    // Hash longer than 60 chars should also be rejected
-    let valid_hash = make_test_bcrypt_hash("test_password");
-    let long_hash = format!("{}extra", valid_hash);
-    assert!(!is_valid_bcrypt_format(&long_hash));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_incomplete_phc_only_prefix() {
-    // Only $bcrypt$ prefix should be rejected
-    assert!(!is_valid_bcrypt_format("$bcrypt$"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_incomplete_phc_missing_version() {
-    // Missing version part should be rejected
-    assert!(!is_valid_bcrypt_format("$bcrypt$r=12$saltnhash"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_incomplete_phc_missing_rounds() {
-    // Missing rounds part should be rejected
-    assert!(!is_valid_bcrypt_format("$bcrypt$v=98$saltnhash"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_incomplete_phc_invalid_version() {
-    // Invalid version should be rejected (only v=98 is valid)
-    assert!(!is_valid_bcrypt_format("$bcrypt$v=99$r=12$saltnhash"));
-    assert!(!is_valid_bcrypt_format("$bcrypt$v=97$r=12$saltnhash"));
-    assert!(!is_valid_bcrypt_format("$bcrypt$v=100$r=12$saltnhash"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_incomplete_phc_invalid_rounds_format()
-  {
-    // Invalid rounds format should be rejected
-    assert!(!is_valid_bcrypt_format("$bcrypt$v=98$r=abc$saltnhash")); // non-numeric
-    assert!(!is_valid_bcrypt_format(
-      "$bcrypt$v=98$rounds=12$saltnhash"
-    )); // wrong format
-    assert!(!is_valid_bcrypt_format("$bcrypt$v=98$r=$saltnhash")); // empty rounds
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_incomplete_phc_missing_hash() {
-    // Missing hash part should be rejected
-    assert!(!is_valid_bcrypt_format("$bcrypt$v=98$r=12$"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_incomplete_phc_not_enough_parts() {
-    // Not enough parts should be rejected
-    assert!(!is_valid_bcrypt_format("$bcrypt$v=98"));
-    assert!(!is_valid_bcrypt_format("$bcrypt$v=98$r=12"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_valid_standard_60_chars() {
-    // Valid standard bcrypt hash should be exactly 60 chars
-    let hash = make_test_bcrypt_hash("test_password");
-    assert_eq!(hash.len(), 60);
-    assert!(is_valid_bcrypt_format(&hash));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_format_valid_phc_complete_structure() {
-    // Valid PHC format with complete structure
-    let bcrypt_hash = make_test_bcrypt_hash("test_password");
-    let salt_hash_part = &bcrypt_hash[7..]; // after "$2b$NN"
-    let phc_hash = format!("$bcrypt$v=98$r=4${}", salt_hash_part);
-    assert!(is_valid_bcrypt_format(&phc_hash));
-
-    // Also test with different rounds
-    let phc_hash_12 = format!("$bcrypt$v=98$r=12${}", salt_hash_part);
-    assert!(is_valid_bcrypt_format(&phc_hash_12));
-  }
-
-  #[test]
-  fn test_verify_bcrypt_password_standard_formats() {
-    let password = "test_password";
-
-    // Test $2a$ format
-    let hash_2a = bcrypt::hash(password, 4).unwrap();
-    // bcrypt crate uses $2b$ by default, but we can verify it works
-    assert!(verify_bcrypt_password(password, &hash_2a));
-    assert!(!verify_bcrypt_password("wrong", &hash_2a));
-  }
-
-  #[test]
-  fn test_verify_bcrypt_password_non_standard_format_rejected() {
-    // Non-standard $2x$ format should be rejected by verify_bcrypt_password
-    // This test verifies that the function only accepts valid formats
-    assert!(!verify_bcrypt_password(
-      "password",
-      "$2x$12$N9qo8yuLO94gxOM6PZ"
-    ));
-
-    // Non-standard $2z$ format should be rejected
-    assert!(!verify_bcrypt_password(
-      "password",
-      "$2z$12$N9qo8yuLO94gxOM6PZ"
-    ));
-  }
-
-  // ============== PHC Format Password Verification Tests ==============
-
-  /// Helper function to convert standard bcrypt hash to PHC format
-  fn standard_to_phc_format(standard_hash: &str) -> String {
-    // Standard format: $2b$<rounds>$<salt+hash>
-    // PHC format: $bcrypt$v=98$r=<rounds>$<salt+hash>
-    let parts: Vec<&str> = standard_hash.split('$').collect();
-    if parts.len() == 4 {
-      let rounds = parts[2];
-      let salt_hash = parts[3];
-      format!("$bcrypt$v=98$r={}${}", rounds, salt_hash)
-    } else {
-      standard_hash.to_string()
-    }
-  }
-
-  #[test]
-  fn test_verify_bcrypt_password_phc_format_valid() {
-    // Test PHC format with valid password
-    // Generate a standard bcrypt hash
-    let standard_hash = bcrypt::hash("correct_password", 4).unwrap();
-    // Convert to PHC format
-    let phc_hash = standard_to_phc_format(&standard_hash);
-    // Verify with correct password
-    assert!(
-      verify_bcrypt_password("correct_password", &phc_hash),
-      "PHC format should verify correct password"
-    );
-    // Verify with wrong password
-    assert!(
-      !verify_bcrypt_password("wrong_password", &phc_hash),
-      "PHC format should not verify wrong password"
-    );
-  }
-
-  #[test]
-  fn test_verify_bcrypt_password_phc_format_different_rounds() {
-    // Test PHC format with different round counts
-    for cost in [4, 10, 12].iter() {
-      let standard_hash = bcrypt::hash("test_password", *cost).unwrap();
-      let phc_hash = standard_to_phc_format(&standard_hash);
-      assert!(
-        verify_bcrypt_password("test_password", &phc_hash),
-        "PHC format with cost {} should verify correct password",
-        cost
-      );
-      assert!(
-        !verify_bcrypt_password("wrong", &phc_hash),
-        "PHC format with cost {} should not verify wrong password",
-        cost
-      );
-    }
-  }
-
-  #[test]
-  fn test_verify_bcrypt_password_phc_format_empty_password() {
-    // Test PHC format with empty password
-    let standard_hash = bcrypt::hash("", 4).unwrap();
-    let phc_hash = standard_to_phc_format(&standard_hash);
-    assert!(
-      verify_bcrypt_password("", &phc_hash),
-      "PHC format should verify empty password"
-    );
-    assert!(
-      !verify_bcrypt_password("something", &phc_hash),
-      "PHC format should not verify non-empty password when hash is for empty"
-    );
-  }
-
-  #[test]
-  fn test_verify_bcrypt_password_phc_format_invalid_structures() {
-    // Test various invalid PHC format structures
-    // Missing version
-    assert!(!verify_bcrypt_password(
-      "password",
-      "$bcrypt$r=12$saltnhash"
-    ));
-    // Missing rounds
-    assert!(!verify_bcrypt_password(
-      "password",
-      "$bcrypt$v=98$saltnhash"
-    ));
-    // Invalid rounds format
-    assert!(!verify_bcrypt_password(
-      "password",
-      "$bcrypt$v=98$r=abc$saltnhash"
-    ));
-    // Missing hash
-    assert!(!verify_bcrypt_password("password", "$bcrypt$v=98$r=12$"));
-    // Not enough parts
-    assert!(!verify_bcrypt_password("password", "$bcrypt$v=98"));
-    // Invalid prefix in rounds (not starting with "r=")
-    assert!(!verify_bcrypt_password(
-      "password",
-      "$bcrypt$v=98$x=12$saltnhash"
-    ));
-    // Only 3 parts (not enough for PHC)
-    assert!(!verify_bcrypt_password("password", "$bcrypt$v=98"));
-    // Empty rounds value
-    assert!(!verify_bcrypt_password(
-      "password",
-      "$bcrypt$v=98$r=$saltnhash"
-    ));
-  }
-
-  #[test]
-  fn test_verify_bcrypt_password_phc_format_with_invalid_bcrypt_hash() {
-    // Test PHC format with malformed bcrypt hash part
-    // This tests the bcrypt::verify returning an error path
-    let invalid_hash = "$bcrypt$v=98$r=12$invalid_bcrypt_hash";
-    assert!(
-      !verify_bcrypt_password("password", invalid_hash),
-      "PHC format with invalid bcrypt hash should return false"
-    );
-  }
-
-  #[test]
-  fn test_verify_password_with_phc_format() {
-    // Test verify_password function with PHC format
-    let standard_hash = bcrypt::hash("secret123", 4).unwrap();
-    let phc_hash = standard_to_phc_format(&standard_hash);
-
-    let mut credentials = HashMap::new();
-    credentials.insert("testuser".to_string(), phc_hash);
-
-    assert!(
-      verify_password(&credentials, "testuser", "secret123"),
-      "verify_password should verify correct PHC hash"
-    );
-    assert!(
-      !verify_password(&credentials, "testuser", "wrong"),
-      "verify_password should not verify wrong password with PHC hash"
-    );
-    assert!(
-      !verify_password(&credentials, "nonexistent", "secret123"),
-      "verify_password should return false for nonexistent user"
-    );
-  }
-
-  #[test]
-  fn test_verify_bcrypt_password_phc_format_with_special_chars() {
-    // Test PHC format with passwords containing special characters
-    let special_passwords = vec![
-      "p@ssw0rd!",
-      "hello world",
-      "日本語パスワード",
-      "emoji🔐password",
-      "  spaces  ",
-      "tab\tpassword",
-    ];
-
-    for password in special_passwords {
-      let standard_hash = bcrypt::hash(password, 4).unwrap();
-      let phc_hash = standard_to_phc_format(&standard_hash);
-      assert!(
-        verify_bcrypt_password(password, &phc_hash),
-        "PHC format should verify password with special chars: {:?}",
-        password
-      );
-    }
-  }
-
-  #[test]
-  fn test_verify_bcrypt_password_phc_format_long_password() {
-    // Test PHC format with long password (bcrypt truncates to 72 bytes)
-    let long_password = "x".repeat(100);
-    let standard_hash = bcrypt::hash(&long_password, 4).unwrap();
-    let phc_hash = standard_to_phc_format(&standard_hash);
-
-    // Should verify the long password (truncated)
-    assert!(
-      verify_bcrypt_password(&long_password, &phc_hash),
-      "PHC format should verify long password"
-    );
-
-    // Should also verify a 72-byte prefix
-    let truncated = "x".repeat(72);
-    assert!(
-      verify_bcrypt_password(&truncated, &phc_hash),
-      "PHC format should verify truncated password"
-    );
-
-    // Should not verify wrong password
-    assert!(
-      !verify_bcrypt_password(&"y".repeat(100), &phc_hash),
-      "PHC format should not verify wrong password"
-    );
   }
 
   // ============== Additional Http3ListenerArgs Tests ==============
@@ -3219,53 +2036,6 @@ key_path: "/path/to/key.pem"
       .await;
   }
 
-  // ============== AuthConfig Edge Cases ==============
-
-  #[test]
-  fn test_auth_config_password_duplicate_usernames() {
-    // When duplicate usernames are provided, the last one wins
-    let hash1 = make_test_bcrypt_hash_2a("password1");
-    let hash2 = make_test_bcrypt_hash_2a("password2");
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![
-        Credential {
-          username: "user".to_string(),
-          password_hash: hash1.clone(),
-        },
-        Credential {
-          username: "user".to_string(), // duplicate
-          password_hash: hash2.clone(),
-        },
-      ]),
-      client_ca_path: None,
-    };
-    let result = AuthConfig::from_args(Some(args));
-    match result {
-      Ok(AuthConfig::Password { credentials }) => {
-        // HashMap will have only one entry for "user"
-        assert_eq!(credentials.len(), 1);
-        // The last value wins
-        assert_eq!(credentials.get("user").unwrap(), &hash2);
-      }
-      _ => panic!("Expected Password variant"),
-    }
-  }
-
-  // ============== Credential Tests ==============
-
-  #[test]
-  fn test_credential_debug() {
-    let hash = make_test_bcrypt_hash("test_password");
-    let cred = Credential {
-      username: "testuser".to_string(),
-      password_hash: hash,
-    };
-    // Test that Debug trait is implemented
-    let debug_str = format!("{:?}", cred);
-    assert!(debug_str.contains("testuser"));
-  }
-
   // ============== QuicConfigArgs Clone Tests ==============
 
   #[test]
@@ -3300,37 +2070,6 @@ key_path: "/path/to/key.pem"
     );
   }
 
-  // ============== AuthConfig Clone Tests ==============
-
-  #[test]
-  fn test_auth_config_clone() {
-    let config = AuthConfig::None;
-    let cloned = config.clone();
-    assert!(matches!(cloned, AuthConfig::None));
-
-    let mut creds = HashMap::new();
-    creds.insert("user".to_string(), "hash".to_string());
-    let config = AuthConfig::Password { credentials: creds };
-    let cloned = config.clone();
-    match cloned {
-      AuthConfig::Password { credentials } => {
-        assert!(credentials.contains_key("user"));
-      }
-      _ => panic!("Expected Password variant"),
-    }
-
-    let config = AuthConfig::TlsClientCert {
-      client_ca_path: PathBuf::from("/path/to/ca.pem"),
-    };
-    let cloned = config.clone();
-    match cloned {
-      AuthConfig::TlsClientCert { client_ca_path } => {
-        assert_eq!(client_ca_path, PathBuf::from("/path/to/ca.pem"));
-      }
-      _ => panic!("Expected TlsClientCert variant"),
-    }
-  }
-
   // ============== Http3ListenerArgs Clone Tests ==============
 
   #[test]
@@ -3355,23 +2094,6 @@ key_path: "/path/to/key.pem"
       "Internal Server Error",
     );
     assert_eq!(resp.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
-  }
-
-  // ============== AuthConfigArgs Tests ==============
-
-  #[test]
-  fn test_auth_config_args_clone() {
-    let hash = make_test_bcrypt_hash("test_password");
-    let args = AuthConfigArgs {
-      auth_type: "password".to_string(),
-      credentials: Some(vec![Credential {
-        username: "user".to_string(),
-        password_hash: hash,
-      }]),
-      client_ca_path: None,
-    };
-    let cloned = args.clone();
-    assert_eq!(cloned.auth_type, args.auth_type);
   }
 
   // ============== TLS Configuration Tests ==============
@@ -3461,11 +2183,11 @@ key_path: "/path/to/key.pem"
       .expect("Failed to write key");
 
     // Test with no auth
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
 
     assert!(
@@ -3490,11 +2212,11 @@ key_path: "/path/to/key.pem"
     write_key_file_secure(&key_path, &key_pem)
       .expect("Failed to write key");
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
 
     assert!(
@@ -3520,11 +2242,11 @@ key_path: "/path/to/key.pem"
     let (cert_pem, _) = generate_test_cert("test");
     std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
 
     assert!(
@@ -3552,11 +2274,11 @@ key_path: "/path/to/key.pem"
     write_key_file_secure(&key_path, &key_pem)
       .expect("Failed to write key");
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
 
     assert!(
@@ -3578,15 +2300,20 @@ key_path: "/path/to/key.pem"
     write_key_file_secure(&key_path, &key_pem)
       .expect("Failed to write key");
 
-    let hash = make_test_bcrypt_hash("test_password");
-    let mut credentials = HashMap::new();
-    credentials.insert("user".to_string(), hash);
-    let auth_config = AuthConfig::Password { credentials };
+    // Create password auth config using the new auth module
+    let auth_config = Some(crate::auth::AuthConfig {
+      auth_type: AuthType::Password,
+      users: Some(vec![crate::auth::UserCredential {
+        username: "user".to_string(),
+        password: "test_password".to_string(),
+      }]),
+      client_ca_path: None,
+    });
 
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
 
     assert!(
@@ -3619,13 +2346,16 @@ key_path: "/path/to/key.pem"
     std::fs::write(&ca_path, ca_cert_pem)
       .expect("Failed to write CA cert");
 
-    let auth_config =
-      AuthConfig::TlsClientCert { client_ca_path: ca_path.clone() };
+    let auth_config = Some(crate::auth::AuthConfig {
+      auth_type: AuthType::TlsClientCert,
+      users: None,
+      client_ca_path: Some(ca_path.to_str().unwrap().to_string()),
+    });
 
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
 
     assert!(
@@ -3650,13 +2380,16 @@ key_path: "/path/to/key.pem"
     write_key_file_secure(&key_path, &key_pem)
       .expect("Failed to write key");
 
-    let auth_config =
-      AuthConfig::TlsClientCert { client_ca_path: ca_path.clone() };
+    let auth_config = Some(crate::auth::AuthConfig {
+      auth_type: AuthType::TlsClientCert,
+      users: None,
+      client_ca_path: Some(ca_path.to_str().unwrap().to_string()),
+    });
 
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
 
     assert!(
@@ -3665,8 +2398,8 @@ key_path: "/path/to/key.pem"
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
-      err_msg.contains("Failed to open client CA file"),
-      "Error should mention client CA file: {err_msg}"
+      err_msg.contains("failed to open CA file"),
+      "Error should mention CA file: {err_msg}"
     );
   }
 
@@ -3684,11 +2417,11 @@ key_path: "/path/to/key.pem"
     write_key_file_secure(&key_path, &key_pem)
       .expect("Failed to write key");
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
 
     assert!(
@@ -3720,11 +2453,11 @@ key_path: "/path/to/key.pem"
       .expect("Failed to set permissions");
     }
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
 
     assert!(
@@ -3746,11 +2479,11 @@ key_path: "/path/to/key.pem"
     // Write empty key file with secure permissions
     write_key_file_secure(&key_path, "").expect("Failed to write key");
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
 
     assert!(
@@ -3767,6 +2500,7 @@ key_path: "/path/to/key.pem"
   #[test]
   fn test_load_tls_config_with_password_and_tls_client_cert_both() {
     ensure_crypto_provider();
+    use crate::auth::{AuthConfig, AuthType, UserCredential};
     // Test that both Password and TlsClientCert use the same cert/key files
     let (cert_pem, key_pem) = generate_test_cert("test-server");
     let (ca_cert_pem, _) = generate_ca_cert();
@@ -3784,25 +2518,32 @@ key_path: "/path/to/key.pem"
     std::fs::write(&ca_path, ca_cert_pem)
       .expect("Failed to write CA cert");
 
-    // Test Password auth
-    let hash = make_test_bcrypt_hash("test_password");
-    let mut credentials = HashMap::new();
-    credentials.insert("user".to_string(), hash);
-    let auth_config = AuthConfig::Password { credentials };
+    // Test Password auth with plaintext password
+    let auth_config = Some(AuthConfig {
+      auth_type: AuthType::Password,
+      users: Some(vec![UserCredential {
+        username: "user".to_string(),
+        password: "test_password".to_string(),
+      }]),
+      client_ca_path: None,
+    });
     let result1 = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
     assert!(result1.is_ok());
 
     // Test TlsClientCert auth
-    let auth_config =
-      AuthConfig::TlsClientCert { client_ca_path: ca_path.clone() };
+    let auth_config = Some(AuthConfig {
+      auth_type: AuthType::TlsClientCert,
+      users: None,
+      client_ca_path: Some(ca_path.to_str().unwrap().to_string()),
+    });
     let result2 = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
     assert!(result2.is_ok());
   }
@@ -3837,11 +2578,11 @@ key_path: "/path/to/key.pem"
       .expect("Failed to set permissions");
     }
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
 
     assert!(
@@ -3983,11 +2724,11 @@ key_path: "/path/to/key.pem"
     // Set insecure permissions
     set_file_permissions(&key_path, 0o644);
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
 
     assert!(
@@ -4017,11 +2758,11 @@ key_path: "/path/to/key.pem"
     // Set secure permissions
     set_file_permissions(&key_path, 0o600);
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
 
     assert!(
@@ -4046,11 +2787,11 @@ key_path: "/path/to/key.pem"
     // Set secure read-only permissions
     set_file_permissions(&key_path, 0o400);
 
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
 
     assert!(
@@ -4230,28 +2971,6 @@ key_path: "/path/to/key.pem"
   }
 
   #[test]
-  fn test_handle_password_auth_success() {
-    let hash = bcrypt::hash("password", 4).unwrap();
-    let mut credentials = HashMap::new();
-    credentials.insert("user".to_string(), hash);
-
-    // Create request with Basic auth header
-    let auth_value =
-      format!("Basic {}", BASE64_STANDARD.encode("user:password"));
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("example.com:443")
-      .header(http::header::PROXY_AUTHORIZATION, auth_value)
-      .body(())
-      .unwrap();
-
-    assert!(
-      handle_password_auth(&req, &credentials).is_ok(),
-      "Valid credentials should pass"
-    );
-  }
-
-  #[test]
   fn test_handle_password_auth_missing_header() {
     let credentials = HashMap::new();
     let req = http::Request::builder()
@@ -4271,100 +2990,15 @@ key_path: "/path/to/key.pem"
   }
 
   #[test]
-  fn test_handle_password_auth_invalid_credentials() {
-    let hash = bcrypt::hash("correct_password", 4).unwrap();
-    let mut credentials = HashMap::new();
-    credentials.insert("user".to_string(), hash);
-
-    // Create request with wrong password
-    let auth_value = format!(
-      "Basic {}",
-      BASE64_STANDARD.encode("user:wrong_password")
-    );
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("example.com:443")
-      .header(http::header::PROXY_AUTHORIZATION, auth_value)
-      .body(())
-      .unwrap();
-
-    let result = handle_password_auth(&req, &credentials);
-    assert!(result.is_err(), "Invalid credentials should fail");
-  }
-
-  #[test]
   fn test_perform_authentication_none() {
     let req = http::Request::builder()
       .method(http::Method::CONNECT)
       .uri("example.com:443")
       .body(())
       .unwrap();
-    let auth_config = AuthConfig::None;
     assert!(
-      perform_authentication(&req, &auth_config).is_ok(),
+      perform_authentication(&req, None).is_ok(),
       "No auth should always pass"
-    );
-  }
-
-  #[test]
-  fn test_perform_authentication_tls_client_cert() {
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("example.com:443")
-      .body(())
-      .unwrap();
-    let auth_config = AuthConfig::TlsClientCert {
-      client_ca_path: PathBuf::from("/tmp/ca.pem"),
-    };
-    assert!(
-      perform_authentication(&req, &auth_config).is_ok(),
-      "TLS client cert auth should pass (auth happens at TLS level)"
-    );
-  }
-
-  #[test]
-  fn test_perform_authentication_password_success() {
-    let hash = bcrypt::hash("password", 4).unwrap();
-    let mut credentials = HashMap::new();
-    credentials.insert("user".to_string(), hash);
-    let auth_config = AuthConfig::Password { credentials };
-
-    let auth_value =
-      format!("Basic {}", BASE64_STANDARD.encode("user:password"));
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("example.com:443")
-      .header(http::header::PROXY_AUTHORIZATION, auth_value)
-      .body(())
-      .unwrap();
-
-    assert!(
-      perform_authentication(&req, &auth_config).is_ok(),
-      "Valid password auth should pass"
-    );
-  }
-
-  #[test]
-  fn test_perform_authentication_password_failure() {
-    let hash = bcrypt::hash("correct_password", 4).unwrap();
-    let mut credentials = HashMap::new();
-    credentials.insert("user".to_string(), hash);
-    let auth_config = AuthConfig::Password { credentials };
-
-    let auth_value = format!(
-      "Basic {}",
-      BASE64_STANDARD.encode("user:wrong_password")
-    );
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("example.com:443")
-      .header(http::header::PROXY_AUTHORIZATION, auth_value)
-      .body(())
-      .unwrap();
-
-    assert!(
-      perform_authentication(&req, &auth_config).is_err(),
-      "Invalid password auth should fail"
     );
   }
 
@@ -4665,64 +3299,6 @@ key_path: "/path/to/key.pem"
       .await;
   }
 
-  // ============== PHC Format Edge Cases Tests ==============
-
-  #[test]
-  fn test_verify_bcrypt_password_phc_format_with_dollar_in_hash() {
-    // Test that PHC format parsing strictly follows the architecture document
-    // PHC format: $bcrypt$v=98$r=<rounds>$<hash> (exactly 5 parts)
-
-    // Generate a valid standard hash
-    let standard_hash = bcrypt::hash("test_password", 4).unwrap();
-
-    // Convert to PHC format
-    let parts: Vec<&str> = standard_hash.split('$').collect();
-    // parts[0] = "", parts[1] = "2b", parts[2] = "4", parts[3] = salt+hash
-    let rounds = parts[2];
-    let salt_hash = parts[3];
-    let phc_hash = format!("$bcrypt$v=98$r={}${}", rounds, salt_hash);
-
-    // This should verify correctly
-    assert!(
-      verify_bcrypt_password("test_password", &phc_hash),
-      "Valid PHC format should verify"
-    );
-
-    // Test with extra $ characters after the hash
-    // Per architecture document, PHC format must be exactly:
-    // $bcrypt$v=98$r=<rounds>$<hash>
-    // Extra parts mean invalid format, so verification should fail
-    let phc_with_extra =
-      format!("$bcrypt$v=98$r={}${}$extra$parts", rounds, salt_hash);
-    assert!(
-      !verify_bcrypt_password("test_password", &phc_with_extra),
-      "PHC format with extra $ should NOT verify (invalid format per architecture)"
-    );
-  }
-
-  #[test]
-  fn test_verify_bcrypt_password_phc_format_minimal_parts() {
-    // Test the minimum number of parts required for PHC format
-    // PHC format: $bcrypt$v=98$r=<rounds>$<salt_hash>
-    // parts: ["", "bcrypt", "v=98", "r=<rounds>", "<salt_hash>"]
-
-    // Valid minimal PHC format (exactly 5 parts)
-    let standard_hash = bcrypt::hash("test", 4).unwrap();
-    let parts: Vec<&str> = standard_hash.split('$').collect();
-    let phc_hash = format!("$bcrypt$v=98$r={}${}", parts[2], parts[3]);
-    assert!(
-      verify_bcrypt_password("test", &phc_hash),
-      "Valid minimal PHC format should verify"
-    );
-
-    // Missing salt+hash part (only 4 parts)
-    let incomplete_phc = "$bcrypt$v=98$r=4";
-    assert!(
-      !verify_bcrypt_password("test", incomplete_phc),
-      "Incomplete PHC format should not verify"
-    );
-  }
-
   // ============================================================================
   // Task 005-010: Password Authentication Tests
   // ============================================================================
@@ -4839,97 +3415,6 @@ key_path: "/path/to/key.pem"
       result.is_err(),
       "Missing colon separator should return error"
     );
-  }
-
-  // ============== Task 008: bcrypt Password Verification Tests ==============
-
-  #[test]
-  fn test_bcrypt_password_verify_success() {
-    // Test successful bcrypt password verification
-    let hash = bcrypt::hash("correct_password", 4).unwrap();
-    let mut credentials = HashMap::new();
-    credentials.insert("testuser".to_string(), hash);
-    assert!(
-      verify_password(&credentials, "testuser", "correct_password"),
-      "Correct password should verify"
-    );
-  }
-
-  #[test]
-  fn test_bcrypt_password_verify_wrong_password() {
-    // Test bcrypt password verification with wrong password
-    let hash = bcrypt::hash("correct_password", 4).unwrap();
-    let mut credentials = HashMap::new();
-    credentials.insert("testuser".to_string(), hash);
-    assert!(
-      !verify_password(&credentials, "testuser", "wrong_password"),
-      "Wrong password should not verify"
-    );
-  }
-
-  #[test]
-  fn test_bcrypt_password_verify_user_not_found() {
-    // Test bcrypt password verification when user doesn't exist
-    let hash = bcrypt::hash("password", 4).unwrap();
-    let mut credentials = HashMap::new();
-    credentials.insert("existinguser".to_string(), hash);
-    assert!(
-      !verify_password(&credentials, "nonexistent", "password"),
-      "Non-existent user should not verify"
-    );
-  }
-
-  #[test]
-  fn test_bcrypt_password_verify_different_cost() {
-    // Test bcrypt password verification with different cost factors
-    for cost in [4, 10, 12] {
-      let hash = bcrypt::hash("testpassword", cost).unwrap();
-      let mut credentials = HashMap::new();
-      credentials.insert("user".to_string(), hash);
-      assert!(
-        verify_password(&credentials, "user", "testpassword"),
-        "Password with cost {} should verify",
-        cost
-      );
-    }
-  }
-
-  // ============== Task 009: PHC Format Password Verification Tests ==============
-
-  #[test]
-  fn test_phc_format_password_verify_success() {
-    // Test successful PHC format password verification
-    let standard_hash = bcrypt::hash("testpassword", 4).unwrap();
-    let phc_hash = standard_to_phc_format(&standard_hash);
-    assert!(
-      verify_bcrypt_password("testpassword", &phc_hash),
-      "PHC format should verify correct password"
-    );
-  }
-
-  #[test]
-  fn test_phc_format_password_verify_wrong_password() {
-    // Test PHC format password verification with wrong password
-    let standard_hash = bcrypt::hash("correct_password", 4).unwrap();
-    let phc_hash = standard_to_phc_format(&standard_hash);
-    assert!(
-      !verify_bcrypt_password("wrong_password", &phc_hash),
-      "PHC format should not verify wrong password"
-    );
-  }
-
-  #[test]
-  fn test_phc_format_password_verify_various_rounds() {
-    // Test PHC format with various round counts
-    for rounds in [4, 8, 12] {
-      let standard_hash = bcrypt::hash("password", rounds).unwrap();
-      let phc_hash = standard_to_phc_format(&standard_hash);
-      assert!(
-        verify_bcrypt_password("password", &phc_hash),
-        "PHC format with rounds {} should verify",
-        rounds
-      );
-    }
   }
 
   // ============== Task 010: 407 Response Validation Tests ==============
@@ -5087,11 +3572,11 @@ key_path: "/path/to/key.pem"
     std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
     write_key_file_secure(&key_path, &key_pem)
       .expect("Failed to write key");
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
     assert!(result.is_ok(), "Matching cert and key should succeed");
   }
@@ -5111,11 +3596,11 @@ key_path: "/path/to/key.pem"
       .expect("Failed to write cert");
     write_key_file_secure(&key_path, &key2_pem)
       .expect("Failed to write key");
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     );
     assert!(result.is_err(), "Mismatched cert and key should fail");
   }
@@ -5134,11 +3619,11 @@ key_path: "/path/to/key.pem"
     std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
     write_key_file_secure(&key_path, &key_pem)
       .expect("Failed to write key");
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
     let tls_config = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     )
     .expect("TLS config should load");
     // Verify ALPN protocol is set to h3 (required for HTTP/3)
@@ -5162,11 +3647,11 @@ key_path: "/path/to/key.pem"
     std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
     write_key_file_secure(&key_path, &key_pem)
       .expect("Failed to write key");
-    let auth_config = AuthConfig::None;
+    let auth_config = None;
     let tls_config = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      &auth_config,
+      auth_config.as_ref(),
     )
     .expect("TLS config should load");
     assert_eq!(
@@ -5345,5 +3830,142 @@ key_path: "/path/to/key.pem"
         assert_eq!(tracker.connection_count(), 0);
       })
       .await;
+  }
+
+  // ========== New Auth Module Integration Tests ==========
+  // These tests verify HTTP/3 listener authentication behavior with the new auth module.
+  // The key change: perform_authentication and handle_password_auth now use crate::auth::AuthConfig
+
+  #[test]
+  fn test_http3_perform_authentication_with_none_auth() {
+    // When AuthConfig is None (represented by Option<AuthConfig> = None),
+    // authentication should pass without checking headers.
+    // This tests the listener's behavior, not just the AuthConfig struct.
+
+    // Create a mock HTTP request without auth headers
+    let req = http::Request::builder()
+      .method("CONNECT")
+      .uri("example.com:443")
+      .body(())
+      .expect("build request");
+
+    // With auth_config = None (no auth required), should succeed
+    let result = perform_authentication(&req, None);
+    assert!(result.is_ok(), "No auth should pass without credentials");
+  }
+
+  #[test]
+  fn test_http3_perform_authentication_with_password_missing_header() {
+    use crate::auth::{AuthConfig, AuthType, UserCredential};
+
+    // Create request without Proxy-Authorization header
+    let req = http::Request::builder()
+      .method("CONNECT")
+      .uri("example.com:443")
+      .body(())
+      .expect("build request");
+
+    // Create password AuthConfig
+    let auth_config = Some(AuthConfig {
+      auth_type: AuthType::Password,
+      users: Some(vec![UserCredential {
+        username: "admin".to_string(),
+        password: "secret".to_string(),
+      }]),
+      client_ca_path: None,
+    });
+
+    // Should fail because no Proxy-Authorization header provided
+    // This tests listener behavior: HTTP/3 requires Proxy-Authorization for password auth
+    let result = perform_authentication(&req, auth_config.as_ref());
+    assert!(
+      result.is_err(),
+      "Password auth should fail without header"
+    );
+  }
+
+  #[test]
+  fn test_http3_perform_authentication_with_password_valid_credentials()
+  {
+    use crate::auth::{AuthConfig, AuthType, UserCredential};
+
+    // Create request with valid Proxy-Authorization header (Basic auth)
+    let credentials = BASE64_STANDARD.encode("admin:secret");
+    let req = http::Request::builder()
+      .method("CONNECT")
+      .uri("example.com:443")
+      .header("Proxy-Authorization", format!("Basic {}", credentials))
+      .body(())
+      .expect("build request");
+
+    // Create password AuthConfig with matching credentials
+    let auth_config = Some(AuthConfig {
+      auth_type: AuthType::Password,
+      users: Some(vec![UserCredential {
+        username: "admin".to_string(),
+        password: "secret".to_string(),
+      }]),
+      client_ca_path: None,
+    });
+
+    // Should succeed with valid plaintext password
+    // This tests that HTTP/3 listener uses PLAINTEXT comparison (not bcrypt)
+    let result = perform_authentication(&req, auth_config.as_ref());
+    assert!(result.is_ok(), "Valid credentials should pass");
+  }
+
+  #[test]
+  fn test_http3_perform_authentication_with_password_wrong_password() {
+    use crate::auth::{AuthConfig, AuthType, UserCredential};
+
+    // Create request with WRONG password in Proxy-Authorization header
+    let credentials = BASE64_STANDARD.encode("admin:wrongpassword");
+    let req = http::Request::builder()
+      .method("CONNECT")
+      .uri("example.com:443")
+      .header("Proxy-Authorization", format!("Basic {}", credentials))
+      .body(())
+      .expect("build request");
+
+    // Create password AuthConfig with DIFFERENT password
+    let auth_config = Some(AuthConfig {
+      auth_type: AuthType::Password,
+      users: Some(vec![UserCredential {
+        username: "admin".to_string(),
+        password: "secret".to_string(), // Different from request
+      }]),
+      client_ca_path: None,
+    });
+
+    // Should fail with wrong password
+    // This tests listener's credential validation behavior
+    let result = perform_authentication(&req, auth_config.as_ref());
+    assert!(result.is_err(), "Wrong password should fail");
+  }
+
+  #[test]
+  fn test_http3_perform_authentication_with_tls_client_cert() {
+    use crate::auth::{AuthConfig, AuthType};
+
+    // TLS client cert auth is handled at QUIC layer, not HTTP layer
+    // perform_authentication should pass for TLS cert type
+    let req = http::Request::builder()
+      .method("CONNECT")
+      .uri("example.com:443")
+      .body(())
+      .expect("build request");
+
+    let auth_config = Some(AuthConfig {
+      auth_type: AuthType::TlsClientCert,
+      users: None,
+      client_ca_path: Some("/path/to/ca.pem".to_string()),
+    });
+
+    // TLS cert auth bypasses HTTP-layer auth check
+    let result = perform_authentication(&req, auth_config.as_ref());
+    assert!(
+      result.is_ok(),
+      "TLS client cert auth should pass at HTTP layer"
+    );
   }
 }

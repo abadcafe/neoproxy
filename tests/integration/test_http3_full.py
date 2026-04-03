@@ -796,10 +796,14 @@ class TestHTTP3ConfigValidationFull:
 
     def test_password_hash_format_error_rejected(self) -> None:
         """
-        TC-H3-CFG-006: Invalid password hash format causes failure.
+        TC-H3-CFG-006: Legacy bcrypt-based auth config schema is rejected.
 
-        Target: Verify HTTP/3 listener handles invalid password hash format.
-        The implementation should reject invalid hash format at startup.
+        Target: Verify HTTP/3 listener rejects legacy bcrypt-era auth config format.
+        The config uses old field names (credentials instead of users, password_hash
+        instead of password) which are no longer valid after auth module refactoring.
+        The rejection is due to schema mismatch (field names no longer valid),
+        not hash format validation. This ensures backward-incompatible config
+        changes are properly detected at startup.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = 33052
@@ -856,11 +860,13 @@ servers:
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_valid_bcrypt_hash_accepted(self) -> None:
+    def test_valid_plaintext_password_accepted(self) -> None:
         """
-        TC-H3-CFG-007: Valid bcrypt hash is accepted.
+        TC-H3-CFG-007: Valid plaintext password is accepted.
 
-        Target: Verify HTTP/3 listener accepts valid bcrypt hash format.
+        Target: Verify HTTP/3 listener accepts valid plaintext password format.
+        After auth module refactoring, bcrypt hashes are no longer supported.
+        Plaintext passwords are now the standard format.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = 33053
@@ -868,9 +874,6 @@ servers:
 
         try:
             cert_path, key_path, _ = generate_test_certificates(temp_dir)
-
-            # Use a valid bcrypt hash format ($2b$12$...)
-            valid_hash = "$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.qO.1BoWBPfGKne"
 
             config_content = f"""worker_threads: 1
 log_directory: "{temp_dir}/logs"
@@ -889,20 +892,20 @@ servers:
       key_path: "{key_path}"
       auth:
         type: "password"
-        credentials:
+        users:
         - username: "testuser"
-          password_hash: "{valid_hash}"
+          password: "plaintext_secret"
   service: connect_tcp
 """
-            config_path = os.path.join(temp_dir, "valid_hash.yaml")
+            config_path = os.path.join(temp_dir, "valid_password.yaml")
             with open(config_path, "w") as f:
                 f.write(config_content)
 
             proxy_proc = start_proxy(config_path)
 
-            # Should start successfully with valid hash
+            # Should start successfully with valid plaintext password
             assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
-                "HTTP/3 listener should start with valid bcrypt hash"
+                "HTTP/3 listener should start with valid plaintext password"
 
         finally:
             if proxy_proc:

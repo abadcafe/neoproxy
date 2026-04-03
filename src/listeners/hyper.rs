@@ -159,11 +159,13 @@ impl HyperListener {
           Ok((stream, _raddr)) => {
             let io = rt_util::TokioIo::new(stream);
             let svc = HyperServiceAdaptor::new(svc.clone());
-            let builder = conn_util::Builder::new(TokioLocalExecutor {});
+            let builder =
+              conn_util::Builder::new(TokioLocalExecutor {});
             connection_tracker.register(async move {
               // Do not need any graceful shutdown actions here for
               // connections. The `Service`s should do this instead.
-              let conn = builder.serve_connection_with_upgrades(io, svc);
+              let conn =
+                builder.serve_connection_with_upgrades(io, svc);
               if let Err(e) = conn.await {
                 error!("connection error: {e}");
               }
@@ -224,9 +226,11 @@ impl plugin::Listening for HyperListener {
           Err(e) => {
             error!("listening join error: {e}")
           }
-          Ok(res) => if let Err(e) = res {
-            error!("listening error: {e}")
-          },
+          Ok(res) => {
+            if let Err(e) = res {
+              error!("listening error: {e}")
+            }
+          }
         }
       }
 

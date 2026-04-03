@@ -977,7 +977,7 @@ class TestSocks5ListenerMonitoring:
             from .test_socks5 import create_socks5_config
 
             config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_mode="none"
+                proxy_port, temp_dir  # No auth_type means no auth
             )
             proxy_proc = start_proxy(config_path)
 
@@ -1060,7 +1060,7 @@ class TestSocks5ListenerMonitoring:
             )
 
             config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_mode="none"
+                proxy_port, temp_dir  # No auth_type means no auth
             )
             proxy_proc = start_proxy(config_path)
 
@@ -1176,9 +1176,6 @@ servers:
   - kind: fast_socks5.listener
     args:
       addresses: [ "0.0.0.0:{socks5_port}" ]
-      auth:
-        mode: "none"
-        users: []
   - kind: http3.listener
     args:
       address: "0.0.0.0:{http3_port}"

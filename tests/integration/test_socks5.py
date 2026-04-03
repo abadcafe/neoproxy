@@ -69,7 +69,7 @@ PASSWORD_AUTH_FAILURE = 0x01
 def create_socks5_config(
     proxy_port: int,
     temp_dir: str,
-    auth_mode: str = "none",
+    auth_type: Optional[str] = None,
     users: Optional[List[Dict[str, str]]] = None,
     addresses: Optional[List[str]] = None,
     handshake_timeout: Optional[str] = None,
@@ -81,7 +81,7 @@ def create_socks5_config(
     Args:
         proxy_port: Port for the SOCKS5 listener
         temp_dir: Temporary directory for logs
-        auth_mode: Authentication mode ("none" or "password")
+        auth_type: Authentication type ("password" or None for no auth)
         users: List of user dicts with "username" and "password" keys
         addresses: List of addresses to listen on (default: ["0.0.0.0:port"])
         handshake_timeout: Handshake timeout string (e.g., "10s")
@@ -94,21 +94,16 @@ def create_socks5_config(
         addresses = [f"0.0.0.0:{proxy_port}"]
 
     auth_section = ""
-    if auth_mode == "password" and users:
+    if auth_type == "password" and users:
         users_yaml = "\n".join([
             f"          - username: \"{u['username']}\"\n            password: \"{u['password']}\""
             for u in users
         ])
         auth_section = f"""
       auth:
-        mode: "password"
+        type: password
         users:
 {users_yaml}"""
-    elif auth_mode == "none":
-        auth_section = """
-      auth:
-        mode: "none"
-        users: []"""
 
     timeout_section = ""
     if handshake_timeout:
@@ -423,7 +418,7 @@ class TestSocks5BasicConnection:
         target_socket: Optional[socket.socket] = None
 
         try:
-            # Create config
+            # Create config (no auth field = no auth required)
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             # Create target server
@@ -502,7 +497,7 @@ class TestSocks5BasicConnection:
             # Create config with password auth
             users = [{"username": "testuser", "password": "testpass"}]
             config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_mode="password", users=users
+                proxy_port, temp_dir, auth_type="password", users=users
             )
 
             # Create target server
@@ -571,7 +566,7 @@ class TestSocks5BasicConnection:
             # Create config with password auth
             users = [{"username": "testuser", "password": "correctpass"}]
             config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_mode="password", users=users
+                proxy_port, temp_dir, auth_type="password", users=users
             )
 
             # Start proxy
@@ -617,7 +612,7 @@ class TestSocks5BasicConnection:
             # Create config with password auth
             users = [{"username": "testuser", "password": "testpass"}]
             config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_mode="password", users=users
+                proxy_port, temp_dir, auth_type="password", users=users
             )
 
             # Start proxy
@@ -1239,7 +1234,7 @@ class TestSocks5UsernamePasswordBoundary:
         try:
             users = [{"username": "a", "password": "test"}]
             config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_mode="password", users=users
+                proxy_port, temp_dir, auth_type="password", users=users
             )
 
             _, target_socket = create_target_server(
@@ -1284,7 +1279,7 @@ class TestSocks5UsernamePasswordBoundary:
         try:
             users = [{"username": "test", "password": "x"}]
             config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_mode="password", users=users
+                proxy_port, temp_dir, auth_type="password", users=users
             )
 
             _, target_socket = create_target_server(
@@ -1330,7 +1325,7 @@ class TestSocks5UsernamePasswordBoundary:
             long_username = "a" * 255
             users = [{"username": long_username, "password": "test"}]
             config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_mode="password", users=users
+                proxy_port, temp_dir, auth_type="password", users=users
             )
 
             _, target_socket = create_target_server(
@@ -1813,7 +1808,10 @@ servers:
   - kind: fast_socks5.listener
     args:
       auth:
-        mode: "none"
+        type: password
+        users:
+          - username: "test"
+            password: "test"
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "config.yaml")
@@ -1855,8 +1853,6 @@ servers:
   - kind: fast_socks5.listener
     args:
       addresses: []
-      auth:
-        mode: "none"
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "config.yaml")
@@ -1880,7 +1876,7 @@ servers:
         """
         TC-S5-030: Password mode with empty users
 
-        Test that proxy fails to start when mode is password but users is empty.
+        Test that proxy fails to start when type is password but users is empty.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = 29051
@@ -1901,7 +1897,7 @@ servers:
       addresses:
         - "0.0.0.0:{proxy_port}"
       auth:
-        mode: "password"
+        type: password
         users: []
   service: connect_tcp
 """
@@ -1922,11 +1918,11 @@ servers:
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_invalid_auth_mode(self) -> None:
+    def test_invalid_auth_type(self) -> None:
         """
-        TC-S5-031: Invalid auth mode
+        TC-S5-031: Invalid auth type
 
-        Test that proxy fails to start with invalid auth mode.
+        Test that proxy fails to start with invalid auth type.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = 29052
@@ -1947,7 +1943,7 @@ servers:
       addresses:
         - "0.0.0.0:{proxy_port}"
       auth:
-        mode: "invalid_mode"
+        type: invalid_mode
         users: []
   service: connect_tcp
 """
@@ -1959,7 +1955,7 @@ servers:
             try:
                 exit_code = proxy_proc.wait(timeout=5.0)
                 assert exit_code != 0, \
-                    "Expected non-zero exit code for invalid auth mode"
+                    "Expected non-zero exit code for invalid auth type"
             except subprocess.TimeoutExpired:
                 proxy_proc.kill()
                 proxy_proc.wait()
@@ -1993,8 +1989,6 @@ servers:
       addresses:
         - "0.0.0.0:{proxy_port}"
       handshake_timeout: "invalid"
-      auth:
-        mode: "none"
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "config.yaml")
@@ -2034,7 +2028,7 @@ class TestSocks5AdditionalBoundary:
             long_password = "x" * 255
             users = [{"username": "test", "password": long_password}]
             config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_mode="password", users=users
+                proxy_port, temp_dir, auth_type="password", users=users
             )
 
             _, target_socket = create_target_server(
@@ -2304,4 +2298,55 @@ class TestSocks5HandshakeTimeoutFormat:
         finally:
             if proxy_proc:
                 terminate_process(proxy_proc)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+class TestSocks5TlsClientCertRejected:
+    """Tests for TLS client cert rejection (SOCKS5 only supports password auth)"""
+
+    def test_tls_client_cert_type_rejected(self) -> None:
+        """
+        TC-S5-040: TLS client cert auth type rejected
+
+        Test that SOCKS5 listener rejects tls_client_cert auth type.
+        SOCKS5 protocol only supports password authentication.
+        """
+        temp_dir = tempfile.mkdtemp()
+        proxy_port = 29062
+
+        try:
+            config_content = f"""worker_threads: 1
+log_directory: "{temp_dir}/logs"
+
+services:
+- name: connect_tcp
+  kind: connect_tcp.connect_tcp
+
+servers:
+- name: socks5_server
+  listeners:
+  - kind: fast_socks5.listener
+    args:
+      addresses:
+        - "0.0.0.0:{proxy_port}"
+      auth:
+        type: tls_client_cert
+        client_ca_path: "/path/to/ca.pem"
+  service: connect_tcp
+"""
+            config_path = os.path.join(temp_dir, "config.yaml")
+            with open(config_path, "w") as f:
+                f.write(config_content)
+
+            proxy_proc = start_proxy(config_path)
+            try:
+                exit_code = proxy_proc.wait(timeout=5.0)
+                assert exit_code != 0, \
+                    "Expected non-zero exit code for tls_client_cert auth type in SOCKS5"
+            except subprocess.TimeoutExpired:
+                proxy_proc.kill()
+                proxy_proc.wait()
+                raise AssertionError("Process should have exited")
+
+        finally:
             shutil.rmtree(temp_dir, ignore_errors=True)

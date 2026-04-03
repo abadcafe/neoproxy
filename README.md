@@ -120,19 +120,19 @@ HTTP/3 (QUIC) 监听器，提供更快的连接建立和更好的弱网表现。
 
 #### 认证配置
 
-**方式一：密码认证**
+**密码认证：**
 
 ```yaml
 auth:
   type: password
-  credentials:
+  users:
     - username: user1
-      password_hash: $2b$12$...  # bcrypt 哈希
+      password: secret123
     - username: user2
-      password_hash: $2b$12$...
+      password: secret456
 ```
 
-**方式二：TLS 客户端证书认证**
+**TLS 客户端证书认证：**
 
 ```yaml
 auth:
@@ -140,34 +140,7 @@ auth:
   client_ca_path: /path/to/client_ca.pem
 ```
 
-#### 配置示例
-
-```yaml
-listeners:
-  - kind: http3.listener
-    args:
-      address: "0.0.0.0:443"
-      cert_path: /path/to/cert.pem
-      key_path: /path/to/key.pem
-      quic:
-        max_concurrent_bidi_streams: 200
-        max_idle_timeout_ms: 60000
-      auth:
-        type: password
-        credentials:
-          - username: admin
-            password_hash: $2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.flLWrYLYfCDVuS
-```
-
-#### 生成密码哈希
-
-```bash
-# 使用 htpasswd 生成
-htpasswd -nbBC 12 admin password
-
-# 或使用 Python
-python3 -c "import bcrypt; print(bcrypt.hashpw(b'password', bcrypt.gensalt(12)).decode())"
-```
+> **安全警告：** 密码以明文形式存储在配置文件中。建议通过文件权限限制配置文件的访问权限（例如 `chmod 600 conf/server.yaml`）。
 
 ---
 
@@ -185,10 +158,10 @@ SOCKS5 监听器，完全兼容 RFC 1928 和 RFC 1929。
 
 #### 认证配置
 
-| 参数 | 类型 | 必填 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| `mode` | `String` | 否 | `none` | 认证模式：`none` 或 `password` |
-| `users` | `[Object]` | 否 | - | 用户列表（mode=password 时必填） |
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `type` | `String` | 是 | 认证类型：`password`（SOCKS5 仅支持密码认证） |
+| `users` | `[Object]` | 是 | 用户列表 |
 
 用户条目格式：
 
@@ -196,6 +169,8 @@ SOCKS5 监听器，完全兼容 RFC 1928 和 RFC 1929。
 |------|------|------|
 | `username` | `String` | 用户名 |
 | `password` | `String` | 密码（明文） |
+
+> **注意：** SOCKS5 仅支持密码认证，不支持 TLS 客户端证书认证。
 
 #### 配置示例
 
@@ -209,7 +184,7 @@ listeners:
         - "0.0.0.0:1080"
 ```
 
-**用户名/密码认证：**
+**密码认证：**
 
 ```yaml
 listeners:
@@ -219,12 +194,10 @@ listeners:
         - "0.0.0.0:1080"
       handshake_timeout: 15
       auth:
-        mode: password
+        type: password
         users:
-          - username: user1
-            password: pass1
-          - username: user2
-            password: pass2
+          - username: admin
+            password: secret123
 ```
 
 #### 使用方式
@@ -405,7 +378,7 @@ servers:
           addresses:
             - "0.0.0.0:1080"
           auth:
-            mode: password
+            type: password
             users:
               - username: admin
                 password: secret123
@@ -432,9 +405,9 @@ servers:
           key_path: /etc/neoproxy/key.pem
           auth:
             type: password
-            credentials:
+            users:
               - username: admin
-                password_hash: $2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.flLWrYLYfCDVuS
+                password: secret123
 ```
 
 ### 示例 4：HTTP/3 代理链
@@ -514,6 +487,25 @@ neoproxy 支持优雅关闭：
 2. 等待现有连接完成（超时 5 秒）
 3. 强制关闭剩余连接
 4. 退出程序
+
+---
+
+## 安全建议
+
+1. **配置文件权限：** 密码以明文存储，建议设置配置文件权限为 600
+   ```bash
+   chmod 600 conf/server.yaml
+   ```
+
+2. **日志目录权限：** 限制日志目录访问权限
+   ```bash
+   chmod 700 logs/
+   ```
+
+3. **证书文件权限：** TLS 私钥文件应设置严格权限
+   ```bash
+   chmod 600 /path/to/key.pem
+   ```
 
 ---
 

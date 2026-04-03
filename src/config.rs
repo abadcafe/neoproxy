@@ -13,91 +13,6 @@ use crate::listeners::ListenerBuilderSet;
 use crate::plugin;
 use crate::plugins::PluginBuilderSet;
 
-/// Check if a string is a valid bcrypt hash format
-///
-/// Supports both PHC format and standard bcrypt format:
-/// - PHC format: $bcrypt$v=98$r=<rounds>$<hash>
-/// - Standard bcrypt format: $2a$12$<salt><hash>, $2b$12$<salt><hash>, etc.
-///
-/// Validates both format structure and hash content:
-/// - Format structure must be correct
-/// - Hash content must be non-empty and have valid length
-fn is_valid_bcrypt_hash(hash: &str) -> bool {
-  // Check for PHC format: $bcrypt$v=98$r=<rounds>$<hash>
-  if hash.starts_with("$bcrypt$") {
-    // Expected format: $bcrypt$v=98$r=12$<hash>
-    let parts: Vec<&str> = hash.split('$').collect();
-    // Should have at least 5 parts: "", "bcrypt", "v=98", "r=12", "<hash>"
-    if parts.len() < 5 {
-      return false;
-    }
-    // Check version part
-    if !parts[2].starts_with("v=") {
-      return false;
-    }
-    // Check rounds part
-    if !parts[3].starts_with("r=") {
-      return false;
-    }
-    // Parse rounds and check it's valid
-    let rounds_str = &parts[3][2..];
-    if let Ok(rounds) = rounds_str.parse::<u32>() {
-      // bcrypt rounds should be between 4 and 31 (log2)
-      if !(4..=31).contains(&rounds) {
-        return false;
-      }
-    } else {
-      return false;
-    }
-    // Validate hash content exists and has sufficient length
-    // PHC format expects hash content after the 4th '$'
-    // bcrypt produces 24 bytes (184 bits) of hash, base64 encoded to ~31 chars
-    // We require at least 30 characters for meaningful hash content
-    let hash_content = parts[4];
-    if hash_content.is_empty() {
-      return false;
-    }
-    // Hash content should be valid base64 with meaningful content
-    hash_content.len() >= 30
-  }
-  // Check for standard bcrypt format: $2a$, $2b$, $2x$, $2y$
-  else if hash.starts_with("$2a$")
-    || hash.starts_with("$2b$")
-    || hash.starts_with("$2x$")
-    || hash.starts_with("$2y$")
-  {
-    // Expected format: $2a$12$<salt><hash>
-    // Standard bcrypt: 22 chars salt + 31 chars hash = 53 chars total
-    let parts: Vec<&str> = hash.split('$').collect();
-    // Should have at least 4 parts: "", "2a", "12", "<salt><hash>"
-    if parts.len() < 4 {
-      return false;
-    }
-    // Check cost factor
-    let cost = match parts[2].parse::<u32>() {
-      Ok(c) => c,
-      Err(_) => return false,
-    };
-    // bcrypt cost should be between 4 and 31
-    if !(4..=31).contains(&cost) {
-      return false;
-    }
-    // Validate hash content exists and has sufficient length
-    // Standard bcrypt hash part should be 53 characters
-    // (base64 encoded 128-bit salt + 184-bit hash without padding)
-    // We require at least 50 characters for standard bcrypt hashes
-    let hash_content = parts[3];
-    if hash_content.is_empty() {
-      return false;
-    }
-    // Standard bcrypt produces 22 chars salt + 31 chars hash = 53 chars total
-    // We require at least 50 characters for a valid bcrypt hash
-    hash_content.len() >= 50
-  } else {
-    false
-  }
-}
-
 #[derive(Parser, Debug)]
 pub struct CmdOpt {
   /// Sets a custom config file
@@ -390,7 +305,7 @@ impl Config {
   /// - Certificate and private key match
   /// - QUIC parameters validity
   /// - Authentication configuration completeness
-  /// - Password hash format for password authentication
+  /// - Password field format for plaintext password authentication
   fn validate_http3_listener_args(
     &self,
     args: &serde_yaml::Value,
@@ -400,13 +315,14 @@ impl Config {
     // Validate address format
     if let Some(address) = args.get("address")
       && let Some(addr_str) = address.as_str()
-        && addr_str.parse::<std::net::SocketAddr>().is_err() {
-          collector.add(
-            format!("{}.args.address", location),
-            format!("invalid address '{}'", addr_str),
-            ConfigErrorKind::InvalidAddress,
-          );
-        }
+      && addr_str.parse::<std::net::SocketAddr>().is_err()
+    {
+      collector.add(
+        format!("{}.args.address", location),
+        format!("invalid address '{}'", addr_str),
+        ConfigErrorKind::InvalidAddress,
+      );
+    }
 
     // Validate certificate path and get content for matching check
     let cert_content = if let Some(cert_path) = args.get("cert_path") {
@@ -623,57 +539,62 @@ impl Config {
     // Validate max_concurrent_bidi_streams
     if let Some(v) = quic.get("max_concurrent_bidi_streams")
       && let Some(n) = v.as_u64()
-        && (!(1..=10000).contains(&n)) {
-          collector.add(
-            format!("{}.max_concurrent_bidi_streams", location),
-            format!("invalid value {}, expected range 1-10000", n),
-            ConfigErrorKind::InvalidFormat,
-          );
-        }
+      && (!(1..=10000).contains(&n))
+    {
+      collector.add(
+        format!("{}.max_concurrent_bidi_streams", location),
+        format!("invalid value {}, expected range 1-10000", n),
+        ConfigErrorKind::InvalidFormat,
+      );
+    }
 
     // Validate max_idle_timeout_ms
     if let Some(v) = quic.get("max_idle_timeout_ms")
       && let Some(n) = v.as_u64()
-        && n == 0 {
-          collector.add(
-            format!("{}.max_idle_timeout_ms", location),
-            "invalid value 0, expected value > 0".to_string(),
-            ConfigErrorKind::InvalidFormat,
-          );
-        }
+      && n == 0
+    {
+      collector.add(
+        format!("{}.max_idle_timeout_ms", location),
+        "invalid value 0, expected value > 0".to_string(),
+        ConfigErrorKind::InvalidFormat,
+      );
+    }
 
     // Validate initial_mtu
     if let Some(v) = quic.get("initial_mtu")
       && let Some(n) = v.as_u64()
-        && (!(1200..=9000).contains(&n)) {
-          collector.add(
-            format!("{}.initial_mtu", location),
-            format!("invalid value {}, expected range 1200-9000", n),
-            ConfigErrorKind::InvalidFormat,
-          );
-        }
+      && (!(1200..=9000).contains(&n))
+    {
+      collector.add(
+        format!("{}.initial_mtu", location),
+        format!("invalid value {}, expected range 1200-9000", n),
+        ConfigErrorKind::InvalidFormat,
+      );
+    }
 
     // Validate send_window
     if let Some(v) = quic.get("send_window")
       && let Some(n) = v.as_u64()
-        && n == 0 {
-          collector.add(
-            format!("{}.send_window", location),
-            "invalid value 0, expected value > 0".to_string(),
-            ConfigErrorKind::InvalidFormat,
-          );
-        }
+      && n == 0
+    {
+      collector.add(
+        format!("{}.send_window", location),
+        "invalid value 0, expected value > 0".to_string(),
+        ConfigErrorKind::InvalidFormat,
+      );
+    }
 
     // Validate receive_window
     if let Some(v) = quic.get("receive_window")
       && let Some(n) = v.as_u64()
-        && n == 0 {
-          collector.add(
-            format!("{}.receive_window", location),
-            "invalid value 0, expected value > 0".to_string(),
-            ConfigErrorKind::InvalidFormat,
-          );
-        }
+      && n == 0
+    {
+      collector.add(
+        format!("{}.receive_window", location),
+        "invalid value 0, expected value > 0".to_string(),
+        ConfigErrorKind::InvalidFormat,
+      );
+    }
   }
 
   /// Validate HTTP/3 authentication configuration
@@ -688,79 +609,138 @@ impl Config {
 
     match auth_type {
       Some("password") => {
-        // Password authentication: credentials must be present and non-empty
-        if let Some(credentials) = auth.get("credentials") {
-          if let Some(creds) = credentials.as_sequence() {
-            if creds.is_empty() {
+        // NEW format: Password authentication with users array and plaintext password
+        if let Some(users) = auth.get("users") {
+          if let Some(users_seq) = users.as_sequence() {
+            if users_seq.is_empty() {
               collector.add(
-                format!("{}.args.auth.credentials", location),
-                "credentials cannot be empty for password authentication"
+                format!("{}.args.auth.users", location),
+                "users cannot be empty for password authentication"
                   .to_string(),
                 ConfigErrorKind::InvalidFormat,
               );
             }
-            // Validate each credential
-            for (idx, cred) in creds.iter().enumerate() {
-              if let Some(cred_map) = cred.as_mapping() {
+            // Validate each user credential
+            for (idx, user) in users_seq.iter().enumerate() {
+              if let Some(user_map) = user.as_mapping() {
                 // Check username
-                if !cred_map.contains_key(serde_yaml::Value::String(
+                if !user_map.contains_key(serde_yaml::Value::String(
                   "username".to_string(),
                 )) {
                   collector.add(
                     format!(
-                      "{}.args.auth.credentials[{}].username",
+                      "{}.args.auth.users[{}].username",
                       location, idx
                     ),
                     "username is required".to_string(),
                     ConfigErrorKind::MissingField,
                   );
-                }
-                // Check password_hash field exists
-                if !cred_map.contains_key(serde_yaml::Value::String(
-                  "password_hash".to_string(),
-                )) {
-                  collector.add(
-                    format!(
-                      "{}.args.auth.credentials[{}].password_hash",
-                      location, idx
-                    ),
-                    "password_hash is required".to_string(),
-                    ConfigErrorKind::MissingField,
-                  );
-                } else if let Some(hash_value) =
-                  cred_map.get(serde_yaml::Value::String(
-                    "password_hash".to_string(),
-                  ))
-                {
-                  // Validate password hash format (bcrypt)
-                  if let Some(hash_str) = hash_value.as_str()
-                    && !is_valid_bcrypt_hash(hash_str) {
+                } else if let Some(username_value) = user_map.get(
+                  serde_yaml::Value::String("username".to_string()),
+                ) {
+                  // Validate username is non-empty string
+                  if let Some(username_str) = username_value.as_str() {
+                    if username_str.is_empty() {
                       collector.add(
                         format!(
-                          "{}.args.auth.credentials[{}].password_hash",
+                          "{}.args.auth.users[{}].username",
                           location, idx
                         ),
-                        "invalid bcrypt hash format, expected format \
-                           like $2a$12$... or $bcrypt$v=98$r=12$...".to_string(),
+                        "username cannot be empty".to_string(),
                         ConfigErrorKind::InvalidFormat,
                       );
                     }
+                    if username_str.len() > 255 {
+                      collector.add(
+                        format!(
+                          "{}.args.auth.users[{}].username",
+                          location, idx
+                        ),
+                        format!(
+                          "username '{}' is too long (max 255 bytes)",
+                          username_str
+                        ),
+                        ConfigErrorKind::InvalidFormat,
+                      );
+                    }
+                  } else {
+                    collector.add(
+                      format!(
+                        "{}.args.auth.users[{}].username",
+                        location, idx
+                      ),
+                      "username must be a string".to_string(),
+                      ConfigErrorKind::TypeMismatch,
+                    );
+                  }
                 }
+                // Check password field exists
+                if !user_map.contains_key(serde_yaml::Value::String(
+                  "password".to_string(),
+                )) {
+                  collector.add(
+                    format!(
+                      "{}.args.auth.users[{}].password",
+                      location, idx
+                    ),
+                    "password is required".to_string(),
+                    ConfigErrorKind::MissingField,
+                  );
+                } else if let Some(password_value) = user_map.get(
+                  serde_yaml::Value::String("password".to_string()),
+                ) {
+                  // Validate password is non-empty string
+                  if let Some(password_str) = password_value.as_str() {
+                    if password_str.is_empty() {
+                      collector.add(
+                        format!(
+                          "{}.args.auth.users[{}].password",
+                          location, idx
+                        ),
+                        "password cannot be empty".to_string(),
+                        ConfigErrorKind::InvalidFormat,
+                      );
+                    }
+                  } else {
+                    collector.add(
+                      format!(
+                        "{}.args.auth.users[{}].password",
+                        location, idx
+                      ),
+                      "password must be a string".to_string(),
+                      ConfigErrorKind::TypeMismatch,
+                    );
+                  }
+                }
+              } else {
+                collector.add(
+                  format!("{}.args.auth.users[{}]", location, idx),
+                  "user entry must be a mapping".to_string(),
+                  ConfigErrorKind::TypeMismatch,
+                );
               }
             }
           } else {
             collector.add(
-              format!("{}.args.auth.credentials", location),
-              "credentials must be an array".to_string(),
+              format!("{}.args.auth.users", location),
+              "users must be an array".to_string(),
               ConfigErrorKind::TypeMismatch,
             );
           }
         } else {
           collector.add(
-            format!("{}.args.auth.credentials", location),
-            "credentials is required for password authentication"
-              .to_string(),
+            format!("{}.args.auth.users", location),
+            "users is required for password authentication".to_string(),
             ConfigErrorKind::MissingField,
+          );
+        }
+        // Warn if client_ca_path is set for password auth (should not be used)
+        if auth.get("client_ca_path").is_some() {
+          collector.add(
+            format!("{}.args.auth.client_ca_path", location),
+            "client_ca_path should not be configured for password authentication"
+              .to_string(),
+            ConfigErrorKind::InvalidFormat,
           );
         }
       }
@@ -781,6 +761,15 @@ impl Config {
             "client_ca_path is required for tls_client_cert authentication"
               .to_string(),
             ConfigErrorKind::MissingField,
+          );
+        }
+        // Warn if users is set for tls_client_cert auth (should not be used)
+        if auth.get("users").is_some() {
+          collector.add(
+            format!("{}.args.auth.users", location),
+            "users should not be configured for tls_client_cert authentication"
+              .to_string(),
+            ConfigErrorKind::InvalidFormat,
           );
         }
       }
@@ -2204,10 +2193,10 @@ worker_threads: [
   "key_path": "{}",
   "auth": {{
     "type": "password",
-    "credentials": [
+    "users": [
       {{
         "username": "user1",
-        "password_hash": "$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.VTtYA/1IbCQ5Gu"
+        "password": "secret123"
       }}
     ]
   }}
@@ -2234,7 +2223,7 @@ worker_threads: [
     let _ = std::fs::remove_file(&cert_path);
     let _ = std::fs::remove_file(&key_path);
 
-    // Password auth with valid credentials should pass
+    // Password auth with valid users should pass
     let auth_errors: Vec<_> = collector
       .errors()
       .iter()
@@ -2244,7 +2233,7 @@ worker_threads: [
   }
 
   #[test]
-  fn test_validate_http3_listener_auth_password_missing_credentials() {
+  fn test_validate_http3_listener_auth_password_missing_users() {
     ensure_crypto_provider();
 
     // Use real certificates for cert/key matching validation
@@ -2283,16 +2272,14 @@ worker_threads: [
 
     assert!(collector.has_errors());
     let errors = collector.errors();
-    let cred_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| e.location.contains("credentials"))
-      .collect();
-    assert!(!cred_errors.is_empty());
-    assert_eq!(cred_errors[0].kind, ConfigErrorKind::MissingField);
+    let users_errors: Vec<_> =
+      errors.iter().filter(|e| e.location.contains("users")).collect();
+    assert!(!users_errors.is_empty());
+    assert_eq!(users_errors[0].kind, ConfigErrorKind::MissingField);
   }
 
   #[test]
-  fn test_validate_http3_listener_auth_password_empty_credentials() {
+  fn test_validate_http3_listener_auth_password_empty_users() {
     ensure_crypto_provider();
 
     // Use real certificates for cert/key matching validation
@@ -2305,7 +2292,7 @@ worker_threads: [
   "key_path": "{}",
   "auth": {{
     "type": "password",
-    "credentials": []
+    "users": []
   }}
 }}"#,
       cert_path.to_str().unwrap(),
@@ -2332,13 +2319,11 @@ worker_threads: [
 
     assert!(collector.has_errors());
     let errors = collector.errors();
-    let cred_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| e.location.contains("credentials"))
-      .collect();
-    assert!(!cred_errors.is_empty());
-    assert_eq!(cred_errors[0].kind, ConfigErrorKind::InvalidFormat);
-    assert!(cred_errors[0].message.contains("cannot be empty"));
+    let users_errors: Vec<_> =
+      errors.iter().filter(|e| e.location.contains("users")).collect();
+    assert!(!users_errors.is_empty());
+    assert_eq!(users_errors[0].kind, ConfigErrorKind::InvalidFormat);
+    assert!(users_errors[0].message.contains("cannot be empty"));
   }
 
   #[test]
@@ -2355,9 +2340,9 @@ worker_threads: [
   "key_path": "{}",
   "auth": {{
     "type": "password",
-    "credentials": [
+    "users": [
       {{
-        "password_hash": "$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.VTtYA/1IbCQ5Gu"
+        "password": "secret123"
       }}
     ]
   }}
@@ -2395,8 +2380,7 @@ worker_threads: [
   }
 
   #[test]
-  fn test_validate_http3_listener_auth_password_missing_password_hash()
-  {
+  fn test_validate_http3_listener_auth_password_missing_password() {
     ensure_crypto_provider();
 
     // Use real certificates for cert/key matching validation
@@ -2409,7 +2393,7 @@ worker_threads: [
   "key_path": "{}",
   "auth": {{
     "type": "password",
-    "credentials": [
+    "users": [
       {{
         "username": "user1"
       }}
@@ -2440,12 +2424,12 @@ worker_threads: [
 
     assert!(collector.has_errors());
     let errors = collector.errors();
-    let hash_errors: Vec<_> = errors
+    let password_errors: Vec<_> = errors
       .iter()
-      .filter(|e| e.location.contains("password_hash"))
+      .filter(|e| e.location.contains("password"))
       .collect();
-    assert!(!hash_errors.is_empty());
-    assert_eq!(hash_errors[0].kind, ConfigErrorKind::MissingField);
+    assert!(!password_errors.is_empty());
+    assert_eq!(password_errors[0].kind, ConfigErrorKind::MissingField);
   }
 
   #[test]
@@ -2783,7 +2767,7 @@ worker_threads: [
   }
 
   #[test]
-  fn test_validate_http3_listener_auth_credentials_not_array() {
+  fn test_validate_http3_listener_auth_users_not_array() {
     ensure_crypto_provider();
 
     // Use real certificates for cert/key matching validation
@@ -2796,7 +2780,7 @@ worker_threads: [
   "key_path": "{}",
   "auth": {{
     "type": "password",
-    "credentials": "not_an_array"
+    "users": "not_an_array"
   }}
 }}"#,
       cert_path.to_str().unwrap(),
@@ -2823,16 +2807,14 @@ worker_threads: [
 
     assert!(collector.has_errors());
     let errors = collector.errors();
-    let cred_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| e.location.contains("credentials"))
-      .collect();
-    assert!(!cred_errors.is_empty());
-    assert_eq!(cred_errors[0].kind, ConfigErrorKind::TypeMismatch);
+    let users_errors: Vec<_> =
+      errors.iter().filter(|e| e.location.contains("users")).collect();
+    assert!(!users_errors.is_empty());
+    assert_eq!(users_errors[0].kind, ConfigErrorKind::TypeMismatch);
   }
 
   #[test]
-  fn test_validate_http3_listener_multiple_credentials() {
+  fn test_validate_http3_listener_multiple_users() {
     let temp_dir = get_temp_dir();
     let cert_path = temp_dir.join("neoproxy_test_cert_multi.pem");
     let key_path = temp_dir.join("neoproxy_test_key_multi.pem");
@@ -2855,14 +2837,14 @@ worker_threads: [
   "key_path": "{}",
   "auth": {{
     "type": "password",
-    "credentials": [
+    "users": [
       {{
         "username": "user1",
-        "password_hash": "$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.VTtYA/1IbCQ5Gu"
+        "password": "secret123"
       }},
       {{
         "username": "user2",
-        "password_hash": "$2b$12$VoH3H6wXNGx9xLxJzXzYzOzX9z9z9z9z9z9z9z9z9z9z9z9z9z9z9"
+        "password": "secret456"
       }}
     ]
   }}
@@ -2889,7 +2871,7 @@ worker_threads: [
     let _ = std::fs::remove_file(&cert_path);
     let _ = std::fs::remove_file(&key_path);
 
-    // Multiple credentials should be valid
+    // Multiple users should be valid
     let auth_errors: Vec<_> = collector
       .errors()
       .iter()
@@ -3189,288 +3171,6 @@ worker_threads: [
       })
       .collect();
     assert!(!key_errors.is_empty());
-  }
-
-  // =========================================================================
-  // Password Hash Format Validation Tests
-  // =========================================================================
-
-  #[test]
-  fn test_validate_password_hash_valid_bcrypt_2a() {
-    ensure_crypto_provider();
-
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
-  "auth": {{
-    "type": "password",
-    "credentials": [
-      {{
-        "username": "user1",
-        "password_hash": "$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.VTtYA/1IbCQ5Gu"
-      }}
-    ]
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Valid bcrypt hash format should pass
-    let hash_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| {
-        e.location.contains("password_hash")
-          && e.message.contains("bcrypt")
-      })
-      .collect();
-    assert!(hash_errors.is_empty());
-  }
-
-  #[test]
-  fn test_validate_password_hash_valid_bcrypt_2b() {
-    ensure_crypto_provider();
-
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
-  "auth": {{
-    "type": "password",
-    "credentials": [
-      {{
-        "username": "user1",
-        "password_hash": "$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.VTtYA/1IbCQ5Gu"
-      }}
-    ]
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Valid bcrypt hash format should pass
-    let hash_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| {
-        e.location.contains("password_hash")
-          && e.message.contains("bcrypt")
-      })
-      .collect();
-    assert!(hash_errors.is_empty());
-  }
-
-  #[test]
-  fn test_validate_password_hash_valid_phc_format() {
-    ensure_crypto_provider();
-
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
-  "auth": {{
-    "type": "password",
-    "credentials": [
-      {{
-        "username": "user1",
-        "password_hash": "$bcrypt$v=98$r=12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8"
-      }}
-    ]
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Valid PHC format should pass
-    let hash_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| {
-        e.location.contains("password_hash")
-          && e.message.contains("bcrypt")
-      })
-      .collect();
-    assert!(hash_errors.is_empty());
-  }
-
-  #[test]
-  fn test_validate_password_hash_invalid_format() {
-    ensure_crypto_provider();
-
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
-  "auth": {{
-    "type": "password",
-    "credentials": [
-      {{
-        "username": "user1",
-        "password_hash": "invalid_hash_format"
-      }}
-    ]
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Invalid hash format should produce error
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    let hash_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| {
-        e.location.contains("password_hash")
-          && e.message.contains("bcrypt")
-      })
-      .collect();
-    assert!(!hash_errors.is_empty());
-  }
-
-  #[test]
-  fn test_validate_password_hash_invalid_cost() {
-    ensure_crypto_provider();
-
-    let (cert_path, key_path) = generate_test_certificates();
-
-    // bcrypt cost must be between 4 and 31
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
-  "auth": {{
-    "type": "password",
-    "credentials": [
-      {{
-        "username": "user1",
-        "password_hash": "$2a$99$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8"
-      }}
-    ]
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Invalid cost should produce error
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    let hash_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| {
-        e.location.contains("password_hash")
-          && e.message.contains("bcrypt")
-      })
-      .collect();
-    assert!(!hash_errors.is_empty());
   }
 
   // =========================================================================
@@ -3841,164 +3541,6 @@ worker_threads: [
   }
 
   // =========================================================================
-  // is_valid_bcrypt_hash Function Tests
-  // =========================================================================
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_2a_format() {
-    assert!(is_valid_bcrypt_hash(
-      "$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.VTtYA/1IbCQ5Gu"
-    ));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_2b_format() {
-    assert!(is_valid_bcrypt_hash(
-      "$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.VTtYA/1IbCQ5Gu"
-    ));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_2x_format() {
-    assert!(is_valid_bcrypt_hash(
-      "$2x$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.VTtYA/1IbCQ5Gu"
-    ));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_2y_format() {
-    assert!(is_valid_bcrypt_hash(
-      "$2y$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.VTtYA/1IbCQ5Gu"
-    ));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_phc_format() {
-    assert!(is_valid_bcrypt_hash(
-      "$bcrypt$v=98$r=12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8"
-    ));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_invalid_format() {
-    assert!(!is_valid_bcrypt_hash("invalid_hash"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_invalid_cost_too_low() {
-    assert!(!is_valid_bcrypt_hash(
-      "$2a$03$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.VTtYA/1IbCQ5Gu"
-    ));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_invalid_cost_too_high() {
-    assert!(!is_valid_bcrypt_hash(
-      "$2a$32$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.VTtYA/1IbCQ5Gu"
-    ));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_missing_hash_part() {
-    // "$2a$12$" has 4 parts after splitting: "", "2a", "12", ""
-    // The hash content (parts[3]) is empty string
-    // This should return false because there's no actual hash content
-    let result = is_valid_bcrypt_hash("$2a$12$");
-    assert!(!result);
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_missing_cost() {
-    // "$2a$" has only 2 parts after splitting: "", "2a"
-    // This should return false
-    assert!(!is_valid_bcrypt_hash("$2a$"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_phc_missing_version() {
-    assert!(!is_valid_bcrypt_hash("$bcrypt$r=12$hash"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_phc_missing_rounds() {
-    assert!(!is_valid_bcrypt_hash("$bcrypt$v=98$hash"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_phc_invalid_rounds() {
-    assert!(!is_valid_bcrypt_hash(
-      "$bcrypt$v=98$r=abc$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8"
-    ));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_invalid_cost_non_numeric() {
-    // Non-numeric cost should return false
-    assert!(!is_valid_bcrypt_hash("$2a$ab$hash"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_phc_invalid_version() {
-    // Wrong version format should return false
-    assert!(!is_valid_bcrypt_hash("$bcrypt$x=98$r=12$hash"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_phc_invalid_rounds_format() {
-    // Rounds part doesn't start with "r=" should return false
-    // This covers the case where parts[3] exists but doesn't start with "r="
-    assert!(!is_valid_bcrypt_hash("$bcrypt$v=98$x=12$hash"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_empty_string() {
-    assert!(!is_valid_bcrypt_hash(""));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_wrong_prefix() {
-    assert!(!is_valid_bcrypt_hash("$2c$12$hash"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_phc_rounds_out_of_range_low() {
-    // PHC format with rounds below valid range (4-31)
-    // This tests line 47: return false for rounds out of range
-    assert!(!is_valid_bcrypt_hash(
-      "$bcrypt$v=98$r=3$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8"
-    ));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_phc_rounds_out_of_range_high() {
-    // PHC format with rounds above valid range (4-31)
-    // This tests line 47: return false for rounds out of range
-    assert!(!is_valid_bcrypt_hash(
-      "$bcrypt$v=98$r=32$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8"
-    ));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_phc_hash_too_short() {
-    // PHC format with hash content too short (< 30 chars)
-    // This tests line 58: return false for short hash content
-    assert!(!is_valid_bcrypt_hash("$bcrypt$v=98$r=12$short_hash"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_phc_empty_hash() {
-    // PHC format with empty hash content
-    // This tests line 58: return false for empty hash content
-    assert!(!is_valid_bcrypt_hash("$bcrypt$v=98$r=12$"));
-  }
-
-  #[test]
-  fn test_is_valid_bcrypt_hash_phc_insufficient_parts() {
-    // PHC format with only 4 parts (missing hash content)
-    assert!(!is_valid_bcrypt_hash("$bcrypt$v=98$r=12"));
-  }
-
-  // =========================================================================
   // HTTP/3 Listener Missing/Invalid cert_path and key_path Tests
   // =========================================================================
 
@@ -4170,5 +3712,120 @@ worker_threads: [
       .filter(|e| e.location.contains("key_path"))
       .collect();
     assert!(key_errors.is_empty());
+  }
+
+  // =========================================================================
+  // NEW Auth Format Tests (plaintext password with users array)
+  // =========================================================================
+
+  #[test]
+  fn test_validate_http3_auth_new_password_format_with_users() {
+    ensure_crypto_provider();
+
+    let (cert_path, key_path) = generate_test_certificates();
+
+    // Config with NEW auth format: users array with plaintext password
+    let args = serde_yaml::from_str(&format!(
+      r#"{{
+  "address": "127.0.0.1:8443",
+  "cert_path": "{}",
+  "key_path": "{}",
+  "auth": {{
+    "type": "password",
+    "users": [
+      {{
+        "username": "admin",
+        "password": "secret123"
+      }}
+    ]
+  }}
+}}"#,
+      cert_path.to_str().unwrap(),
+      key_path.to_str().unwrap()
+    ))
+    .unwrap();
+
+    let config = Config {
+      servers: vec![Server {
+        name: "test".to_string(),
+        listeners: vec![Listener {
+          kind: "http3.listener".to_string(),
+          args,
+        }],
+        service: "".to_string(),
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+
+    let _ = std::fs::remove_file(&cert_path);
+    let _ = std::fs::remove_file(&key_path);
+
+    // NEW format should be accepted - no auth-related errors
+    let auth_errors: Vec<_> = collector
+      .errors()
+      .iter()
+      .filter(|e| e.location.contains("auth"))
+      .collect();
+    assert!(
+      auth_errors.is_empty(),
+      "NEW auth format should be accepted"
+    );
+  }
+
+  #[test]
+  fn test_validate_http3_auth_new_format_tls_client_cert() {
+    ensure_crypto_provider();
+
+    let (cert_path, key_path) = generate_test_certificates();
+    let client_ca_path = cert_path.clone(); // Use the same cert for client CA (just for testing format)
+
+    // Config with NEW auth format: tls_client_cert type
+    let args = serde_yaml::from_str(&format!(
+      r#"{{
+  "address": "127.0.0.1:8443",
+  "cert_path": "{}",
+  "key_path": "{}",
+  "auth": {{
+    "type": "tls_client_cert",
+    "client_ca_path": "{}"
+  }}
+}}"#,
+      cert_path.to_str().unwrap(),
+      key_path.to_str().unwrap(),
+      client_ca_path.to_str().unwrap()
+    ))
+    .unwrap();
+
+    let config = Config {
+      servers: vec![Server {
+        name: "test".to_string(),
+        listeners: vec![Listener {
+          kind: "http3.listener".to_string(),
+          args,
+        }],
+        service: "".to_string(),
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+
+    let _ = std::fs::remove_file(&cert_path);
+    let _ = std::fs::remove_file(&key_path);
+
+    // NEW tls_client_cert format should be accepted
+    let auth_errors: Vec<_> = collector
+      .errors()
+      .iter()
+      .filter(|e| {
+        e.location.contains("auth") && !e.message.contains("client_ca")
+      })
+      .collect();
+    assert!(
+      auth_errors.is_empty(),
+      "NEW tls_client_cert format should be accepted"
+    );
   }
 }

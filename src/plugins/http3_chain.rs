@@ -24,7 +24,7 @@ use tracing::{error, info, warn};
 
 use super::utils;
 use crate::listeners::fast_socks5::{
-  extract_host_port, format_connect_uri, Socks5StreamCell,
+  Socks5StreamCell, extract_host_port, format_connect_uri,
 };
 use crate::listeners::http3::StreamTracker;
 use crate::plugin;
@@ -50,7 +50,10 @@ const H3_NO_ERROR_CODE: u32 = 0x100;
 ///
 /// A Vec<u8> containing the complete SOCKS5 reply packet.
 #[allow(dead_code)]
-fn build_socks5_reply(reply_code: u8, bind_addr: SocketAddr) -> Vec<u8> {
+fn build_socks5_reply(
+  reply_code: u8,
+  bind_addr: SocketAddr,
+) -> Vec<u8> {
   let (addr_type, mut ip_oct, mut port) = match bind_addr {
     SocketAddr::V4(sock) => (
       fast_socks5::consts::SOCKS5_ADDR_TYPE_IPV4,
@@ -265,9 +268,11 @@ impl ProxyGroup {
               proxy.address
             );
           }
-          Ok(res) => if let Err(e) = res {
-            info!("connection of {} finished: {e}", proxy.address);
-          },
+          Ok(res) => {
+            if let Err(e) = res {
+              info!("connection of {} finished: {e}", proxy.address);
+            }
+          }
         }
       } else {
         return Ok(proxy.requester.as_ref().unwrap().clone());
@@ -389,10 +394,7 @@ impl io::AsyncWrite for H3SendingStreamWriter {
     cx: &mut Context<'_>,
   ) -> Poll<Result<(), std::io::Error>> {
     let fut = self.0.finish();
-    Box::pin(fut)
-      .as_mut()
-      .poll(cx)
-      .map_err(std::io::Error::other)
+    Box::pin(fut).as_mut().poll(cx).map_err(std::io::Error::other)
   }
 }
 
@@ -488,7 +490,9 @@ impl tower::Service<plugin::Request> for Http3ChainService {
       return Box::pin(async move {
         // Check if service is shutting down - reject new requests
         if is_shutting_down {
-          warn!("Http3ChainService: rejecting SOCKS5 request during shutdown");
+          warn!(
+            "Http3ChainService: rejecting SOCKS5 request during shutdown"
+          );
           return Ok(build_empty_response(
             http::StatusCode::SERVICE_UNAVAILABLE,
           ));
@@ -515,17 +519,18 @@ impl tower::Service<plugin::Request> for Http3ChainService {
         let uri = format_connect_uri(&host, port);
 
         // Get connection to next hop proxy
-        let mut requester = match pg.borrow_mut().get_proxy_conn(&st, &ct).await {
-          Ok(r) => r,
-          Err(e) => {
-            // Failed to connect to next hop proxy - send REP=0x01
-            warn!("SOCKS5: failed to connect to next hop proxy: {e}");
-            let _ = proto
-              .reply_error(&fast_socks5::ReplyError::GeneralFailure)
-              .await;
-            return Ok(build_empty_response(http::StatusCode::OK));
-          }
-        };
+        let mut requester =
+          match pg.borrow_mut().get_proxy_conn(&st, &ct).await {
+            Ok(r) => r,
+            Err(e) => {
+              // Failed to connect to next hop proxy - send REP=0x01
+              warn!("SOCKS5: failed to connect to next hop proxy: {e}");
+              let _ = proto
+                .reply_error(&fast_socks5::ReplyError::GeneralFailure)
+                .await;
+              return Ok(build_empty_response(http::StatusCode::OK));
+            }
+          };
 
         // Send HTTP/3 CONNECT request to next hop proxy
         // Target address is passed through as-is (no DNS resolution)
@@ -541,10 +546,13 @@ impl tower::Service<plugin::Request> for Http3ChainService {
           }
         };
 
-        let proxy_stream = match requester.send_request(proxy_req).await {
+        let proxy_stream = match requester.send_request(proxy_req).await
+        {
           Ok(s) => s,
           Err(e) => {
-            warn!("SOCKS5: failed to send CONNECT request to next hop: {e}");
+            warn!(
+              "SOCKS5: failed to send CONNECT request to next hop: {e}"
+            );
             let _ = proto
               .reply_error(&fast_socks5::ReplyError::GeneralFailure)
               .await;
@@ -556,7 +564,9 @@ impl tower::Service<plugin::Request> for Http3ChainService {
         let proxy_resp = match proxy_stream.recv_response().await {
           Ok(r) => r,
           Err(e) => {
-            warn!("SOCKS5: failed to receive response from next hop: {e}");
+            warn!(
+              "SOCKS5: failed to receive response from next hop: {e}"
+            );
             let _ = proto
               .reply_error(&fast_socks5::ReplyError::GeneralFailure)
               .await;
@@ -578,13 +588,17 @@ impl tower::Service<plugin::Request> for Http3ChainService {
         }
 
         // Send SOCKS5 success reply (REP=0x00) and get the stream
-        let client_stream = match proto.reply_success("0.0.0.0:0".parse().unwrap()).await {
-          Ok(stream) => stream,
-          Err(e) => {
-            warn!("SOCKS5: failed to send success reply to client: {e}");
-            return Ok(build_empty_response(http::StatusCode::OK));
-          }
-        };
+        let client_stream =
+          match proto.reply_success("0.0.0.0:0".parse().unwrap()).await
+          {
+            Ok(stream) => stream,
+            Err(e) => {
+              warn!(
+                "SOCKS5: failed to send success reply to client: {e}"
+              );
+              return Ok(build_empty_response(http::StatusCode::OK));
+            }
+          };
 
         // Split the proxy stream for bidirectional transfer
         let (sending_stream, receiving_stream) = proxy_stream.split();
@@ -646,9 +660,7 @@ impl tower::Service<plugin::Request> for Http3ChainService {
       // transfer request body's data frames to proxy sending stream.
       ts.borrow_mut().new_transfering(
         tokio_util::io::StreamReader::new(
-          req_body
-            .map_err(std::io::Error::other)
-            .into_data_stream(),
+          req_body.map_err(std::io::Error::other).into_data_stream(),
         ),
         H3SendingStreamWriter::new(sending_stream),
       )?;
@@ -2716,8 +2728,10 @@ ca_path: "/tmp/ca.pem"
   // ============== SOCKS5 Mode Detection Tests ==============
 
   /// Helper to create a socket pair for testing
-  async fn create_socket_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  async fn create_socket_pair()
+  -> (tokio::net::TcpStream, tokio::net::TcpStream) {
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let client = tokio::net::TcpStream::connect(addr).await.unwrap();
     let (server, _) = listener.accept().await.unwrap();
@@ -2732,19 +2746,22 @@ ca_path: "/tmp/ca.pem"
         let (client, server) = create_socket_pair().await;
 
         // Create Socks5StreamCell with a domain target address
-        let target_addr = fast_socks5::util::target_addr::TargetAddr::Domain(
-          "example.com".to_string(),
-          443,
-        );
+        let target_addr =
+          fast_socks5::util::target_addr::TargetAddr::Domain(
+            "example.com".to_string(),
+            443,
+          );
         let cell = Socks5StreamCell::new_for_test(server, target_addr);
 
         // Create a request with Socks5StreamCell in extensions
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri("example.com:443")
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
@@ -2797,18 +2814,21 @@ ca_path: "/tmp/ca.pem"
         let (client, server) = create_socket_pair().await;
 
         // Create Socks5StreamCell with an IPv4 target address
-        let target_addr = fast_socks5::util::target_addr::TargetAddr::Ip(
-          "127.0.0.1:8080".parse().unwrap(),
-        );
+        let target_addr =
+          fast_socks5::util::target_addr::TargetAddr::Ip(
+            "127.0.0.1:8080".parse().unwrap(),
+          );
         let cell = Socks5StreamCell::new_for_test(server, target_addr);
 
         // Create a request with Socks5StreamCell in extensions
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri("127.0.0.1:8080")
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
@@ -2855,18 +2875,21 @@ ca_path: "/tmp/ca.pem"
         let (client, server) = create_socket_pair().await;
 
         // Create Socks5StreamCell with an IPv6 target address
-        let target_addr = fast_socks5::util::target_addr::TargetAddr::Ip(
-          "[::1]:8080".parse().unwrap(),
-        );
+        let target_addr =
+          fast_socks5::util::target_addr::TargetAddr::Ip(
+            "[::1]:8080".parse().unwrap(),
+          );
         let cell = Socks5StreamCell::new_for_test(server, target_addr);
 
         // Create a request with Socks5StreamCell in extensions
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri("[::1]:8080")
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
@@ -2913,11 +2936,13 @@ ca_path: "/tmp/ca.pem"
         let (_client, server) = create_socket_pair().await;
 
         // Create Socks5StreamCell and take its contents
-        let target_addr = fast_socks5::util::target_addr::TargetAddr::Domain(
-          "example.com".to_string(),
-          443,
-        );
-        let mut cell = Socks5StreamCell::new_for_test(server, target_addr);
+        let target_addr =
+          fast_socks5::util::target_addr::TargetAddr::Domain(
+            "example.com".to_string(),
+            443,
+          );
+        let mut cell =
+          Socks5StreamCell::new_for_test(server, target_addr);
         // Take the stream - this makes the cell empty
         let _ = cell.take_stream_for_test();
 
@@ -2925,9 +2950,11 @@ ca_path: "/tmp/ca.pem"
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri("example.com:443")
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
@@ -2980,9 +3007,11 @@ ca_path: "/tmp/ca.pem"
         let req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri("example.com:443")
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
 
         // Create service and call
@@ -3038,19 +3067,22 @@ ca_path: "/tmp/ca.pem"
         let (client, server) = create_socket_pair().await;
 
         // Create Socks5StreamCell
-        let target_addr = fast_socks5::util::target_addr::TargetAddr::Domain(
-          "example.com".to_string(),
-          443,
-        );
+        let target_addr =
+          fast_socks5::util::target_addr::TargetAddr::Domain(
+            "example.com".to_string(),
+            443,
+          );
         let cell = Socks5StreamCell::new_for_test(server, target_addr);
 
         // Create a request with Socks5StreamCell in extensions
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri("example.com:443")
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
@@ -3104,19 +3136,22 @@ ca_path: "/tmp/ca.pem"
         let (client, server) = create_socket_pair().await;
 
         // Create Socks5StreamCell with a domain target address
-        let target_addr = fast_socks5::util::target_addr::TargetAddr::Domain(
-          "nonexistent.example.test".to_string(),
-          443,
-        );
+        let target_addr =
+          fast_socks5::util::target_addr::TargetAddr::Domain(
+            "nonexistent.example.test".to_string(),
+            443,
+          );
         let cell = Socks5StreamCell::new_for_test(server, target_addr);
 
         // Create a request with Socks5StreamCell in extensions
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri("nonexistent.example.test:443")
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
@@ -3261,10 +3296,11 @@ ca_path: "/tmp/ca.pem"
   /// Test that domain names are not modified (regression test)
   #[test]
   fn test_socks5_domain_uri_format_unchanged() {
-    let target_addr = fast_socks5::util::target_addr::TargetAddr::Domain(
-      "example.com".to_string(),
-      443,
-    );
+    let target_addr =
+      fast_socks5::util::target_addr::TargetAddr::Domain(
+        "example.com".to_string(),
+        443,
+      );
 
     let (host, port) = extract_host_port(&target_addr);
     let uri = format_connect_uri(&host, port);

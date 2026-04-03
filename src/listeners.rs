@@ -92,7 +92,9 @@ mod tests {
     let global_set = ListenerBuilderSet::global();
     assert!(global_set.listener_builder("hyper.listener").is_some());
     assert!(global_set.listener_builder("http3.listener").is_some());
-    assert!(global_set.listener_builder("fast_socks5.listener").is_some());
+    assert!(
+      global_set.listener_builder("fast_socks5.listener").is_some()
+    );
   }
 
   #[test]

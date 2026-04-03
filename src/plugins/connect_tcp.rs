@@ -58,7 +58,10 @@ fn build_error_response(
 ///
 /// A Vec<u8> containing the complete SOCKS5 reply packet.
 #[allow(dead_code)]
-fn build_socks5_reply(reply_code: u8, bind_addr: SocketAddr) -> Vec<u8> {
+fn build_socks5_reply(
+  reply_code: u8,
+  bind_addr: SocketAddr,
+) -> Vec<u8> {
   let (addr_type, mut ip_oct, mut port) = match bind_addr {
     SocketAddr::V4(sock) => (
       fast_socks5::consts::SOCKS5_ADDR_TYPE_IPV4,
@@ -307,7 +310,9 @@ impl tower::Service<plugin::Request> for ConnectTcpService {
           Some((proto, addr)) => (proto, addr),
           None => {
             warn!("Socks5StreamCell was already taken");
-            return Ok(build_empty_response(http::StatusCode::INTERNAL_SERVER_ERROR));
+            return Ok(build_empty_response(
+              http::StatusCode::INTERNAL_SERVER_ERROR,
+            ));
           }
         };
 
@@ -316,9 +321,10 @@ impl tower::Service<plugin::Request> for ConnectTcpService {
           fast_socks5::util::target_addr::TargetAddr::Ip(addr) => {
             (addr.ip().to_string(), addr.port())
           }
-          fast_socks5::util::target_addr::TargetAddr::Domain(domain, port) => {
-            (domain.clone(), *port)
-          }
+          fast_socks5::util::target_addr::TargetAddr::Domain(
+            domain,
+            port,
+          ) => (domain.clone(), *port),
         };
 
         // Build and return 200 response immediately
@@ -1430,7 +1436,10 @@ mod tests {
     );
     assert_eq!(reply.len(), 10);
     assert_eq!(reply[0], fast_socks5::consts::SOCKS5_VERSION);
-    assert_eq!(reply[1], fast_socks5::consts::SOCKS5_REPLY_CONNECTION_REFUSED);
+    assert_eq!(
+      reply[1],
+      fast_socks5::consts::SOCKS5_REPLY_CONNECTION_REFUSED
+    );
   }
 
   #[test]
@@ -1439,7 +1448,10 @@ mod tests {
       fast_socks5::consts::SOCKS5_REPLY_HOST_UNREACHABLE,
       "0.0.0.0:0".parse().unwrap(),
     );
-    assert_eq!(reply[1], fast_socks5::consts::SOCKS5_REPLY_HOST_UNREACHABLE);
+    assert_eq!(
+      reply[1],
+      fast_socks5::consts::SOCKS5_REPLY_HOST_UNREACHABLE
+    );
   }
 
   #[test]
@@ -1460,55 +1472,77 @@ mod tests {
       fast_socks5::consts::SOCKS5_REPLY_GENERAL_FAILURE,
       "0.0.0.0:0".parse().unwrap(),
     );
-    assert_eq!(reply[1], fast_socks5::consts::SOCKS5_REPLY_GENERAL_FAILURE);
+    assert_eq!(
+      reply[1],
+      fast_socks5::consts::SOCKS5_REPLY_GENERAL_FAILURE
+    );
   }
 
   #[test]
   fn test_io_error_to_reply_error_connection_refused() {
     let err = io::Error::new(io::ErrorKind::ConnectionRefused, "test");
     let reply = io_error_to_reply_error(&err);
-    assert_eq!(reply.as_u8(), fast_socks5::consts::SOCKS5_REPLY_CONNECTION_REFUSED);
+    assert_eq!(
+      reply.as_u8(),
+      fast_socks5::consts::SOCKS5_REPLY_CONNECTION_REFUSED
+    );
   }
 
   #[test]
   fn test_io_error_to_reply_error_network_unreachable() {
     let err = io::Error::new(io::ErrorKind::NetworkUnreachable, "test");
     let reply = io_error_to_reply_error(&err);
-    assert_eq!(reply.as_u8(), fast_socks5::consts::SOCKS5_REPLY_NETWORK_UNREACHABLE);
+    assert_eq!(
+      reply.as_u8(),
+      fast_socks5::consts::SOCKS5_REPLY_NETWORK_UNREACHABLE
+    );
   }
 
   #[test]
   fn test_io_error_to_reply_error_host_unreachable() {
     let err = io::Error::new(io::ErrorKind::HostUnreachable, "test");
     let reply = io_error_to_reply_error(&err);
-    assert_eq!(reply.as_u8(), fast_socks5::consts::SOCKS5_REPLY_HOST_UNREACHABLE);
+    assert_eq!(
+      reply.as_u8(),
+      fast_socks5::consts::SOCKS5_REPLY_HOST_UNREACHABLE
+    );
   }
 
   #[test]
   fn test_io_error_to_reply_error_timed_out() {
     let err = io::Error::new(io::ErrorKind::TimedOut, "test");
     let reply = io_error_to_reply_error(&err);
-    assert_eq!(reply.as_u8(), fast_socks5::consts::SOCKS5_REPLY_GENERAL_FAILURE);
+    assert_eq!(
+      reply.as_u8(),
+      fast_socks5::consts::SOCKS5_REPLY_GENERAL_FAILURE
+    );
   }
 
   #[test]
   fn test_io_error_to_reply_error_addr_not_available() {
     let err = io::Error::new(io::ErrorKind::AddrNotAvailable, "test");
     let reply = io_error_to_reply_error(&err);
-    assert_eq!(reply.as_u8(), fast_socks5::consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED);
+    assert_eq!(
+      reply.as_u8(),
+      fast_socks5::consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED
+    );
   }
 
   #[test]
   fn test_io_error_to_reply_error_other() {
     let err = io::Error::other("test");
     let reply = io_error_to_reply_error(&err);
-    assert_eq!(reply.as_u8(), fast_socks5::consts::SOCKS5_REPLY_GENERAL_FAILURE);
+    assert_eq!(
+      reply.as_u8(),
+      fast_socks5::consts::SOCKS5_REPLY_GENERAL_FAILURE
+    );
   }
 
   #[test]
   fn test_io_error_to_reply_error_unexpected_eof() {
     // Test the catch-all _ => ReplyError::GeneralFailure branch
-    let err = io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected eof");
+    let err =
+      io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected eof");
     let reply = io_error_to_reply_error(&err);
     assert_eq!(
       reply.as_u8(),
@@ -1565,9 +1599,8 @@ mod tests {
   #[test]
   fn test_io_error_to_reply_error_dns_failure_macos() {
     // macOS DNS failure message
-    let err = io::Error::other(
-      "nodename nor servname provided, or not known",
-    );
+    let err =
+      io::Error::other("nodename nor servname provided, or not known");
     let reply = io_error_to_reply_error(&err);
     assert_eq!(
       reply.as_u8(),
@@ -1603,7 +1636,8 @@ mod tests {
   #[test]
   fn test_io_error_to_reply_error_invalid_input_non_dns() {
     // InvalidInput but not a DNS failure
-    let err = io::Error::new(io::ErrorKind::InvalidInput, "invalid argument");
+    let err =
+      io::Error::new(io::ErrorKind::InvalidInput, "invalid argument");
     let reply = io_error_to_reply_error(&err);
     assert_eq!(
       reply.as_u8(),
@@ -1612,8 +1646,10 @@ mod tests {
   }
 
   /// Helper to create a socket pair for testing
-  async fn create_socket_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  async fn create_socket_pair()
+  -> (tokio::net::TcpStream, tokio::net::TcpStream) {
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let client = tokio::net::TcpStream::connect(addr).await.unwrap();
     let (server, _) = listener.accept().await.unwrap();
@@ -1628,19 +1664,22 @@ mod tests {
         let (client, server) = create_socket_pair().await;
 
         // Create Socks5StreamCell with a domain target address
-        let target_addr = fast_socks5::util::target_addr::TargetAddr::Domain(
-          "example.com".to_string(),
-          443,
-        );
+        let target_addr =
+          fast_socks5::util::target_addr::TargetAddr::Domain(
+            "example.com".to_string(),
+            443,
+          );
         let cell = Socks5StreamCell::new_for_test(server, target_addr);
 
         // Create a request with Socks5StreamCell in extensions
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri("example.com:443")
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
@@ -1666,18 +1705,21 @@ mod tests {
         let (client, server) = create_socket_pair().await;
 
         // Create Socks5StreamCell with an IPv4 target address
-        let target_addr = fast_socks5::util::target_addr::TargetAddr::Ip(
-          "127.0.0.1:8080".parse().unwrap(),
-        );
+        let target_addr =
+          fast_socks5::util::target_addr::TargetAddr::Ip(
+            "127.0.0.1:8080".parse().unwrap(),
+          );
         let cell = Socks5StreamCell::new_for_test(server, target_addr);
 
         // Create a request with Socks5StreamCell in extensions
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri("127.0.0.1:8080")
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
@@ -1703,11 +1745,13 @@ mod tests {
         let (_client, server) = create_socket_pair().await;
 
         // Create Socks5StreamCell and take its contents
-        let target_addr = fast_socks5::util::target_addr::TargetAddr::Domain(
-          "example.com".to_string(),
-          443,
-        );
-        let mut cell = Socks5StreamCell::new_for_test(server, target_addr);
+        let target_addr =
+          fast_socks5::util::target_addr::TargetAddr::Domain(
+            "example.com".to_string(),
+            443,
+          );
+        let mut cell =
+          Socks5StreamCell::new_for_test(server, target_addr);
         // Take the stream - this makes the cell empty
         let _ = cell.take_stream_for_test();
 
@@ -1715,9 +1759,11 @@ mod tests {
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri("example.com:443")
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
@@ -1748,9 +1794,11 @@ mod tests {
         let req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri("example.com:443")
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
 
         let resp = service.call(req).await.unwrap();
@@ -1774,7 +1822,8 @@ mod tests {
 
         // Spawn a task to accept the target connection
         let accept_handle = tokio::spawn(async move {
-          let (mut target_stream, _) = target_listener.accept().await.unwrap();
+          let (mut target_stream, _) =
+            target_listener.accept().await.unwrap();
           // Simple echo: read and write back
           let mut buf = [0u8; 1024];
           if let Ok(n) = target_stream.read(&mut buf).await
@@ -1792,15 +1841,18 @@ mod tests {
         // Create Socks5StreamCell with the target address
         let target_addr_socks5 =
           fast_socks5::util::target_addr::TargetAddr::Ip(target_addr);
-        let cell = Socks5StreamCell::new_for_test(server, target_addr_socks5);
+        let cell =
+          Socks5StreamCell::new_for_test(server, target_addr_socks5);
 
         // Create a request with Socks5StreamCell in extensions
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri(format!("127.0.0.1:{}", target_addr.port()))
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
@@ -1812,16 +1864,27 @@ mod tests {
 
         // Read SOCKS5 reply from client with timeout
         let mut reply_buf = [0u8; 10];
-        let read_result =
-          tokio::time::timeout(Duration::from_secs(5), client.read(&mut reply_buf))
-            .await;
-        assert!(read_result.is_ok(), "Should receive SOCKS5 reply within timeout");
+        let read_result = tokio::time::timeout(
+          Duration::from_secs(5),
+          client.read(&mut reply_buf),
+        )
+        .await;
+        assert!(
+          read_result.is_ok(),
+          "Should receive SOCKS5 reply within timeout"
+        );
         let n = read_result.unwrap().unwrap();
-        assert!(n >= 10, "Should receive at least 10 bytes for SOCKS5 reply");
+        assert!(
+          n >= 10,
+          "Should receive at least 10 bytes for SOCKS5 reply"
+        );
 
         // Verify SOCKS5 reply
         assert_eq!(reply_buf[0], fast_socks5::consts::SOCKS5_VERSION);
-        assert_eq!(reply_buf[1], fast_socks5::consts::SOCKS5_REPLY_SUCCEEDED);
+        assert_eq!(
+          reply_buf[1],
+          fast_socks5::consts::SOCKS5_REPLY_SUCCEEDED
+        );
 
         // Clean up
         drop(client);
@@ -1847,16 +1910,19 @@ mod tests {
         let (mut client, server) = create_socket_pair().await;
 
         // Create Socks5StreamCell with the unavailable target address
-        let target_addr = fast_socks5::util::target_addr::TargetAddr::Ip(addr);
+        let target_addr =
+          fast_socks5::util::target_addr::TargetAddr::Ip(addr);
         let cell = Socks5StreamCell::new_for_test(server, target_addr);
 
         // Create a request with Socks5StreamCell in extensions
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri(format!("127.0.0.1:{}", addr.port()))
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
@@ -1872,7 +1938,10 @@ mod tests {
         // Read SOCKS5 error reply from client
         let mut reply_buf = [0u8; 10];
         let n = client.read(&mut reply_buf).await.unwrap();
-        assert!(n >= 10, "Should receive at least 10 bytes for SOCKS5 reply");
+        assert!(
+          n >= 10,
+          "Should receive at least 10 bytes for SOCKS5 reply"
+        );
 
         // Verify SOCKS5 error reply
         assert_eq!(reply_buf[0], fast_socks5::consts::SOCKS5_VERSION);
@@ -1902,24 +1971,26 @@ mod tests {
         let (client, server) = create_socket_pair().await;
 
         // Create Socks5StreamCell with an unavailable port
-        let target_addr = fast_socks5::util::target_addr::TargetAddr::Ip(addr);
+        let target_addr =
+          fast_socks5::util::target_addr::TargetAddr::Ip(addr);
         let cell = Socks5StreamCell::new_for_test(server, target_addr);
 
         // Create a request with Socks5StreamCell
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri(format!("127.0.0.1:{}", addr.port()))
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
         // Create service with a tunnel tracker
         let tunnel_tracker = Rc::new(TunnelTracker::new());
-        let service = ConnectTcpService {
-          tunnel_tracker: tunnel_tracker.clone(),
-        };
+        let service =
+          ConnectTcpService { tunnel_tracker: tunnel_tracker.clone() };
         let mut service = plugin::Service::new(service);
 
         // Call the service
@@ -1957,7 +2028,8 @@ mod tests {
         let target_addr = target_listener.local_addr().unwrap();
 
         // Create a local task to accept the target connection in LocalSet
-        let (accept_tx, mut accept_rx) = tokio::sync::oneshot::channel();
+        let (accept_tx, mut accept_rx) =
+          tokio::sync::oneshot::channel();
         let accept_task = tokio::task::spawn_local(async move {
           if let Ok((stream, _)) = target_listener.accept().await {
             let _ = accept_tx.send(());
@@ -1973,23 +2045,25 @@ mod tests {
         // Create Socks5StreamCell with the target address
         let target_addr_cell =
           fast_socks5::util::target_addr::TargetAddr::Ip(target_addr);
-        let cell = Socks5StreamCell::new_for_test(server, target_addr_cell);
+        let cell =
+          Socks5StreamCell::new_for_test(server, target_addr_cell);
 
         // Create a request with Socks5StreamCell
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri(format!("127.0.0.1:{}", target_addr.port()))
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
         // Create service with a tunnel tracker
         let tunnel_tracker = Rc::new(TunnelTracker::new());
-        let service = ConnectTcpService {
-          tunnel_tracker: tunnel_tracker.clone(),
-        };
+        let service =
+          ConnectTcpService { tunnel_tracker: tunnel_tracker.clone() };
         let mut service = plugin::Service::new(service);
 
         // Call the service
@@ -1998,8 +2072,9 @@ mod tests {
         assert_eq!(tunnel_tracker.active_count(), 1);
 
         // Wait for connection to be established
-        let _ = tokio::time::timeout(Duration::from_secs(2), &mut accept_rx)
-          .await;
+        let _ =
+          tokio::time::timeout(Duration::from_secs(2), &mut accept_rx)
+            .await;
 
         // Trigger shutdown
         tunnel_tracker.shutdown();
@@ -2010,7 +2085,10 @@ mod tests {
           tunnel_tracker.wait_shutdown(),
         )
         .await;
-        assert!(wait_result.is_ok(), "tunnel should complete after shutdown");
+        assert!(
+          wait_result.is_ok(),
+          "tunnel should complete after shutdown"
+        );
         assert_eq!(tunnel_tracker.active_count(), 0);
 
         // Clean up
@@ -2059,15 +2137,18 @@ mod tests {
         // Create Socks5StreamCell with the target address
         let target_addr_socks5 =
           fast_socks5::util::target_addr::TargetAddr::Ip(target_addr);
-        let cell = Socks5StreamCell::new_for_test(server, target_addr_socks5);
+        let cell =
+          Socks5StreamCell::new_for_test(server, target_addr_socks5);
 
         // Create a request with Socks5StreamCell
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri(format!("127.0.0.1:{}", target_addr.port()))
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
@@ -2082,7 +2163,10 @@ mod tests {
         let n = client.read(&mut reply_buf).await.unwrap();
         assert!(n >= 10, "Should receive SOCKS5 reply");
         assert_eq!(reply_buf[0], fast_socks5::consts::SOCKS5_VERSION);
-        assert_eq!(reply_buf[1], fast_socks5::consts::SOCKS5_REPLY_SUCCEEDED);
+        assert_eq!(
+          reply_buf[1],
+          fast_socks5::consts::SOCKS5_REPLY_SUCCEEDED
+        );
 
         // Now test bidirectional data transfer
         let test_data = b"Hello, SOCKS5!";
@@ -2124,23 +2208,25 @@ mod tests {
         // Create Socks5StreamCell with the target address
         let target_addr_socks5 =
           fast_socks5::util::target_addr::TargetAddr::Ip(target_addr);
-        let cell = Socks5StreamCell::new_for_test(server, target_addr_socks5);
+        let cell =
+          Socks5StreamCell::new_for_test(server, target_addr_socks5);
 
         // Create a request with Socks5StreamCell
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri(format!("127.0.0.1:{}", target_addr.port()))
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
         // Create service with tunnel tracker
         let tunnel_tracker = Rc::new(TunnelTracker::new());
-        let service = ConnectTcpService {
-          tunnel_tracker: tunnel_tracker.clone(),
-        };
+        let service =
+          ConnectTcpService { tunnel_tracker: tunnel_tracker.clone() };
         let mut service = plugin::Service::new(service);
 
         // Drop client before response is sent - this should cause write failure
@@ -2191,17 +2277,18 @@ mod tests {
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri(format!("127.0.0.1:{}", addr.port()))
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
         // Create service with tunnel tracker
         let tunnel_tracker = Rc::new(TunnelTracker::new());
-        let service = ConnectTcpService {
-          tunnel_tracker: tunnel_tracker.clone(),
-        };
+        let service =
+          ConnectTcpService { tunnel_tracker: tunnel_tracker.clone() };
         let mut service = plugin::Service::new(service);
 
         // Drop client before error response is sent
@@ -2268,19 +2355,22 @@ mod tests {
         let (client, server) = create_socket_pair().await;
 
         // Create Socks5StreamCell with a domain target address
-        let target_addr = fast_socks5::util::target_addr::TargetAddr::Domain(
-          "localhost".to_string(),
-          1, // Port 1 - unlikely to be listening, but tests domain handling
-        );
+        let target_addr =
+          fast_socks5::util::target_addr::TargetAddr::Domain(
+            "localhost".to_string(),
+            1, // Port 1 - unlikely to be listening, but tests domain handling
+          );
         let cell = Socks5StreamCell::new_for_test(server, target_addr);
 
         // Create a request with Socks5StreamCell
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri("localhost:1")
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
@@ -2330,15 +2420,18 @@ mod tests {
         // Create Socks5StreamCell with the target address
         let target_addr_socks5 =
           fast_socks5::util::target_addr::TargetAddr::Ip(target_addr);
-        let cell = Socks5StreamCell::new_for_test(server, target_addr_socks5);
+        let cell =
+          Socks5StreamCell::new_for_test(server, target_addr_socks5);
 
         // Create a request with Socks5StreamCell
         let mut req = http::Request::builder()
           .method(http::Method::CONNECT)
           .uri(format!("127.0.0.1:{}", target_addr.port()))
-          .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
-            http_body_util::Empty::new(),
-          )))
+          .body(plugin::RequestBody::new(
+            plugin::BytesBufBodyWrapper::new(
+              http_body_util::Empty::new(),
+            ),
+          ))
           .unwrap();
         req.extensions_mut().insert(cell);
 
@@ -2353,7 +2446,10 @@ mod tests {
         let n = client.read(&mut reply_buf).await.unwrap();
         assert!(n >= 10, "Should receive SOCKS5 reply");
         assert_eq!(reply_buf[0], fast_socks5::consts::SOCKS5_VERSION);
-        assert_eq!(reply_buf[1], fast_socks5::consts::SOCKS5_REPLY_SUCCEEDED);
+        assert_eq!(
+          reply_buf[1],
+          fast_socks5::consts::SOCKS5_REPLY_SUCCEEDED
+        );
 
         // Send data to trigger transfer error
         let _ = client.write_all(b"test data").await;

@@ -7,8 +7,8 @@ Test nature: Black-box testing through external interface
 This test module covers:
 - 7.3 Authentication scenarios (password and TLS client certificate)
 
-NOTE: These tests use real HTTP/3 clients and real bcrypt hashing
-to verify authentication behavior.
+NOTE: These tests use real HTTP/3 clients to verify authentication behavior.
+Passwords are stored in plaintext format in the configuration.
 """
 
 import subprocess
@@ -45,8 +45,6 @@ from .utils.http3_client import (
     perform_h3_connection_test,
     perform_h3_connect_test,
     perform_h3_tls_client_cert_test,
-    create_real_bcrypt_hash,
-    verify_bcrypt_hash,
 )
 
 
@@ -55,29 +53,12 @@ from .utils.http3_client import (
 # ==============================================================================
 
 
-def create_bcrypt_hash(password: str, cost: int = 12) -> str:
-    """
-    Create a real bcrypt password hash for testing.
-
-    Uses Python's bcrypt library to create a proper bcrypt hash.
-    This replaces the previous fake implementation that used SHA256.
-
-    Args:
-        password: Plain text password
-        cost: bcrypt cost parameter (default 12, per architecture doc)
-
-    Returns:
-        str: bcrypt hash string in standard format ($2b$...)
-    """
-    return create_real_bcrypt_hash(password, rounds=cost)
-
-
 def create_http3_listener_config_with_password_auth(
     proxy_port: int,
     cert_path: str,
     key_path: str,
     temp_dir: str,
-    credentials: List[Tuple[str, str]],
+    users: List[Tuple[str, str]],
     quic_config: Optional[str] = None,
     worker_threads: int = 1
 ) -> str:
@@ -89,19 +70,19 @@ def create_http3_listener_config_with_password_auth(
         cert_path: TLS certificate path
         key_path: TLS private key path
         temp_dir: Temporary directory for logs
-        credentials: List of (username, password_hash) tuples
+        users: List of (username, plaintext_password) tuples
         quic_config: Optional QUIC config YAML string
         worker_threads: Number of worker threads
 
     Returns:
         str: Path to the configuration file
     """
-    cred_lines = []
-    for username, password_hash in credentials:
-        cred_lines.append(f'          - username: "{username}"')
-        cred_lines.append(f'            password_hash: "{password_hash}"')
+    user_lines = []
+    for username, password in users:
+        user_lines.append(f'          - username: "{username}"')
+        user_lines.append(f'            password: "{password}"')
 
-    cred_section = "\n".join(cred_lines)
+    users_section = "\n".join(user_lines)
 
     quic_section = ""
     if quic_config:
@@ -126,8 +107,8 @@ servers:
       key_path: "{key_path}"{quic_section}
       auth:
         type: "password"
-        credentials:
-{cred_section}
+        users:
+{users_section}
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "http3_auth_config.yaml")
@@ -205,7 +186,7 @@ class TestHTTP3PasswordAuth:
         TC-H3-AUTH-002: HTTP/3 listener with password auth starts successfully.
 
         Target: Verify HTTP/3 listener starts with password authentication config
-        using real bcrypt hashes.
+        using plaintext passwords.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = 31001
@@ -214,16 +195,13 @@ class TestHTTP3PasswordAuth:
         try:
             cert_path, key_path, _ = generate_test_certificates(temp_dir)
 
-            # Create real bcrypt hash for password
-            real_hash = create_bcrypt_hash("test_password", cost=12)
-
             config_path = create_http3_listener_config_with_password_auth(
                 proxy_port=proxy_port,
                 cert_path=cert_path,
                 key_path=key_path,
                 temp_dir=temp_dir,
-                credentials=[
-                    ("testuser", real_hash),
+                users=[
+                    ("testuser", "test_password"),
                 ]
             )
 
@@ -261,21 +239,16 @@ class TestHTTP3PasswordAuth:
         try:
             cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
 
-            # Create real bcrypt hash
+            # Use plaintext password
             password = "valid_password_123"
-            real_hash = create_bcrypt_hash(password, cost=12)
-
-            # Verify the hash is valid
-            assert verify_bcrypt_hash(password, real_hash), \
-                "Generated bcrypt hash should be verifiable"
 
             config_path = create_http3_listener_config_with_password_auth(
                 proxy_port=proxy_port,
                 cert_path=cert_path,
                 key_path=key_path,
                 temp_dir=temp_dir,
-                credentials=[
-                    ("validuser", real_hash),
+                users=[
+                    ("validuser", password),
                 ]
             )
 
@@ -354,17 +327,16 @@ class TestHTTP3PasswordAuth:
         try:
             cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
 
-            # Create real bcrypt hash for correct password
+            # Use plaintext password
             correct_password = "correct_password"
-            real_hash = create_bcrypt_hash(correct_password, cost=12)
 
             config_path = create_http3_listener_config_with_password_auth(
                 proxy_port=proxy_port,
                 cert_path=cert_path,
                 key_path=key_path,
                 temp_dir=temp_dir,
-                credentials=[
-                    ("testuser", real_hash),
+                users=[
+                    ("testuser", correct_password),
                 ]
             )
 
@@ -454,7 +426,7 @@ servers:
       key_path: "{key_path}"
       auth:
         type: "password"
-        credentials: []
+        users: []
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "empty_creds.yaml")
@@ -1019,33 +991,11 @@ servers:
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_bcrypt_hash_verification_works(self) -> None:
+    def test_plaintext_password_accepted_in_config(self) -> None:
         """
-        TC-H3-AUTH-CFG-004: Verify bcrypt hash generation and verification.
+        TC-H3-AUTH-CFG-004: Plaintext password is accepted in configuration.
 
-        Target: Verify that the bcrypt hash generation produces valid hashes.
-        """
-        # Test password hashing
-        password = "test_password_123"
-        hash_str = create_bcrypt_hash(password, cost=12)
-
-        # Verify hash format (should start with $2b$)
-        assert hash_str.startswith("$2b$"), \
-            f"Hash should start with $2b$, got: {hash_str[:10]}..."
-
-        # Verify the hash can be verified
-        assert verify_bcrypt_hash(password, hash_str), \
-            "Hash verification should succeed with correct password"
-
-        # Verify wrong password fails
-        assert not verify_bcrypt_hash("wrong_password", hash_str), \
-            "Hash verification should fail with wrong password"
-
-    def test_valid_bcrypt_hash_accepted_in_config(self) -> None:
-        """
-        TC-H3-AUTH-CFG-005: Valid bcrypt hash is accepted in configuration.
-
-        Target: Verify HTTP/3 listener accepts valid bcrypt hash in config.
+        Target: Verify HTTP/3 listener accepts plaintext password in config.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = 31023
@@ -1054,23 +1004,56 @@ servers:
         try:
             cert_path, key_path, _ = generate_test_certificates(temp_dir)
 
-            # Generate a real bcrypt hash
-            real_hash = create_bcrypt_hash("password123", cost=12)
-
             config_path = create_http3_listener_config_with_password_auth(
                 proxy_port=proxy_port,
                 cert_path=cert_path,
                 key_path=key_path,
                 temp_dir=temp_dir,
-                credentials=[
-                    ("testuser", real_hash),
+                users=[
+                    ("testuser", "password123"),
                 ]
             )
 
             proxy_proc = start_proxy(config_path)
 
             assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
-                "HTTP/3 listener should start with valid bcrypt hash"
+                "HTTP/3 listener should start with plaintext password"
+
+        finally:
+            if proxy_proc:
+                proxy_proc.send_signal(signal.SIGTERM)
+                proxy_proc.wait(timeout=10)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_multiple_users_accepted(self) -> None:
+        """
+        TC-H3-AUTH-CFG-005: Multiple users are accepted in configuration.
+
+        Target: Verify HTTP/3 listener accepts multiple users in config.
+        """
+        temp_dir = tempfile.mkdtemp()
+        proxy_port = 31024
+        proxy_proc: Optional[subprocess.Popen] = None
+
+        try:
+            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+
+            config_path = create_http3_listener_config_with_password_auth(
+                proxy_port=proxy_port,
+                cert_path=cert_path,
+                key_path=key_path,
+                temp_dir=temp_dir,
+                users=[
+                    ("user1", "password1"),
+                    ("user2", "password2"),
+                    ("admin", "adminpass"),
+                ]
+            )
+
+            proxy_proc = start_proxy(config_path)
+
+            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+                "HTTP/3 listener should start with multiple users"
 
         finally:
             if proxy_proc:

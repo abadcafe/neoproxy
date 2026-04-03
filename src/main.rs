@@ -13,6 +13,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 
+mod auth;
 mod config;
 mod config_validator;
 mod listeners;
@@ -392,6 +393,13 @@ mod tests {
   use super::*;
   use std::sync::Mutex;
   use std::time::Instant;
+
+  #[test]
+  fn test_auth_module_exists() {
+    // Verify the auth module exists by using a type from it
+    use crate::auth::AuthError;
+    let _error = AuthError::InvalidCredentials;
+  }
 
   #[test]
   fn test_graceful_shutdown_timeout_constant() {

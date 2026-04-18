@@ -5,18 +5,14 @@
 //!
 //! # Design Note: Thread Safety
 //!
-//! The `Socks5StreamCell` type needs to be stored in `http::Extensions`,
-//! which requires `Clone + Send + Sync + 'static`. Since the inner types
-//! (`TcpStream` and `TargetAddr`) implement `Send`, we use `Arc<Mutex<T>>`
-//! to provide thread-safe access without unsafe code in production.
-//!
 //! Note: The `#![allow(clippy::await_holding_refcell_ref)]` attribute is
 //! used because we hold RefCell references across await points in the
 //! single-threaded LocalSet context, which is safe.
 //!
-//! The `build_connect_request` function must only be called from a
-//! single-threaded context (LocalSet), and the Service must extract the
-//! stream before any cross-thread operation.
+//! The Listener uses `Socks5UpgradeTrigger::pair()` to create a linked
+//! (trigger, upgrade) pair. The `Socks5OnUpgrade` is stored in
+//! `http::Extensions` and the `Socks5UpgradeTrigger` is held by the
+//! Listener to send SOCKS5 replies based on the Service response.
 
 #![allow(clippy::await_holding_refcell_ref)]
 
@@ -24,11 +20,9 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use http_body_util::BodyExt;
 use serde::Deserialize;
 use tokio::task::JoinSet;
 use tracing::warn;
@@ -327,25 +321,52 @@ impl Socks5Listener {
                   }
                 };
 
-              // Step 3: Create Socks5StreamCell
-              let stream_cell = Socks5StreamCell::new(
+              // Step 3: Create upgrade pair
+              let (trigger, on_upgrade) = plugin::Socks5UpgradeTrigger::pair(
                 command_result.proto,
-                command_result.target_addr,
               );
 
-              // Step 4: Build HTTP CONNECT request
-              let request = build_connect_request(stream_cell);
+              // Step 4: Build HTTP CONNECT request with on_upgrade in extensions
+              let (host, port) = extract_host_port(&command_result.target_addr);
+              let uri = format_connect_uri(&host, port);
+
+              let mut request = http::Request::builder()
+                .method(http::Method::CONNECT)
+                .uri(&uri)
+                .version(http::Version::HTTP_11)
+                .body(plugin::RequestBody::new(
+                  plugin::BytesBufBodyWrapper::new(
+                    http_body_util::Empty::<bytes::Bytes>::new(),
+                  ),
+                ))
+                .expect("failed to build CONNECT request");
+
+              request.extensions_mut().insert(on_upgrade);
 
               // Step 5: Call the associated Service
               let result = service.call(request).await;
 
-              // Step 6: Log the result
+              // Step 6: Based on Response, send SOCKS5 reply via trigger
               match result {
-                Ok(_) => {
-                  tracing::info!(
-                    "SOCKS5 connection disconnected from {}",
-                    peer_addr
-                  );
+                Ok(resp) => {
+                  if resp.status() == http::StatusCode::OK {
+                    if let Err(e) = trigger.send_success().await {
+                      tracing::warn!(
+                        "SOCKS5 failed to send success reply to {}: {}",
+                        peer_addr,
+                        e
+                      );
+                    }
+                  } else {
+                    let error = plugin::http_status_to_socks5_error(resp.status());
+                    if let Err(e) = trigger.send_error(error).await {
+                      tracing::warn!(
+                        "SOCKS5 failed to send error reply to {}: {}",
+                        peer_addr,
+                        e
+                      );
+                    }
+                  }
                 }
                 Err(e) => {
                   tracing::error!(
@@ -353,6 +374,16 @@ impl Socks5Listener {
                     peer_addr,
                     e
                   );
+                  if let Err(send_err) = trigger
+                    .send_error(fast_socks5::ReplyError::GeneralFailure)
+                    .await
+                  {
+                    tracing::warn!(
+                      "SOCKS5 failed to send error reply to {}: {}",
+                      peer_addr,
+                      send_err
+                    );
+                  }
                 }
               }
             });
@@ -678,216 +709,6 @@ impl Clone for ConnectionTracker {
     Self {
       connections: self.connections.clone(),
       shutdown_handle: self.shutdown_handle.clone(),
-    }
-  }
-}
-
-/// Container for TCP stream and SOCKS5 protocol objects.
-///
-/// This structure is used to pass TCP stream ownership from the SOCKS5
-/// listener to the Service. It wraps the stream and target address
-/// extracted from the SOCKS5 handshake.
-///
-/// # Thread Safety
-///
-/// This type uses `Arc<Mutex<T>>` to satisfy `http::Extensions` requirements
-/// for `Send + Sync`. The underlying types (`TcpStream`, `TargetAddr`) are
-/// `Send`, making `Arc<Mutex<T>>` automatically `Send + Sync`.
-///
-/// The type is designed for single-threaded use (LocalSet), but the
-/// `Arc<Mutex>` wrapper ensures type safety without unsafe code.
-///
-/// For sending SOCKS5 responses, the Service should:
-/// 1. Take the stream from this cell
-/// 2. Write SOCKS5 response directly to the stream
-/// 3. Proceed with data forwarding
-///
-/// # Clone Behavior
-///
-/// Cloning creates a shared reference to the same underlying data.
-/// When `take_proto()` is called on one clone, all clones will return
-/// `None` for subsequent calls.
-pub struct Socks5StreamCell {
-  /// The SOCKS5 protocol in CommandRead state.
-  ///
-  /// Note: We store the protocol as an Option to allow taking ownership.
-  /// After `take_proto()` is called, subsequent calls will return `None`.
-  proto: Arc<
-    Mutex<
-      Option<
-        fast_socks5::server::Socks5ServerProtocol<
-          tokio::net::TcpStream,
-          fast_socks5::server::states::CommandRead,
-        >,
-      >,
-    >,
-  >,
-  /// The target address from SOCKS5 request.
-  target_addr:
-    Arc<Mutex<Option<fast_socks5::util::target_addr::TargetAddr>>>,
-}
-
-impl Clone for Socks5StreamCell {
-  fn clone(&self) -> Self {
-    // Clone creates a shared reference to the same underlying data.
-    // Both clones share the same proto and target_addr via Arc.
-    Self {
-      proto: self.proto.clone(),
-      target_addr: self.target_addr.clone(),
-    }
-  }
-}
-
-impl Socks5StreamCell {
-  /// Creates a new Socks5StreamCell.
-  ///
-  /// # Arguments
-  ///
-  /// * `proto` - The SOCKS5 protocol in CommandRead state
-  /// * `target_addr` - The target address extracted from SOCKS5 request
-  pub fn new(
-    proto: fast_socks5::server::Socks5ServerProtocol<
-      tokio::net::TcpStream,
-      fast_socks5::server::states::CommandRead,
-    >,
-    target_addr: fast_socks5::util::target_addr::TargetAddr,
-  ) -> Self {
-    Self {
-      proto: Arc::new(Mutex::new(Some(proto))),
-      target_addr: Arc::new(Mutex::new(Some(target_addr))),
-    }
-  }
-
-  /// Takes and returns the protocol and target address.
-  ///
-  /// This method should be called by the Service to extract the protocol.
-  /// After this call, subsequent calls will return `None`.
-  ///
-  /// # Returns
-  ///
-  /// `Some` tuple containing:
-  /// - The SOCKS5 protocol in CommandRead state
-  /// - The target address
-  ///
-  /// `None` if the inner data was already taken.
-  pub fn take_proto(
-    &mut self,
-  ) -> Option<(
-    fast_socks5::server::Socks5ServerProtocol<
-      tokio::net::TcpStream,
-      fast_socks5::server::states::CommandRead,
-    >,
-    fast_socks5::util::target_addr::TargetAddr,
-  )> {
-    // SAFETY: Mutex::lock() only fails if the mutex is poisoned (a panic
-    // occurred while holding the lock). In our single-threaded LocalSet
-    // environment, this cannot happen. We use expect() with a clear message
-    // for consistency and debuggability.
-    let proto = self
-      .proto
-      .lock()
-      .expect("mutex poisoned in single-threaded context")
-      .take()?;
-    let target_addr = self
-      .target_addr
-      .lock()
-      .expect("mutex poisoned in single-threaded context")
-      .take()?;
-    Some((proto, target_addr))
-  }
-
-  /// Returns a clone of the target address if available.
-  ///
-  /// Returns `None` if the inner data was already taken.
-  pub fn target_addr_cloned(
-    &self,
-  ) -> Option<fast_socks5::util::target_addr::TargetAddr> {
-    // SAFETY: Mutex::lock() only fails if the mutex is poisoned. In our
-    // single-threaded LocalSet environment, this cannot happen.
-    self
-      .target_addr
-      .lock()
-      .expect("mutex poisoned in single-threaded context")
-      .as_ref()
-      .cloned()
-  }
-
-  /// Checks if the inner data is still present (not yet taken).
-  #[allow(dead_code)]
-  pub fn is_present(&self) -> bool {
-    // SAFETY: Mutex::lock() only fails if the mutex is poisoned. In our
-    // single-threaded LocalSet environment, this cannot happen.
-    self
-      .proto
-      .lock()
-      .expect("mutex poisoned in single-threaded context")
-      .is_some()
-  }
-
-  /// Takes and returns the inner stream and target address for testing purposes.
-  ///
-  /// This method directly extracts the stream from the protocol wrapper,
-  /// bypassing the SOCKS5 response mechanism. Only use in tests.
-  ///
-  /// # Returns
-  ///
-  /// `Some` tuple containing:
-  /// - The TCP stream
-  /// - The target address
-  ///
-  /// `None` if the inner data was already taken.
-  #[cfg(test)]
-  pub fn take_stream_for_test(
-    &mut self,
-  ) -> Option<(
-    tokio::net::TcpStream,
-    fast_socks5::util::target_addr::TargetAddr,
-  )> {
-    let proto = self.proto.lock().unwrap().take()?;
-    let target_addr = self.target_addr.lock().unwrap().take()?;
-
-    // SAFETY: Socks5ServerProtocol<T, S> has the same memory layout as T
-    // because the state marker is PhantomData (zero-sized).
-    // We transmute directly to extract the inner stream.
-    #[allow(clippy::missing_transmute_annotations)]
-    let stream: tokio::net::TcpStream =
-      unsafe { std::mem::transmute(proto) };
-
-    Some((stream, target_addr))
-  }
-
-  /// Creates a Socks5StreamCell from a raw TCP stream for testing purposes.
-  ///
-  /// This method is only available in tests and creates a mock protocol
-  /// state. The resulting cell will NOT be able to send proper SOCKS5
-  /// responses - the protocol wrapper is just a placeholder.
-  ///
-  /// # Safety
-  ///
-  /// This is only safe in test contexts where we're not actually using
-  /// the SOCKS5 protocol machinery. The state transition from Opened to
-  /// CommandRead is simulated via transmute.
-  #[cfg(test)]
-  pub fn new_for_test(
-    stream: tokio::net::TcpStream,
-    target_addr: fast_socks5::util::target_addr::TargetAddr,
-  ) -> Self {
-    // Start with Opened state
-    let proto_opened =
-      fast_socks5::server::Socks5ServerProtocol::start(stream);
-
-    // SAFETY: The state types (Opened, Authenticated, CommandRead) are all
-    // zero-sized types, so transmuting between them is safe as long as the
-    // underlying stream remains valid. This is only used in tests.
-    #[allow(clippy::missing_transmute_annotations)]
-    let proto: fast_socks5::server::Socks5ServerProtocol<
-      tokio::net::TcpStream,
-      fast_socks5::server::states::CommandRead,
-    > = unsafe { std::mem::transmute(proto_opened) };
-
-    Self {
-      proto: Arc::new(Mutex::new(Some(proto))),
-      target_addr: Arc::new(Mutex::new(Some(target_addr))),
     }
   }
 }
@@ -1565,7 +1386,7 @@ pub fn resolve_addresses(addresses: &[String]) -> Vec<SocketAddr> {
 /// # Returns
 ///
 /// Formatted URI string for HTTP CONNECT request.
-pub fn format_connect_uri(host: &str, port: u16) -> String {
+fn format_connect_uri(host: &str, port: u16) -> String {
   // Check if already bracketed (e.g., "[::1]")
   if host.starts_with('[') {
     return format!("{}:{}", host, port);
@@ -1592,7 +1413,7 @@ pub fn format_connect_uri(host: &str, port: u16) -> String {
 /// # Returns
 ///
 /// Tuple of (host_string, port).
-pub fn extract_host_port(
+fn extract_host_port(
   target_addr: &fast_socks5::util::target_addr::TargetAddr,
 ) -> (String, u16) {
   match target_addr {
@@ -1606,42 +1427,6 @@ pub fn extract_host_port(
   }
 }
 
-/// Builds an HTTP CONNECT request from Socks5StreamCell.
-///
-/// # Arguments
-///
-/// * `stream_cell` - The SOCKS5 stream cell containing the TCP stream
-///
-/// # Returns
-///
-/// HTTP CONNECT request with the stream cell stored in extensions.
-pub fn build_connect_request(
-  stream_cell: Socks5StreamCell,
-) -> plugin::Request {
-  let target_addr = stream_cell.target_addr_cloned();
-  let (host, port) = target_addr
-    .as_ref()
-    .map(extract_host_port)
-    .unwrap_or(("unknown".to_string(), 0));
-
-  let uri = format_connect_uri(&host, port);
-
-  let builder = http::Request::builder()
-    .method(http::Method::CONNECT)
-    .uri(uri)
-    .version(http::Version::HTTP_11);
-
-  let mut request = builder
-    .body(plugin::RequestBody::new(
-      http_body_util::Empty::<bytes::Bytes>::new()
-        .map_err(|_| anyhow::anyhow!("empty body")),
-    ))
-    .expect("failed to build CONNECT request");
-
-  request.extensions_mut().insert(stream_cell);
-
-  request
-}
 
 /// Plugin listener name.
 pub fn listener_name() -> &'static str {
@@ -2169,29 +1954,6 @@ mod tests {
         assert!(!tracker2.shutdown_handle().is_shutdown());
       })
       .await;
-  }
-
-  // ========== Socks5StreamCell Tests ==========
-
-  #[test]
-  fn test_socks5_stream_cell_clone() {
-    // Verify Socks5StreamCell implements Clone
-    fn assert_clone<T: Clone>() {}
-    assert_clone::<Socks5StreamCell>();
-  }
-
-  #[test]
-  fn test_socks5_stream_cell_send() {
-    // Verify Socks5StreamCell implements Send (via Arc<Mutex>)
-    fn assert_send<T: Send>() {}
-    assert_send::<Socks5StreamCell>();
-  }
-
-  #[test]
-  fn test_socks5_stream_cell_sync() {
-    // Verify Socks5StreamCell implements Sync (via Arc<Mutex>)
-    fn assert_sync<T: Sync>() {}
-    assert_sync::<Socks5StreamCell>();
   }
 
   // ========== AuthConfig Tests ==========
@@ -3394,19 +3156,6 @@ addresses:
     assert_eq!(MONITORING_LOG_INTERVAL, Duration::from_secs(60));
   }
 
-  // ========== build_connect_request Tests ==========
-
-  #[test]
-  fn test_build_connect_request_stores_in_extensions() {
-    // Create a mock Socks5StreamCell - note we can't create a real TcpStream
-    // without a connection, so we test the structure indirectly.
-    // The actual integration tests will verify the full flow.
-
-    // Verify that Socks5StreamCell can be stored in extensions
-    fn assert_storable<T: Clone + Send + Sync + 'static>() {}
-    assert_storable::<Socks5StreamCell>();
-  }
-
   // ========== is_fatal_accept_error Tests ==========
 
   #[test]
@@ -4462,191 +4211,6 @@ addresses:
       }
       _ => {}
     }
-  }
-
-  // ========== Socks5StreamCell Functionality Tests ==========
-
-  #[tokio::test]
-  async fn test_socks5_stream_cell_new_and_take() {
-    let (client, server) = create_socket_pair().await;
-
-    // Create a TargetAddr
-    let target_addr =
-      fast_socks5::util::target_addr::TargetAddr::Domain(
-        "example.com".to_string(),
-        443,
-      );
-
-    // Create Socks5StreamCell
-    let mut cell =
-      Socks5StreamCell::new_for_test(server, target_addr.clone());
-
-    // Verify is_present returns true
-    assert!(cell.is_present());
-
-    // Verify target_addr_cloned returns the correct address
-    let cloned_addr = cell.target_addr_cloned();
-    assert!(cloned_addr.is_some());
-
-    // Take the stream and address
-    let taken = cell.take_stream_for_test();
-    assert!(taken.is_some());
-    let (stream, addr) = taken.unwrap();
-    // Verify we got the stream
-    drop(stream);
-    assert_eq!(
-      addr,
-      fast_socks5::util::target_addr::TargetAddr::Domain(
-        "example.com".to_string(),
-        443
-      )
-    );
-
-    // After take, is_present should return false
-    assert!(!cell.is_present());
-
-    // After take, target_addr_cloned should return None
-    assert!(cell.target_addr_cloned().is_none());
-
-    // Second take should return None
-    assert!(cell.take_stream_for_test().is_none());
-
-    // Keep client alive
-    drop(client);
-  }
-
-  #[tokio::test]
-  async fn test_socks5_stream_cell_clone_behavior() {
-    let (client, server) = create_socket_pair().await;
-
-    let target_addr = fast_socks5::util::target_addr::TargetAddr::Ip(
-      "127.0.0.1:8080".parse().unwrap(),
-    );
-
-    let mut original =
-      Socks5StreamCell::new_for_test(server, target_addr.clone());
-
-    // Clone the cell - with Arc<Mutex>, both share the same underlying data
-    let cloned = original.clone();
-
-    // Both should report as present since they share the same data
-    assert!(original.is_present());
-    assert!(cloned.is_present());
-
-    // Both should have the target address
-    assert!(original.target_addr_cloned().is_some());
-    assert!(cloned.target_addr_cloned().is_some());
-
-    // Take from original
-    let taken = original.take_stream_for_test();
-    assert!(taken.is_some());
-
-    // After original's take, cloned should also see the data is gone
-    // (because they share the same Arc<Mutex>)
-    assert!(!original.is_present());
-    assert!(!cloned.is_present());
-
-    // cloned's target_addr should now return None
-    assert!(cloned.target_addr_cloned().is_none());
-
-    drop(client);
-  }
-
-  // ========== build_connect_request Functionality Tests ==========
-
-  #[tokio::test]
-  async fn test_build_connect_request_ipv4_target() {
-    let (client, server) = create_socket_pair().await;
-
-    let target_addr = fast_socks5::util::target_addr::TargetAddr::Ip(
-      "192.168.1.1:8080".parse().unwrap(),
-    );
-
-    let cell = Socks5StreamCell::new_for_test(server, target_addr);
-    let request = build_connect_request(cell);
-
-    // Verify method is CONNECT
-    assert_eq!(request.method(), http::Method::CONNECT);
-
-    // Verify URI format for IPv4
-    assert_eq!(request.uri().to_string(), "192.168.1.1:8080");
-
-    // Verify Socks5StreamCell is stored in extensions
-    assert!(request.extensions().get::<Socks5StreamCell>().is_some());
-
-    drop(client);
-  }
-
-  #[tokio::test]
-  async fn test_build_connect_request_ipv6_target() {
-    let (client, server) = create_socket_pair().await;
-
-    let target_addr = fast_socks5::util::target_addr::TargetAddr::Ip(
-      "[2001:db8::1]:443".parse().unwrap(),
-    );
-
-    let cell = Socks5StreamCell::new_for_test(server, target_addr);
-    let request = build_connect_request(cell);
-
-    // Verify method is CONNECT
-    assert_eq!(request.method(), http::Method::CONNECT);
-
-    // Verify URI format for IPv6 (should be bracketed)
-    assert_eq!(request.uri().to_string(), "[2001:db8::1]:443");
-
-    drop(client);
-  }
-
-  #[tokio::test]
-  async fn test_build_connect_request_domain_target() {
-    let (client, server) = create_socket_pair().await;
-
-    let target_addr =
-      fast_socks5::util::target_addr::TargetAddr::Domain(
-        "example.com".to_string(),
-        443,
-      );
-
-    let cell = Socks5StreamCell::new_for_test(server, target_addr);
-    let request = build_connect_request(cell);
-
-    // Verify method is CONNECT
-    assert_eq!(request.method(), http::Method::CONNECT);
-
-    // Verify URI format for domain
-    assert_eq!(request.uri().to_string(), "example.com:443");
-
-    drop(client);
-  }
-
-  #[tokio::test]
-  async fn test_build_connect_request_after_take() {
-    // Test edge case: build_connect_request with a cell that has been taken
-    let (client, server) = create_socket_pair().await;
-
-    let target_addr =
-      fast_socks5::util::target_addr::TargetAddr::Domain(
-        "example.com".to_string(),
-        443,
-      );
-
-    let mut cell = Socks5StreamCell::new_for_test(server, target_addr);
-
-    // Take the stream and target address first
-    let taken = cell.take_stream_for_test();
-    assert!(taken.is_some());
-
-    // Now build request with the taken cell
-    // This should use the default "unknown" address
-    let request = build_connect_request(cell);
-
-    // Verify method is CONNECT
-    assert_eq!(request.method(), http::Method::CONNECT);
-
-    // Verify URI uses default "unknown:0"
-    assert_eq!(request.uri().to_string(), "unknown:0");
-
-    drop(client);
   }
 
   // ========== Test using create_test_listener_args_with_invalid ==========

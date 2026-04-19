@@ -90,7 +90,7 @@ class TestHTTP3FullConnection:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -135,7 +135,7 @@ class TestHTTP3FullConnection:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -216,7 +216,7 @@ class TestHTTP3FullConnection:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -328,7 +328,7 @@ class TestHTTP3GracefulShutdownWithConnections:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,
                 worker_threads=2
@@ -373,7 +373,7 @@ class TestHTTP3GracefulShutdownWithConnections:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -425,7 +425,7 @@ class TestFullHTTP3ProxyChain:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir1)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
 
             # Create HTTP/3 listener (machine 2 - the backend)
             h3_config = create_http3_listener_config(
@@ -484,7 +484,7 @@ class TestFullHTTP3ProxyChain:
         h3_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir1)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
 
             # Start HTTP/3 listener
             h3_config = create_http3_listener_config(
@@ -555,7 +555,7 @@ class TestHTTP3ErrorHandling:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -611,7 +611,7 @@ class TestHTTP3ErrorHandling:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -672,7 +672,7 @@ class TestHTTP3ErrorHandling:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -734,7 +734,7 @@ class TestHTTP3ConfigValidationFull:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
 
             # Invalid: extremely large value
             quic_config = """      max_concurrent_bidi_streams: 999999999
@@ -771,7 +771,7 @@ class TestHTTP3ConfigValidationFull:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
 
             # Test with zero timeout (invalid, should use default)
             quic_config = """      max_concurrent_bidi_streams: 100
@@ -809,7 +809,7 @@ class TestHTTP3ConfigValidationFull:
         proxy_port = 33052
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
 
             # Use an obviously invalid hash format
             config_content = f"""worker_threads: 1
@@ -873,7 +873,7 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
 
             config_content = f"""worker_threads: 1
 log_directory: "{temp_dir}/logs"
@@ -924,7 +924,7 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
 
             # Test minimum valid values
             quic_config = """      max_concurrent_bidi_streams: 1
@@ -964,7 +964,7 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
 
             # Test maximum valid values per design doc
             quic_config = """      max_concurrent_bidi_streams: 10000
@@ -1004,7 +1004,7 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
 
             # Note: YAML may not parse negative values correctly for unsigned types
             # This tests that the system handles invalid input gracefully
@@ -1063,7 +1063,7 @@ class TestFullHTTP3ProxyChainDataTransfer:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir1)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
 
             # Create HTTP/3 listener (machine 2 - the backend)
             h3_config = create_http3_listener_config(
@@ -1186,7 +1186,7 @@ class TestHTTP3GracefulShutdownTimeout:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -1263,7 +1263,7 @@ class TestHTTP3Performance:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -1352,7 +1352,7 @@ class TestHTTP3Performance:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -1416,7 +1416,7 @@ class TestHTTP3Performance:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )

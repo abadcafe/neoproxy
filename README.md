@@ -15,6 +15,10 @@
 
 ## 快速开始
 
+### 环境要求
+
+- Rust 1.85.0 或更高版本（使用 Rust 2024 edition）
+
 ### 编译
 
 ```bash
@@ -73,6 +77,8 @@ HTTP/1.1 监听器，接收 HTTP CONNECT 请求。
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `addresses` | `[String]` | 是 | 监听地址列表，格式 `host:port` |
+| `protocols` | `[String]` | 否 | 协议列表（预留参数，暂未使用） |
+| `hostnames` | `[String]` | 否 | 主机名列表（预留参数，暂未使用） |
 
 #### 配置示例
 
@@ -91,6 +97,25 @@ listeners:
 # 通过代理访问目标服务器
 curl --proxy 127.0.0.1:8080 https://example.com
 ```
+
+#### 认证配置
+
+**密码认证：**
+
+```yaml
+listeners:
+  - kind: hyper.listener
+    args:
+      addresses:
+        - "0.0.0.0:8080"
+      auth:
+        type: password
+        users:
+          - username: user1
+            password: secret123
+```
+
+> **注意：** hyper.listener 仅支持密码认证，不支持 TLS 客户端证书认证。
 
 ---
 
@@ -307,6 +332,45 @@ servers:
           key_path: /path/to/key.pem
 ```
 
+#### 上游代理认证
+
+http3_chain 支持两种上游代理认证方式：
+
+**密码认证：**
+
+```yaml
+services:
+  - name: proxy_chain
+    kind: http3_chain.http3_chain
+    args:
+      proxy_group:
+        - address: "upstream.example.com:443"
+          weight: 1
+      ca_path: /path/to/ca.pem
+      username: user1
+      password: secret123
+```
+
+**TLS 客户端证书认证：**
+
+```yaml
+services:
+  - name: proxy_chain
+    kind: http3_chain.http3_chain
+    args:
+      proxy_group:
+        - address: "upstream.example.com:443"
+          weight: 1
+      ca_path: /path/to/ca.pem
+      client_cert_path: /path/to/client.crt
+      client_key_path: /path/to/client.key
+```
+
+**配置规则：**
+- `username` 和 `password` 必须同时配置或同时不配置
+- `client_cert_path` 和 `client_key_path` 必须同时配置或同时不配置
+- 两种认证方式可以同时使用
+
 ---
 
 ### 3. echo
@@ -484,7 +548,7 @@ neoproxy 支持优雅关闭：
 
 优雅关闭流程：
 1. 停止接收新连接
-2. 等待现有连接完成（超时 5 秒）
+2. 等待现有连接完成（Listener 层超时 3 秒，Service 层超时 5 秒）
 3. 强制关闭剩余连接
 4. 退出程序
 

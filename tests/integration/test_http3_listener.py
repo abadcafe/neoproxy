@@ -39,47 +39,88 @@ from .utils.helpers import (
 # ==============================================================================
 
 
-def generate_test_certificates(temp_dir: str) -> Tuple[str, str, str]:
+def generate_test_certificates(temp_dir: str) -> Tuple[str, str, str, str]:
     """
     Generate self-signed test certificates for HTTP/3 testing.
+
+    Creates a proper CA certificate and a server certificate signed by that CA.
+    This is required because rustls enforces proper certificate chain validation.
 
     Args:
         temp_dir: Temporary directory to store certificates
 
     Returns:
-        Tuple[str, str, str]: (cert_path, key_path, ca_path)
+        Tuple[str, str, str, str]: (server_cert_path, server_key_path, ca_cert_path, ca_key_path)
     """
-    cert_path = os.path.join(temp_dir, "server.crt")
-    key_path = os.path.join(temp_dir, "server.key")
-    ca_path = os.path.join(temp_dir, "ca.crt")
+    ca_key_path = os.path.join(temp_dir, "ca.key")
+    ca_cert_path = os.path.join(temp_dir, "ca.crt")
+    server_key_path = os.path.join(temp_dir, "server.key")
+    server_csr_path = os.path.join(temp_dir, "server.csr")
+    server_cert_path = os.path.join(temp_dir, "server.crt")
 
-    # Generate private key
+    # Step 1: Generate CA private key
     subprocess.run(
-        [
-            "openssl", "genrsa", "-out", key_path, "2048"
-        ],
+        ["openssl", "genrsa", "-out", ca_key_path, "2048"],
         check=True,
         capture_output=True
     )
 
-    # Generate self-signed certificate
+    # Step 2: Generate CA certificate (with CA:TRUE)
     subprocess.run(
         [
             "openssl", "req", "-new", "-x509",
-            "-key", key_path,
-            "-out", cert_path,
+            "-key", ca_key_path,
+            "-out", ca_cert_path,
             "-days", "1",
-            "-subj", "/CN=localhost",
-            "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"
+            "-subj", "/CN=Test CA",
+            "-addext", "basicConstraints=critical,CA:TRUE"
         ],
         check=True,
         capture_output=True
     )
 
-    # Copy cert as CA
-    shutil.copy(cert_path, ca_path)
+    # Step 3: Generate server private key
+    subprocess.run(
+        ["openssl", "genrsa", "-out", server_key_path, "2048"],
+        check=True,
+        capture_output=True
+    )
 
-    return cert_path, key_path, ca_path
+    # Step 4: Generate server CSR
+    subprocess.run(
+        [
+            "openssl", "req", "-new",
+            "-key", server_key_path,
+            "-out", server_csr_path,
+            "-subj", "/CN=localhost"
+        ],
+        check=True,
+        capture_output=True
+    )
+
+    # Step 5: Create extensions config for server cert
+    ext_config_path = os.path.join(temp_dir, "server_ext.cnf")
+    with open(ext_config_path, "w") as f:
+        f.write("subjectAltName=DNS:localhost,IP:127.0.0.1\n")
+        f.write("basicConstraints=critical,CA:FALSE\n")
+
+    # Step 6: Sign server certificate with CA
+    subprocess.run(
+        [
+            "openssl", "x509", "-req",
+            "-in", server_csr_path,
+            "-CA", ca_cert_path,
+            "-CAkey", ca_key_path,
+            "-CAcreateserial",
+            "-out", server_cert_path,
+            "-days", "1",
+            "-extfile", ext_config_path
+        ],
+        check=True,
+        capture_output=True
+    )
+
+    return server_cert_path, server_key_path, ca_cert_path, ca_key_path
 
 
 def generate_client_certificate(
@@ -366,7 +407,7 @@ class TestHTTP3BasicConnection:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -398,7 +439,7 @@ class TestHTTP3BasicConnection:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -449,7 +490,7 @@ class TestHTTP3Authentication:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
             # No auth config means no authentication
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
@@ -541,7 +582,7 @@ servers:
         proxy_port = 30451
 
         try:
-            cert_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path, _, _, _ = generate_test_certificates(temp_dir)
 
             config_content = f"""worker_threads: 1
 log_directory: "{temp_dir}/logs"
@@ -595,7 +636,7 @@ servers:
 
         try:
             # Generate two different key pairs
-            cert_path1, key_path1, _ = generate_test_certificates(temp_dir)
+            cert_path1, _, _, _ = generate_test_certificates(temp_dir)
 
             # Generate another key
             key_path2 = os.path.join(temp_dir, "wrong.key")
@@ -668,7 +709,7 @@ class TestHTTP3ConfigValidation:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
 
             # Invalid QUIC config: max_concurrent_bidi_streams = 0
             quic_config = """      max_concurrent_bidi_streams: 0
@@ -752,7 +793,7 @@ servers:
         Target: Verify HTTP/3 listener fails with invalid address
         """
         temp_dir = tempfile.mkdtemp()
-        cert_path, key_path, _ = generate_test_certificates(temp_dir)
+        cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
 
         try:
             config_content = f"""worker_threads: 1
@@ -816,7 +857,7 @@ class TestHTTP3GracefulShutdown:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -856,7 +897,7 @@ class TestHTTP3GracefulShutdown:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,
                 worker_threads=4

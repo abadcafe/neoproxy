@@ -991,6 +991,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_yaml",
+ "subtle",
  "tempfile",
  "time",
  "tokio",

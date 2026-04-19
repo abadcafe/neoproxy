@@ -11,12 +11,14 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use std::{fs, path};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use bytes::{Buf, Bytes};
 use h3::client as h3_cli;
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::CertificateDer;
 use rustls_native_certs::CertificateResult;
+use rustls_pemfile;
 use serde::Deserialize;
 use tokio::{io, task};
 use tracing::{error, info, warn};
@@ -107,7 +109,7 @@ struct Proxy {
   conn_handle: Option<task::JoinHandle<Result<()>>>,
   requester: Option<h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>>,
   weight: usize,
-  current_weight: usize,
+  current_weight: isize,
 }
 
 async fn connection_maintaining(
@@ -123,6 +125,8 @@ async fn connection_maintaining(
 
 struct ProxyGroup {
   ca_path: path::PathBuf,
+  client_cert_path: Option<path::PathBuf>,
+  client_key_path: Option<path::PathBuf>,
   proxies: Vec<Proxy>,
 }
 
@@ -130,6 +134,8 @@ impl ProxyGroup {
   fn new(
     ca_path: path::PathBuf,
     addresses: Vec<(SocketAddr, usize)>,
+    client_cert_path: Option<path::PathBuf>,
+    client_key_path: Option<path::PathBuf>,
   ) -> Self {
     let mut proxies = vec![];
     for (addr, weight) in addresses {
@@ -142,15 +148,15 @@ impl ProxyGroup {
       });
     }
 
-    Self { ca_path, proxies }
+    Self { ca_path, client_cert_path, client_key_path, proxies }
   }
 
   fn schedule_wrr(&mut self) -> usize {
-    let total = self.proxies.iter().fold(0, |t, p| t + p.weight);
+    let total = self.proxies.iter().fold(0, |t, p| t + p.weight) as isize;
     let mut selected_idx = 0usize;
-    let mut selected_weight = 0usize;
+    let mut selected_weight = 0isize;
     for (i, p) in self.proxies.iter_mut().enumerate() {
-      p.current_weight += p.weight;
+      p.current_weight += p.weight as isize;
       if p.current_weight > selected_weight {
         selected_weight = p.current_weight;
         selected_idx = i;
@@ -177,21 +183,48 @@ impl ProxyGroup {
       error!("couldn't load default trust roots: {e}");
     }
 
-    // load certificate of CA who issues the server certificate
-    if let Err(e) =
-      roots.add(CertificateDer::from(fs::read(self.ca_path.as_path())?))
-    {
-      error!("failed to parse trust anchor: {e}");
+    // Load CA certificate (PEM format) for server verification
+    let ca_file = fs::File::open(self.ca_path.as_path())?;
+    let mut ca_reader = std::io::BufReader::new(ca_file);
+    let ca_certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut ca_reader)
+      .collect::<Result<Vec<_>, _>>()
+      .map_err(|e| anyhow::anyhow!("failed to parse CA certificate: {e}"))?;
+
+    for cert in ca_certs {
+      if let Err(e) = roots.add(cert) {
+        error!("failed to add CA certificate to trust store: {e}");
+      }
     }
 
-    let mut tls_config = rustls::ClientConfig::builder()
-      .with_root_certificates(roots)
-      .with_no_client_auth();
+    // CR-003: Build TLS config with optional client cert, then apply common settings
+    let mut tls_config = match (&self.client_cert_path, &self.client_key_path) {
+      (Some(cert_path), Some(key_path)) => {
+        // Load client certificate chain (PEM format)
+        let cert_file = fs::File::open(cert_path)?;
+        let mut cert_reader = std::io::BufReader::new(cert_file);
+        let cert_chain: Vec<CertificateDer> = rustls_pemfile::certs(&mut cert_reader)
+          .collect::<Result<Vec<_>, _>>()
+          .map_err(|e| anyhow::anyhow!("failed to parse client certificate: {e}"))?;
 
+        // Load client private key (PEM format)
+        let key_file = fs::File::open(key_path)?;
+        let mut key_reader = std::io::BufReader::new(key_file);
+        let key = rustls_pemfile::private_key(&mut key_reader)?
+          .ok_or_else(|| anyhow::anyhow!("no private key found in file"))?;
+
+        rustls::ClientConfig::builder()
+          .with_root_certificates(roots)
+          .with_client_auth_cert(cert_chain, key)?
+      }
+      _ => {
+        rustls::ClientConfig::builder()
+          .with_root_certificates(roots)
+          .with_no_client_auth()
+      }
+    };
+    // Apply common configuration (CR-003: avoid duplication)
     tls_config.enable_early_data = true;
     tls_config.alpn_protocols = vec![ALPN.into()];
-
-    // Write all Keys to a file if SSLKEYLOGFILE env is set.
     tls_config.key_log = Arc::new(rustls::KeyLogFile::new());
 
     let mut cli_endpoint =
@@ -203,7 +236,8 @@ impl ProxyGroup {
     cli_endpoint.set_default_client_config(cli_config);
 
     let addr = self.proxies[proxy_idx].address;
-    let host = addr.to_string();
+    // Use IP address as server name for TLS (without port)
+    let host = addr.ip().to_string();
     let conn = cli_endpoint.connect(addr, host.as_str())?.await?;
 
     info!("QUIC connection established");
@@ -273,6 +307,25 @@ use h3::error::StreamError;
 /// State for an in-progress send_data or finish operation.
 /// The future OWNS the send stream (taken from the Option) to avoid
 /// self-referential borrows.
+///
+/// State machine transitions:
+///
+/// 1. poll_write path:
+///    Idle -> Sending { fut, len } -> Idle (after fut completes)
+///
+/// 2. poll_shutdown path:
+///    Idle -> Finishing { fut } -> Idle (after fut completes)
+///    OR
+///    Sending { fut, .. } -> (poll fut) -> Idle -> Finishing { fut } -> Idle
+///
+/// 3. Error conditions:
+///    - poll_write during Finishing: returns error "stream is shutting down"
+///    - poll_flush: always returns Ok(()) (no-op)
+///
+/// Key invariants:
+/// - Only one send operation at a time (enforced by state machine)
+/// - Send stream ownership transfers to future, returns on completion
+/// - H3_NO_ERROR is treated as success in poll_write result handling
 enum SendState {
   /// Ready for new data. The send stream is in H3BidirectionalStream.send.
   Idle,
@@ -311,6 +364,32 @@ enum SendState {
 /// Combines h3 SendStream and RecvStream into a single type
 /// implementing AsyncRead + AsyncWrite, enabling use with
 /// `tokio::io::copy_bidirectional`.
+///
+/// # Send Side (AsyncWrite)
+///
+/// - Only one send operation at a time (state machine enforced via SendState)
+/// - poll_flush is a no-op (returns Ok immediately)
+/// - poll_shutdown sends finish to the stream
+/// - poll_write during Finishing state returns error "stream is shutting down"
+///
+/// # Receive Side (AsyncRead)
+///
+/// - recv_buf holds partial read data
+/// - Buffered data returned before polling for new data
+/// - Copy min(data.len(), buf.remaining()) bytes per read
+/// - If partial read, remaining bytes stored in recv_buf for next poll_read
+///
+/// # Ownership
+///
+/// - Send stream is owned by the future during operations
+/// - Returned to struct after operation completes
+///
+/// # Testing
+///
+/// This component requires real h3 streams which cannot be easily mocked.
+/// It is tested through integration tests:
+/// - `tests/integration/test_proxy_chain.py` - proxy chain with data transmission
+/// - `tests/integration/test_http3_chain.py` - HTTP/3 chain data transmission tests
 struct H3BidirectionalStream {
   /// Send stream (AsyncWrite), wrapped in Option for ownership transfer
   send: Option<h3_cli::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>>,
@@ -486,6 +565,92 @@ struct Http3ChainServiceArgsProxyGroup {
 struct Http3ChainServiceArgs {
   proxy_group: Vec<Http3ChainServiceArgsProxyGroup>,
   ca_path: String,
+  // New fields for password authentication
+  #[serde(default)]
+  username: Option<String>,
+  #[serde(default)]
+  password: Option<String>,
+  // New fields for TLS client certificate
+  #[serde(default)]
+  client_cert_path: Option<String>,
+  #[serde(default)]
+  client_key_path: Option<String>,
+}
+
+impl Http3ChainServiceArgs {
+  fn validate(&self) -> Result<()> {
+    // CR-004: Validate that ca_path exists (required field)
+    if !path::Path::new(&self.ca_path).exists() {
+      bail!("ca_path '{}' does not exist", self.ca_path);
+    }
+
+    // CR-003: Validate that all proxy weights are greater than 0
+    for proxy in &self.proxy_group {
+      if proxy.weight == 0 {
+        bail!(
+          "proxy weight must be greater than 0, got 0 for address '{}'",
+          proxy.address
+        );
+      }
+    }
+
+    // CR-014: Validate username/password are non-empty when present
+    match (&self.username, &self.password) {
+      (Some(user), None) => {
+        if user.is_empty() {
+          bail!("username cannot be empty");
+        }
+        bail!("password is required when username is set");
+      }
+      (None, Some(pass)) => {
+        if pass.is_empty() {
+          bail!("password cannot be empty");
+        }
+        bail!("username is required when password is set");
+      }
+      (Some(user), Some(pass)) => {
+        if user.is_empty() {
+          bail!("username cannot be empty");
+        }
+        if pass.is_empty() {
+          bail!("password cannot be empty");
+        }
+      }
+      _ => {}
+    }
+    // CR-014: Validate client cert/key paths are non-empty when present
+    match (&self.client_cert_path, &self.client_key_path) {
+      (Some(cert_path), Some(key_path)) => {
+        // CR-002: Validate that cert and key files exist
+        if cert_path.is_empty() {
+          bail!("client_cert_path cannot be empty");
+        }
+        if !path::Path::new(cert_path).exists() {
+          bail!("client_cert_path '{}' does not exist", cert_path);
+        }
+        if key_path.is_empty() {
+          bail!("client_key_path cannot be empty");
+        }
+        if !path::Path::new(key_path).exists() {
+          bail!("client_key_path '{}' does not exist", key_path);
+        }
+      }
+      (Some(cert_path), None) => {
+        if cert_path.is_empty() {
+          bail!("client_cert_path cannot be empty");
+        }
+        bail!("client_key_path is required when client_cert_path is set");
+      }
+      (None, Some(key_path)) => {
+        if key_path.is_empty() {
+          bail!("client_key_path cannot be empty");
+        }
+        bail!("client_cert_path is required when client_key_path is set");
+      }
+      _ => {}
+    }
+    Ok(())
+  }
 }
 
 #[derive(Clone)]
@@ -493,6 +658,8 @@ struct Http3ChainService {
   proxy_group: Rc<RefCell<ProxyGroup>>,
   stream_tracker: Rc<StreamTracker>,
   conn_tracker: ActiveConnectionTracker,
+  username: Option<String>,
+  password: Option<String>,
 }
 
 impl Http3ChainService {
@@ -503,6 +670,8 @@ impl Http3ChainService {
     conn_tracker: ActiveConnectionTracker,
   ) -> Result<plugin::Service> {
     let args: Http3ChainServiceArgs = serde_yaml::from_value(sargs)?;
+    args.validate()?;
+
     let proxy_group =
       ProxyGroup::new(
         args.ca_path.into(),
@@ -520,12 +689,16 @@ impl Http3ChainService {
               .map(|a| (a, *w))
           })
           .collect(),
+        args.client_cert_path.map(|p| p.into()),
+        args.client_key_path.map(|p| p.into()),
       );
 
     Ok(plugin::Service::new(Self {
       proxy_group: Rc::new(RefCell::new(proxy_group)),
       stream_tracker,
       conn_tracker,
+      username: args.username,
+      password: args.password,
     }))
   }
 
@@ -552,6 +725,8 @@ impl tower::Service<plugin::Request> for Http3ChainService {
     let st = self.stream_tracker.clone();
     let ct = self.conn_tracker.clone();
     let is_shutting_down = self.is_shutting_down();
+    let username = self.username.clone();
+    let password = self.password.clone();
 
     // Check for SOCKS5 upgrade (similar to hyper::upgrade::on)
     let socks5_upgrade = plugin::Socks5OnUpgrade::on(&mut req);
@@ -586,7 +761,17 @@ impl tower::Service<plugin::Request> for Http3ChainService {
       };
 
       // Send HTTP/3 CONNECT request to next hop proxy
-      let proxy_req = match http::Request::connect(format!("{host}:{port}")).body(()) {
+      let mut builder = http::Request::builder()
+        .method(http::Method::CONNECT)
+        .uri(format!("{host}:{port}"));
+
+      // Add Proxy-Authorization header if credentials are configured
+      if let (Some(user), Some(pass)) = (&username, &password) {
+        let credentials = BASE64_STANDARD.encode(format!("{}:{}", user, pass));
+        builder = builder.header("Proxy-Authorization", format!("Basic {}", credentials));
+      }
+
+      let proxy_req = match builder.body(()) {
         Ok(r) => r,
         Err(e) => {
           warn!("Http3ChainService: failed to build CONNECT request: {e}");
@@ -1030,7 +1215,12 @@ mod tests {
       ("127.0.0.1:8080".parse().unwrap(), 1),
       ("127.0.0.1:8081".parse().unwrap(), 2),
     ];
-    let group = ProxyGroup::new("/tmp/ca.pem".into(), addresses);
+    let group = ProxyGroup::new(
+      "/tmp/ca.pem".into(),
+      addresses,
+      None,
+      None,
+    );
 
     assert_eq!(group.proxies.len(), 2);
     assert_eq!(group.proxies[0].weight, 1);
@@ -1040,13 +1230,521 @@ mod tests {
   #[test]
   fn test_proxy_group_schedule_wrr_single() {
     let addresses = vec![("127.0.0.1:8080".parse().unwrap(), 1)];
-    let mut group = ProxyGroup::new("/tmp/ca.pem".into(), addresses);
+    let mut group = ProxyGroup::new(
+      "/tmp/ca.pem".into(),
+      addresses,
+      None,
+      None,
+    );
 
     // With single proxy, should always select index 0
     assert_eq!(group.schedule_wrr(), 0);
   }
 
+  #[test]
+  fn test_proxy_group_schedule_wrr_two_proxies_weight_2_to_1() {
+    // Test WRR with two proxies: weights 2:1
+    // Expected distribution over 6 calls: 0, 1, 0, 0, 1, 0 (4:2 ratio = 2:1)
+    let addresses = vec![
+      ("127.0.0.1:8080".parse().unwrap(), 2), // weight 2
+      ("127.0.0.1:8081".parse().unwrap(), 1), // weight 1
+    ];
+    let mut group = ProxyGroup::new(
+      "/tmp/ca.pem".into(),
+      addresses,
+      None,
+      None,
+    );
+
+    // Run 6 iterations (total weight = 3, so 6 = 2 full cycles)
+    let selections: Vec<usize> = (0..6).map(|_| group.schedule_wrr()).collect();
+
+    // Count selections per proxy
+    let count_0 = selections.iter().filter(|&&x| x == 0).count();
+    let count_1 = selections.iter().filter(|&&x| x == 1).count();
+
+    // With weights 2:1, expect approximately 4:2 distribution
+    assert_eq!(count_0, 4, "Proxy 0 (weight 2) should be selected 4 times");
+    assert_eq!(count_1, 2, "Proxy 1 (weight 1) should be selected 2 times");
+  }
+
+  #[test]
+  fn test_proxy_group_schedule_wrr_two_proxies_weight_3_to_1() {
+    // Test WRR with two proxies: weights 3:1
+    // Expected distribution over 8 calls: 6:2 ratio = 3:1
+    let addresses = vec![
+      ("127.0.0.1:8080".parse().unwrap(), 3), // weight 3
+      ("127.0.0.1:8081".parse().unwrap(), 1), // weight 1
+    ];
+    let mut group = ProxyGroup::new(
+      "/tmp/ca.pem".into(),
+      addresses,
+      None,
+      None,
+    );
+
+    // Run 8 iterations (total weight = 4, so 8 = 2 full cycles)
+    let selections: Vec<usize> = (0..8).map(|_| group.schedule_wrr()).collect();
+
+    let count_0 = selections.iter().filter(|&&x| x == 0).count();
+    let count_1 = selections.iter().filter(|&&x| x == 1).count();
+
+    // With weights 3:1, expect 6:2 distribution
+    assert_eq!(count_0, 6, "Proxy 0 (weight 3) should be selected 6 times");
+    assert_eq!(count_1, 2, "Proxy 1 (weight 1) should be selected 2 times");
+  }
+
+  #[test]
+  fn test_proxy_group_schedule_wrr_three_proxies() {
+    // Test WRR with three proxies: weights 2:1:1
+    // Expected distribution over 8 calls: 4:2:2 ratio
+    let addresses = vec![
+      ("127.0.0.1:8080".parse().unwrap(), 2), // weight 2
+      ("127.0.0.1:8081".parse().unwrap(), 1), // weight 1
+      ("127.0.0.1:8082".parse().unwrap(), 1), // weight 1
+    ];
+    let mut group = ProxyGroup::new(
+      "/tmp/ca.pem".into(),
+      addresses,
+      None,
+      None,
+    );
+
+    // Run 8 iterations (total weight = 4, so 8 = 2 full cycles)
+    let selections: Vec<usize> = (0..8).map(|_| group.schedule_wrr()).collect();
+
+    let count_0 = selections.iter().filter(|&&x| x == 0).count();
+    let count_1 = selections.iter().filter(|&&x| x == 1).count();
+    let count_2 = selections.iter().filter(|&&x| x == 2).count();
+
+    // With weights 2:1:1, expect 4:2:2 distribution
+    assert_eq!(count_0, 4, "Proxy 0 (weight 2) should be selected 4 times");
+    assert_eq!(count_1, 2, "Proxy 1 (weight 1) should be selected 2 times");
+    assert_eq!(count_2, 2, "Proxy 2 (weight 1) should be selected 2 times");
+  }
+
+  #[test]
+  fn test_proxy_group_schedule_wrr_equal_weights() {
+    // Test WRR with two proxies: equal weights 1:1
+    // Expected distribution over 4 calls: 2:2 (alternating)
+    let addresses = vec![
+      ("127.0.0.1:8080".parse().unwrap(), 1),
+      ("127.0.0.1:8081".parse().unwrap(), 1),
+    ];
+    let mut group = ProxyGroup::new(
+      "/tmp/ca.pem".into(),
+      addresses,
+      None,
+      None,
+    );
+
+    // Run 4 iterations
+    let selections: Vec<usize> = (0..4).map(|_| group.schedule_wrr()).collect();
+
+    let count_0 = selections.iter().filter(|&&x| x == 0).count();
+    let count_1 = selections.iter().filter(|&&x| x == 1).count();
+
+    // With equal weights, expect 2:2 distribution
+    assert_eq!(count_0, 2, "Each proxy should be selected 2 times");
+    assert_eq!(count_1, 2, "Each proxy should be selected 2 times");
+  }
+
+  #[test]
+  fn test_proxy_group_schedule_wrr_deterministic() {
+    // Test that WRR produces deterministic, repeatable results
+    let addresses = vec![
+      ("127.0.0.1:8080".parse().unwrap(), 2),
+      ("127.0.0.1:8081".parse().unwrap(), 1),
+    ];
+
+    // First run
+    let mut group1 = ProxyGroup::new(
+      "/tmp/ca.pem".into(),
+      addresses.clone(),
+      None,
+      None,
+    );
+    let selections1: Vec<usize> = (0..6).map(|_| group1.schedule_wrr()).collect();
+
+    // Second run (should produce identical results)
+    let mut group2 = ProxyGroup::new(
+      "/tmp/ca.pem".into(),
+      addresses,
+      None,
+      None,
+    );
+    let selections2: Vec<usize> = (0..6).map(|_| group2.schedule_wrr()).collect();
+
+    assert_eq!(selections1, selections2, "WRR should be deterministic");
+  }
+
   // ============== Http3ChainServiceArgs Tests ==============
+
+  #[test]
+  fn test_service_args_with_password_auth() {
+    let yaml = r#"
+proxy_group:
+  - address: "127.0.0.1:8080"
+    weight: 1
+ca_path: "/tmp/ca.pem"
+username: "user1"
+password: "pass1"
+"#;
+    let args: Http3ChainServiceArgs = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(args.username, Some("user1".to_string()));
+    assert_eq!(args.password, Some("pass1".to_string()));
+  }
+
+  #[test]
+  fn test_config_validation_username_without_password_fails() {
+    // CR-008: Use tempfile to ensure ca_path exists, so validate() reaches
+    // the username/password pair check instead of failing on missing ca_path
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      username: Some("user".to_string()),
+      password: None,
+      client_cert_path: None,
+      client_key_path: None,
+    };
+    let result = args.validate();
+    assert!(result.is_err());
+    // Verify it fails for the right reason: username without password
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+      err_msg.contains("password is required when username is set"),
+      "Expected username-without-password error, got: {err_msg}"
+    );
+  }
+
+  #[test]
+  fn test_config_validation_cert_without_key_fails() {
+    // CR-008: Use tempfile to ensure ca_path exists
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      username: None,
+      password: None,
+      client_cert_path: Some("/tmp/client.crt".to_string()),
+      client_key_path: None,
+    };
+    let result = args.validate();
+    assert!(result.is_err());
+    // Verify it fails for the right reason: cert without key
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+      err_msg.contains("client_key_path is required when client_cert_path is set"),
+      "Expected cert-without-key error, got: {err_msg}"
+    );
+  }
+
+  #[test]
+  fn test_config_validation_password_without_username_fails() {
+    // CR-008: Use tempfile to ensure ca_path exists
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      username: None,
+      password: Some("pass".to_string()),
+      client_cert_path: None,
+      client_key_path: None,
+    };
+    let result = args.validate();
+    assert!(result.is_err());
+    // Verify it fails for the right reason: password without username
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+      err_msg.contains("username is required when password is set"),
+      "Expected password-without-username error, got: {err_msg}"
+    );
+  }
+
+  #[test]
+  fn test_config_validation_key_without_cert_fails() {
+    // CR-008: Use tempfile to ensure ca_path exists
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      username: None,
+      password: None,
+      client_cert_path: None,
+      client_key_path: Some("/tmp/client.key".to_string()),
+    };
+    let result = args.validate();
+    assert!(result.is_err());
+    // Verify it fails for the right reason: key without cert
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+      err_msg.contains("client_cert_path is required when client_key_path is set"),
+      "Expected key-without-cert error, got: {err_msg}"
+    );
+  }
+
+  #[test]
+  fn test_config_validation_both_auth_methods_ok() {
+    // Create temp files for ca, cert and key validation (CR-002, CR-004)
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    let cert_path = temp_dir.path().join("client.crt");
+    let key_path = temp_dir.path().join("client.key");
+    fs::write(&ca_path, "dummy ca").unwrap();
+    fs::write(&cert_path, "dummy cert").unwrap();
+    fs::write(&key_path, "dummy key").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      username: Some("user".to_string()),
+      password: Some("pass".to_string()),
+      client_cert_path: Some(cert_path.to_string_lossy().to_string()),
+      client_key_path: Some(key_path.to_string_lossy().to_string()),
+    };
+    assert!(args.validate().is_ok());
+  }
+
+  #[test]
+  fn test_config_validation_nonexistent_cert_file_fails() {
+    // CR-002: validate() should check that cert files exist
+    // CR-008: Use tempfile to ensure ca_path exists
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      username: None,
+      password: None,
+      client_cert_path: Some("/nonexistent/path/client.crt".to_string()),
+      client_key_path: Some("/nonexistent/path/client.key".to_string()),
+    };
+    // Should fail because cert files don't exist
+    let result = args.validate();
+    assert!(result.is_err(), "validate() should fail for nonexistent cert files");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+      err_msg.contains("client_cert_path") && err_msg.contains("does not exist"),
+      "Expected cert-not-found error, got: {err_msg}"
+    );
+  }
+
+  #[test]
+  fn test_config_validation_nonexistent_key_file_fails() {
+    // CR-002: validate() should check that key files exist
+    // CR-008: Use tempfile to ensure ca_path and cert exist
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    let cert_path = temp_dir.path().join("client.crt");
+    fs::write(&ca_path, "dummy ca").unwrap();
+    fs::write(&cert_path, "dummy cert").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      username: None,
+      password: None,
+      client_cert_path: Some(cert_path.to_string_lossy().to_string()),
+      client_key_path: Some("/nonexistent/path/client.key".to_string()),
+    };
+    // Should fail because key file doesn't exist
+    let result = args.validate();
+    assert!(result.is_err(), "validate() should fail for nonexistent key file");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+      err_msg.contains("client_key_path") && err_msg.contains("does not exist"),
+      "Expected key-not-found error, got: {err_msg}"
+    );
+  }
+
+  // CR-014: Tests for empty username/password validation
+  #[test]
+  fn test_config_validation_empty_username_fails() {
+    // CR-014: Empty username should be rejected at config validation time
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      username: Some("".to_string()), // Empty username
+      password: Some("pass".to_string()),
+      client_cert_path: None,
+      client_key_path: None,
+    };
+    let result = args.validate();
+    assert!(result.is_err(), "validate() should fail for empty username");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+      err_msg.contains("username cannot be empty"),
+      "Expected empty username error, got: {err_msg}"
+    );
+  }
+
+  #[test]
+  fn test_config_validation_empty_password_fails() {
+    // CR-014: Empty password should be rejected at config validation time
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      username: Some("user".to_string()),
+      password: Some("".to_string()), // Empty password
+      client_cert_path: None,
+      client_key_path: None,
+    };
+    let result = args.validate();
+    assert!(result.is_err(), "validate() should fail for empty password");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+      err_msg.contains("password cannot be empty"),
+      "Expected empty password error, got: {err_msg}"
+    );
+  }
+
+  #[test]
+  fn test_config_validation_empty_username_and_password_fails() {
+    // CR-014: Both empty should be rejected (first error should be about username)
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      username: Some("".to_string()), // Empty username
+      password: Some("".to_string()), // Empty password
+      client_cert_path: None,
+      client_key_path: None,
+    };
+    let result = args.validate();
+    assert!(result.is_err(), "validate() should fail for empty credentials");
+  }
+
+  #[test]
+  fn test_config_validation_empty_client_cert_path_fails() {
+    // CR-014: Empty client_cert_path should be rejected
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      username: None,
+      password: None,
+      client_cert_path: Some("".to_string()), // Empty path
+      client_key_path: Some("/tmp/client.key".to_string()),
+    };
+    let result = args.validate();
+    assert!(result.is_err(), "validate() should fail for empty client_cert_path");
+  }
+
+  #[test]
+  fn test_config_validation_empty_client_key_path_fails() {
+    // CR-014: Empty client_key_path should be rejected
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      username: None,
+      password: None,
+      client_cert_path: Some("/tmp/client.crt".to_string()),
+      client_key_path: Some("".to_string()), // Empty path
+    };
+    let result = args.validate();
+    assert!(result.is_err(), "validate() should fail for empty client_key_path");
+  }
+
+  #[test]
+  fn test_config_validation_nonexistent_ca_path_fails() {
+    // CR-004: validate() should check that ca_path exists
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: "/nonexistent/path/ca.pem".to_string(),
+      username: None,
+      password: None,
+      client_cert_path: None,
+      client_key_path: None,
+    };
+    // Should fail because ca_path doesn't exist
+    assert!(args.validate().is_err(), "validate() should fail for nonexistent ca_path");
+  }
+
+  // CR-003: Test for zero weight validation
+  #[test]
+  fn test_config_validation_zero_weight_fails() {
+    // Create temp files for validation
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![
+        Http3ChainServiceArgsProxyGroup {
+          address: "127.0.0.1:8080".to_string(),
+          weight: 0, // CR-003: weight 0 should be rejected
+        }
+      ],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      username: None,
+      password: None,
+      client_cert_path: None,
+      client_key_path: None,
+    };
+    // Should fail because weight is 0
+    assert!(args.validate().is_err(), "validate() should fail for zero weight");
+  }
+
+  #[test]
+  fn test_config_validation_multiple_proxies_one_zero_weight_fails() {
+    // Create temp files for validation
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![
+        Http3ChainServiceArgsProxyGroup {
+          address: "127.0.0.1:8080".to_string(),
+          weight: 2, // valid weight
+        },
+        Http3ChainServiceArgsProxyGroup {
+          address: "127.0.0.1:8081".to_string(),
+          weight: 0, // CR-003: weight 0 should be rejected
+        },
+      ],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      username: None,
+      password: None,
+      client_cert_path: None,
+      client_key_path: None,
+    };
+    // Should fail because one proxy has weight 0
+    assert!(args.validate().is_err(), "validate() should fail when any proxy has zero weight");
+  }
 
   #[test]
   fn test_service_args_deserialize() {
@@ -1766,4 +2464,8 @@ ca_path: "/tmp/ca.pem"
     let varint = quinn::VarInt::from_u32(H3_NO_ERROR_CODE);
     assert_eq!(varint.into_inner(), 0x100u64);
   }
+
+  // SendState and H3BidirectionalStream behavior is documented in code comments
+  // and verified through integration tests. See SendState enum and
+  // H3BidirectionalStream struct doc comments for state machine documentation.
 }

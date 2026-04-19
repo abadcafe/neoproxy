@@ -1146,8 +1146,10 @@ pub async fn perform_handshake(
           auth_state.read_username_password().await?;
 
         // Get users map from AuthConfig
-        // Note: users_map() returning None should never happen after AuthConfig validation,
-        // but we handle it defensively as an internal configuration error.
+        // Note: users_map() is called here per-connection. For SOCKS5, connections
+        // are less frequent than HTTP/3 streams, so this is acceptable. However,
+        // if performance becomes a concern, credentials can be pre-computed and
+        // passed into perform_handshake similar to how HyperServiceAdaptor caches them.
         let users = auth_config
           .users_map()
           .ok_or_else(|| {

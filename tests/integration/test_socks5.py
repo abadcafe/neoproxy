@@ -2058,24 +2058,6 @@ class TestSocks5AdditionalBoundary:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_domain_too_long(self) -> None:
-        """
-        TC-S5-034: Domain too long (256 bytes)
-
-        Test that domain exceeding 255 bytes cannot be sent in SOCKS5 protocol.
-        Note: SOCKS5 protocol limits domain length to 255 bytes (1-byte length field).
-        This test verifies the client-side limitation, as 256-byte domain
-        cannot be encoded in valid SOCKS5 request.
-        """
-        # 256-byte domain exceeds SOCKS5 protocol limit
-        # The domain length field is 1 byte, max 255
-        # So this test verifies client-side encoding limitation
-        long_domain = "a" * 256
-        # This cannot be encoded as valid SOCKS5 request
-        # because length would be 256, which doesn't fit in 1 byte
-        # Skip this test as it's a protocol limitation, not server behavior
-        pass
-
     def test_port_0(self) -> None:
         """
         TC-S5-035: Port 0 target address

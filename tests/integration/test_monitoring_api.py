@@ -270,7 +270,7 @@ class TestHTTP3MonitoringAPI:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -322,7 +322,7 @@ class TestHTTP3MonitoringAPI:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )

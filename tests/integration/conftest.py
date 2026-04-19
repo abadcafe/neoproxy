@@ -10,7 +10,6 @@ import socket
 import tempfile
 import shutil
 import threading
-import time
 import os
 import sys
 from typing import Optional, Generator, Callable

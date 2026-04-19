@@ -6,9 +6,9 @@ use std::fmt;
 #[derive(Debug, Clone)]
 pub enum AuthError {
   /// Invalid username or password.
+  /// CR-009: All authentication failures return this variant to avoid
+  /// leaking information about whether a username exists.
   InvalidCredentials,
-  /// User not found.
-  UserNotFound(String),
   /// Configuration error.
   ConfigError(String),
   /// TLS client certificate verification failed.
@@ -21,7 +21,6 @@ impl fmt::Display for AuthError {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Self::InvalidCredentials => write!(f, "invalid credentials"),
-      Self::UserNotFound(user) => write!(f, "user not found: {}", user),
       Self::ConfigError(msg) => write!(f, "auth config error: {}", msg),
       Self::TlsCertError(msg) => write!(f, "TLS cert error: {}", msg),
       Self::UnsupportedAuthType(t) => {

@@ -10,9 +10,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use base64::{
-  Engine, engine::general_purpose::STANDARD as BASE64_STANDARD,
-};
 use bytes::{Buf, Bytes};
 use h3::server;
 use http_body_util::BodyExt;
@@ -23,7 +20,7 @@ use tokio::net;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
-use crate::auth::{AuthType, TlsClientCertVerifier, verify_password};
+use crate::auth::{AuthType, TlsClientCertVerifier, parse_basic_auth, verify_password};
 use crate::plugin;
 
 // ============================================================================
@@ -410,7 +407,7 @@ fn handle_password_auth(
     .get(http::header::PROXY_AUTHORIZATION)
     .ok_or_else(|| anyhow!("Proxy Authentication Required"))?;
 
-  let (username, password) = parse_basic_auth(auth_header.clone())?;
+  let (username, password) = parse_basic_auth(&auth_header)?;
 
   // Use plaintext password verification from auth module
   verify_password(credentials, &username, &password).map_err(|_| {
@@ -427,16 +424,17 @@ fn handle_password_auth(
 fn perform_authentication(
   req: &http::Request<()>,
   auth_config: Option<&crate::auth::AuthConfig>,
+  credentials: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<()> {
   match auth_config {
     None => Ok(()), // No auth configured
     Some(config) => {
       match config.auth_type {
         AuthType::Password => {
-          let users = config.users_map().ok_or_else(|| {
+          let users = credentials.ok_or_else(|| {
             anyhow!("password auth configured but no users")
           })?;
-          handle_password_auth(req, &users)
+          handle_password_auth(req, users)
         }
         AuthType::TlsClientCert => Ok(()), // TLS cert handled at QUIC level
       }
@@ -476,6 +474,7 @@ enum ValidationError {
 fn validate_connect_request(
   req: &http::Request<()>,
   auth_config: Option<&crate::auth::AuthConfig>,
+  credentials: Option<&std::collections::HashMap<String, String>>,
 ) -> std::result::Result<String, ValidationError> {
   // Step 1: Validate CONNECT method
   if let Err(e) = validate_connect_method(req) {
@@ -483,7 +482,7 @@ fn validate_connect_request(
   }
 
   // Step 2: Perform authentication
-  if let Err(e) = perform_authentication(req, auth_config) {
+  if let Err(e) = perform_authentication(req, auth_config, credentials) {
     return Err(ValidationError::Unauthorized(e.to_string()));
   }
 
@@ -626,8 +625,10 @@ async fn handle_h3_stream<S>(
   <S as h3::quic::BidiStream<Bytes>>::RecvStream: Send,
 {
   // Phase 1: Validate request
+  // Pre-compute credentials map once per stream to avoid per-request allocation
+  let credentials = auth_config.as_ref().and_then(|c| c.users_map());
   let target_addr =
-    match validate_connect_request(&req, auth_config.as_ref()) {
+    match validate_connect_request(&req, auth_config.as_ref(), credentials.as_ref()) {
       Ok(addr) => addr,
       Err(e) => {
         handle_validation_error(&mut stream, e).await;
@@ -719,23 +720,6 @@ where
   }
 
   Ok(())
-}
-
-/// Parse Basic authentication header
-fn parse_basic_auth(
-  header_value: http::HeaderValue,
-) -> Result<(String, String)> {
-  let header_str = header_value.to_str()?;
-  if !header_str.starts_with("Basic ") {
-    bail!("Not Basic authentication");
-  }
-  let encoded = &header_str[6..];
-  let decoded = BASE64_STANDARD.decode(encoded)?;
-  let decoded_str = String::from_utf8(decoded)?;
-  let mut parts = decoded_str.splitn(2, ':');
-  let username = parts.next().ok_or_else(|| anyhow!("No username"))?;
-  let password = parts.next().ok_or_else(|| anyhow!("No password"))?;
-  Ok((username.to_string(), password.to_string()))
 }
 
 // ============================================================================
@@ -1251,6 +1235,7 @@ pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
 mod tests {
   use super::*;
   use http_body::Body;
+  use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 
   // ============== QuicConfigArgs Tests ==============
 
@@ -1698,7 +1683,7 @@ type: invalid_type
     let header_value =
       http::HeaderValue::from_str("Basic dXNlcjpwYXNzd29yZA==")
         .unwrap();
-    let (username, password) = parse_basic_auth(header_value).unwrap();
+    let (username, password) = parse_basic_auth(&header_value).unwrap();
     assert_eq!(username, "user");
     assert_eq!(password, "password");
   }
@@ -1707,7 +1692,7 @@ type: invalid_type
   fn test_parse_basic_auth_not_basic() {
     let header_value =
       http::HeaderValue::from_str("Bearer token123").unwrap();
-    let result = parse_basic_auth(header_value);
+    let result = parse_basic_auth(&header_value);
     assert!(result.is_err());
   }
 
@@ -1716,7 +1701,7 @@ type: invalid_type
     // base64 of "user" is "dXNlcg=="
     let header_value =
       http::HeaderValue::from_str("Basic dXNlcg==").unwrap();
-    let result = parse_basic_auth(header_value);
+    let result = parse_basic_auth(&header_value);
     assert!(result.is_err());
   }
 
@@ -2997,7 +2982,7 @@ key_path: "/path/to/key.pem"
       .body(())
       .unwrap();
     assert!(
-      perform_authentication(&req, None).is_ok(),
+      perform_authentication(&req, None, None).is_ok(),
       "No auth should always pass"
     );
   }
@@ -3348,7 +3333,7 @@ key_path: "/path/to/key.pem"
     let header_value =
       http::HeaderValue::from_str("Basic dXNlcjpwYXNzd29yZA==")
         .unwrap();
-    let result = parse_basic_auth(header_value);
+    let result = parse_basic_auth(&header_value);
     assert!(result.is_ok(), "Valid Basic format should parse");
     let (username, password) = result.unwrap();
     assert_eq!(username, "user");
@@ -3360,7 +3345,7 @@ key_path: "/path/to/key.pem"
     // Test non-Basic auth format
     let header_value =
       http::HeaderValue::from_str("Bearer token123").unwrap();
-    let result = parse_basic_auth(header_value);
+    let result = parse_basic_auth(&header_value);
     assert!(result.is_err(), "Non-Basic format should return error");
     let err = result.unwrap_err().to_string();
     assert!(
@@ -3374,7 +3359,7 @@ key_path: "/path/to/key.pem"
     // Test Digest auth format (should be rejected)
     let header_value =
       http::HeaderValue::from_str("Digest username=\"user\"").unwrap();
-    let result = parse_basic_auth(header_value);
+    let result = parse_basic_auth(&header_value);
     assert!(result.is_err(), "Digest format should return error");
   }
 
@@ -3387,7 +3372,7 @@ key_path: "/path/to/key.pem"
     let header_value =
       http::HeaderValue::from_str(&format!("Basic {}", encoded))
         .unwrap();
-    let result = parse_basic_auth(header_value);
+    let result = parse_basic_auth(&header_value);
     assert!(result.is_ok(), "Valid Base64 should decode");
     let (username, password) = result.unwrap();
     assert_eq!(username, "testuser");
@@ -3399,7 +3384,7 @@ key_path: "/path/to/key.pem"
     // Test invalid Base64 string
     let header_value =
       http::HeaderValue::from_str("Basic !!invalid!!base64!!").unwrap();
-    let result = parse_basic_auth(header_value);
+    let result = parse_basic_auth(&header_value);
     assert!(result.is_err(), "Invalid Base64 should return error");
   }
 
@@ -3410,7 +3395,7 @@ key_path: "/path/to/key.pem"
     let header_value =
       http::HeaderValue::from_str(&format!("Basic {}", encoded))
         .unwrap();
-    let result = parse_basic_auth(header_value);
+    let result = parse_basic_auth(&header_value);
     assert!(
       result.is_err(),
       "Missing colon separator should return error"
@@ -3850,7 +3835,7 @@ key_path: "/path/to/key.pem"
       .expect("build request");
 
     // With auth_config = None (no auth required), should succeed
-    let result = perform_authentication(&req, None);
+    let result = perform_authentication(&req, None, None);
     assert!(result.is_ok(), "No auth should pass without credentials");
   }
 
@@ -3875,9 +3860,12 @@ key_path: "/path/to/key.pem"
       client_ca_path: None,
     });
 
+    // Pre-compute credentials (as done in handle_h3_stream)
+    let credentials = auth_config.as_ref().and_then(|c| c.users_map());
+
     // Should fail because no Proxy-Authorization header provided
     // This tests listener behavior: HTTP/3 requires Proxy-Authorization for password auth
-    let result = perform_authentication(&req, auth_config.as_ref());
+    let result = perform_authentication(&req, auth_config.as_ref(), credentials.as_ref());
     assert!(
       result.is_err(),
       "Password auth should fail without header"
@@ -3908,9 +3896,12 @@ key_path: "/path/to/key.pem"
       client_ca_path: None,
     });
 
+    // Pre-compute credentials (as done in handle_h3_stream)
+    let creds_map = auth_config.as_ref().and_then(|c| c.users_map());
+
     // Should succeed with valid plaintext password
     // This tests that HTTP/3 listener uses PLAINTEXT comparison (not bcrypt)
-    let result = perform_authentication(&req, auth_config.as_ref());
+    let result = perform_authentication(&req, auth_config.as_ref(), creds_map.as_ref());
     assert!(result.is_ok(), "Valid credentials should pass");
   }
 
@@ -3937,9 +3928,12 @@ key_path: "/path/to/key.pem"
       client_ca_path: None,
     });
 
+    // Pre-compute credentials (as done in handle_h3_stream)
+    let creds_map = auth_config.as_ref().and_then(|c| c.users_map());
+
     // Should fail with wrong password
     // This tests listener's credential validation behavior
-    let result = perform_authentication(&req, auth_config.as_ref());
+    let result = perform_authentication(&req, auth_config.as_ref(), creds_map.as_ref());
     assert!(result.is_err(), "Wrong password should fail");
   }
 
@@ -3961,8 +3955,11 @@ key_path: "/path/to/key.pem"
       client_ca_path: Some("/path/to/ca.pem".to_string()),
     });
 
+    // Pre-compute credentials (as done in handle_h3_stream)
+    let credentials = auth_config.as_ref().and_then(|c| c.users_map());
+
     // TLS cert auth bypasses HTTP-layer auth check
-    let result = perform_authentication(&req, auth_config.as_ref());
+    let result = perform_authentication(&req, auth_config.as_ref(), credentials.as_ref());
     assert!(
       result.is_ok(),
       "TLS client cert auth should pass at HTTP layer"

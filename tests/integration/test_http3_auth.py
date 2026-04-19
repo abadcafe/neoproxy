@@ -193,7 +193,7 @@ class TestHTTP3PasswordAuth:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
 
             config_path = create_http3_listener_config_with_password_auth(
                 proxy_port=proxy_port,
@@ -237,7 +237,7 @@ class TestHTTP3PasswordAuth:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
 
             # Use plaintext password
             password = "valid_password_123"
@@ -325,7 +325,7 @@ class TestHTTP3PasswordAuth:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
 
             # Use plaintext password
             correct_password = "correct_password"
@@ -407,7 +407,7 @@ class TestHTTP3PasswordAuth:
         proxy_port = 31006
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
 
             config_content = f"""worker_threads: 1
 log_directory: "{temp_dir}/logs"
@@ -474,7 +474,7 @@ class TestHTTP3TLSClientCertAuth:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
 
             config_path = create_http3_listener_config_with_tls_client_cert(
                 proxy_port=proxy_port,
@@ -509,7 +509,7 @@ class TestHTTP3TLSClientCertAuth:
         proxy_port = 31011
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
 
             config_content = f"""worker_threads: 1
 log_directory: "{temp_dir}/logs"
@@ -567,7 +567,7 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
 
             config_path = create_http3_listener_config_with_tls_client_cert(
                 proxy_port=proxy_port,
@@ -611,7 +611,7 @@ servers:
 
         try:
             # Generate server certificates
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
 
             # Generate client certificate signed by the CA
             client_cert_path, client_key_path = generate_client_certificate(
@@ -678,7 +678,7 @@ servers:
 
         try:
             # Generate server certificates
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
 
             # Generate a different CA and client cert (not signed by server's CA)
             other_ca_cert_path = os.path.join(temp_dir, "other_ca.crt")
@@ -770,7 +770,7 @@ servers:
 
         try:
             # Generate server certificates
-            cert_path, key_path, ca_path = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
 
             config_path = create_http3_listener_config_with_tls_client_cert(
                 proxy_port=proxy_port,
@@ -834,7 +834,7 @@ class TestHTTP3AuthConfigValidation:
         proxy_port = 31020
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
 
             config_content = f"""worker_threads: 1
 log_directory: "{temp_dir}/logs"
@@ -890,7 +890,7 @@ servers:
         proxy_port = 31021
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
 
             config_content = f"""worker_threads: 1
 log_directory: "{temp_dir}/logs"
@@ -946,7 +946,7 @@ servers:
         proxy_port = 31022
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
 
             config_content = f"""worker_threads: 1
 log_directory: "{temp_dir}/logs"
@@ -1002,7 +1002,7 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
 
             config_path = create_http3_listener_config_with_password_auth(
                 proxy_port=proxy_port,
@@ -1036,7 +1036,7 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
 
             config_path = create_http3_listener_config_with_password_auth(
                 proxy_port=proxy_port,

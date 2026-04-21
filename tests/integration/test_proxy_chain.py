@@ -135,9 +135,11 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
+          auth:
+            - type: password
+              username: user1
+              password: pass1
       ca_path: "{ca_path}"
-      username: user1
-      password: pass1
 
 servers:
   - name: entry_http
@@ -180,9 +182,11 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
+          auth:
+            - type: tls_client_cert
+              client_cert_path: "{client_cert_path}"
+              client_key_path: "{client_key_path}"
       ca_path: "{ca_path}"
-      client_cert_path: "{client_cert_path}"
-      client_key_path: "{client_key_path}"
 
 servers:
   - name: entry_http
@@ -223,9 +227,11 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
+          auth:
+            - type: password
+              username: user1
+              password: pass1
       ca_path: "{ca_path}"
-      username: user1
-      password: pass1
 
 servers:
   - name: entry_socks5
@@ -266,9 +272,11 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
+          auth:
+            - type: tls_client_cert
+              client_cert_path: "{client_cert_path}"
+              client_key_path: "{client_key_path}"
       ca_path: "{ca_path}"
-      client_cert_path: "{client_cert_path}"
-      client_key_path: "{client_key_path}"
 
 servers:
   - name: entry_socks5
@@ -694,9 +702,11 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
+          auth:
+            - type: password
+              username: wrong_user
+              password: wrong_pass
       ca_path: "{ca_path}"
-      username: wrong_user
-      password: wrong_pass
 
 servers:
   - name: entry_http

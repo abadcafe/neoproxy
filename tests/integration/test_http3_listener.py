@@ -126,7 +126,8 @@ def generate_test_certificates(temp_dir: str) -> Tuple[str, str, str, str]:
 def generate_client_certificate(
     temp_dir: str,
     ca_cert_path: str,
-    ca_key_path: str
+    ca_key_path: str,
+    client_name: str = "testclient"
 ) -> Tuple[str, str]:
     """
     Generate client certificate for TLS client auth testing.
@@ -135,13 +136,14 @@ def generate_client_certificate(
         temp_dir: Temporary directory
         ca_cert_path: CA certificate path
         ca_key_path: CA private key path
+        client_name: Common name for the client certificate (default: "testclient")
 
     Returns:
         Tuple[str, str]: (client_cert_path, client_key_path)
     """
-    client_key_path = os.path.join(temp_dir, "client.key")
-    client_csr_path = os.path.join(temp_dir, "client.csr")
-    client_cert_path = os.path.join(temp_dir, "client.crt")
+    client_key_path = os.path.join(temp_dir, f"{client_name}.key")
+    client_csr_path = os.path.join(temp_dir, f"{client_name}.csr")
+    client_cert_path = os.path.join(temp_dir, f"{client_name}.crt")
 
     # Generate client private key
     subprocess.run(
@@ -156,7 +158,7 @@ def generate_client_certificate(
             "openssl", "req", "-new",
             "-key", client_key_path,
             "-out", client_csr_path,
-            "-subj", "/CN=testclient"
+            "-subj", f"/CN={client_name}"
         ],
         check=True,
         capture_output=True

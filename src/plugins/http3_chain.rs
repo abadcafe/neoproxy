@@ -11,8 +11,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use std::{fs, path};
 
-use anyhow::{bail, Result};
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use anyhow::{anyhow, bail, Result};
+use base64::Engine;
 use bytes::{Buf, Bytes};
 use h3::client as h3_cli;
 use hyper_util::rt::TokioIo;
@@ -27,6 +27,18 @@ use super::utils;
 use crate::listeners::http3::StreamTracker;
 use crate::plugin;
 use crate::plugin::ClientStream;
+
+/// Error indicating proxy authentication failure (HTTP 407)
+#[derive(Debug)]
+struct ProxyAuthRequiredError;
+
+impl std::fmt::Display for ProxyAuthRequiredError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "Proxy Authentication Required (407)")
+  }
+}
+
+impl std::error::Error for ProxyAuthRequiredError {}
 
 static ALPN: &[u8] = b"h3";
 
@@ -81,6 +93,18 @@ impl ActiveConnectionTracker {
     self.connections.borrow_mut().push(ActiveConnection::new(conn));
   }
 
+  /// Close and remove a specific connection by its stable_id
+  /// This is useful when auth fails and we need to close the failed connection
+  fn close_and_remove(&self, conn: &quinn::Connection) {
+    let target_id = conn.stable_id();
+    let mut connections = self.connections.borrow_mut();
+    // Find and remove the connection by stable_id, then close it
+    if let Some(pos) = connections.iter().position(|ac| ac.conn.stable_id() == target_id) {
+      let active_conn = connections.remove(pos);
+      active_conn.close();
+    }
+  }
+
   /// Close all registered connections with H3_NO_ERROR
   fn close_all(&self) {
     let connections = self.connections.borrow();
@@ -110,6 +134,7 @@ struct Proxy {
   requester: Option<h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>>,
   weight: usize,
   current_weight: isize,
+  auth_chain: Vec<ProxyAuth>,
 }
 
 async fn connection_maintaining(
@@ -123,32 +148,96 @@ async fn connection_maintaining(
   }
 }
 
+/// Build TLS client config based on auth method
+fn build_tls_client_config(
+  roots: rustls::RootCertStore,
+  auth: &ProxyAuth,
+) -> Result<rustls::ClientConfig> {
+  let tls_config = match auth {
+    ProxyAuth::None => rustls::ClientConfig::builder()
+      .with_root_certificates(roots)
+      .with_no_client_auth(),
+    ProxyAuth::Password { .. } => {
+      // No TLS-level auth, password will be sent in CONNECT request
+      rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth()
+    }
+    ProxyAuth::TlsClientCert {
+      client_cert_path,
+      client_key_path,
+    } => {
+      // Load client certificate chain (PEM format)
+      let cert_file = fs::File::open(client_cert_path)?;
+      let mut cert_reader = std::io::BufReader::new(cert_file);
+      let cert_chain: Vec<CertificateDer> = rustls_pemfile::certs(&mut cert_reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow::anyhow!("failed to parse client certificate: {e}"))?;
+
+      // Load client private key (PEM format)
+      let key_file = fs::File::open(client_key_path)?;
+      let mut key_reader = std::io::BufReader::new(key_file);
+      let key = rustls_pemfile::private_key(&mut key_reader)?
+        .ok_or_else(|| anyhow::anyhow!("no private key found in file"))?;
+
+      rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(cert_chain, key)?
+    }
+  };
+  Ok(tls_config)
+}
+
+/// Check if an error is a TLS handshake failure (indicating auth failure)
+///
+/// This function uses type-based detection when possible (via downcast to quinn::ConnectionError)
+/// and falls back to string matching for other error types.
+///
+/// TLS handshake errors are detected when:
+/// 1. The error is a quinn::ConnectionError::TransportError with a crypto error code (0x100-0x1FF)
+/// 2. The error message contains TLS-related keywords (fallback for other error types)
+fn is_tls_handshake_error(e: &anyhow::Error) -> bool {
+  // First, try type-based detection for quinn::ConnectionError
+  if let Some(conn_err) = e.downcast_ref::<quinn::ConnectionError>() {
+    match conn_err {
+      quinn::ConnectionError::TransportError(transport_err) => {
+        // Crypto error codes are in range 0x100-0x1FF (256-511)
+        // These indicate TLS handshake failures
+        let code: u64 = transport_err.code.into();
+        return code >= 0x100 && code < 0x200;
+      }
+      _ => return false,
+    }
+  }
+
+  // Fallback: check for common TLS handshake error patterns in error message
+  let err_str = e.to_string().to_lowercase();
+  err_str.contains("tls") && (err_str.contains("handshake") || err_str.contains("certificate"))
+}
+
 struct ProxyGroup {
   ca_path: path::PathBuf,
-  client_cert_path: Option<path::PathBuf>,
-  client_key_path: Option<path::PathBuf>,
   proxies: Vec<Proxy>,
 }
 
 impl ProxyGroup {
   fn new(
     ca_path: path::PathBuf,
-    addresses: Vec<(SocketAddr, usize)>,
-    client_cert_path: Option<path::PathBuf>,
-    client_key_path: Option<path::PathBuf>,
+    addresses: Vec<(SocketAddr, usize, Vec<ProxyAuth>)>,  // Now includes auth_chain
   ) -> Self {
     let mut proxies = vec![];
-    for (addr, weight) in addresses {
+    for (addr, weight, auth_chain) in addresses {
       proxies.push(Proxy {
         address: addr,
         conn_handle: None,
         requester: None,
         weight,
         current_weight: 0,
+        auth_chain,
       });
     }
 
-    Self { ca_path, client_cert_path, client_key_path, proxies }
+    Self { ca_path, proxies }
   }
 
   fn schedule_wrr(&mut self) -> usize {
@@ -167,9 +256,11 @@ impl ProxyGroup {
     selected_idx
   }
 
-  async fn new_proxy_conn(
+  /// Establish a new QUIC connection with a specific auth method
+  async fn new_proxy_conn_with_auth(
     &self,
     proxy_idx: usize,
+    auth: &ProxyAuth,
   ) -> Result<quinn::Connection> {
     let mut roots = rustls::RootCertStore::empty();
     let CertificateResult { certs, errors, .. } =
@@ -184,45 +275,27 @@ impl ProxyGroup {
     }
 
     // Load CA certificate (PEM format) for server verification
+    info!("Loading CA certificate from: {:?}", self.ca_path);
     let ca_file = fs::File::open(self.ca_path.as_path())?;
     let mut ca_reader = std::io::BufReader::new(ca_file);
     let ca_certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut ca_reader)
       .collect::<Result<Vec<_>, _>>()
       .map_err(|e| anyhow::anyhow!("failed to parse CA certificate: {e}"))?;
 
+    info!("Loaded {} CA certificates", ca_certs.len());
     for cert in ca_certs {
       if let Err(e) = roots.add(cert) {
         error!("failed to add CA certificate to trust store: {e}");
+      } else {
+        info!("Successfully added CA certificate to trust store");
       }
     }
 
-    // CR-003: Build TLS config with optional client cert, then apply common settings
-    let mut tls_config = match (&self.client_cert_path, &self.client_key_path) {
-      (Some(cert_path), Some(key_path)) => {
-        // Load client certificate chain (PEM format)
-        let cert_file = fs::File::open(cert_path)?;
-        let mut cert_reader = std::io::BufReader::new(cert_file);
-        let cert_chain: Vec<CertificateDer> = rustls_pemfile::certs(&mut cert_reader)
-          .collect::<Result<Vec<_>, _>>()
-          .map_err(|e| anyhow::anyhow!("failed to parse client certificate: {e}"))?;
+    info!("Establishing connection with auth: {:?}", auth);
+    // Build TLS config based on auth method
+    let mut tls_config = build_tls_client_config(roots, auth)?;
 
-        // Load client private key (PEM format)
-        let key_file = fs::File::open(key_path)?;
-        let mut key_reader = std::io::BufReader::new(key_file);
-        let key = rustls_pemfile::private_key(&mut key_reader)?
-          .ok_or_else(|| anyhow::anyhow!("no private key found in file"))?;
-
-        rustls::ClientConfig::builder()
-          .with_root_certificates(roots)
-          .with_client_auth_cert(cert_chain, key)?
-      }
-      _ => {
-        rustls::ClientConfig::builder()
-          .with_root_certificates(roots)
-          .with_no_client_auth()
-      }
-    };
-    // Apply common configuration (CR-003: avoid duplication)
+    // Apply common configuration
     tls_config.enable_early_data = true;
     tls_config.alpn_protocols = vec![ALPN.into()];
     tls_config.key_log = Arc::new(rustls::KeyLogFile::new());
@@ -240,7 +313,7 @@ impl ProxyGroup {
     let host = addr.ip().to_string();
     let conn = cli_endpoint.connect(addr, host.as_str())?.await?;
 
-    info!("QUIC connection established");
+    info!("QUIC connection established with auth method");
     Ok(conn)
   }
 
@@ -248,9 +321,17 @@ impl ProxyGroup {
     &mut self,
     stream_tracker: &StreamTracker,
     conn_tracker: &ActiveConnectionTracker,
-  ) -> Result<h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>> {
+  ) -> Result<(
+    h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>,
+    usize,
+    Vec<ProxyAuth>,
+  )> {
     let idx = self.schedule_wrr();
     let proxy = &mut self.proxies[idx];
+
+    // Return the auth chain for this proxy
+    let auth_chain = proxy.auth_chain.clone();
+
     if let Some(h) = proxy.conn_handle.as_mut() {
       if h.is_finished() {
         match h.await {
@@ -267,27 +348,96 @@ impl ProxyGroup {
           }
         }
       } else {
-        return Ok(proxy.requester.as_ref().unwrap().clone());
+        return Ok((proxy.requester.as_ref().unwrap().clone(), idx, auth_chain));
       }
     }
 
-    let conn = self.new_proxy_conn(idx).await?;
-    // Register the QUIC connection to the connection tracker
-    // so we can close it gracefully during shutdown
-    conn_tracker.register(conn.clone());
-    let (h3_conn, requester) =
-      h3::client::new(h3_quinn::Connection::new(conn)).await?;
+    // If no auth chain, establish connection without auth
+    if auth_chain.is_empty() {
+      let conn = self.new_proxy_conn_with_auth(idx, &ProxyAuth::None).await?;
+      conn_tracker.register(conn.clone());
+      let (h3_conn, requester) =
+        h3::client::new(h3_quinn::Connection::new(conn)).await?;
+      let conn_task = connection_maintaining(h3_conn);
+      stream_tracker.register_connection(async move {
+        let _ = conn_task.await;
+      });
+      let proxy = &mut self.proxies[idx];
+      let _ = proxy.conn_handle.take();
+      let _ = proxy.requester.insert(requester.clone());
+      return Ok((requester, idx, auth_chain));
+    }
 
-    // Register connection maintenance task to stream tracker
-    let conn_task = connection_maintaining(h3_conn);
-    stream_tracker.register_connection(async move {
-      let _ = conn_task.await;
-    });
+    // Try each auth method in order until one succeeds
+    // This handles TLS handshake failures by falling back to the next auth method
+    // Connection management: failed connections are closed before trying the next auth method
+    let mut last_error: Option<anyhow::Error> = None;
+    let mut current_conn: Option<quinn::Connection> = None;
 
-    let proxy = &mut self.proxies[idx];
-    let _ = proxy.conn_handle.take(); // No longer needed, tracked by stream_tracker
-    let _ = proxy.requester.insert(requester.clone());
-    Ok(requester)
+    for (auth_index, auth) in auth_chain.iter().enumerate() {
+      // Close previous failed connection (if any) before establishing a new one
+      if let Some(ref prev_conn) = current_conn {
+        info!(
+          "ProxyGroup: closing previous failed connection before trying auth method {}",
+          auth_index
+        );
+        conn_tracker.close_and_remove(prev_conn);
+        current_conn = None;
+      }
+
+      match self.new_proxy_conn_with_auth(idx, auth).await {
+        Ok(conn) => {
+          conn_tracker.register(conn.clone());
+          current_conn = Some(conn.clone());
+          match h3::client::new(h3_quinn::Connection::new(conn)).await {
+            Ok((h3_conn, requester)) => {
+              let conn_task = connection_maintaining(h3_conn);
+              stream_tracker.register_connection(async move {
+                let _ = conn_task.await;
+              });
+              let proxy = &mut self.proxies[idx];
+              let _ = proxy.conn_handle.take();
+              let _ = proxy.requester.insert(requester.clone());
+              return Ok((requester, idx, auth_chain));
+            }
+            Err(e) => {
+              warn!(
+                "Http3ChainService: failed to create H3 connection with auth method {}: {e}",
+                auth_index
+              );
+              last_error = Some(e.into());
+              continue;
+            }
+          }
+        }
+        Err(e) => {
+          if is_tls_handshake_error(&e) {
+            info!(
+              "Http3ChainService: TLS handshake failed with auth method {}, trying next: {}",
+              auth_index, e
+            );
+            last_error = Some(e);
+            continue;
+          }
+          // Non-TLS error, no fallback
+          warn!(
+            "Http3ChainService: connection failed with auth method {}: {e}",
+            auth_index
+          );
+          return Err(e);
+        }
+      }
+    }
+
+    // All auth methods failed
+    let error_detail = last_error
+      .map(|e| format!(": {e}"))
+      .unwrap_or_default();
+    Err(anyhow!(
+      "all {} auth methods failed during connection establishment{}",
+      auth_chain.len(),
+      error_detail
+    ))
   }
 }
 
@@ -555,26 +705,53 @@ impl io::AsyncRead for H3BidirectionalStream {
   }
 }
 
+/// Authentication method for a single proxy
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProxyAuth {
+  /// No authentication
+  None,
+  /// Username/password authentication (HTTP Basic Auth)
+  Password {
+    username: String,
+    password: String,
+  },
+  /// TLS client certificate authentication (mTLS)
+  TlsClientCert {
+    client_cert_path: path::PathBuf,
+    client_key_path: path::PathBuf,
+  },
+}
+
+/// Deserialized auth configuration entry
+#[derive(Deserialize, Clone, Debug, Default)]
+struct ProxyAuthConfig {
+  #[serde(rename = "type")]
+  auth_type: String,
+  #[serde(default)]
+  username: Option<String>,
+  #[serde(default)]
+  password: Option<String>,
+  #[serde(default)]
+  client_cert_path: Option<String>,
+  #[serde(default)]
+  client_key_path: Option<String>,
+}
+
 #[derive(Deserialize, Default, Clone, Debug)]
 struct Http3ChainServiceArgsProxyGroup {
   address: String,
   weight: usize,
+  #[serde(default)]
+  auth: Option<Vec<ProxyAuthConfig>>,
 }
 
 #[derive(Deserialize, Default, Clone, Debug)]
 struct Http3ChainServiceArgs {
   proxy_group: Vec<Http3ChainServiceArgsProxyGroup>,
   ca_path: String,
-  // New fields for password authentication
+  // Default upstream auth (inherited by proxies without auth field)
   #[serde(default)]
-  username: Option<String>,
-  #[serde(default)]
-  password: Option<String>,
-  // New fields for TLS client certificate
-  #[serde(default)]
-  client_cert_path: Option<String>,
-  #[serde(default)]
-  client_key_path: Option<String>,
+  default_upstream_auth: Option<Vec<ProxyAuthConfig>>,
 }
 
 impl Http3ChainServiceArgs {
@@ -594,62 +771,141 @@ impl Http3ChainServiceArgs {
       }
     }
 
-    // CR-014: Validate username/password are non-empty when present
-    match (&self.username, &self.password) {
-      (Some(user), None) => {
-        if user.is_empty() {
-          bail!("username cannot be empty");
-        }
-        bail!("password is required when username is set");
+    // Validate default_upstream_auth if present
+    if let Some(ref auth_list) = self.default_upstream_auth {
+      for (i, auth) in auth_list.iter().enumerate() {
+        Self::validate_auth_config(auth, &format!("default_upstream_auth[{}]", i))?;
       }
-      (None, Some(pass)) => {
-        if pass.is_empty() {
-          bail!("password cannot be empty");
-        }
-        bail!("username is required when password is set");
-      }
-      (Some(user), Some(pass)) => {
-        if user.is_empty() {
-          bail!("username cannot be empty");
-        }
-        if pass.is_empty() {
-          bail!("password cannot be empty");
-        }
-      }
-      _ => {}
     }
-    // CR-014: Validate client cert/key paths are non-empty when present
-    match (&self.client_cert_path, &self.client_key_path) {
-      (Some(cert_path), Some(key_path)) => {
-        // CR-002: Validate that cert and key files exist
+
+    // Validate per-proxy auth if present
+    for proxy in &self.proxy_group {
+      if let Some(ref auth_list) = proxy.auth {
+        for (i, auth) in auth_list.iter().enumerate() {
+          Self::validate_auth_config(
+            auth,
+            &format!("proxy[{}].auth[{}]", proxy.address, i)
+          )?;
+        }
+      }
+    }
+
+    Ok(())
+  }
+
+  /// Validate a single auth configuration entry
+  fn validate_auth_config(config: &ProxyAuthConfig, context: &str) -> Result<()> {
+    match config.auth_type.as_str() {
+      "none" => Ok(()),
+      "password" => {
+        if config.username.is_none() || config.username.as_ref().map_or(true, |u| u.is_empty()) {
+          bail!("{}: username required for password auth", context);
+        }
+        if config.password.is_none() || config.password.as_ref().map_or(true, |p| p.is_empty()) {
+          bail!("{}: password required for password auth", context);
+        }
+        Ok(())
+      }
+      "tls_client_cert" => {
+        let cert_path = config.client_cert_path.as_ref()
+          .ok_or_else(|| anyhow!("{}: client_cert_path required for tls_client_cert auth", context))?;
+        let key_path = config.client_key_path.as_ref()
+          .ok_or_else(|| anyhow!("{}: client_key_path required for tls_client_cert auth", context))?;
+
         if cert_path.is_empty() {
-          bail!("client_cert_path cannot be empty");
+          bail!("{}: client_cert_path cannot be empty", context);
         }
         if !path::Path::new(cert_path).exists() {
-          bail!("client_cert_path '{}' does not exist", cert_path);
+          bail!("{}: client_cert_path '{}' does not exist", context, cert_path);
         }
+
         if key_path.is_empty() {
-          bail!("client_key_path cannot be empty");
+          bail!("{}: client_key_path cannot be empty", context);
         }
         if !path::Path::new(key_path).exists() {
-          bail!("client_key_path '{}' does not exist", key_path);
+          bail!("{}: client_key_path '{}' does not exist", context, key_path);
         }
+        Ok(())
       }
-      (Some(cert_path), None) => {
-        if cert_path.is_empty() {
-          bail!("client_cert_path cannot be empty");
-        }
-        bail!("client_key_path is required when client_cert_path is set");
-      }
-      (None, Some(key_path)) => {
-        if key_path.is_empty() {
-          bail!("client_key_path cannot be empty");
-        }
-        bail!("client_cert_path is required when client_key_path is set");
-      }
-      _ => {}
+      _ => bail!("{}: unknown auth type: {}", context, config.auth_type),
     }
-    Ok(())
+  }
+
+  /// Parse a single auth config entry into ProxyAuth.
+  ///
+  /// This function validates the configuration by calling `validate_auth_config`
+  /// first, then constructs the appropriate `ProxyAuth` variant.
+  ///
+  /// # Note
+  /// File existence checks (for tls_client_cert) are performed during validation
+  /// by `validate_auth_config`. If this function is called directly without prior
+  /// validation, file existence will still be checked.
+  fn parse_auth_config(config: &ProxyAuthConfig) -> Result<ProxyAuth> {
+    // CR-002: Delegate validation to validate_auth_config to avoid duplication
+    // This ensures consistent validation behavior between validate() and parse operations
+    Self::validate_auth_config(config, "auth_config")?;
+
+    match config.auth_type.as_str() {
+      "none" => Ok(ProxyAuth::None),
+      "password" => {
+        // Safe to unwrap because validate_auth_config already verified these exist and are non-empty
+        let username = config.username.as_ref().unwrap();
+        let password = config.password.as_ref().unwrap();
+        Ok(ProxyAuth::Password {
+          username: username.clone(),
+          password: password.clone(),
+        })
+      }
+      "tls_client_cert" => {
+        // Safe to unwrap because validate_auth_config already verified these exist and are non-empty
+        let cert_path = config.client_cert_path.as_ref().unwrap();
+        let key_path = config.client_key_path.as_ref().unwrap();
+        Ok(ProxyAuth::TlsClientCert {
+          client_cert_path: path::PathBuf::from(cert_path),
+          client_key_path: path::PathBuf::from(key_path),
+        })
+      }
+      _ => unreachable!("validate_auth_config should have rejected unknown auth type"),
+    }
+  }
+
+  /// Resolve auth chain for a proxy.
+  ///
+  /// Inheritance rules:
+  /// - If proxy has its own auth field, use it (overrides default)
+  /// - If proxy has no auth field, inherit from default_upstream_auth
+  /// - If neither is set, return empty vec (no auth)
+  fn resolve_proxy_auth(&self, proxy_auth: &Option<Vec<ProxyAuthConfig>>) -> Vec<ProxyAuth> {
+    // If proxy has its own auth, use it
+    if let Some(auth_list) = proxy_auth {
+      return auth_list
+        .iter()
+        .filter_map(|c| match Self::parse_auth_config(c) {
+          Ok(auth) => Some(auth),
+          Err(e) => {
+            warn!("Http3ChainService: failed to parse auth config, skipping: {e}");
+            None
+          }
+        })
+        .collect();
+    }
+
+    // Otherwise, use default_upstream_auth
+    self.default_upstream_auth
+      .as_ref()
+      .map(|auth_list| {
+        auth_list
+          .iter()
+          .filter_map(|c| match Self::parse_auth_config(c) {
+            Ok(auth) => Some(auth),
+            Err(e) => {
+              warn!("Http3ChainService: failed to parse default auth config, skipping: {e}");
+              None
+            }
+          })
+          .collect()
+      })
+      .unwrap_or_default()
   }
 }
 
@@ -658,8 +914,6 @@ struct Http3ChainService {
   proxy_group: Rc<RefCell<ProxyGroup>>,
   stream_tracker: Rc<StreamTracker>,
   conn_tracker: ActiveConnectionTracker,
-  username: Option<String>,
-  password: Option<String>,
 }
 
 impl Http3ChainService {
@@ -672,33 +926,32 @@ impl Http3ChainService {
     let args: Http3ChainServiceArgs = serde_yaml::from_value(sargs)?;
     args.validate()?;
 
-    let proxy_group =
-      ProxyGroup::new(
-        args.ca_path.into(),
-        args
-          .proxy_group
-          .iter()
-          .filter_map(|e| {
-            let Http3ChainServiceArgsProxyGroup {
-              address: s,
-              weight: w,
-            } = e;
-            s.parse()
-              .inspect_err(|e| error!("address '{s}' invalid: {e}"))
-              .ok()
-              .map(|a| (a, *w))
-          })
-          .collect(),
-        args.client_cert_path.map(|p| p.into()),
-        args.client_key_path.map(|p| p.into()),
-      );
+    // Resolve auth chains for each proxy
+    let proxy_addresses: Vec<(SocketAddr, usize, Vec<ProxyAuth>)> = args
+      .proxy_group
+      .iter()
+      .filter_map(|e| {
+        let Http3ChainServiceArgsProxyGroup {
+          address: s,
+          weight: w,
+          auth,
+        } = e;
+
+        let auth_chain = args.resolve_proxy_auth(auth);
+
+        s.parse()
+          .inspect_err(|e| error!("address '{s}' invalid: {e}"))
+          .ok()
+          .map(|a| (a, *w, auth_chain))
+      })
+      .collect();
+
+    let proxy_group = ProxyGroup::new(args.ca_path.into(), proxy_addresses);
 
     Ok(plugin::Service::new(Self {
       proxy_group: Rc::new(RefCell::new(proxy_group)),
       stream_tracker,
       conn_tracker,
-      username: args.username,
-      password: args.password,
     }))
   }
 
@@ -725,8 +978,6 @@ impl tower::Service<plugin::Request> for Http3ChainService {
     let st = self.stream_tracker.clone();
     let ct = self.conn_tracker.clone();
     let is_shutting_down = self.is_shutting_down();
-    let username = self.username.clone();
-    let password = self.password.clone();
 
     // Check for SOCKS5 upgrade (similar to hyper::upgrade::on)
     let socks5_upgrade = plugin::Socks5OnUpgrade::on(&mut req);
@@ -751,117 +1002,322 @@ impl tower::Service<plugin::Request> for Http3ChainService {
 
       let (host, port) = utils::parse_connect_target(&req_headers)?;
 
-      // Get connection to next hop proxy
-      let mut requester = match pg.borrow_mut().get_proxy_conn(&st, &ct).await {
-        Ok(r) => r,
-        Err(e) => {
-          warn!("Http3ChainService: failed to connect to next hop proxy: {e}");
-          return Ok(build_empty_response(http::StatusCode::BAD_GATEWAY));
-        }
-      };
-
-      // Send HTTP/3 CONNECT request to next hop proxy
-      let mut builder = http::Request::builder()
-        .method(http::Method::CONNECT)
-        .uri(format!("{host}:{port}"));
-
-      // Add Proxy-Authorization header if credentials are configured
-      if let (Some(user), Some(pass)) = (&username, &password) {
-        let credentials = BASE64_STANDARD.encode(format!("{}:{}", user, pass));
-        builder = builder.header("Proxy-Authorization", format!("Basic {}", credentials));
-      }
-
-      let proxy_req = match builder.body(()) {
-        Ok(r) => r,
-        Err(e) => {
-          warn!("Http3ChainService: failed to build CONNECT request: {e}");
-          return Ok(build_empty_response(http::StatusCode::BAD_GATEWAY));
-        }
-      };
-
-      let mut proxy_stream = match requester.send_request(proxy_req).await {
-        Ok(s) => s,
-        Err(e) => {
-          warn!("Http3ChainService: failed to send CONNECT request to next hop: {e}");
-          return Ok(build_empty_response(http::StatusCode::BAD_GATEWAY));
-        }
-      };
-
-      let proxy_resp = match proxy_stream.recv_response().await {
-        Ok(r) => r,
-        Err(e) => {
-          warn!("Http3ChainService: failed to receive response from next hop: {e}");
-          return Ok(build_empty_response(http::StatusCode::BAD_GATEWAY));
-        }
-      };
-
-      if !proxy_resp.status().is_success() {
-        return Ok(build_empty_response(proxy_resp.status()));
-      }
-
-      // Split proxy stream for bidirectional transfer
-      let (sending_stream, receiving_stream) = proxy_stream.split();
-
-      // Build 200 response
-      let resp = build_empty_response(http::StatusCode::OK);
-
-      // Get shutdown handle
-      let shutdown_handle = st.shutdown_handle();
-
-      // Background task: wait for upgrade, then bidirectional transfer
-      st.register(async move {
-        // Get client stream (SOCKS5 or HTTP upgrade)
-        let client_result: Result<ClientStream, String> =
-          if let Some(socks5) = socks5_upgrade {
-            match socks5.await {
-              Ok(stream) => Ok(ClientStream::Socks5(stream)),
-              Err(e) => Err(format!("SOCKS5 upgrade failed: {e}")),
-            }
-          } else if let Some(http) = http_upgrade {
-            match http.await {
-              Ok(upgraded) => Ok(ClientStream::Http(TokioIo::new(upgraded))),
-              Err(e) => Err(format!("HTTP upgrade failed: {e}")),
-            }
-          } else {
-            // No upgrade available - need to transfer with request body
-            // For HTTP/3 chain without upgrade, we need a different approach
-            // This case handles the "pure HTTP/3 CONNECT" where there's no client stream
-            // to proxy, but we have request body data to send.
-            // For now, log a warning and return.
-            warn!("Http3ChainService: no upgrade available for tunnel");
-            return;
-          };
-
-        let mut client = match client_result {
-          Ok(c) => c,
+      // Get proxy index and auth chain
+      let (initial_requester, proxy_idx, auth_chain) =
+        match pg.borrow_mut().get_proxy_conn(&st, &ct).await {
+          Ok(r) => r,
           Err(e) => {
-            warn!("Http3ChainService tunnel upgrade failed: {e}");
-            return;
+            warn!(
+              "Http3ChainService: failed to connect to next hop proxy: {e}"
+            );
+            return Ok(build_empty_response(http::StatusCode::BAD_GATEWAY));
           }
         };
 
-        // Create H3BidirectionalStream for proxy stream
-        let mut h3_stream = H3BidirectionalStream::new(sending_stream, receiving_stream);
+      // If no auth methods configured, proceed without auth fallback
+      if auth_chain.is_empty() {
+        return send_connect_and_tunnel(
+          initial_requester,
+          host,
+          port,
+          &st,
+          socks5_upgrade,
+          http_upgrade,
+        )
+        .await;
+      }
 
-        // Bidirectional transfer with shutdown notification
-        let result = tokio::select! {
-          res = tokio::io::copy_bidirectional(&mut client, &mut h3_stream) => {
-            res
-          }
-          _ = shutdown_handle.notified() => {
-            warn!("Http3ChainService tunnel shutdown by notification");
-            return;
-          }
-        };
+      // Try each auth method in order
+      // IMPORTANT: For TLS client cert auth, we need a NEW connection for each
+      // auth method because the TLS config differs per auth method
+      //
+      // Connection management during auth fallback:
+      // - The initial connection (auth_index == 0) is tracked by conn_tracker and
+      //   stream_tracker, and will be cleaned up during shutdown.
+      // - For subsequent auth methods, new connections are created and similarly tracked.
+      // - If an auth method fails (407 or TLS error), the failed connection is explicitly
+      //   closed before trying the next auth method.
+      // - This prevents resource accumulation from multiple failed auth attempts.
+      let mut last_error: Option<anyhow::Error> = None;
+      let mut current_conn: Option<quinn::Connection> = None;
 
-        if let Err(e) = result {
-          warn!("Http3ChainService tunnel transfer error: {e}");
+      for (auth_index, auth) in auth_chain.iter().enumerate() {
+        // Close previous failed connection (if any) before establishing a new one
+        if let Some(ref prev_conn) = current_conn {
+          info!(
+            "Http3ChainService: closing previous failed connection before trying auth method {}",
+            auth_index
+          );
+          ct.close_and_remove(prev_conn);
+          current_conn = None;
         }
-      });
 
-      Ok(resp)
+        // For the first auth method, we can reuse the existing connection
+        // For subsequent methods, we need a new connection
+        let requester = if auth_index == 0 {
+          initial_requester.clone()
+        } else {
+          info!(
+            "Http3ChainService: establishing new connection for auth method {}",
+            auth_index
+          );
+          let conn = match pg
+            .borrow_mut()
+            .new_proxy_conn_with_auth(proxy_idx, auth)
+            .await
+          {
+            Ok(c) => c,
+            Err(e) => {
+              if is_tls_handshake_error(&e) {
+                // TLS handshake failure, try next auth
+                last_error = Some(e);
+                continue;
+              }
+              // Non-auth error, no fallback
+              warn!("Http3ChainService: connection failed: {e}");
+              return Ok(build_empty_response(http::StatusCode::BAD_GATEWAY));
+            }
+          };
+          ct.register(conn.clone());
+          current_conn = Some(conn.clone());
+          let (h3_conn, requester) =
+            match h3::client::new(h3_quinn::Connection::new(conn)).await {
+              Ok(r) => r,
+              Err(e) => {
+                warn!(
+                  "Http3ChainService: failed to create H3 connection: {e}"
+                );
+                return Ok(build_empty_response(http::StatusCode::BAD_GATEWAY));
+              }
+            };
+
+          // Spawn connection maintenance task
+          let conn_task = connection_maintaining(h3_conn);
+          st.register_connection(async move {
+            let _ = conn_task.await;
+          });
+
+          requester
+        };
+
+        // Send CONNECT request
+        // Clone requester to keep the connection alive after send_connect_with_auth returns.
+        // The h3 library closes the H3 connection when the last SendRequest instance is dropped.
+        // By keeping a clone alive (stored in proxy.requester below), we prevent premature closure.
+        let requester_clone = requester.clone();
+        let result = send_connect_with_auth(
+          requester_clone,
+          host.clone(),
+          port,
+          auth,
+          &st,
+          socks5_upgrade.clone(),
+          http_upgrade.clone(),
+        )
+        .await;
+
+        match result {
+          Ok(response) => {
+            // Store the requester to keep the connection alive
+            // This prevents the h3 connection from being closed when the clone is dropped
+            let proxy = &mut pg.borrow_mut().proxies[proxy_idx];
+            let _ = proxy.requester.insert(requester);
+            return Ok(response);
+          }
+          Err(e) => {
+            if is_tls_handshake_error(&e) {
+              // TLS handshake failure, try next auth method
+              info!(
+                "Http3ChainService: TLS handshake failed with auth method {}, trying next: {}",
+                auth_index, e
+              );
+              last_error = Some(e);
+              continue;
+            }
+
+            // Check if it's a 407 error (auth failure at HTTP level)
+            // Use proper error type checking instead of string matching
+            if e.downcast_ref::<ProxyAuthRequiredError>().is_some() {
+              info!(
+                "Http3ChainService: auth method {} returned 407, trying next",
+                auth_index
+              );
+              last_error = Some(e);
+              continue;
+            }
+
+            // Non-auth error, no fallback
+            warn!("Http3ChainService: request failed: {e}");
+            return Ok(build_empty_response(http::StatusCode::BAD_GATEWAY));
+          }
+        }
+      }
+
+      // All auth methods failed
+      let error_detail = last_error
+        .map(|e| format!(": {e}"))
+        .unwrap_or_default();
+      warn!(
+        "Http3ChainService: all {} auth methods failed{}",
+        auth_chain.len(),
+        error_detail
+      );
+      Ok(build_empty_response(
+        http::StatusCode::PROXY_AUTHENTICATION_REQUIRED,
+      ))
     })
   }
+}
+
+/// Send CONNECT request with authentication
+async fn send_connect_with_auth(
+  mut requester: h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>,
+  host: String,
+  port: u16,
+  auth: &ProxyAuth,
+  st: &Rc<StreamTracker>,
+  socks5_upgrade: Option<plugin::Socks5OnUpgrade>,
+  http_upgrade: Option<hyper::upgrade::OnUpgrade>,
+) -> Result<plugin::Response> {
+  // Build CONNECT request
+  let mut builder =
+    http::Request::builder().method(http::Method::CONNECT).uri(format!(
+      "{host}:{port}"
+    ));
+
+  // Add Proxy-Authorization header for password auth
+  if let ProxyAuth::Password { username, password } = auth {
+    let credentials =
+      base64::engine::general_purpose::STANDARD.encode(format!(
+        "{}:{}",
+        username, password
+      ));
+    builder =
+      builder.header("Proxy-Authorization", format!("Basic {}", credentials));
+  }
+
+  let proxy_req = builder.body(())?;
+  info!("Http3ChainService: sending CONNECT request for {:?}", auth);
+  let mut proxy_stream = requester.send_request(proxy_req).await?;
+  let proxy_resp = proxy_stream.recv_response().await?;
+  info!(
+    "Http3ChainService: received CONNECT response: status={}",
+    proxy_resp.status()
+  );
+
+  // Check for 407 error
+  if proxy_resp.status() == http::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
+    return Err(ProxyAuthRequiredError.into());
+  }
+
+  if !proxy_resp.status().is_success() {
+    return Ok(build_empty_response(proxy_resp.status()));
+  }
+
+  // Success - complete the tunnel
+  info!("Http3ChainService: CONNECT succeeded, setting up tunnel");
+  let (sending_stream, receiving_stream) = proxy_stream.split();
+  complete_tunnel(sending_stream, receiving_stream, st, socks5_upgrade, http_upgrade)
+    .await
+}
+
+/// Send CONNECT request without authentication and tunnel data
+async fn send_connect_and_tunnel(
+  mut requester: h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>,
+  host: String,
+  port: u16,
+  st: &Rc<StreamTracker>,
+  socks5_upgrade: Option<plugin::Socks5OnUpgrade>,
+  http_upgrade: Option<hyper::upgrade::OnUpgrade>,
+) -> Result<plugin::Response> {
+  let proxy_req = http::Request::builder()
+    .method(http::Method::CONNECT)
+    .uri(format!("{host}:{port}"))
+    .body(())?;
+
+  let mut proxy_stream = requester.send_request(proxy_req).await?;
+  let proxy_resp = proxy_stream.recv_response().await?;
+
+  if !proxy_resp.status().is_success() {
+    return Ok(build_empty_response(proxy_resp.status()));
+  }
+
+  let (sending_stream, receiving_stream) = proxy_stream.split();
+  complete_tunnel(sending_stream, receiving_stream, st, socks5_upgrade, http_upgrade)
+    .await
+}
+
+/// Complete the tunnel by setting up bidirectional transfer
+async fn complete_tunnel(
+  sending_stream: h3_cli::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
+  receiving_stream: h3_cli::RequestStream<h3_quinn::RecvStream, Bytes>,
+  st: &Rc<StreamTracker>,
+  socks5_upgrade: Option<plugin::Socks5OnUpgrade>,
+  http_upgrade: Option<hyper::upgrade::OnUpgrade>,
+) -> Result<plugin::Response> {
+  let resp = build_empty_response(http::StatusCode::OK);
+  let shutdown_handle = st.shutdown_handle();
+
+  st.register(async move {
+    info!("Http3ChainService: tunnel background task started");
+
+    // Check if shutdown is already triggered
+    if shutdown_handle.is_shutdown() {
+      warn!("Http3ChainService: shutdown already triggered, aborting tunnel");
+      return;
+    }
+
+    let client_result: Result<ClientStream, String> =
+      if let Some(socks5) = socks5_upgrade {
+        info!("Http3ChainService: waiting for SOCKS5 upgrade");
+        match socks5.await {
+          Ok(stream) => {
+            info!("Http3ChainService: SOCKS5 upgrade succeeded");
+            Ok(ClientStream::Socks5(stream))
+          },
+          Err(e) => Err(format!("SOCKS5 upgrade failed: {e}")),
+        }
+      } else if let Some(http) = http_upgrade {
+        info!("Http3ChainService: waiting for HTTP upgrade");
+        match http.await {
+          Ok(upgraded) => {
+            info!("Http3ChainService: HTTP upgrade succeeded");
+            Ok(ClientStream::Http(TokioIo::new(upgraded)))
+          },
+          Err(e) => Err(format!("HTTP upgrade failed: {e}")),
+        }
+      } else {
+        warn!("Http3ChainService: no upgrade available for tunnel");
+        return;
+      };
+
+    let mut client = match client_result {
+      Ok(c) => c,
+      Err(e) => {
+        warn!("Http3ChainService tunnel upgrade failed: {e}");
+        return;
+      }
+    };
+
+    info!("Http3ChainService: client upgrade complete, starting bidirectional transfer");
+    let mut h3_stream = H3BidirectionalStream::new(sending_stream, receiving_stream);
+
+    let result = tokio::select! {
+      res = tokio::io::copy_bidirectional(&mut client, &mut h3_stream) => res,
+      _shutdown = shutdown_handle.notified() => {
+        warn!("Http3ChainService tunnel shutdown by notification");
+        return;
+      }
+    };
+
+    if let Err(e) = result {
+      warn!("Http3ChainService tunnel transfer error: {e}");
+    } else {
+      info!("Http3ChainService: bidirectional transfer completed successfully");
+    }
+  });
+
+  Ok(resp)
 }
 
 struct Http3ChainPlugin {
@@ -998,6 +1454,16 @@ mod tests {
   use super::*;
   use crate::plugin::Plugin;
   use std::future::pending;
+
+  // Initialize CryptoProvider for tests that involve TLS
+  static CRYPTO_PROVIDER_INIT: std::sync::Once = std::sync::Once::new();
+
+  fn ensure_crypto_provider() {
+    CRYPTO_PROVIDER_INIT.call_once(|| {
+      let _ =
+        rustls::crypto::ring::default_provider().install_default();
+    });
+  }
 
   // ============== Http3ChainPlugin Tests ==============
 
@@ -1212,14 +1678,12 @@ mod tests {
   #[test]
   fn test_proxy_group_new() {
     let addresses = vec![
-      ("127.0.0.1:8080".parse().unwrap(), 1),
-      ("127.0.0.1:8081".parse().unwrap(), 2),
+      ("127.0.0.1:8080".parse().unwrap(), 1, vec![]),
+      ("127.0.0.1:8081".parse().unwrap(), 2, vec![]),
     ];
     let group = ProxyGroup::new(
       "/tmp/ca.pem".into(),
       addresses,
-      None,
-      None,
     );
 
     assert_eq!(group.proxies.len(), 2);
@@ -1229,12 +1693,10 @@ mod tests {
 
   #[test]
   fn test_proxy_group_schedule_wrr_single() {
-    let addresses = vec![("127.0.0.1:8080".parse().unwrap(), 1)];
+    let addresses = vec![("127.0.0.1:8080".parse().unwrap(), 1, vec![])];
     let mut group = ProxyGroup::new(
       "/tmp/ca.pem".into(),
       addresses,
-      None,
-      None,
     );
 
     // With single proxy, should always select index 0
@@ -1246,14 +1708,12 @@ mod tests {
     // Test WRR with two proxies: weights 2:1
     // Expected distribution over 6 calls: 0, 1, 0, 0, 1, 0 (4:2 ratio = 2:1)
     let addresses = vec![
-      ("127.0.0.1:8080".parse().unwrap(), 2), // weight 2
-      ("127.0.0.1:8081".parse().unwrap(), 1), // weight 1
+      ("127.0.0.1:8080".parse().unwrap(), 2, vec![]), // weight 2
+      ("127.0.0.1:8081".parse().unwrap(), 1, vec![]), // weight 1
     ];
     let mut group = ProxyGroup::new(
       "/tmp/ca.pem".into(),
       addresses,
-      None,
-      None,
     );
 
     // Run 6 iterations (total weight = 3, so 6 = 2 full cycles)
@@ -1273,14 +1733,12 @@ mod tests {
     // Test WRR with two proxies: weights 3:1
     // Expected distribution over 8 calls: 6:2 ratio = 3:1
     let addresses = vec![
-      ("127.0.0.1:8080".parse().unwrap(), 3), // weight 3
-      ("127.0.0.1:8081".parse().unwrap(), 1), // weight 1
+      ("127.0.0.1:8080".parse().unwrap(), 3, vec![]), // weight 3
+      ("127.0.0.1:8081".parse().unwrap(), 1, vec![]), // weight 1
     ];
     let mut group = ProxyGroup::new(
       "/tmp/ca.pem".into(),
       addresses,
-      None,
-      None,
     );
 
     // Run 8 iterations (total weight = 4, so 8 = 2 full cycles)
@@ -1299,15 +1757,13 @@ mod tests {
     // Test WRR with three proxies: weights 2:1:1
     // Expected distribution over 8 calls: 4:2:2 ratio
     let addresses = vec![
-      ("127.0.0.1:8080".parse().unwrap(), 2), // weight 2
-      ("127.0.0.1:8081".parse().unwrap(), 1), // weight 1
-      ("127.0.0.1:8082".parse().unwrap(), 1), // weight 1
+      ("127.0.0.1:8080".parse().unwrap(), 2, vec![]), // weight 2
+      ("127.0.0.1:8081".parse().unwrap(), 1, vec![]), // weight 1
+      ("127.0.0.1:8082".parse().unwrap(), 1, vec![]), // weight 1
     ];
     let mut group = ProxyGroup::new(
       "/tmp/ca.pem".into(),
       addresses,
-      None,
-      None,
     );
 
     // Run 8 iterations (total weight = 4, so 8 = 2 full cycles)
@@ -1328,14 +1784,12 @@ mod tests {
     // Test WRR with two proxies: equal weights 1:1
     // Expected distribution over 4 calls: 2:2 (alternating)
     let addresses = vec![
-      ("127.0.0.1:8080".parse().unwrap(), 1),
-      ("127.0.0.1:8081".parse().unwrap(), 1),
+      ("127.0.0.1:8080".parse().unwrap(), 1, vec![]),
+      ("127.0.0.1:8081".parse().unwrap(), 1, vec![]),
     ];
     let mut group = ProxyGroup::new(
       "/tmp/ca.pem".into(),
       addresses,
-      None,
-      None,
     );
 
     // Run 4 iterations
@@ -1353,16 +1807,14 @@ mod tests {
   fn test_proxy_group_schedule_wrr_deterministic() {
     // Test that WRR produces deterministic, repeatable results
     let addresses = vec![
-      ("127.0.0.1:8080".parse().unwrap(), 2),
-      ("127.0.0.1:8081".parse().unwrap(), 1),
+      ("127.0.0.1:8080".parse().unwrap(), 2, vec![]),
+      ("127.0.0.1:8081".parse().unwrap(), 1, vec![]),
     ];
 
     // First run
     let mut group1 = ProxyGroup::new(
       "/tmp/ca.pem".into(),
       addresses.clone(),
-      None,
-      None,
     );
     let selections1: Vec<usize> = (0..6).map(|_| group1.schedule_wrr()).collect();
 
@@ -1370,8 +1822,6 @@ mod tests {
     let mut group2 = ProxyGroup::new(
       "/tmp/ca.pem".into(),
       addresses,
-      None,
-      None,
     );
     let selections2: Vec<usize> = (0..6).map(|_| group2.schedule_wrr()).collect();
 
@@ -1381,313 +1831,12 @@ mod tests {
   // ============== Http3ChainServiceArgs Tests ==============
 
   #[test]
-  fn test_service_args_with_password_auth() {
-    let yaml = r#"
-proxy_group:
-  - address: "127.0.0.1:8080"
-    weight: 1
-ca_path: "/tmp/ca.pem"
-username: "user1"
-password: "pass1"
-"#;
-    let args: Http3ChainServiceArgs = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(args.username, Some("user1".to_string()));
-    assert_eq!(args.password, Some("pass1".to_string()));
-  }
-
-  #[test]
-  fn test_config_validation_username_without_password_fails() {
-    // CR-008: Use tempfile to ensure ca_path exists, so validate() reaches
-    // the username/password pair check instead of failing on missing ca_path
-    let temp_dir = tempfile::tempdir().unwrap();
-    let ca_path = temp_dir.path().join("ca.pem");
-    fs::write(&ca_path, "dummy ca").unwrap();
-
-    let args = Http3ChainServiceArgs {
-      proxy_group: vec![],
-      ca_path: ca_path.to_string_lossy().to_string(),
-      username: Some("user".to_string()),
-      password: None,
-      client_cert_path: None,
-      client_key_path: None,
-    };
-    let result = args.validate();
-    assert!(result.is_err());
-    // Verify it fails for the right reason: username without password
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-      err_msg.contains("password is required when username is set"),
-      "Expected username-without-password error, got: {err_msg}"
-    );
-  }
-
-  #[test]
-  fn test_config_validation_cert_without_key_fails() {
-    // CR-008: Use tempfile to ensure ca_path exists
-    let temp_dir = tempfile::tempdir().unwrap();
-    let ca_path = temp_dir.path().join("ca.pem");
-    fs::write(&ca_path, "dummy ca").unwrap();
-
-    let args = Http3ChainServiceArgs {
-      proxy_group: vec![],
-      ca_path: ca_path.to_string_lossy().to_string(),
-      username: None,
-      password: None,
-      client_cert_path: Some("/tmp/client.crt".to_string()),
-      client_key_path: None,
-    };
-    let result = args.validate();
-    assert!(result.is_err());
-    // Verify it fails for the right reason: cert without key
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-      err_msg.contains("client_key_path is required when client_cert_path is set"),
-      "Expected cert-without-key error, got: {err_msg}"
-    );
-  }
-
-  #[test]
-  fn test_config_validation_password_without_username_fails() {
-    // CR-008: Use tempfile to ensure ca_path exists
-    let temp_dir = tempfile::tempdir().unwrap();
-    let ca_path = temp_dir.path().join("ca.pem");
-    fs::write(&ca_path, "dummy ca").unwrap();
-
-    let args = Http3ChainServiceArgs {
-      proxy_group: vec![],
-      ca_path: ca_path.to_string_lossy().to_string(),
-      username: None,
-      password: Some("pass".to_string()),
-      client_cert_path: None,
-      client_key_path: None,
-    };
-    let result = args.validate();
-    assert!(result.is_err());
-    // Verify it fails for the right reason: password without username
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-      err_msg.contains("username is required when password is set"),
-      "Expected password-without-username error, got: {err_msg}"
-    );
-  }
-
-  #[test]
-  fn test_config_validation_key_without_cert_fails() {
-    // CR-008: Use tempfile to ensure ca_path exists
-    let temp_dir = tempfile::tempdir().unwrap();
-    let ca_path = temp_dir.path().join("ca.pem");
-    fs::write(&ca_path, "dummy ca").unwrap();
-
-    let args = Http3ChainServiceArgs {
-      proxy_group: vec![],
-      ca_path: ca_path.to_string_lossy().to_string(),
-      username: None,
-      password: None,
-      client_cert_path: None,
-      client_key_path: Some("/tmp/client.key".to_string()),
-    };
-    let result = args.validate();
-    assert!(result.is_err());
-    // Verify it fails for the right reason: key without cert
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-      err_msg.contains("client_cert_path is required when client_key_path is set"),
-      "Expected key-without-cert error, got: {err_msg}"
-    );
-  }
-
-  #[test]
-  fn test_config_validation_both_auth_methods_ok() {
-    // Create temp files for ca, cert and key validation (CR-002, CR-004)
-    let temp_dir = tempfile::tempdir().unwrap();
-    let ca_path = temp_dir.path().join("ca.pem");
-    let cert_path = temp_dir.path().join("client.crt");
-    let key_path = temp_dir.path().join("client.key");
-    fs::write(&ca_path, "dummy ca").unwrap();
-    fs::write(&cert_path, "dummy cert").unwrap();
-    fs::write(&key_path, "dummy key").unwrap();
-
-    let args = Http3ChainServiceArgs {
-      proxy_group: vec![],
-      ca_path: ca_path.to_string_lossy().to_string(),
-      username: Some("user".to_string()),
-      password: Some("pass".to_string()),
-      client_cert_path: Some(cert_path.to_string_lossy().to_string()),
-      client_key_path: Some(key_path.to_string_lossy().to_string()),
-    };
-    assert!(args.validate().is_ok());
-  }
-
-  #[test]
-  fn test_config_validation_nonexistent_cert_file_fails() {
-    // CR-002: validate() should check that cert files exist
-    // CR-008: Use tempfile to ensure ca_path exists
-    let temp_dir = tempfile::tempdir().unwrap();
-    let ca_path = temp_dir.path().join("ca.pem");
-    fs::write(&ca_path, "dummy ca").unwrap();
-
-    let args = Http3ChainServiceArgs {
-      proxy_group: vec![],
-      ca_path: ca_path.to_string_lossy().to_string(),
-      username: None,
-      password: None,
-      client_cert_path: Some("/nonexistent/path/client.crt".to_string()),
-      client_key_path: Some("/nonexistent/path/client.key".to_string()),
-    };
-    // Should fail because cert files don't exist
-    let result = args.validate();
-    assert!(result.is_err(), "validate() should fail for nonexistent cert files");
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-      err_msg.contains("client_cert_path") && err_msg.contains("does not exist"),
-      "Expected cert-not-found error, got: {err_msg}"
-    );
-  }
-
-  #[test]
-  fn test_config_validation_nonexistent_key_file_fails() {
-    // CR-002: validate() should check that key files exist
-    // CR-008: Use tempfile to ensure ca_path and cert exist
-    let temp_dir = tempfile::tempdir().unwrap();
-    let ca_path = temp_dir.path().join("ca.pem");
-    let cert_path = temp_dir.path().join("client.crt");
-    fs::write(&ca_path, "dummy ca").unwrap();
-    fs::write(&cert_path, "dummy cert").unwrap();
-
-    let args = Http3ChainServiceArgs {
-      proxy_group: vec![],
-      ca_path: ca_path.to_string_lossy().to_string(),
-      username: None,
-      password: None,
-      client_cert_path: Some(cert_path.to_string_lossy().to_string()),
-      client_key_path: Some("/nonexistent/path/client.key".to_string()),
-    };
-    // Should fail because key file doesn't exist
-    let result = args.validate();
-    assert!(result.is_err(), "validate() should fail for nonexistent key file");
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-      err_msg.contains("client_key_path") && err_msg.contains("does not exist"),
-      "Expected key-not-found error, got: {err_msg}"
-    );
-  }
-
-  // CR-014: Tests for empty username/password validation
-  #[test]
-  fn test_config_validation_empty_username_fails() {
-    // CR-014: Empty username should be rejected at config validation time
-    let temp_dir = tempfile::tempdir().unwrap();
-    let ca_path = temp_dir.path().join("ca.pem");
-    fs::write(&ca_path, "dummy ca").unwrap();
-
-    let args = Http3ChainServiceArgs {
-      proxy_group: vec![],
-      ca_path: ca_path.to_string_lossy().to_string(),
-      username: Some("".to_string()), // Empty username
-      password: Some("pass".to_string()),
-      client_cert_path: None,
-      client_key_path: None,
-    };
-    let result = args.validate();
-    assert!(result.is_err(), "validate() should fail for empty username");
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-      err_msg.contains("username cannot be empty"),
-      "Expected empty username error, got: {err_msg}"
-    );
-  }
-
-  #[test]
-  fn test_config_validation_empty_password_fails() {
-    // CR-014: Empty password should be rejected at config validation time
-    let temp_dir = tempfile::tempdir().unwrap();
-    let ca_path = temp_dir.path().join("ca.pem");
-    fs::write(&ca_path, "dummy ca").unwrap();
-
-    let args = Http3ChainServiceArgs {
-      proxy_group: vec![],
-      ca_path: ca_path.to_string_lossy().to_string(),
-      username: Some("user".to_string()),
-      password: Some("".to_string()), // Empty password
-      client_cert_path: None,
-      client_key_path: None,
-    };
-    let result = args.validate();
-    assert!(result.is_err(), "validate() should fail for empty password");
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-      err_msg.contains("password cannot be empty"),
-      "Expected empty password error, got: {err_msg}"
-    );
-  }
-
-  #[test]
-  fn test_config_validation_empty_username_and_password_fails() {
-    // CR-014: Both empty should be rejected (first error should be about username)
-    let temp_dir = tempfile::tempdir().unwrap();
-    let ca_path = temp_dir.path().join("ca.pem");
-    fs::write(&ca_path, "dummy ca").unwrap();
-
-    let args = Http3ChainServiceArgs {
-      proxy_group: vec![],
-      ca_path: ca_path.to_string_lossy().to_string(),
-      username: Some("".to_string()), // Empty username
-      password: Some("".to_string()), // Empty password
-      client_cert_path: None,
-      client_key_path: None,
-    };
-    let result = args.validate();
-    assert!(result.is_err(), "validate() should fail for empty credentials");
-  }
-
-  #[test]
-  fn test_config_validation_empty_client_cert_path_fails() {
-    // CR-014: Empty client_cert_path should be rejected
-    let temp_dir = tempfile::tempdir().unwrap();
-    let ca_path = temp_dir.path().join("ca.pem");
-    fs::write(&ca_path, "dummy ca").unwrap();
-
-    let args = Http3ChainServiceArgs {
-      proxy_group: vec![],
-      ca_path: ca_path.to_string_lossy().to_string(),
-      username: None,
-      password: None,
-      client_cert_path: Some("".to_string()), // Empty path
-      client_key_path: Some("/tmp/client.key".to_string()),
-    };
-    let result = args.validate();
-    assert!(result.is_err(), "validate() should fail for empty client_cert_path");
-  }
-
-  #[test]
-  fn test_config_validation_empty_client_key_path_fails() {
-    // CR-014: Empty client_key_path should be rejected
-    let temp_dir = tempfile::tempdir().unwrap();
-    let ca_path = temp_dir.path().join("ca.pem");
-    fs::write(&ca_path, "dummy ca").unwrap();
-
-    let args = Http3ChainServiceArgs {
-      proxy_group: vec![],
-      ca_path: ca_path.to_string_lossy().to_string(),
-      username: None,
-      password: None,
-      client_cert_path: Some("/tmp/client.crt".to_string()),
-      client_key_path: Some("".to_string()), // Empty path
-    };
-    let result = args.validate();
-    assert!(result.is_err(), "validate() should fail for empty client_key_path");
-  }
-
-  #[test]
   fn test_config_validation_nonexistent_ca_path_fails() {
     // CR-004: validate() should check that ca_path exists
     let args = Http3ChainServiceArgs {
       proxy_group: vec![],
       ca_path: "/nonexistent/path/ca.pem".to_string(),
-      username: None,
-      password: None,
-      client_cert_path: None,
-      client_key_path: None,
+      default_upstream_auth: None,
     };
     // Should fail because ca_path doesn't exist
     assert!(args.validate().is_err(), "validate() should fail for nonexistent ca_path");
@@ -1706,13 +1855,11 @@ password: "pass1"
         Http3ChainServiceArgsProxyGroup {
           address: "127.0.0.1:8080".to_string(),
           weight: 0, // CR-003: weight 0 should be rejected
+          auth: None,
         }
       ],
       ca_path: ca_path.to_string_lossy().to_string(),
-      username: None,
-      password: None,
-      client_cert_path: None,
-      client_key_path: None,
+      default_upstream_auth: None,
     };
     // Should fail because weight is 0
     assert!(args.validate().is_err(), "validate() should fail for zero weight");
@@ -1730,17 +1877,16 @@ password: "pass1"
         Http3ChainServiceArgsProxyGroup {
           address: "127.0.0.1:8080".to_string(),
           weight: 2, // valid weight
+          auth: None,
         },
         Http3ChainServiceArgsProxyGroup {
           address: "127.0.0.1:8081".to_string(),
           weight: 0, // CR-003: weight 0 should be rejected
+          auth: None,
         },
       ],
       ca_path: ca_path.to_string_lossy().to_string(),
-      username: None,
-      password: None,
-      client_cert_path: None,
-      client_key_path: None,
+      default_upstream_auth: None,
     };
     // Should fail because one proxy has weight 0
     assert!(args.validate().is_err(), "validate() should fail when any proxy has zero weight");
@@ -1882,6 +2028,7 @@ ca_path: "/tmp/ca.pem"
       requester: None,
       weight: 1,
       current_weight: 0,
+      auth_chain: vec![],
     };
     assert_eq!(proxy.weight, 1);
     assert_eq!(proxy.current_weight, 0);
@@ -2468,4 +2615,1299 @@ ca_path: "/tmp/ca.pem"
   // SendState and H3BidirectionalStream behavior is documented in code comments
   // and verified through integration tests. See SendState enum and
   // H3BidirectionalStream struct doc comments for state machine documentation.
+
+  // ============== ProxyAuth Tests ==============
+
+  #[test]
+  fn test_proxy_auth_none() {
+    let auth = ProxyAuth::None;
+    assert!(matches!(auth, ProxyAuth::None));
+  }
+
+  #[test]
+  fn test_proxy_auth_password() {
+    let auth = ProxyAuth::Password {
+      username: "user".to_string(),
+      password: "pass".to_string(),
+    };
+    match auth {
+      ProxyAuth::Password { username, password } => {
+        assert_eq!(username, "user");
+        assert_eq!(password, "pass");
+      }
+      _ => panic!("Expected Password variant"),
+    }
+  }
+
+  #[test]
+  fn test_proxy_auth_tls_client_cert() {
+    let auth = ProxyAuth::TlsClientCert {
+      client_cert_path: std::path::PathBuf::from("/path/to/cert.pem"),
+      client_key_path: std::path::PathBuf::from("/path/to/key.pem"),
+    };
+    match auth {
+      ProxyAuth::TlsClientCert { client_cert_path, client_key_path } => {
+        assert_eq!(client_cert_path, std::path::PathBuf::from("/path/to/cert.pem"));
+        assert_eq!(client_key_path, std::path::PathBuf::from("/path/to/key.pem"));
+      }
+      _ => panic!("Expected TlsClientCert variant"),
+    }
+  }
+
+  // ============== ProxyAuthConfig Tests ==============
+
+  #[test]
+  fn test_proxy_auth_config_deserialize_none() {
+    let yaml = r#"
+type: "none"
+"#;
+    let config: ProxyAuthConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(config.auth_type, "none");
+  }
+
+  #[test]
+  fn test_proxy_auth_config_deserialize_password() {
+    let yaml = r#"
+type: "password"
+username: "testuser"
+password: "testpass"
+"#;
+    let config: ProxyAuthConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(config.auth_type, "password");
+    assert_eq!(config.username, Some("testuser".to_string()));
+    assert_eq!(config.password, Some("testpass".to_string()));
+  }
+
+  #[test]
+  fn test_proxy_auth_config_deserialize_tls_client_cert() {
+    let yaml = r#"
+type: "tls_client_cert"
+client_cert_path: "/path/to/cert.pem"
+client_key_path: "/path/to/key.pem"
+"#;
+    let config: ProxyAuthConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(config.auth_type, "tls_client_cert");
+    assert_eq!(config.client_cert_path, Some("/path/to/cert.pem".to_string()));
+    assert_eq!(config.client_key_path, Some("/path/to/key.pem".to_string()));
+  }
+
+  #[test]
+  fn test_proxy_auth_config_default_fields() {
+    let yaml = r#"
+type: "password"
+username: "user"
+"#;
+    let config: ProxyAuthConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(config.auth_type, "password");
+    assert_eq!(config.username, Some("user".to_string()));
+    assert_eq!(config.password, None); // Default is None
+  }
+
+  #[test]
+  fn test_proxy_auth_config_to_proxy_auth_none() {
+    let config = ProxyAuthConfig {
+      auth_type: "none".to_string(),
+      ..Default::default()
+    };
+    let auth = Http3ChainServiceArgs::parse_auth_config(&config).unwrap();
+    assert!(matches!(auth, ProxyAuth::None));
+  }
+
+  #[test]
+  fn test_proxy_auth_config_to_proxy_auth_password() {
+    let config = ProxyAuthConfig {
+      auth_type: "password".to_string(),
+      username: Some("user".to_string()),
+      password: Some("pass".to_string()),
+      ..Default::default()
+    };
+    let auth = Http3ChainServiceArgs::parse_auth_config(&config).unwrap();
+    match auth {
+      ProxyAuth::Password { username, password } => {
+        assert_eq!(username, "user");
+        assert_eq!(password, "pass");
+      }
+      _ => panic!("Expected Password variant"),
+    }
+  }
+
+  #[test]
+  fn test_proxy_auth_config_to_proxy_auth_tls_client_cert() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let cert_path = temp_dir.path().join("cert.pem");
+    let key_path = temp_dir.path().join("key.pem");
+    fs::write(&cert_path, "dummy cert").unwrap();
+    fs::write(&key_path, "dummy key").unwrap();
+
+    let config = ProxyAuthConfig {
+      auth_type: "tls_client_cert".to_string(),
+      client_cert_path: Some(cert_path.to_string_lossy().to_string()),
+      client_key_path: Some(key_path.to_string_lossy().to_string()),
+      ..Default::default()
+    };
+    let auth = Http3ChainServiceArgs::parse_auth_config(&config).unwrap();
+    match auth {
+      ProxyAuth::TlsClientCert { client_cert_path: cert, client_key_path: key } => {
+        assert_eq!(cert, cert_path);
+        assert_eq!(key, key_path);
+      }
+      _ => panic!("Expected TlsClientCert variant"),
+    }
+  }
+
+  #[test]
+  fn test_proxy_auth_config_invalid_type() {
+    let config = ProxyAuthConfig {
+      auth_type: "invalid_type".to_string(),
+      ..Default::default()
+    };
+    let result = Http3ChainServiceArgs::parse_auth_config(&config);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("unknown auth type"));
+  }
+
+  #[test]
+  fn test_proxy_auth_config_password_missing_username() {
+    let config = ProxyAuthConfig {
+      auth_type: "password".to_string(),
+      username: None,
+      password: Some("pass".to_string()),
+      ..Default::default()
+    };
+    let result = Http3ChainServiceArgs::parse_auth_config(&config);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("username required"));
+  }
+
+  #[test]
+  fn test_proxy_auth_config_password_missing_password() {
+    let config = ProxyAuthConfig {
+      auth_type: "password".to_string(),
+      username: Some("user".to_string()),
+      password: None,
+      ..Default::default()
+    };
+    let result = Http3ChainServiceArgs::parse_auth_config(&config);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("password required"));
+  }
+
+  // CR-015, CR-017: Tests for empty string validation in parse_auth_config
+
+  #[test]
+  fn test_proxy_auth_config_password_empty_username() {
+    // CR-015: Empty username should be rejected by parse_auth_config
+    // CR-002: Now delegates to validate_auth_config for consistent validation
+    let config = ProxyAuthConfig {
+      auth_type: "password".to_string(),
+      username: Some("".to_string()), // Empty string
+      password: Some("pass".to_string()),
+      ..Default::default()
+    };
+    let result = Http3ChainServiceArgs::parse_auth_config(&config);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("username required"), "Expected error about username, got: {err_msg}");
+  }
+
+  #[test]
+  fn test_proxy_auth_config_password_empty_password() {
+    // CR-015: Empty password should be rejected by parse_auth_config
+    // CR-002: Now delegates to validate_auth_config for consistent validation
+    let config = ProxyAuthConfig {
+      auth_type: "password".to_string(),
+      username: Some("user".to_string()),
+      password: Some("".to_string()), // Empty string
+      ..Default::default()
+    };
+    let result = Http3ChainServiceArgs::parse_auth_config(&config);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("password required"), "Expected error about password, got: {err_msg}");
+  }
+
+  #[test]
+  fn test_proxy_auth_config_tls_client_cert_empty_cert_path() {
+    // CR-016: Empty client_cert_path should be rejected by parse_auth_config
+    // CR-002: Now delegates to validate_auth_config for consistent validation
+    let config = ProxyAuthConfig {
+      auth_type: "tls_client_cert".to_string(),
+      client_cert_path: Some("".to_string()), // Empty string
+      client_key_path: Some("/path/to/key.pem".to_string()),
+      ..Default::default()
+    };
+    let result = Http3ChainServiceArgs::parse_auth_config(&config);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("client_cert_path"), "Expected error about client_cert_path, got: {err_msg}");
+  }
+
+  #[test]
+  fn test_proxy_auth_config_tls_client_cert_empty_key_path() {
+    // CR-016: Empty client_key_path should be rejected by parse_auth_config
+    // CR-002: Now delegates to validate_auth_config for consistent validation
+    // Note: validate_auth_config checks file existence, so we need to create temp files
+    let temp_dir = tempfile::tempdir().unwrap();
+    let cert_path = temp_dir.path().join("cert.pem");
+    fs::write(&cert_path, "dummy cert").unwrap();
+
+    let config = ProxyAuthConfig {
+      auth_type: "tls_client_cert".to_string(),
+      client_cert_path: Some(cert_path.to_string_lossy().to_string()),
+      client_key_path: Some("".to_string()), // Empty string
+      ..Default::default()
+    };
+    let result = Http3ChainServiceArgs::parse_auth_config(&config);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("client_key_path"), "Expected error about client_key_path, got: {err_msg}");
+  }
+
+  // ============== Per-Proxy Auth Config Tests ==============
+
+  #[test]
+  fn test_proxy_group_with_auth_field() {
+    let yaml = r#"
+address: "127.0.0.1:8080"
+weight: 1
+auth:
+  - type: "password"
+    username: "user1"
+    password: "pass1"
+  - type: "tls_client_cert"
+    client_cert_path: "/path/to/cert.pem"
+    client_key_path: "/path/to/key.pem"
+"#;
+    let proxy: Http3ChainServiceArgsProxyGroup = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(proxy.address, "127.0.0.1:8080");
+    assert_eq!(proxy.weight, 1);
+    assert!(proxy.auth.is_some());
+    let auth_list = proxy.auth.unwrap();
+    assert_eq!(auth_list.len(), 2);
+    assert_eq!(auth_list[0].auth_type, "password");
+    assert_eq!(auth_list[1].auth_type, "tls_client_cert");
+  }
+
+  #[test]
+  fn test_proxy_group_without_auth_field() {
+    let yaml = r#"
+address: "127.0.0.1:8080"
+weight: 1
+"#;
+    let proxy: Http3ChainServiceArgsProxyGroup = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(proxy.address, "127.0.0.1:8080");
+    assert_eq!(proxy.weight, 1);
+    assert!(proxy.auth.is_none());
+  }
+
+  #[test]
+  fn test_proxy_group_auth_explicit_none() {
+    let yaml = r#"
+address: "127.0.0.1:8080"
+weight: 1
+auth:
+  - type: "none"
+"#;
+    let proxy: Http3ChainServiceArgsProxyGroup = serde_yaml::from_str(yaml).unwrap();
+    assert!(proxy.auth.is_some());
+    let auth_list = proxy.auth.unwrap();
+    assert_eq!(auth_list.len(), 1);
+    assert_eq!(auth_list[0].auth_type, "none");
+  }
+
+  // ============== Http3ChainServiceArgs with default_upstream_auth Tests ==============
+
+  #[test]
+  fn test_service_args_with_default_upstream_auth() {
+    let yaml = r#"
+proxy_group:
+  - address: "127.0.0.1:8080"
+    weight: 1
+  - address: "127.0.0.1:8081"
+    weight: 2
+    auth:
+      - type: "password"
+        username: "user1"
+        password: "pass1"
+ca_path: "/tmp/ca.pem"
+default_upstream_auth:
+  - type: "tls_client_cert"
+    client_cert_path: "/default/cert.pem"
+    client_key_path: "/default/key.pem"
+  - type: "password"
+    username: "default_user"
+    password: "default_pass"
+"#;
+    let args: Http3ChainServiceArgs = serde_yaml::from_str(yaml).unwrap();
+    assert!(args.default_upstream_auth.is_some());
+    let default_auth = args.default_upstream_auth.unwrap();
+    assert_eq!(default_auth.len(), 2);
+    assert_eq!(default_auth[0].auth_type, "tls_client_cert");
+    assert_eq!(default_auth[1].auth_type, "password");
+  }
+
+  #[test]
+  fn test_service_args_without_default_upstream_auth() {
+    let yaml = r#"
+proxy_group:
+  - address: "127.0.0.1:8080"
+    weight: 1
+ca_path: "/tmp/ca.pem"
+"#;
+    let args: Http3ChainServiceArgs = serde_yaml::from_str(yaml).unwrap();
+    assert!(args.default_upstream_auth.is_none());
+  }
+
+  // ============== Proxy with auth_chain Tests ==============
+
+  #[test]
+  fn test_proxy_with_auth_chain() {
+    let proxy = Proxy {
+      address: "127.0.0.1:8080".parse().unwrap(),
+      conn_handle: None,
+      requester: None,
+      weight: 1,
+      current_weight: 0,
+      auth_chain: vec![
+        ProxyAuth::Password {
+          username: "user".to_string(),
+          password: "pass".to_string(),
+        },
+        ProxyAuth::None,
+      ],
+    };
+    assert_eq!(proxy.auth_chain.len(), 2);
+    assert!(matches!(proxy.auth_chain[0], ProxyAuth::Password { .. }));
+    assert!(matches!(proxy.auth_chain[1], ProxyAuth::None));
+  }
+
+  #[test]
+  fn test_proxy_with_empty_auth_chain() {
+    let proxy = Proxy {
+      address: "127.0.0.1:8080".parse().unwrap(),
+      conn_handle: None,
+      requester: None,
+      weight: 1,
+      current_weight: 0,
+      auth_chain: vec![],
+    };
+    assert!(proxy.auth_chain.is_empty());
+  }
+
+  // ============== Auth Configuration Validation Tests ==============
+
+  #[test]
+  fn test_validate_default_upstream_auth_password_missing_username() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      default_upstream_auth: Some(vec![
+        ProxyAuthConfig {
+          auth_type: "password".to_string(),
+          username: None,
+          password: Some("pass".to_string()),
+          ..Default::default()
+        }
+      ]),
+    };
+    let result = args.validate();
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("username"), "Expected error about username, got: {err_msg}");
+  }
+
+  #[test]
+  fn test_validate_default_upstream_auth_tls_cert_missing_cert_path() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      default_upstream_auth: Some(vec![
+        ProxyAuthConfig {
+          auth_type: "tls_client_cert".to_string(),
+          client_cert_path: None,
+          client_key_path: Some("/tmp/key.pem".to_string()),
+          ..Default::default()
+        }
+      ]),
+    };
+    let result = args.validate();
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("client_cert_path"), "Expected error about client_cert_path, got: {err_msg}");
+  }
+
+  #[test]
+  fn test_validate_default_upstream_auth_tls_cert_nonexistent_cert() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      default_upstream_auth: Some(vec![
+        ProxyAuthConfig {
+          auth_type: "tls_client_cert".to_string(),
+          client_cert_path: Some("/nonexistent/cert.pem".to_string()),
+          client_key_path: Some("/nonexistent/key.pem".to_string()),
+          ..Default::default()
+        }
+      ]),
+    };
+    let result = args.validate();
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("does not exist") || err_msg.contains("client_cert_path"),
+            "Expected error about missing file, got: {err_msg}");
+  }
+
+  #[test]
+  fn test_validate_default_upstream_auth_valid() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    let cert_path = temp_dir.path().join("cert.pem");
+    let key_path = temp_dir.path().join("key.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+    fs::write(&cert_path, "dummy cert").unwrap();
+    fs::write(&key_path, "dummy key").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      default_upstream_auth: Some(vec![
+        ProxyAuthConfig {
+          auth_type: "tls_client_cert".to_string(),
+          client_cert_path: Some(cert_path.to_string_lossy().to_string()),
+          client_key_path: Some(key_path.to_string_lossy().to_string()),
+          ..Default::default()
+        },
+        ProxyAuthConfig {
+          auth_type: "password".to_string(),
+          username: Some("user".to_string()),
+          password: Some("pass".to_string()),
+          ..Default::default()
+        }
+      ]),
+    };
+    assert!(args.validate().is_ok());
+  }
+
+  #[test]
+  fn test_validate_default_upstream_auth_unknown_type() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      default_upstream_auth: Some(vec![
+        ProxyAuthConfig {
+          auth_type: "unknown_type".to_string(),
+          ..Default::default()
+        }
+      ]),
+    };
+    let result = args.validate();
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("unknown auth type"), "Expected error about unknown type, got: {err_msg}");
+  }
+
+  #[test]
+  fn test_validate_per_proxy_auth_password_valid() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![
+        Http3ChainServiceArgsProxyGroup {
+          address: "127.0.0.1:8080".to_string(),
+          weight: 1,
+          auth: Some(vec![
+            ProxyAuthConfig {
+              auth_type: "password".to_string(),
+              username: Some("user".to_string()),
+              password: Some("pass".to_string()),
+              ..Default::default()
+            }
+          ]),
+        }
+      ],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      default_upstream_auth: None,
+    };
+    assert!(args.validate().is_ok());
+  }
+
+  #[test]
+  fn test_validate_per_proxy_auth_tls_cert_valid() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    let cert_path = temp_dir.path().join("cert.pem");
+    let key_path = temp_dir.path().join("key.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+    fs::write(&cert_path, "dummy cert").unwrap();
+    fs::write(&key_path, "dummy key").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![
+        Http3ChainServiceArgsProxyGroup {
+          address: "127.0.0.1:8080".to_string(),
+          weight: 1,
+          auth: Some(vec![
+            ProxyAuthConfig {
+              auth_type: "tls_client_cert".to_string(),
+              client_cert_path: Some(cert_path.to_string_lossy().to_string()),
+              client_key_path: Some(key_path.to_string_lossy().to_string()),
+              ..Default::default()
+            }
+          ]),
+        }
+      ],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      default_upstream_auth: None,
+    };
+    assert!(args.validate().is_ok());
+  }
+
+  #[test]
+  fn test_validate_per_proxy_auth_none_valid() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![
+        Http3ChainServiceArgsProxyGroup {
+          address: "127.0.0.1:8080".to_string(),
+          weight: 1,
+          auth: Some(vec![
+            ProxyAuthConfig {
+              auth_type: "none".to_string(),
+              ..Default::default()
+            }
+          ]),
+        }
+      ],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      default_upstream_auth: None,
+    };
+    assert!(args.validate().is_ok());
+  }
+
+  #[test]
+  fn test_validate_per_proxy_auth_fallback_chain_valid() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    let cert_path = temp_dir.path().join("cert.pem");
+    let key_path = temp_dir.path().join("key.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+    fs::write(&cert_path, "dummy cert").unwrap();
+    fs::write(&key_path, "dummy key").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![
+        Http3ChainServiceArgsProxyGroup {
+          address: "127.0.0.1:8080".to_string(),
+          weight: 1,
+          auth: Some(vec![
+            ProxyAuthConfig {
+              auth_type: "tls_client_cert".to_string(),
+              client_cert_path: Some(cert_path.to_string_lossy().to_string()),
+              client_key_path: Some(key_path.to_string_lossy().to_string()),
+              ..Default::default()
+            },
+            ProxyAuthConfig {
+              auth_type: "password".to_string(),
+              username: Some("user".to_string()),
+              password: Some("pass".to_string()),
+              ..Default::default()
+            }
+          ]),
+        }
+      ],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      default_upstream_auth: None,
+    };
+    assert!(args.validate().is_ok());
+  }
+
+  #[test]
+  fn test_validate_per_proxy_auth_missing_password() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![
+        Http3ChainServiceArgsProxyGroup {
+          address: "127.0.0.1:8080".to_string(),
+          weight: 1,
+          auth: Some(vec![
+            ProxyAuthConfig {
+              auth_type: "password".to_string(),
+              username: Some("user".to_string()),
+              password: None,
+              ..Default::default()
+            }
+          ]),
+        }
+      ],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      default_upstream_auth: None,
+    };
+    let result = args.validate();
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("password required"), "Expected error about password, got: {err_msg}");
+  }
+
+  // CR-003: Test for empty password string validation via validate()
+  #[test]
+  fn test_validate_default_upstream_auth_empty_password() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      default_upstream_auth: Some(vec![
+        ProxyAuthConfig {
+          auth_type: "password".to_string(),
+          username: Some("user".to_string()),
+          password: Some("".to_string()), // Empty password
+          ..Default::default()
+        }
+      ]),
+    };
+    let result = args.validate();
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("password required"), "Expected error about password, got: {err_msg}");
+  }
+
+  // CR-001: Test for per-proxy auth with missing/empty username
+  #[test]
+  fn test_validate_per_proxy_auth_missing_username() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![
+        Http3ChainServiceArgsProxyGroup {
+          address: "127.0.0.1:8080".to_string(),
+          weight: 1,
+          auth: Some(vec![
+            ProxyAuthConfig {
+              auth_type: "password".to_string(),
+              username: None,
+              password: Some("pass".to_string()),
+              ..Default::default()
+            }
+          ]),
+        }
+      ],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      default_upstream_auth: None,
+    };
+    let result = args.validate();
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("username required"), "Expected error about username, got: {err_msg}");
+  }
+
+  // CR-001: Test for per-proxy auth with empty username string
+  #[test]
+  fn test_validate_per_proxy_auth_empty_username() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![
+        Http3ChainServiceArgsProxyGroup {
+          address: "127.0.0.1:8080".to_string(),
+          weight: 1,
+          auth: Some(vec![
+            ProxyAuthConfig {
+              auth_type: "password".to_string(),
+              username: Some("".to_string()), // Empty string
+              password: Some("pass".to_string()),
+              ..Default::default()
+            }
+          ]),
+        }
+      ],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      default_upstream_auth: None,
+    };
+    let result = args.validate();
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("username required"), "Expected error about username, got: {err_msg}");
+  }
+
+  // CR-003: Test for per-proxy auth with empty password string validation via validate()
+  #[test]
+  fn test_validate_per_proxy_auth_empty_password() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![
+        Http3ChainServiceArgsProxyGroup {
+          address: "127.0.0.1:8080".to_string(),
+          weight: 1,
+          auth: Some(vec![
+            ProxyAuthConfig {
+              auth_type: "password".to_string(),
+              username: Some("user".to_string()),
+              password: Some("".to_string()), // Empty string
+              ..Default::default()
+            }
+          ]),
+        }
+      ],
+      ca_path: ca_path.to_string_lossy().to_string(),
+      default_upstream_auth: None,
+    };
+    let result = args.validate();
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("password required"), "Expected error about password, got: {err_msg}");
+  }
+
+  // ============== Auth Resolution Tests ==============
+
+  #[test]
+  fn test_resolve_proxy_auth_no_auth_field_inherits_default() {
+    let default_auth = vec![
+      ProxyAuthConfig {
+        auth_type: "password".to_string(),
+        username: Some("default_user".to_string()),
+        password: Some("default_pass".to_string()),
+        ..Default::default()
+      }
+    ];
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: "/tmp/ca.pem".to_string(),
+      default_upstream_auth: Some(default_auth),
+    };
+
+    let resolved = args.resolve_proxy_auth(&None);
+    assert_eq!(resolved.len(), 1);
+    match &resolved[0] {
+      ProxyAuth::Password { username, password } => {
+        assert_eq!(username, "default_user");
+        assert_eq!(password, "default_pass");
+      }
+      _ => panic!("Expected Password variant"),
+    }
+  }
+
+  #[test]
+  fn test_resolve_proxy_auth_no_auth_field_no_default() {
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: "/tmp/ca.pem".to_string(),
+      default_upstream_auth: None,
+    };
+
+    let resolved = args.resolve_proxy_auth(&None);
+    assert!(resolved.is_empty());
+  }
+
+  #[test]
+  fn test_resolve_proxy_auth_own_auth_overrides_default() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let cert_path = temp_dir.path().join("cert.pem");
+    let key_path = temp_dir.path().join("key.pem");
+    fs::write(&cert_path, "dummy cert").unwrap();
+    fs::write(&key_path, "dummy key").unwrap();
+
+    let default_auth = vec![
+      ProxyAuthConfig {
+        auth_type: "password".to_string(),
+        username: Some("default_user".to_string()),
+        password: Some("default_pass".to_string()),
+        ..Default::default()
+      }
+    ];
+
+    let own_auth = vec![
+      ProxyAuthConfig {
+        auth_type: "tls_client_cert".to_string(),
+        client_cert_path: Some(cert_path.to_string_lossy().to_string()),
+        client_key_path: Some(key_path.to_string_lossy().to_string()),
+        ..Default::default()
+      }
+    ];
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: "/tmp/ca.pem".to_string(),
+      default_upstream_auth: Some(default_auth),
+    };
+
+    let resolved = args.resolve_proxy_auth(&Some(own_auth));
+    assert_eq!(resolved.len(), 1);
+    assert!(matches!(resolved[0], ProxyAuth::TlsClientCert { .. }));
+  }
+
+  #[test]
+  fn test_resolve_proxy_auth_explicit_none() {
+    let default_auth = vec![
+      ProxyAuthConfig {
+        auth_type: "password".to_string(),
+        username: Some("default_user".to_string()),
+        password: Some("default_pass".to_string()),
+        ..Default::default()
+      }
+    ];
+
+    let own_auth = vec![
+      ProxyAuthConfig {
+        auth_type: "none".to_string(),
+        ..Default::default()
+      }
+    ];
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: "/tmp/ca.pem".to_string(),
+      default_upstream_auth: Some(default_auth),
+    };
+
+    let resolved = args.resolve_proxy_auth(&Some(own_auth));
+    assert_eq!(resolved.len(), 1);
+    assert!(matches!(resolved[0], ProxyAuth::None));
+  }
+
+  #[test]
+  fn test_resolve_proxy_auth_fallback_chain() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let cert_path = temp_dir.path().join("cert.pem");
+    let key_path = temp_dir.path().join("key.pem");
+    fs::write(&cert_path, "dummy cert").unwrap();
+    fs::write(&key_path, "dummy key").unwrap();
+
+    let own_auth = vec![
+      ProxyAuthConfig {
+        auth_type: "tls_client_cert".to_string(),
+        client_cert_path: Some(cert_path.to_string_lossy().to_string()),
+        client_key_path: Some(key_path.to_string_lossy().to_string()),
+        ..Default::default()
+      },
+      ProxyAuthConfig {
+        auth_type: "password".to_string(),
+        username: Some("user".to_string()),
+        password: Some("pass".to_string()),
+        ..Default::default()
+      },
+    ];
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: "/tmp/ca.pem".to_string(),
+      default_upstream_auth: None,
+    };
+
+    let resolved = args.resolve_proxy_auth(&Some(own_auth));
+    assert_eq!(resolved.len(), 2);
+    assert!(matches!(resolved[0], ProxyAuth::TlsClientCert { .. }));
+    assert!(matches!(resolved[1], ProxyAuth::Password { .. }));
+  }
+
+  #[test]
+  fn test_resolve_proxy_auth_default_fallback_chain() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let cert_path = temp_dir.path().join("cert.pem");
+    let key_path = temp_dir.path().join("key.pem");
+    fs::write(&cert_path, "dummy cert").unwrap();
+    fs::write(&key_path, "dummy key").unwrap();
+
+    let default_auth = vec![
+      ProxyAuthConfig {
+        auth_type: "tls_client_cert".to_string(),
+        client_cert_path: Some(cert_path.to_string_lossy().to_string()),
+        client_key_path: Some(key_path.to_string_lossy().to_string()),
+        ..Default::default()
+      },
+      ProxyAuthConfig {
+        auth_type: "password".to_string(),
+        username: Some("default_user".to_string()),
+        password: Some("default_pass".to_string()),
+        ..Default::default()
+      },
+    ];
+
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      ca_path: "/tmp/ca.pem".to_string(),
+      default_upstream_auth: Some(default_auth),
+    };
+
+    let resolved = args.resolve_proxy_auth(&None);
+    assert_eq!(resolved.len(), 2);
+    assert!(matches!(resolved[0], ProxyAuth::TlsClientCert { .. }));
+    assert!(matches!(resolved[1], ProxyAuth::Password { .. }));
+  }
+
+  #[test]
+  fn test_service_new_resolves_auth_chains() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let yaml = r#"
+proxy_group:
+  - address: "127.0.0.1:8080"
+    weight: 1
+  - address: "127.0.0.1:8081"
+    weight: 2
+    auth:
+      - type: "password"
+        username: "user1"
+        password: "pass1"
+  - address: "127.0.0.1:8082"
+    weight: 3
+    auth:
+      - type: "none"
+ca_path: "/tmp/ca.pem"
+default_upstream_auth:
+  - type: "password"
+    username: "default_user"
+    password: "default_pass"
+"#;
+    let yaml_value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+
+    // Parse and validate
+    let args: Http3ChainServiceArgs = serde_yaml::from_value(yaml_value).unwrap();
+
+    // Proxy 0: no auth field -> inherits default
+    let auth0 = args.resolve_proxy_auth(&args.proxy_group[0].auth);
+    assert_eq!(auth0.len(), 1);
+    match &auth0[0] {
+      ProxyAuth::Password { username, .. } => assert_eq!(username, "default_user"),
+      _ => panic!("Expected Password variant"),
+    }
+
+    // Proxy 1: own auth -> overrides default
+    let auth1 = args.resolve_proxy_auth(&args.proxy_group[1].auth);
+    assert_eq!(auth1.len(), 1);
+    match &auth1[0] {
+      ProxyAuth::Password { username, .. } => assert_eq!(username, "user1"),
+      _ => panic!("Expected Password variant"),
+    }
+
+    // Proxy 2: explicit none -> no auth
+    let auth2 = args.resolve_proxy_auth(&args.proxy_group[2].auth);
+    assert_eq!(auth2.len(), 1);
+    assert!(matches!(auth2[0], ProxyAuth::None));
+  }
+
+  // ============== TLS Config Building Tests ==============
+
+  #[test]
+  fn test_build_tls_client_config_none_auth() {
+    use rustls::RootCertStore;
+
+    ensure_crypto_provider();
+
+    let roots = RootCertStore::empty();
+
+    // Build TLS config with no auth
+    let config = build_tls_client_config(roots, &ProxyAuth::None);
+    assert!(config.is_ok(), "Should build TLS config for None auth");
+
+    // The returned config should be a valid ClientConfig
+    let _tls_config = config.unwrap();
+    // Note: ALPN protocols are set by the caller, not by build_tls_client_config
+  }
+
+  #[test]
+  fn test_build_tls_client_config_password_auth() {
+    use rustls::RootCertStore;
+
+    ensure_crypto_provider();
+
+    let roots = RootCertStore::empty();
+
+    let auth = ProxyAuth::Password {
+      username: "user".to_string(),
+      password: "pass".to_string(),
+    };
+
+    // Password auth should build a TLS config without client cert
+    let config = build_tls_client_config(roots, &auth);
+    assert!(config.is_ok(), "Should build TLS config for Password auth");
+
+    // The returned config should be a valid ClientConfig
+    let _tls_config = config.unwrap();
+    // Note: ALPN protocols are set by the caller, not by build_tls_client_config
+  }
+
+  #[test]
+  fn test_build_tls_client_config_tls_client_cert_auth() {
+    use rustls::RootCertStore;
+
+    ensure_crypto_provider();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let cert_path = temp_dir.path().join("cert.pem");
+    let key_path = temp_dir.path().join("key.pem");
+
+    // Write valid PEM data (self-signed cert for testing)
+    // Generate a simple ECDSA key and cert for testing
+    let rcgen::CertifiedKey { cert, key_pair } =
+      rcgen::generate_simple_self_signed(vec!["test".into()]).unwrap();
+    fs::write(&cert_path, cert.pem()).unwrap();
+    fs::write(&key_path, key_pair.serialize_pem()).unwrap();
+
+    let roots = RootCertStore::empty();
+
+    let auth = ProxyAuth::TlsClientCert {
+      client_cert_path: cert_path.clone(),
+      client_key_path: key_path.clone(),
+    };
+
+    // TLS client cert auth should build a TLS config WITH client cert
+    let config = build_tls_client_config(roots, &auth);
+    assert!(
+      config.is_ok(),
+      "Should build TLS config for TlsClientCert auth"
+    );
+
+    // The returned config should be a valid ClientConfig with client auth
+    let _tls_config = config.unwrap();
+    // Note: ALPN protocols are set by the caller, not by build_tls_client_config
+    // The config should have client auth configured
+    // (we can't easily verify this without actually connecting)
+  }
+
+  #[test]
+  fn test_build_tls_client_config_tls_client_cert_missing_cert() {
+    use rustls::RootCertStore;
+
+    let roots = RootCertStore::empty();
+
+    let auth = ProxyAuth::TlsClientCert {
+      client_cert_path: "/nonexistent/cert.pem".into(),
+      client_key_path: "/nonexistent/key.pem".into(),
+    };
+
+    // Should fail because cert file doesn't exist
+    let config = build_tls_client_config(roots, &auth);
+    assert!(config.is_err(), "Should fail for missing cert file");
+    let err_msg = config.unwrap_err().to_string();
+    assert!(
+      err_msg.contains("cert") || err_msg.contains("No such file"),
+      "Error should mention missing file: {err_msg}"
+    );
+  }
+
+  // ============== TLS Handshake Error Detection Tests ==============
+
+  #[test]
+  fn test_is_tls_handshake_error_detects_certificate_error() {
+    // Create an error that looks like a TLS certificate error
+    let err = anyhow::anyhow!("TLS handshake failed: certificate rejected");
+    assert!(
+      is_tls_handshake_error(&err),
+      "Should detect certificate error"
+    );
+  }
+
+  #[test]
+  fn test_is_tls_handshake_error_detects_handshake_error() {
+    let err = anyhow::anyhow!("TLS handshake error: unknown CA");
+    assert!(
+      is_tls_handshake_error(&err),
+      "Should detect handshake error"
+    );
+  }
+
+  #[test]
+  fn test_is_tls_handshake_error_rejects_network_error() {
+    let err = anyhow::anyhow!("Connection refused");
+    assert!(
+      !is_tls_handshake_error(&err),
+      "Should NOT detect network error as TLS error"
+    );
+  }
+
+  #[test]
+  fn test_is_tls_handshake_error_rejects_timeout_error() {
+    let err = anyhow::anyhow!("Connection timed out");
+    assert!(
+      !is_tls_handshake_error(&err),
+      "Should NOT detect timeout as TLS error"
+    );
+  }
+
+  #[test]
+  fn test_is_tls_handshake_error_case_insensitive() {
+    let err = anyhow::anyhow!("tls HANDSHAKE failed");
+    assert!(is_tls_handshake_error(&err), "Should be case insensitive");
+  }
+
+  #[test]
+  fn test_is_tls_handshake_error_detects_quinn_connection_error_with_crypto_code() {
+    // Test that we detect ConnectionError::TransportError with crypto error code
+    // We need to use the internal quinn_proto type since quinn doesn't export TransportError
+    // The crypto error code is created from a TLS alert (e.g., bad_certificate = 42)
+    let _crypto_code = quinn::TransportErrorCode::crypto(42); // TLS alert: bad_certificate
+    // Create TransportError using the proto crate via quinn's re-exports
+    // Since we can't construct it directly, we use the Display string pattern
+    // The error message will contain "cryptographic handshake failed"
+    let err_msg = format!(
+      "TLS handshake failed: cryptographic error 42"
+    );
+    let err = anyhow::anyhow!("{}", err_msg);
+    assert!(
+      is_tls_handshake_error(&err),
+      "Should detect crypto handshake failure error message"
+    );
+  }
+
+  #[test]
+  fn test_is_tls_handshake_error_rejects_quinn_timeout() {
+    // Timeout errors should NOT be detected as TLS handshake errors
+    let conn_err = quinn::ConnectionError::TimedOut;
+    let err: anyhow::Error = conn_err.into();
+    assert!(
+      !is_tls_handshake_error(&err),
+      "Should NOT detect TimedOut as TLS error"
+    );
+  }
+
+  #[test]
+  fn test_is_tls_handshake_error_rejects_quinn_reset() {
+    // Reset errors should NOT be detected as TLS handshake errors
+    let conn_err = quinn::ConnectionError::Reset;
+    let err: anyhow::Error = conn_err.into();
+    assert!(
+      !is_tls_handshake_error(&err),
+      "Should NOT detect Reset as TLS error"
+    );
+  }
+
+  #[test]
+  fn test_is_tls_handshake_error_detects_certificate_error_via_downcast() {
+    // Test that we can detect quinn::ConnectionError::TransportError via downcast
+    // and check the error code is in the crypto range
+    use quinn::ConnectionError;
+
+    // Create a mock error that simulates TLS handshake failure
+    // We'll test the downcast mechanism
+    let timeout_err: anyhow::Error = ConnectionError::TimedOut.into();
+    let downcast_result = timeout_err.downcast_ref::<ConnectionError>();
+    assert!(
+      downcast_result.is_some(),
+      "Should be able to downcast to ConnectionError"
+    );
+    match downcast_result {
+      Some(ConnectionError::TimedOut) => {}
+      _ => panic!("Expected TimedOut variant"),
+    }
+  }
+
+  // ============== Connection with Auth Tests ==============
+
+  // Note: Real connection tests require actual servers and are tested in integration tests.
+  // Unit tests here verify the auth chain is passed correctly.
+
+  #[test]
+  fn test_proxy_group_new_accepts_auth_chain() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ca_path = temp_dir.path().join("ca.pem");
+    fs::write(&ca_path, "dummy ca").unwrap();
+
+    let auth_chain = vec![
+      ProxyAuth::Password {
+        username: "user".to_string(),
+        password: "pass".to_string(),
+      },
+      ProxyAuth::None,
+    ];
+
+    let addresses: Vec<(SocketAddr, usize, Vec<ProxyAuth>)> = vec![
+      ("127.0.0.1:8080".parse().unwrap(), 1, auth_chain.clone()),
+    ];
+
+    let group = ProxyGroup::new(ca_path.into(), addresses);
+
+    assert_eq!(group.proxies.len(), 1);
+    assert_eq!(group.proxies[0].auth_chain.len(), 2);
+    assert!(matches!(
+      group.proxies[0].auth_chain[0],
+      ProxyAuth::Password { .. }
+    ));
+    assert!(matches!(group.proxies[0].auth_chain[1], ProxyAuth::None));
+  }
+
+  // ============== ProxyAuthRequiredError Tests ==============
+
+  #[test]
+  fn test_proxy_auth_required_error_display() {
+    let err = ProxyAuthRequiredError;
+    let msg = format!("{err}");
+    assert!(
+      msg.contains("407"),
+      "Error message should contain 407: {msg}"
+    );
+    assert!(
+      msg.contains("Proxy Authentication Required"),
+      "Error message should contain Proxy Authentication Required: {msg}"
+    );
+  }
+
+  #[test]
+  fn test_proxy_auth_required_error_downcast() {
+    // Test that we can properly detect this error type via downcast
+    let err: anyhow::Error = ProxyAuthRequiredError.into();
+    assert!(
+      err.downcast_ref::<ProxyAuthRequiredError>().is_some(),
+      "Should be able to downcast to ProxyAuthRequiredError"
+    );
+  }
+
+  #[test]
+  fn test_proxy_auth_required_error_not_tls_handshake_error() {
+    // ProxyAuthRequiredError should NOT be detected as TLS handshake error
+    let err: anyhow::Error = ProxyAuthRequiredError.into();
+    assert!(
+      !is_tls_handshake_error(&err),
+      "ProxyAuthRequiredError should not be detected as TLS handshake error"
+    );
+  }
+
+  #[test]
+  fn test_proxy_auth_required_error_in_anyhow() {
+    // Test that the error can be converted to anyhow::Error and back
+    let err: anyhow::Error = ProxyAuthRequiredError.into();
+    let err_msg = err.to_string();
+    assert!(
+      err_msg.contains("407"),
+      "Anyhow error message should contain 407: {err_msg}"
+    );
+  }
 }

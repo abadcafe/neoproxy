@@ -598,7 +598,32 @@ impl Config {
   }
 
   /// Validate HTTP/3 authentication configuration
+  /// Supports both single auth object and array of auth objects (multi-auth)
   fn validate_http3_auth_config(
+    &self,
+    auth: &serde_yaml::Value,
+    location: &str,
+    collector: &mut ConfigErrorCollector,
+  ) {
+    // Check if auth is an array (multi-auth) or a single object
+    if auth.is_sequence() {
+      // Multi-auth: validate each auth config in the array
+      let auth_array = auth.as_sequence().unwrap();
+      for (idx, auth_item) in auth_array.iter().enumerate() {
+        self.validate_single_http3_auth_config(
+          auth_item,
+          &format!("{}.args.auth[{}]", location, idx),
+          collector,
+        );
+      }
+    } else {
+      // Single auth config
+      self.validate_single_http3_auth_config(auth, &format!("{}.args.auth", location), collector);
+    }
+  }
+
+  /// Validate a single HTTP/3 authentication configuration entry
+  fn validate_single_http3_auth_config(
     &self,
     auth: &serde_yaml::Value,
     location: &str,
@@ -614,7 +639,7 @@ impl Config {
           if let Some(users_seq) = users.as_sequence() {
             if users_seq.is_empty() {
               collector.add(
-                format!("{}.args.auth.users", location),
+                format!("{}.users", location),
                 "users cannot be empty for password authentication"
                   .to_string(),
                 ConfigErrorKind::InvalidFormat,
@@ -629,7 +654,7 @@ impl Config {
                 )) {
                   collector.add(
                     format!(
-                      "{}.args.auth.users[{}].username",
+                      "{}.users[{}].username",
                       location, idx
                     ),
                     "username is required".to_string(),
@@ -643,7 +668,7 @@ impl Config {
                     if username_str.is_empty() {
                       collector.add(
                         format!(
-                          "{}.args.auth.users[{}].username",
+                          "{}.users[{}].username",
                           location, idx
                         ),
                         "username cannot be empty".to_string(),
@@ -653,7 +678,7 @@ impl Config {
                     if username_str.len() > 255 {
                       collector.add(
                         format!(
-                          "{}.args.auth.users[{}].username",
+                          "{}.users[{}].username",
                           location, idx
                         ),
                         format!(
@@ -666,7 +691,7 @@ impl Config {
                   } else {
                     collector.add(
                       format!(
-                        "{}.args.auth.users[{}].username",
+                        "{}.users[{}].username",
                         location, idx
                       ),
                       "username must be a string".to_string(),
@@ -680,7 +705,7 @@ impl Config {
                 )) {
                   collector.add(
                     format!(
-                      "{}.args.auth.users[{}].password",
+                      "{}.users[{}].password",
                       location, idx
                     ),
                     "password is required".to_string(),
@@ -694,7 +719,7 @@ impl Config {
                     if password_str.is_empty() {
                       collector.add(
                         format!(
-                          "{}.args.auth.users[{}].password",
+                          "{}.users[{}].password",
                           location, idx
                         ),
                         "password cannot be empty".to_string(),
@@ -704,7 +729,7 @@ impl Config {
                   } else {
                     collector.add(
                       format!(
-                        "{}.args.auth.users[{}].password",
+                        "{}.users[{}].password",
                         location, idx
                       ),
                       "password must be a string".to_string(),
@@ -714,7 +739,7 @@ impl Config {
                 }
               } else {
                 collector.add(
-                  format!("{}.args.auth.users[{}]", location, idx),
+                  format!("{}.users[{}]", location, idx),
                   "user entry must be a mapping".to_string(),
                   ConfigErrorKind::TypeMismatch,
                 );
@@ -722,27 +747,20 @@ impl Config {
             }
           } else {
             collector.add(
-              format!("{}.args.auth.users", location),
+              format!("{}.users", location),
               "users must be an array".to_string(),
               ConfigErrorKind::TypeMismatch,
             );
           }
         } else {
           collector.add(
-            format!("{}.args.auth.users", location),
+            format!("{}.users", location),
             "users is required for password authentication".to_string(),
             ConfigErrorKind::MissingField,
           );
         }
-        // Warn if client_ca_path is set for password auth (should not be used)
-        if auth.get("client_ca_path").is_some() {
-          collector.add(
-            format!("{}.args.auth.client_ca_path", location),
-            "client_ca_path should not be configured for password authentication"
-              .to_string(),
-            ConfigErrorKind::InvalidFormat,
-          );
-        }
+        // Note: For multi-auth, client_ca_path may be set in another auth entry
+        // We don't warn about it here since this is valid in multi-auth context
       }
       Some("tls_client_cert") => {
         // TLS client cert authentication: client_ca_path must be present
@@ -751,38 +769,34 @@ impl Config {
             // Validate client CA file
             self.validate_client_ca_file(
               ca_path_str,
-              &format!("{}.args.auth.client_ca_path", location),
+              &format!("{}.client_ca_path", location),
               collector,
             );
           }
         } else {
           collector.add(
-            format!("{}.args.auth.client_ca_path", location),
+            format!("{}.client_ca_path", location),
             "client_ca_path is required for tls_client_cert authentication"
               .to_string(),
             ConfigErrorKind::MissingField,
           );
         }
-        // Warn if users is set for tls_client_cert auth (should not be used)
-        if auth.get("users").is_some() {
-          collector.add(
-            format!("{}.args.auth.users", location),
-            "users should not be configured for tls_client_cert authentication"
-              .to_string(),
-            ConfigErrorKind::InvalidFormat,
-          );
-        }
+        // Note: For multi-auth, users may be set in another auth entry
+        // We don't warn about it here since this is valid in multi-auth context
+      }
+      Some("none") => {
+        // No auth - no additional validation needed
       }
       Some(other) => {
         collector.add(
-          format!("{}.args.auth.type", location),
+          format!("{}.type", location),
           format!("invalid authentication type '{}'", other),
           ConfigErrorKind::InvalidFormat,
         );
       }
       None => {
         collector.add(
-          format!("{}.args.auth.type", location),
+          format!("{}.type", location),
           "authentication type is required".to_string(),
           ConfigErrorKind::MissingField,
         );

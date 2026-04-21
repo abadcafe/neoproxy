@@ -173,6 +173,77 @@ servers:
     return config_path
 
 
+def create_http3_listener_config_with_mtls_and_password(
+    proxy_port: int,
+    cert_path: str,
+    key_path: str,
+    client_ca_path: str,
+    temp_dir: str,
+    users: List[Tuple[str, str]],
+    quic_config: Optional[str] = None,
+    worker_threads: int = 1
+) -> str:
+    """
+    Create HTTP/3 Listener configuration with BOTH TLS client cert AND password auth.
+
+    This is used for testing fallback scenarios where mTLS fails but password succeeds,
+    or vice versa. The listener accepts connections from either auth method.
+
+    Args:
+        proxy_port: Port for the HTTP/3 listener
+        cert_path: TLS certificate path
+        key_path: TLS private key path
+        client_ca_path: Client CA certificate path for mTLS
+        temp_dir: Temporary directory for logs
+        users: List of (username, plaintext_password) tuples for password auth
+        quic_config: Optional QUIC config YAML string
+        worker_threads: Number of worker threads
+
+    Returns:
+        str: Path to the configuration file
+    """
+    user_lines = []
+    for username, password in users:
+        user_lines.append(f'          - username: "{username}"')
+        user_lines.append(f'            password: "{password}"')
+
+    users_section = "\n".join(user_lines)
+
+    quic_section = ""
+    if quic_config:
+        quic_section = f"""
+  quic:
+{quic_config}"""
+
+    config_content = f"""worker_threads: {worker_threads}
+log_directory: "{temp_dir}/logs"
+
+services:
+- name: connect_tcp
+  kind: connect_tcp.connect_tcp
+
+servers:
+- name: http3_server
+  listeners:
+  - kind: http3.listener
+    args:
+      address: "0.0.0.0:{proxy_port}"
+      cert_path: "{cert_path}"
+      key_path: "{key_path}"{quic_section}
+      auth:
+        - type: "tls_client_cert"
+          client_ca_path: "{client_ca_path}"
+        - type: "password"
+          users:
+{users_section}
+  service: connect_tcp
+"""
+    config_path = os.path.join(temp_dir, "http3_mtls_password_auth_config.yaml")
+    with open(config_path, "w") as f:
+        f.write(config_content)
+    return config_path
+
+
 # ==============================================================================
 # Test cases - 7.3 Password Authentication scenarios
 # ==============================================================================
@@ -227,9 +298,6 @@ class TestHTTP3PasswordAuth:
         Target: Verify HTTP/3 listener accepts connection with valid credentials.
         Uses real HTTP/3 client to verify authentication.
         """
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
-
         temp_dir = tempfile.mkdtemp()
         proxy_port = 31002
         target_port = 31003
@@ -315,9 +383,6 @@ class TestHTTP3PasswordAuth:
 
         Target: Verify HTTP/3 listener returns 407 for invalid credentials.
         """
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
-
         temp_dir = tempfile.mkdtemp()
         proxy_port = 31004
         target_port = 31005
@@ -602,20 +667,17 @@ servers:
         Target: Verify HTTP/3 listener accepts connection with valid client cert.
         Uses real HTTP/3 client with client certificate.
         """
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
-
         temp_dir = tempfile.mkdtemp()
         proxy_port = 31013
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
             # Generate server certificates
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
 
             # Generate client certificate signed by the CA
             client_cert_path, client_key_path = generate_client_certificate(
-                temp_dir, ca_path, key_path
+                temp_dir, ca_path, ca_key_path
             )
 
             config_path = create_http3_listener_config_with_tls_client_cert(
@@ -669,9 +731,6 @@ servers:
         Expected per design: Connection should be rejected (handshake failure)
         Verification: success must be False, indicating connection was rejected.
         """
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
-
         temp_dir = tempfile.mkdtemp()
         proxy_port = 31014
         proxy_proc: Optional[subprocess.Popen] = None
@@ -761,9 +820,6 @@ servers:
         Expected per design: Connection should be rejected (handshake failure)
         Verification: success must be False, indicating connection was rejected.
         """
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
-
         temp_dir = tempfile.mkdtemp()
         proxy_port = 31015
         proxy_proc: Optional[subprocess.Popen] = None

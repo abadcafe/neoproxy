@@ -423,21 +423,29 @@ fn handle_password_auth(
 /// Err with error message otherwise.
 fn perform_authentication(
   req: &http::Request<()>,
-  auth_config: Option<&crate::auth::AuthConfig>,
+  auth_config: Option<&crate::auth::MultiAuthConfig>,
   credentials: Option<&std::collections::HashMap<String, String>>,
+  auth_context: &AuthContext,
 ) -> Result<()> {
   match auth_config {
     None => Ok(()), // No auth configured
     Some(config) => {
-      match config.auth_type {
-        AuthType::Password => {
-          let users = credentials.ok_or_else(|| {
-            anyhow!("password auth configured but no users")
-          })?;
-          handle_password_auth(req, users)
-        }
-        AuthType::TlsClientCert => Ok(()), // TLS cert handled at QUIC level
+      // Check if already authenticated via TLS client cert
+      if auth_context.tls_client_cert_verified && config.has_tls_client_cert() {
+        // Client already authenticated via TLS client cert
+        return Ok(());
       }
+
+      // Not authenticated via TLS cert, check password if available
+      if config.has_password() {
+        let users = credentials.ok_or_else(|| {
+          anyhow!("password auth configured but no users")
+        })?;
+        return handle_password_auth(req, users);
+      }
+
+      // No authentication method available
+      Err(anyhow!("No valid authentication method available"))
     }
   }
 }
@@ -473,8 +481,9 @@ enum ValidationError {
 /// Returns Ok(target_address) if validation passes, Err otherwise.
 fn validate_connect_request(
   req: &http::Request<()>,
-  auth_config: Option<&crate::auth::AuthConfig>,
+  auth_config: Option<&crate::auth::MultiAuthConfig>,
   credentials: Option<&std::collections::HashMap<String, String>>,
+  auth_context: &AuthContext,
 ) -> std::result::Result<String, ValidationError> {
   // Step 1: Validate CONNECT method
   if let Err(e) = validate_connect_method(req) {
@@ -482,7 +491,7 @@ fn validate_connect_request(
   }
 
   // Step 2: Perform authentication
-  if let Err(e) = perform_authentication(req, auth_config, credentials) {
+  if let Err(e) = perform_authentication(req, auth_config, credentials, auth_context) {
     return Err(ValidationError::Unauthorized(e.to_string()));
   }
 
@@ -617,7 +626,8 @@ async fn handle_h3_stream<S>(
   req: http::Request<()>,
   mut stream: server::RequestStream<S, Bytes>,
   _service: plugin::Service,
-  auth_config: Option<crate::auth::AuthConfig>,
+  auth_config: Option<crate::auth::MultiAuthConfig>,
+  auth_context: AuthContext,
   shutdown_handle: plugin::ShutdownHandle,
 ) where
   S: h3::quic::BidiStream<Bytes> + Send + 'static,
@@ -628,7 +638,7 @@ async fn handle_h3_stream<S>(
   // Pre-compute credentials map once per stream to avoid per-request allocation
   let credentials = auth_config.as_ref().and_then(|c| c.users_map());
   let target_addr =
-    match validate_connect_request(&req, auth_config.as_ref(), credentials.as_ref()) {
+    match validate_connect_request(&req, auth_config.as_ref(), credentials.as_ref(), &auth_context) {
       Ok(addr) => addr,
       Err(e) => {
         handle_validation_error(&mut stream, e).await;
@@ -770,37 +780,57 @@ pub fn verify_tls_client_cert(
   }
 }
 
+/// Authentication context passed from connection level to stream level.
+///
+/// This struct tracks whether the client has already authenticated via
+/// TLS client certificate, which is needed for multi-auth scenarios.
+#[derive(Clone, Default)]
+struct AuthContext {
+  /// Whether the client presented a valid TLS client certificate.
+  tls_client_cert_verified: bool,
+}
+
 /// Handle a single HTTP/3 connection
 async fn handle_h3_connection(
   conn: quinn::Connection,
   service: plugin::Service,
-  auth_config: Option<crate::auth::AuthConfig>,
+  auth_config: Option<crate::auth::MultiAuthConfig>,
   stream_tracker: Rc<StreamTracker>,
   shutdown_handle: plugin::ShutdownHandle,
 ) {
   // Security check: Verify client certificate for TlsClientCert authentication
-  // This is required to prevent TLS client cert bypass vulnerability.
-  // Per architecture doc section 5.3.2, when TlsClientCert auth is configured,
-  // we must verify that the peer presented a valid client certificate.
-  if let Some(ref config) = auth_config
-    && matches!(config.auth_type, AuthType::TlsClientCert)
-  {
+  // For multi-auth (TLS client cert + password), client cert is OPTIONAL
+  // - If client presents valid cert, they are authenticated
+  // - If client presents no/invalid cert, they can still authenticate via password
+  let has_tls_client_cert =
+    auth_config.as_ref().is_some_and(|c| c.has_tls_client_cert());
+  let is_multi_auth =
+    auth_config.as_ref().is_some_and(|c| c.is_multi_auth());
+  let mut auth_context = AuthContext::default();
+
+  if has_tls_client_cert {
     let verify_result = verify_tls_client_cert(conn.peer_identity());
     match verify_result {
       TlsClientCertVerifyResult::Valid => {
         // Client certificate is present and valid
         info!("TLS client certificate verified successfully");
+        auth_context.tls_client_cert_verified = true;
       }
       TlsClientCertVerifyResult::Missing => {
-        warn!(
-          "No client certificate presented - closing connection for security"
-        );
-        // Close with H3_NO_ERROR code for graceful shutdown
-        conn.close(
-          quinn::VarInt::from_u32(H3_NO_ERROR_CODE),
-          b"client certificate required",
-        );
-        return;
+        // For multi-auth, missing cert is OK - password auth can be used
+        // For single TLS client cert auth, missing cert is a failure
+        if !is_multi_auth {
+          warn!(
+            "No client certificate presented - closing connection for security"
+          );
+          // Close with H3_NO_ERROR code for graceful shutdown
+          conn.close(
+            quinn::VarInt::from_u32(H3_NO_ERROR_CODE),
+            b"client certificate required",
+          );
+          return;
+        }
+        info!("No client certificate presented, will check password auth");
       }
       TlsClientCertVerifyResult::InvalidType => {
         warn!(
@@ -843,6 +873,7 @@ async fn handle_h3_connection(
       Ok(Some(resolver)) => {
         let service = service.clone();
         let auth_config = auth_config.clone();
+        let auth_context = auth_context.clone();
         let stream_shutdown = stream_tracker.shutdown_handle();
         stream_tracker.register(async move {
           match resolver.resolve_request().await {
@@ -852,6 +883,7 @@ async fn handle_h3_connection(
                 stream,
                 service,
                 auth_config,
+                auth_context,
                 stream_shutdown,
               )
               .await;
@@ -917,7 +949,7 @@ fn verify_key_file_permissions(key_path: &str) -> Result<()> {
 fn load_tls_config(
   cert_path: &str,
   key_path: &str,
-  auth_config: Option<&crate::auth::AuthConfig>,
+  auth_config: Option<&crate::auth::MultiAuthConfig>,
 ) -> Result<Arc<rustls::ServerConfig>> {
   // Verify private key file permissions before loading
   verify_key_file_permissions(key_path)?;
@@ -940,9 +972,10 @@ fn load_tls_config(
   let key = rustls_pemfile::private_key(&mut key_reader)?
     .ok_or_else(|| anyhow!("No private key found in {}", key_path))?;
 
-  // Build TLS config based on auth type
+  // Build TLS config based on auth configuration
   let tls_config = match auth_config {
     None => {
+      // No auth - no client cert verification
       let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
@@ -950,31 +983,53 @@ fn load_tls_config(
       config
     }
     Some(config) => {
-      match config.auth_type {
-        AuthType::Password => {
-          let mut tls_config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certs, key)?;
-          tls_config.alpn_protocols = vec![ALPN.to_vec()];
-          tls_config
-        }
-        AuthType::TlsClientCert => {
-          let client_ca_path =
-            config.client_ca_pathbuf().ok_or_else(|| {
-              anyhow!(
-                "client_ca_path required for tls_client_cert auth"
-              )
-            })?;
+      let has_tls_client_cert = config.has_tls_client_cert();
+      let has_password = config.has_password();
+      let is_multi_auth = config.is_multi_auth();
 
-          // Use TlsClientCertVerifier from auth module
-          let verifier =
-            TlsClientCertVerifier::from_ca_path(&client_ca_path)?;
-          let mut tls_config = rustls::ServerConfig::builder()
-            .with_client_cert_verifier(verifier.verifier())
-            .with_single_cert(certs, key)?;
-          tls_config.alpn_protocols = vec![ALPN.to_vec()];
-          tls_config
-        }
+      if has_tls_client_cert && has_password && is_multi_auth {
+        // Multi-auth (TLS client cert + password):
+        // Use optional client cert verification - client cert is NOT required
+        // If client presents valid cert, they are authenticated at TLS level
+        // If client doesn't present cert, they can authenticate via password
+        let client_ca_path =
+          config.client_ca_pathbuf().ok_or_else(|| {
+            anyhow!(
+              "client_ca_path required for tls_client_cert auth"
+            )
+          })?;
+
+        // Use TlsClientCertVerifier with OPTIONAL verification for multi-auth
+        let verifier =
+          TlsClientCertVerifier::optional_from_ca_path(&client_ca_path)?;
+        let mut tls_config = rustls::ServerConfig::builder()
+          .with_client_cert_verifier(verifier.verifier())
+          .with_single_cert(certs, key)?;
+        tls_config.alpn_protocols = vec![ALPN.to_vec()];
+        tls_config
+      } else if has_tls_client_cert {
+        // TLS client cert only - client cert is REQUIRED
+        let client_ca_path =
+          config.client_ca_pathbuf().ok_or_else(|| {
+            anyhow!(
+              "client_ca_path required for tls_client_cert auth"
+            )
+          })?;
+
+        let verifier =
+          TlsClientCertVerifier::from_ca_path(&client_ca_path)?;
+        let mut tls_config = rustls::ServerConfig::builder()
+          .with_client_cert_verifier(verifier.verifier())
+          .with_single_cert(certs, key)?;
+        tls_config.alpn_protocols = vec![ALPN.to_vec()];
+        tls_config
+      } else {
+        // Password only or other - no client cert verification
+        let mut tls_config = rustls::ServerConfig::builder()
+          .with_no_client_auth()
+          .with_single_cert(certs, key)?;
+        tls_config.alpn_protocols = vec![ALPN.to_vec()];
+        tls_config
       }
     }
   };
@@ -995,7 +1050,7 @@ pub struct Http3Listener {
   /// QUIC configuration
   quic_config: QuicConfig,
   /// Authentication configuration (None = no auth required)
-  auth_config: Option<crate::auth::AuthConfig>,
+  auth_config: Option<crate::auth::MultiAuthConfig>,
   /// Stream tracker
   stream_tracker: Rc<StreamTracker>,
   /// Shutdown handle
@@ -1025,11 +1080,11 @@ impl Http3Listener {
       None => QuicConfig::default(),
     };
 
-    // Parse authentication config
-    let auth_config: Option<crate::auth::AuthConfig> = args
+    // Parse authentication config (supports both single and multi-auth)
+    let auth_config: Option<crate::auth::MultiAuthConfig> = args
       .auth
       .map(|a| {
-        crate::auth::AuthConfig::from_yaml(
+        crate::auth::MultiAuthConfig::from_yaml(
           a,
           &[AuthType::Password, AuthType::TlsClientCert],
         )
@@ -1236,6 +1291,7 @@ mod tests {
   use super::*;
   use http_body::Body;
   use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
+  use crate::auth::MultiAuthConfig;
 
   // ============== QuicConfigArgs Tests ==============
 
@@ -2286,13 +2342,15 @@ key_path: "/path/to/key.pem"
       .expect("Failed to write key");
 
     // Create password auth config using the new auth module
-    let auth_config = Some(crate::auth::AuthConfig {
-      auth_type: AuthType::Password,
-      users: Some(vec![crate::auth::UserCredential {
-        username: "user".to_string(),
-        password: "test_password".to_string(),
-      }]),
-      client_ca_path: None,
+    let auth_config = Some(crate::auth::MultiAuthConfig {
+      configs: vec![crate::auth::AuthConfig {
+        auth_type: AuthType::Password,
+        users: Some(vec![crate::auth::UserCredential {
+          username: "user".to_string(),
+          password: "test_password".to_string(),
+        }]),
+        client_ca_path: None,
+      }],
     });
 
     let result = load_tls_config(
@@ -2331,10 +2389,12 @@ key_path: "/path/to/key.pem"
     std::fs::write(&ca_path, ca_cert_pem)
       .expect("Failed to write CA cert");
 
-    let auth_config = Some(crate::auth::AuthConfig {
-      auth_type: AuthType::TlsClientCert,
-      users: None,
-      client_ca_path: Some(ca_path.to_str().unwrap().to_string()),
+    let auth_config = Some(crate::auth::MultiAuthConfig {
+      configs: vec![crate::auth::AuthConfig {
+        auth_type: AuthType::TlsClientCert,
+        users: None,
+        client_ca_path: Some(ca_path.to_str().unwrap().to_string()),
+      }],
     });
 
     let result = load_tls_config(
@@ -2365,10 +2425,12 @@ key_path: "/path/to/key.pem"
     write_key_file_secure(&key_path, &key_pem)
       .expect("Failed to write key");
 
-    let auth_config = Some(crate::auth::AuthConfig {
-      auth_type: AuthType::TlsClientCert,
-      users: None,
-      client_ca_path: Some(ca_path.to_str().unwrap().to_string()),
+    let auth_config = Some(crate::auth::MultiAuthConfig {
+      configs: vec![crate::auth::AuthConfig {
+        auth_type: AuthType::TlsClientCert,
+        users: None,
+        client_ca_path: Some(ca_path.to_str().unwrap().to_string()),
+      }],
     });
 
     let result = load_tls_config(
@@ -2504,13 +2566,15 @@ key_path: "/path/to/key.pem"
       .expect("Failed to write CA cert");
 
     // Test Password auth with plaintext password
-    let auth_config = Some(AuthConfig {
-      auth_type: AuthType::Password,
-      users: Some(vec![UserCredential {
-        username: "user".to_string(),
-        password: "test_password".to_string(),
-      }]),
-      client_ca_path: None,
+    let auth_config = Some(MultiAuthConfig {
+      configs: vec![AuthConfig {
+        auth_type: AuthType::Password,
+        users: Some(vec![UserCredential {
+          username: "user".to_string(),
+          password: "test_password".to_string(),
+        }]),
+        client_ca_path: None,
+      }],
     });
     let result1 = load_tls_config(
       cert_path.to_str().unwrap(),
@@ -2520,10 +2584,12 @@ key_path: "/path/to/key.pem"
     assert!(result1.is_ok());
 
     // Test TlsClientCert auth
-    let auth_config = Some(AuthConfig {
-      auth_type: AuthType::TlsClientCert,
-      users: None,
-      client_ca_path: Some(ca_path.to_str().unwrap().to_string()),
+    let auth_config = Some(MultiAuthConfig {
+      configs: vec![AuthConfig {
+        auth_type: AuthType::TlsClientCert,
+        users: None,
+        client_ca_path: Some(ca_path.to_str().unwrap().to_string()),
+      }],
     });
     let result2 = load_tls_config(
       cert_path.to_str().unwrap(),
@@ -2981,8 +3047,9 @@ key_path: "/path/to/key.pem"
       .uri("example.com:443")
       .body(())
       .unwrap();
+    let auth_context = AuthContext::default();
     assert!(
-      perform_authentication(&req, None, None).is_ok(),
+      perform_authentication(&req, None, None, &auth_context).is_ok(),
       "No auth should always pass"
     );
   }
@@ -3819,13 +3886,13 @@ key_path: "/path/to/key.pem"
 
   // ========== New Auth Module Integration Tests ==========
   // These tests verify HTTP/3 listener authentication behavior with the new auth module.
-  // The key change: perform_authentication and handle_password_auth now use crate::auth::AuthConfig
+  // The key change: perform_authentication and handle_password_auth now use crate::auth::MultiAuthConfig
 
   #[test]
   fn test_http3_perform_authentication_with_none_auth() {
-    // When AuthConfig is None (represented by Option<AuthConfig> = None),
+    // When MultiAuthConfig is None (represented by Option<MultiAuthConfig> = None),
     // authentication should pass without checking headers.
-    // This tests the listener's behavior, not just the AuthConfig struct.
+    // This tests the listener's behavior, not just the MultiAuthConfig struct.
 
     // Create a mock HTTP request without auth headers
     let req = http::Request::builder()
@@ -3834,14 +3901,17 @@ key_path: "/path/to/key.pem"
       .body(())
       .expect("build request");
 
+    // Create auth context
+    let auth_context = AuthContext::default();
+
     // With auth_config = None (no auth required), should succeed
-    let result = perform_authentication(&req, None, None);
+    let result = perform_authentication(&req, None, None, &auth_context);
     assert!(result.is_ok(), "No auth should pass without credentials");
   }
 
   #[test]
   fn test_http3_perform_authentication_with_password_missing_header() {
-    use crate::auth::{AuthConfig, AuthType, UserCredential};
+    use crate::auth::{AuthConfig, AuthType, MultiAuthConfig, UserCredential};
 
     // Create request without Proxy-Authorization header
     let req = http::Request::builder()
@@ -3850,22 +3920,27 @@ key_path: "/path/to/key.pem"
       .body(())
       .expect("build request");
 
-    // Create password AuthConfig
-    let auth_config = Some(AuthConfig {
-      auth_type: AuthType::Password,
-      users: Some(vec![UserCredential {
-        username: "admin".to_string(),
-        password: "secret".to_string(),
-      }]),
-      client_ca_path: None,
+    // Create password MultiAuthConfig
+    let auth_config = Some(MultiAuthConfig {
+      configs: vec![AuthConfig {
+        auth_type: AuthType::Password,
+        users: Some(vec![UserCredential {
+          username: "admin".to_string(),
+          password: "secret".to_string(),
+        }]),
+        client_ca_path: None,
+      }],
     });
 
     // Pre-compute credentials (as done in handle_h3_stream)
     let credentials = auth_config.as_ref().and_then(|c| c.users_map());
 
+    // Create auth context
+    let auth_context = AuthContext::default();
+
     // Should fail because no Proxy-Authorization header provided
     // This tests listener behavior: HTTP/3 requires Proxy-Authorization for password auth
-    let result = perform_authentication(&req, auth_config.as_ref(), credentials.as_ref());
+    let result = perform_authentication(&req, auth_config.as_ref(), credentials.as_ref(), &auth_context);
     assert!(
       result.is_err(),
       "Password auth should fail without header"
@@ -3875,7 +3950,7 @@ key_path: "/path/to/key.pem"
   #[test]
   fn test_http3_perform_authentication_with_password_valid_credentials()
   {
-    use crate::auth::{AuthConfig, AuthType, UserCredential};
+    use crate::auth::{AuthConfig, AuthType, MultiAuthConfig, UserCredential};
 
     // Create request with valid Proxy-Authorization header (Basic auth)
     let credentials = BASE64_STANDARD.encode("admin:secret");
@@ -3886,28 +3961,33 @@ key_path: "/path/to/key.pem"
       .body(())
       .expect("build request");
 
-    // Create password AuthConfig with matching credentials
-    let auth_config = Some(AuthConfig {
-      auth_type: AuthType::Password,
-      users: Some(vec![UserCredential {
-        username: "admin".to_string(),
-        password: "secret".to_string(),
-      }]),
-      client_ca_path: None,
+    // Create password MultiAuthConfig with matching credentials
+    let auth_config = Some(MultiAuthConfig {
+      configs: vec![AuthConfig {
+        auth_type: AuthType::Password,
+        users: Some(vec![UserCredential {
+          username: "admin".to_string(),
+          password: "secret".to_string(),
+        }]),
+        client_ca_path: None,
+      }],
     });
 
     // Pre-compute credentials (as done in handle_h3_stream)
     let creds_map = auth_config.as_ref().and_then(|c| c.users_map());
 
+    // Create auth context
+    let auth_context = AuthContext::default();
+
     // Should succeed with valid plaintext password
     // This tests that HTTP/3 listener uses PLAINTEXT comparison (not bcrypt)
-    let result = perform_authentication(&req, auth_config.as_ref(), creds_map.as_ref());
+    let result = perform_authentication(&req, auth_config.as_ref(), creds_map.as_ref(), &auth_context);
     assert!(result.is_ok(), "Valid credentials should pass");
   }
 
   #[test]
   fn test_http3_perform_authentication_with_password_wrong_password() {
-    use crate::auth::{AuthConfig, AuthType, UserCredential};
+    use crate::auth::{AuthConfig, AuthType, MultiAuthConfig, UserCredential};
 
     // Create request with WRONG password in Proxy-Authorization header
     let credentials = BASE64_STANDARD.encode("admin:wrongpassword");
@@ -3918,51 +3998,63 @@ key_path: "/path/to/key.pem"
       .body(())
       .expect("build request");
 
-    // Create password AuthConfig with DIFFERENT password
-    let auth_config = Some(AuthConfig {
-      auth_type: AuthType::Password,
-      users: Some(vec![UserCredential {
-        username: "admin".to_string(),
-        password: "secret".to_string(), // Different from request
-      }]),
-      client_ca_path: None,
+    // Create password MultiAuthConfig with DIFFERENT password
+    let auth_config = Some(MultiAuthConfig {
+      configs: vec![AuthConfig {
+        auth_type: AuthType::Password,
+        users: Some(vec![UserCredential {
+          username: "admin".to_string(),
+          password: "secret".to_string(), // Different from request
+        }]),
+        client_ca_path: None,
+      }],
     });
 
     // Pre-compute credentials (as done in handle_h3_stream)
     let creds_map = auth_config.as_ref().and_then(|c| c.users_map());
 
+    // Create auth context
+    let auth_context = AuthContext::default();
+
     // Should fail with wrong password
     // This tests listener's credential validation behavior
-    let result = perform_authentication(&req, auth_config.as_ref(), creds_map.as_ref());
+    let result = perform_authentication(&req, auth_config.as_ref(), creds_map.as_ref(), &auth_context);
     assert!(result.is_err(), "Wrong password should fail");
   }
 
   #[test]
   fn test_http3_perform_authentication_with_tls_client_cert() {
-    use crate::auth::{AuthConfig, AuthType};
+    use crate::auth::{AuthConfig, AuthType, MultiAuthConfig};
 
     // TLS client cert auth is handled at QUIC layer, not HTTP layer
-    // perform_authentication should pass for TLS cert type
+    // perform_authentication should pass for TLS cert type when cert is verified
     let req = http::Request::builder()
       .method("CONNECT")
       .uri("example.com:443")
       .body(())
       .expect("build request");
 
-    let auth_config = Some(AuthConfig {
-      auth_type: AuthType::TlsClientCert,
-      users: None,
-      client_ca_path: Some("/path/to/ca.pem".to_string()),
+    let auth_config = Some(MultiAuthConfig {
+      configs: vec![AuthConfig {
+        auth_type: AuthType::TlsClientCert,
+        users: None,
+        client_ca_path: Some("/path/to/ca.pem".to_string()),
+      }],
     });
 
     // Pre-compute credentials (as done in handle_h3_stream)
     let credentials = auth_config.as_ref().and_then(|c| c.users_map());
 
+    // Create auth context with TLS cert verified
+    let auth_context = AuthContext {
+      tls_client_cert_verified: true,
+    };
+
     // TLS cert auth bypasses HTTP-layer auth check
-    let result = perform_authentication(&req, auth_config.as_ref(), credentials.as_ref());
+    let result = perform_authentication(&req, auth_config.as_ref(), credentials.as_ref(), &auth_context);
     assert!(
       result.is_ok(),
-      "TLS client cert auth should pass at HTTP layer"
+      "TLS client cert auth should pass at HTTP layer when cert is verified"
     );
   }
 }

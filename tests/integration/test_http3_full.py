@@ -50,23 +50,6 @@ from .utils.http3_client import (
 )
 
 
-def check_http3_client_available() -> bool:
-    """
-    Check if HTTP/3 client tools are available.
-
-    Returns:
-        bool: True if aioquic is available
-    """
-    return AIOQUIC_AVAILABLE
-
-
-# Skip marker for tests requiring HTTP/3 client
-http3_client_required = pytest.mark.skipif(
-    not check_http3_client_available(),
-    reason="HTTP/3 client (aioquic) not available"
-)
-
-
 # ==============================================================================
 # Test cases - 7.1 Basic HTTP/3 Connection scenarios (Full)
 # ==============================================================================
@@ -82,9 +65,6 @@ class TestHTTP3FullConnection:
         Target: Verify QUIC handshake completes successfully when client
         connects to HTTP/3 listener using real HTTP/3 client.
         """
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
-
         temp_dir = tempfile.mkdtemp()
         proxy_port = 33000
         proxy_proc: Optional[subprocess.Popen] = None
@@ -125,9 +105,6 @@ class TestHTTP3FullConnection:
 
         Target: Verify HTTP/3 listener accepts CONNECT request and returns 200.
         """
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
-
         temp_dir = tempfile.mkdtemp()
         proxy_port = 33001
         target_port = 33002
@@ -206,9 +183,6 @@ class TestHTTP3FullConnection:
         data transfer must work: client sends data through QUIC stream, server
         forwards to TCP target, and responses are sent back through the stream.
         """
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
-
         temp_dir = tempfile.mkdtemp()
         proxy_port = 33003
         target_port = 33004
@@ -547,9 +521,6 @@ class TestHTTP3ErrorHandling:
         Target: Verify HTTP/3 listener returns 405 for non-CONNECT requests
         using real HTTP/3 client.
         """
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
-
         temp_dir = tempfile.mkdtemp()
         proxy_port = 33040
         proxy_proc: Optional[subprocess.Popen] = None
@@ -603,9 +574,6 @@ class TestHTTP3ErrorHandling:
 
         Target: Verify HTTP/3 listener returns 400 for invalid target.
         """
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
-
         temp_dir = tempfile.mkdtemp()
         proxy_port = 33041
         proxy_proc: Optional[subprocess.Popen] = None
@@ -664,9 +632,6 @@ class TestHTTP3ErrorHandling:
 
         Target: Verify HTTP/3 listener returns 502 when target is unreachable.
         """
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
-
         temp_dir = tempfile.mkdtemp()
         proxy_port = 33042
         proxy_proc: Optional[subprocess.Popen] = None
@@ -1253,9 +1218,6 @@ class TestHTTP3Performance:
         Target: Verify HTTP/3 listener can handle multiple concurrent connections.
         Uses aioquic to establish multiple HTTP/3 connections simultaneously.
         """
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
-
         temp_dir = tempfile.mkdtemp()
         proxy_port = 33080
         target_port = 33081
@@ -1344,9 +1306,6 @@ class TestHTTP3Performance:
         Target: Verify HTTP/3 connection establishment latency meets requirements.
         Per design doc: TLS 0-RTT connection latency should be < 50ms.
         """
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
-
         temp_dir = tempfile.mkdtemp()
         proxy_port = 33082
         proxy_proc: Optional[subprocess.Popen] = None
@@ -1406,9 +1365,6 @@ class TestHTTP3Performance:
         Target: Verify HTTP/3 data transfer throughput meets requirements.
         Per design doc: throughput should be >= 90% of network bandwidth.
         """
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
-
         temp_dir = tempfile.mkdtemp()
         proxy_port = 33083
         target_port = 33084

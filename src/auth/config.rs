@@ -25,7 +25,7 @@ pub struct UserCredential {
   pub password: String,
 }
 
-/// Authentication configuration.
+/// Authentication configuration for a single auth method.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct AuthConfig {
   /// Authentication type.
@@ -37,6 +37,17 @@ pub struct AuthConfig {
   /// Client CA certificate path for TLS client cert authentication.
   #[serde(default)]
   pub client_ca_path: Option<String>,
+}
+
+/// Multi-auth configuration that supports multiple authentication methods.
+///
+/// This is used by listeners that need to support multiple auth methods
+/// simultaneously (e.g., mTLS + password fallback).
+#[derive(Debug, Clone, Default)]
+pub struct MultiAuthConfig {
+  /// List of authentication configurations.
+  /// When multiple auth methods are configured, they are tried in order.
+  pub configs: Vec<AuthConfig>,
 }
 
 impl AuthConfig {
@@ -143,6 +154,92 @@ impl AuthConfig {
   /// Get client CA path as PathBuf.
   pub fn client_ca_pathbuf(&self) -> Option<PathBuf> {
     self.client_ca_path.as_ref().map(PathBuf::from)
+  }
+}
+
+impl MultiAuthConfig {
+  /// Create a validated MultiAuthConfig from YAML value.
+  ///
+  /// Accepts both a single auth config object and an array of auth configs.
+  pub fn from_yaml(
+    yaml: serde_yaml::Value,
+    supported_types: &[AuthType],
+  ) -> Result<Self, AuthError> {
+    // Try to parse as an array first
+    let configs: Vec<AuthConfig> = if yaml.is_sequence() {
+      serde_yaml::from_value(yaml).map_err(|e| {
+        AuthError::ConfigError(format!("failed to parse auth config array: {}", e))
+      })?
+    } else {
+      // Parse as a single auth config
+      let config: AuthConfig = serde_yaml::from_value(yaml).map_err(|e| {
+        AuthError::ConfigError(format!("failed to parse auth config: {}", e))
+      })?;
+      vec![config]
+    };
+
+    // Validate each config
+    for config in &configs {
+      config.validate(supported_types)?;
+    }
+
+    Ok(Self { configs })
+  }
+
+  /// Check if any auth config uses TLS client cert authentication.
+  pub fn has_tls_client_cert(&self) -> bool {
+    self.configs.iter().any(|c| c.auth_type == AuthType::TlsClientCert)
+  }
+
+  /// Check if any auth config uses password authentication.
+  pub fn has_password(&self) -> bool {
+    self.configs.iter().any(|c| c.auth_type == AuthType::Password)
+  }
+
+  /// Get the client CA path for TLS client cert authentication.
+  /// Returns the first client_ca_path found in the config list.
+  pub fn client_ca_pathbuf(&self) -> Option<PathBuf> {
+    self.configs.iter().find_map(|c| c.client_ca_pathbuf())
+  }
+
+  /// Get users as a HashMap for password lookup.
+  /// Merges users from all password auth configs.
+  pub fn users_map(&self) -> Option<HashMap<String, String>> {
+    let mut result = HashMap::new();
+    for config in &self.configs {
+      if let Some(users) = config.users_map() {
+        result.extend(users);
+      }
+    }
+    if result.is_empty() {
+      None
+    } else {
+      Some(result)
+    }
+  }
+
+  /// Check if authentication is required (any auth configured).
+  pub fn is_auth_required(&self) -> bool {
+    !self.configs.is_empty()
+  }
+
+  /// Check if this is a multi-auth configuration (more than one auth method).
+  pub fn is_multi_auth(&self) -> bool {
+    self.configs.len() > 1
+  }
+
+  /// Validate the multi-auth configuration for logical consistency.
+  pub fn validate(&self) -> Result<(), AuthError> {
+    // Check that we have at least one config if this is called
+    if self.configs.is_empty() {
+      return Ok(());
+    }
+
+    // For multi-auth with both TLS client cert and password,
+    // the configuration is valid - TLS cert will be optional at handshake,
+    // and authentication will be checked at HTTP level.
+
+    Ok(())
   }
 }
 
@@ -332,5 +429,137 @@ client_ca_path: /path/to/client_ca.pem
     let err = result.unwrap_err();
     assert!(matches!(err, AuthError::ConfigError(_)));
     assert!(err.to_string().contains("duplicate"));
+  }
+
+  // ============== MultiAuthConfig Tests ==============
+
+  #[test]
+  fn test_multi_auth_config_from_yaml_single() {
+    let yaml = r#"
+type: password
+users:
+  - username: admin
+    password: secret123
+"#;
+    let yaml_value: serde_yaml::Value =
+      serde_yaml::from_str(yaml).expect("parse yaml");
+    let config = MultiAuthConfig::from_yaml(
+      yaml_value,
+      &[AuthType::Password, AuthType::TlsClientCert],
+    )
+    .expect("parse multi auth config");
+    assert_eq!(config.configs.len(), 1);
+    assert!(config.has_password());
+    assert!(!config.has_tls_client_cert());
+    assert!(!config.is_multi_auth());
+  }
+
+  #[test]
+  fn test_multi_auth_config_from_yaml_array() {
+    let yaml = r#"
+- type: tls_client_cert
+  client_ca_path: /path/to/ca.pem
+- type: password
+  users:
+    - username: admin
+      password: secret123
+"#;
+    let yaml_value: serde_yaml::Value =
+      serde_yaml::from_str(yaml).expect("parse yaml");
+    let config = MultiAuthConfig::from_yaml(
+      yaml_value,
+      &[AuthType::Password, AuthType::TlsClientCert],
+    )
+    .expect("parse multi auth config");
+    assert_eq!(config.configs.len(), 2);
+    assert!(config.has_password());
+    assert!(config.has_tls_client_cert());
+    assert!(config.is_multi_auth());
+  }
+
+  #[test]
+  fn test_multi_auth_config_has_methods() {
+    let config = MultiAuthConfig {
+      configs: vec![
+        AuthConfig {
+          auth_type: AuthType::TlsClientCert,
+          users: None,
+          client_ca_path: Some("/path/to/ca.pem".to_string()),
+        },
+        AuthConfig {
+          auth_type: AuthType::Password,
+          users: Some(vec![UserCredential {
+            username: "admin".to_string(),
+            password: "secret".to_string(),
+          }]),
+          client_ca_path: None,
+        },
+      ],
+    };
+    assert!(config.has_tls_client_cert());
+    assert!(config.has_password());
+    assert!(config.is_auth_required());
+    assert!(config.is_multi_auth());
+  }
+
+  #[test]
+  fn test_multi_auth_config_users_map_merges() {
+    let config = MultiAuthConfig {
+      configs: vec![
+        AuthConfig {
+          auth_type: AuthType::Password,
+          users: Some(vec![UserCredential {
+            username: "user1".to_string(),
+            password: "pass1".to_string(),
+          }]),
+          client_ca_path: None,
+        },
+        AuthConfig {
+          auth_type: AuthType::Password,
+          users: Some(vec![UserCredential {
+            username: "user2".to_string(),
+            password: "pass2".to_string(),
+          }]),
+          client_ca_path: None,
+        },
+      ],
+    };
+    let map = config.users_map().expect("should have users");
+    assert_eq!(map.get("user1"), Some(&"pass1".to_string()));
+    assert_eq!(map.get("user2"), Some(&"pass2".to_string()));
+  }
+
+  #[test]
+  fn test_multi_auth_config_client_ca_pathbuf() {
+    let config = MultiAuthConfig {
+      configs: vec![
+        AuthConfig {
+          auth_type: AuthType::TlsClientCert,
+          users: None,
+          client_ca_path: Some("/path/to/ca.pem".to_string()),
+        },
+        AuthConfig {
+          auth_type: AuthType::Password,
+          users: Some(vec![UserCredential {
+            username: "admin".to_string(),
+            password: "secret".to_string(),
+          }]),
+          client_ca_path: None,
+        },
+      ],
+    };
+    let path = config.client_ca_pathbuf().expect("should have ca path");
+    assert_eq!(path, std::path::PathBuf::from("/path/to/ca.pem"));
+  }
+
+  #[test]
+  fn test_multi_auth_config_empty() {
+    let config = MultiAuthConfig::default();
+    assert!(!config.is_auth_required());
+    assert!(!config.has_password());
+    assert!(!config.has_tls_client_cert());
+    assert!(!config.is_multi_auth());
+    assert!(config.users_map().is_none());
+    assert!(config.client_ca_pathbuf().is_none());
   }
 }

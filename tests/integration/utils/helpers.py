@@ -19,7 +19,7 @@ from typing import Optional, Tuple, List, Callable, Generator
 # Constants
 # ==============================================================================
 
-NEOPROXY_BINARY = "target/debug/neoproxy"
+NEOPROXY_BINARY = "target/release/neoproxy"
 
 
 # ==============================================================================
@@ -579,3 +579,24 @@ def http_echo_handler(conn: socket.socket) -> None:
         pass
     finally:
         conn.close()
+
+
+# ==============================================================================
+# Environment Helpers
+# ==============================================================================
+
+
+def get_curl_env_without_no_proxy() -> dict:
+    """
+    Get a copy of the environment with no_proxy cleared for curl.
+
+    This is needed to force curl to use the proxy for localhost addresses,
+    which are normally excluded by no_proxy environment variables.
+
+    Returns:
+        dict: Environment dict with no_proxy and NO_PROXY cleared
+    """
+    env = os.environ.copy()
+    env["no_proxy"] = ""
+    env["NO_PROXY"] = ""
+    return env

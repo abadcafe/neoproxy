@@ -4,13 +4,18 @@ mod config;
 mod error;
 mod password;
 mod tls_cert;
+mod transport;
+mod application;
 
 #[allow(unused_imports)]
 pub use config::UserCredential;
 pub use config::{AuthConfig, AuthType, MultiAuthConfig};
 pub use error::AuthError;
 pub use password::verify_password;
+#[allow(unused_imports)]
 pub use tls_cert::TlsClientCertVerifier;
+pub use transport::TransportAuth;
+pub use application::ApplicationAuth;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use http::HeaderValue;

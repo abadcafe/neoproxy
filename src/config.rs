@@ -923,9 +923,9 @@ mod tests {
 
   fn ensure_crypto_provider() {
     CRYPTO_PROVIDER_INIT.call_once(|| {
-      rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install rustls crypto provider");
+      // Ignore error if provider is already installed by another test module
+      let _ =
+        rustls::crypto::ring::default_provider().install_default();
     });
   }
 

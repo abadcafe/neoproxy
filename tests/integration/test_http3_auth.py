@@ -30,6 +30,7 @@ from .utils.helpers import (
     wait_for_proxy,
     create_target_server,
     terminate_process,
+    echo_handler,
 )
 
 from .test_http3_listener import (
@@ -186,8 +187,9 @@ def create_http3_listener_config_with_mtls_and_password(
     """
     Create HTTP/3 Listener configuration with BOTH TLS client cert AND password auth.
 
-    This is used for testing fallback scenarios where mTLS fails but password succeeds,
-    or vice versa. The listener accepts connections from either auth method.
+    This is used for testing dual-auth scenarios where BOTH mTLS and password
+    must succeed. Transport layer (TLS client cert) is verified first,
+    then application layer (password). Both must pass.
 
     Args:
         proxy_port: Port for the HTTP/3 listener
@@ -864,6 +866,401 @@ servers:
             assert not success, \
                 f"SECURITY VIOLATION: Connection without client cert should be rejected. " \
                 f"Server accepted connection without required client certificate. Message: {message}"
+
+        finally:
+            if proxy_proc:
+                proxy_proc.send_signal(signal.SIGTERM)
+                proxy_proc.wait(timeout=10)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+# ==============================================================================
+# Test cases - 7.3 Dual Authentication (TLS client cert AND password)
+# ==============================================================================
+
+
+class TestHTTP3DualAuth:
+    """Test dual authentication: TLS client cert AND password (AND logic).
+
+    When both tls_client_cert and password auth are configured,
+    BOTH must pass. Transport layer (cert) is checked first,
+    then application layer (password).
+    """
+
+    def test_dual_auth_valid_cert_valid_password_accepted(self) -> None:
+        """
+        TC-H3-DUAL-001: Both valid cert and valid password -> accepted.
+
+        Target: When both auth methods configured, client with valid cert
+        AND valid password should get 200.
+        """
+        temp_dir = tempfile.mkdtemp()
+        proxy_port = 31030
+        target_port = 31031
+        proxy_proc: Optional[subprocess.Popen] = None
+        target_socket: Optional[socket.socket] = None
+
+        try:
+            cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
+            client_cert_path, client_key_path = generate_client_certificate(
+                temp_dir, ca_path, ca_key_path
+            )
+
+            password = "dual_auth_pass"
+            config_path = create_http3_listener_config_with_mtls_and_password(
+                proxy_port=proxy_port,
+                cert_path=cert_path,
+                key_path=key_path,
+                client_ca_path=ca_path,
+                temp_dir=temp_dir,
+                users=[("dualuser", password)],
+            )
+
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, echo_handler
+            )
+            time.sleep(0.5)
+
+            proxy_proc = start_proxy(config_path)
+            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+                "HTTP/3 listener failed to start"
+
+            # Use H3Client with client cert AND password
+            async def do_dual_auth():
+                client = H3Client(
+                    "127.0.0.1", proxy_port,
+                    ca_path=ca_path,
+                    cert_path=client_cert_path,
+                    key_path=client_key_path,
+                )
+                connected = await client.connect()
+                if not connected:
+                    return False, 0
+                try:
+                    resp = await client.send_connect_request(
+                        "127.0.0.1", target_port,
+                        username="dualuser",
+                        password=password,
+                    )
+                    return True, resp.status_code
+                finally:
+                    await client.close()
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                connected, status_code = loop.run_until_complete(do_dual_auth())
+            finally:
+                loop.close()
+
+            assert connected, "Should connect with valid client cert"
+            assert status_code == 200, \
+                f"Expected 200 with valid cert + valid password, got {status_code}"
+
+        finally:
+            if proxy_proc:
+                proxy_proc.send_signal(signal.SIGTERM)
+                proxy_proc.wait(timeout=10)
+            if target_socket:
+                target_socket.close()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_dual_auth_no_cert_with_password_rejected(self) -> None:
+        """
+        TC-H3-DUAL-002: No client cert but valid password -> rejected at transport.
+
+        Target: When both auth methods configured, client WITHOUT cert
+        should be rejected at TLS level (connection fails), even if
+        password would be valid. This is the key AND-logic test.
+        """
+        temp_dir = tempfile.mkdtemp()
+        proxy_port = 31032
+        target_port = 31033
+        proxy_proc: Optional[subprocess.Popen] = None
+        target_socket: Optional[socket.socket] = None
+
+        try:
+            cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
+
+            password = "dual_auth_pass"
+            config_path = create_http3_listener_config_with_mtls_and_password(
+                proxy_port=proxy_port,
+                cert_path=cert_path,
+                key_path=key_path,
+                client_ca_path=ca_path,
+                temp_dir=temp_dir,
+                users=[("dualuser", password)],
+            )
+
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, echo_handler
+            )
+            time.sleep(0.5)
+
+            proxy_proc = start_proxy(config_path)
+            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+                "HTTP/3 listener failed to start"
+
+            # Connect WITHOUT client cert - should fail at transport layer
+            async def do_no_cert_connect():
+                success, status_code, message = await perform_h3_connect_test(
+                    "127.0.0.1", proxy_port,
+                    "127.0.0.1", target_port,
+                    ca_path=ca_path,
+                    username="dualuser",
+                    password=password,
+                    timeout=15.0,
+                )
+                return success, status_code, message
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                success, status_code, message = loop.run_until_complete(do_no_cert_connect())
+            finally:
+                loop.close()
+
+            # CRITICAL: With AND logic, missing cert = transport failure = connection rejected
+            # The client should NOT be able to fall back to password auth
+            assert not success, \
+                f"SECURITY: No cert should be rejected at transport layer even with valid password. " \
+                f"Got success={success}, status={status_code}, msg={message}"
+
+        finally:
+            if proxy_proc:
+                proxy_proc.send_signal(signal.SIGTERM)
+                proxy_proc.wait(timeout=10)
+            if target_socket:
+                target_socket.close()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_dual_auth_valid_cert_wrong_password_returns_407(self) -> None:
+        """
+        TC-H3-DUAL-003: Valid cert but wrong password -> 407.
+
+        Target: When both auth methods configured, client with valid cert
+        passes transport layer, but wrong password fails application layer
+        and gets 407.
+        """
+        temp_dir = tempfile.mkdtemp()
+        proxy_port = 31034
+        target_port = 31035
+        proxy_proc: Optional[subprocess.Popen] = None
+        target_socket: Optional[socket.socket] = None
+
+        try:
+            cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
+            client_cert_path, client_key_path = generate_client_certificate(
+                temp_dir, ca_path, ca_key_path
+            )
+
+            config_path = create_http3_listener_config_with_mtls_and_password(
+                proxy_port=proxy_port,
+                cert_path=cert_path,
+                key_path=key_path,
+                client_ca_path=ca_path,
+                temp_dir=temp_dir,
+                users=[("dualuser", "correct_password")],
+            )
+
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, echo_handler
+            )
+            time.sleep(0.5)
+
+            proxy_proc = start_proxy(config_path)
+            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+                "HTTP/3 listener failed to start"
+
+            # Use H3Client with valid client cert but WRONG password
+            async def do_wrong_password():
+                client = H3Client(
+                    "127.0.0.1", proxy_port,
+                    ca_path=ca_path,
+                    cert_path=client_cert_path,
+                    key_path=client_key_path,
+                )
+                connected = await client.connect()
+                if not connected:
+                    return False, 0
+                try:
+                    resp = await client.send_connect_request(
+                        "127.0.0.1", target_port,
+                        username="dualuser",
+                        password="wrong_password",
+                    )
+                    return True, resp.status_code
+                finally:
+                    await client.close()
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                connected, status_code = loop.run_until_complete(do_wrong_password())
+            finally:
+                loop.close()
+
+            assert connected, "Should connect with valid client cert (transport passes)"
+            assert status_code == 407, \
+                f"Expected 407 for valid cert + wrong password, got {status_code}"
+
+        finally:
+            if proxy_proc:
+                proxy_proc.send_signal(signal.SIGTERM)
+                proxy_proc.wait(timeout=10)
+            if target_socket:
+                target_socket.close()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_dual_auth_valid_cert_no_password_returns_407(self) -> None:
+        """
+        TC-H3-DUAL-004: Valid cert but no password header -> 407.
+
+        Target: When both auth methods configured, client with valid cert
+        passes transport layer, but missing Proxy-Authorization header
+        fails application layer and gets 407.
+        """
+        temp_dir = tempfile.mkdtemp()
+        proxy_port = 31036
+        target_port = 31037
+        proxy_proc: Optional[subprocess.Popen] = None
+        target_socket: Optional[socket.socket] = None
+
+        try:
+            cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
+            client_cert_path, client_key_path = generate_client_certificate(
+                temp_dir, ca_path, ca_key_path
+            )
+
+            config_path = create_http3_listener_config_with_mtls_and_password(
+                proxy_port=proxy_port,
+                cert_path=cert_path,
+                key_path=key_path,
+                client_ca_path=ca_path,
+                temp_dir=temp_dir,
+                users=[("dualuser", "some_password")],
+            )
+
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, echo_handler
+            )
+            time.sleep(0.5)
+
+            proxy_proc = start_proxy(config_path)
+            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+                "HTTP/3 listener failed to start"
+
+            # Use H3Client with valid client cert but NO password
+            async def do_no_password():
+                client = H3Client(
+                    "127.0.0.1", proxy_port,
+                    ca_path=ca_path,
+                    cert_path=client_cert_path,
+                    key_path=client_key_path,
+                )
+                connected = await client.connect()
+                if not connected:
+                    return False, 0
+                try:
+                    # Send CONNECT without username/password
+                    resp = await client.send_connect_request(
+                        "127.0.0.1", target_port,
+                    )
+                    return True, resp.status_code
+                finally:
+                    await client.close()
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                connected, status_code = loop.run_until_complete(do_no_password())
+            finally:
+                loop.close()
+
+            assert connected, "Should connect with valid client cert (transport passes)"
+            assert status_code == 407, \
+                f"Expected 407 for valid cert + no password, got {status_code}"
+
+        finally:
+            if proxy_proc:
+                proxy_proc.send_signal(signal.SIGTERM)
+                proxy_proc.wait(timeout=10)
+            if target_socket:
+                target_socket.close()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_dual_auth_invalid_cert_rejected_at_transport(self) -> None:
+        """
+        TC-H3-DUAL-005: Invalid cert -> rejected at transport (no password fallback).
+
+        Target: When both auth methods configured, client with invalid cert
+        (signed by wrong CA) should be rejected at TLS level. No fallback
+        to password auth.
+        """
+        temp_dir = tempfile.mkdtemp()
+        proxy_port = 31038
+        proxy_proc: Optional[subprocess.Popen] = None
+
+        try:
+            cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
+
+            # Generate a DIFFERENT CA and client cert (not trusted by server)
+            other_ca_key_path = os.path.join(temp_dir, "other_ca.key")
+            other_ca_cert_path = os.path.join(temp_dir, "other_ca.crt")
+            subprocess.run(
+                ["openssl", "genrsa", "-out", other_ca_key_path, "2048"],
+                check=True, capture_output=True
+            )
+            subprocess.run(
+                [
+                    "openssl", "req", "-new", "-x509",
+                    "-key", other_ca_key_path,
+                    "-out", other_ca_cert_path,
+                    "-days", "1",
+                    "-subj", "/CN=OtherCA"
+                ],
+                check=True, capture_output=True
+            )
+            invalid_cert_path, invalid_key_path = generate_client_certificate(
+                temp_dir, other_ca_cert_path, other_ca_key_path
+            )
+
+            config_path = create_http3_listener_config_with_mtls_and_password(
+                proxy_port=proxy_port,
+                cert_path=cert_path,
+                key_path=key_path,
+                client_ca_path=ca_path,
+                temp_dir=temp_dir,
+                users=[("dualuser", "valid_password")],
+            )
+
+            proxy_proc = start_proxy(config_path)
+            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+                "HTTP/3 listener failed to start"
+
+            # Connect with INVALID cert - should fail at transport
+            async def do_invalid_cert():
+                success, message = await perform_h3_tls_client_cert_test(
+                    "127.0.0.1", proxy_port,
+                    ca_path=ca_path,
+                    client_cert_path=invalid_cert_path,
+                    client_key_path=invalid_key_path,
+                    timeout=15.0,
+                )
+                return success, message
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                success, message = loop.run_until_complete(do_invalid_cert())
+            finally:
+                loop.close()
+
+            # CRITICAL: With AND logic, invalid cert = transport failure
+            # No fallback to password auth allowed
+            assert not success, \
+                f"SECURITY: Invalid cert should be rejected at transport layer " \
+                f"even in dual-auth mode. No password fallback. Message: {message}"
 
         finally:
             if proxy_proc:

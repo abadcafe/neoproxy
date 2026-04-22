@@ -41,12 +41,14 @@ pub struct AuthConfig {
 
 /// Multi-auth configuration that supports multiple authentication methods.
 ///
-/// This is used by listeners that need to support multiple auth methods
-/// simultaneously (e.g., mTLS + password fallback).
+/// When multiple auth methods are configured, they form independent layers:
+/// - Transport layer (TLS client cert): verified at TLS handshake
+/// - Application layer (password): verified at HTTP request level
+/// Both layers must pass when both are configured (AND logic).
 #[derive(Debug, Clone, Default)]
 pub struct MultiAuthConfig {
   /// List of authentication configurations.
-  /// When multiple auth methods are configured, they are tried in order.
+  /// When multiple auth methods are configured, each layer is independently required.
   pub configs: Vec<AuthConfig>,
 }
 
@@ -192,6 +194,7 @@ impl MultiAuthConfig {
   }
 
   /// Check if any auth config uses password authentication.
+  #[allow(dead_code)]
   pub fn has_password(&self) -> bool {
     self.configs.iter().any(|c| c.auth_type == AuthType::Password)
   }
@@ -219,27 +222,9 @@ impl MultiAuthConfig {
   }
 
   /// Check if authentication is required (any auth configured).
+  #[allow(dead_code)]
   pub fn is_auth_required(&self) -> bool {
     !self.configs.is_empty()
-  }
-
-  /// Check if this is a multi-auth configuration (more than one auth method).
-  pub fn is_multi_auth(&self) -> bool {
-    self.configs.len() > 1
-  }
-
-  /// Validate the multi-auth configuration for logical consistency.
-  pub fn validate(&self) -> Result<(), AuthError> {
-    // Check that we have at least one config if this is called
-    if self.configs.is_empty() {
-      return Ok(());
-    }
-
-    // For multi-auth with both TLS client cert and password,
-    // the configuration is valid - TLS cert will be optional at handshake,
-    // and authentication will be checked at HTTP level.
-
-    Ok(())
   }
 }
 
@@ -451,7 +436,6 @@ users:
     assert_eq!(config.configs.len(), 1);
     assert!(config.has_password());
     assert!(!config.has_tls_client_cert());
-    assert!(!config.is_multi_auth());
   }
 
   #[test]
@@ -474,7 +458,6 @@ users:
     assert_eq!(config.configs.len(), 2);
     assert!(config.has_password());
     assert!(config.has_tls_client_cert());
-    assert!(config.is_multi_auth());
   }
 
   #[test]
@@ -499,7 +482,6 @@ users:
     assert!(config.has_tls_client_cert());
     assert!(config.has_password());
     assert!(config.is_auth_required());
-    assert!(config.is_multi_auth());
   }
 
   #[test]
@@ -558,7 +540,6 @@ users:
     assert!(!config.is_auth_required());
     assert!(!config.has_password());
     assert!(!config.has_tls_client_cert());
-    assert!(!config.is_multi_auth());
     assert!(config.users_map().is_none());
     assert!(config.client_ca_pathbuf().is_none());
   }

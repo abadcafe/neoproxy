@@ -1,6 +1,5 @@
 #![allow(clippy::await_holding_refcell_ref)]
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::fs;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -20,7 +19,7 @@ use tokio::net;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
-use crate::auth::{AuthType, TlsClientCertVerifier, parse_basic_auth, verify_password};
+use crate::auth::AuthType;
 use crate::plugin;
 
 // ============================================================================
@@ -395,59 +394,17 @@ fn validate_target_address(req: &http::Request<()>) -> Result<String> {
   Ok(authority.to_string())
 }
 
-/// Handle password authentication for HTTP proxy
-///
-/// Returns Ok(()) if authentication succeeds, Err with error message otherwise.
-fn handle_password_auth(
-  req: &http::Request<()>,
-  credentials: &HashMap<String, String>,
-) -> Result<()> {
-  let auth_header = req
-    .headers()
-    .get(http::header::PROXY_AUTHORIZATION)
-    .ok_or_else(|| anyhow!("Proxy Authentication Required"))?;
-
-  let (username, password) = parse_basic_auth(&auth_header)?;
-
-  // Use plaintext password verification from auth module
-  verify_password(credentials, &username, &password).map_err(|_| {
-    anyhow!("Proxy Authentication Required - invalid credentials")
-  })?;
-
-  Ok(())
-}
-
-/// Perform HTTP authentication based on config
+/// Perform application-layer authentication
 ///
 /// Returns Ok(()) if authentication succeeds or no auth needed,
 /// Err with error message otherwise.
-fn perform_authentication(
+fn perform_application_auth(
   req: &http::Request<()>,
-  auth_config: Option<&crate::auth::MultiAuthConfig>,
-  credentials: Option<&std::collections::HashMap<String, String>>,
-  auth_context: &AuthContext,
+  application_auth: &crate::auth::ApplicationAuth,
 ) -> Result<()> {
-  match auth_config {
-    None => Ok(()), // No auth configured
-    Some(config) => {
-      // Check if already authenticated via TLS client cert
-      if auth_context.tls_client_cert_verified && config.has_tls_client_cert() {
-        // Client already authenticated via TLS client cert
-        return Ok(());
-      }
-
-      // Not authenticated via TLS cert, check password if available
-      if config.has_password() {
-        let users = credentials.ok_or_else(|| {
-          anyhow!("password auth configured but no users")
-        })?;
-        return handle_password_auth(req, users);
-      }
-
-      // No authentication method available
-      Err(anyhow!("No valid authentication method available"))
-    }
-  }
+  application_auth.verify(req).map_err(|e| {
+    anyhow!("Proxy Authentication Required - {}", e)
+  })
 }
 
 /// Connect to target server
@@ -481,17 +438,15 @@ enum ValidationError {
 /// Returns Ok(target_address) if validation passes, Err otherwise.
 fn validate_connect_request(
   req: &http::Request<()>,
-  auth_config: Option<&crate::auth::MultiAuthConfig>,
-  credentials: Option<&std::collections::HashMap<String, String>>,
-  auth_context: &AuthContext,
+  application_auth: &crate::auth::ApplicationAuth,
 ) -> std::result::Result<String, ValidationError> {
   // Step 1: Validate CONNECT method
   if let Err(e) = validate_connect_method(req) {
     return Err(ValidationError::MethodNotAllowed(e.to_string()));
   }
 
-  // Step 2: Perform authentication
-  if let Err(e) = perform_authentication(req, auth_config, credentials, auth_context) {
+  // Step 2: Perform application-layer authentication
+  if let Err(e) = perform_application_auth(req, application_auth) {
     return Err(ValidationError::Unauthorized(e.to_string()));
   }
 
@@ -626,8 +581,7 @@ async fn handle_h3_stream<S>(
   req: http::Request<()>,
   mut stream: server::RequestStream<S, Bytes>,
   _service: plugin::Service,
-  auth_config: Option<crate::auth::MultiAuthConfig>,
-  auth_context: AuthContext,
+  application_auth: crate::auth::ApplicationAuth,
   shutdown_handle: plugin::ShutdownHandle,
 ) where
   S: h3::quic::BidiStream<Bytes> + Send + 'static,
@@ -635,10 +589,8 @@ async fn handle_h3_stream<S>(
   <S as h3::quic::BidiStream<Bytes>>::RecvStream: Send,
 {
   // Phase 1: Validate request
-  // Pre-compute credentials map once per stream to avoid per-request allocation
-  let credentials = auth_config.as_ref().and_then(|c| c.users_map());
   let target_addr =
-    match validate_connect_request(&req, auth_config.as_ref(), credentials.as_ref(), &auth_context) {
+    match validate_connect_request(&req, &application_auth) {
       Ok(addr) => addr,
       Err(e) => {
         handle_validation_error(&mut stream, e).await;
@@ -736,117 +688,14 @@ where
 // HTTP/3 Connection Handler
 // ============================================================================
 
-/// Result of TLS client certificate verification
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TlsClientCertVerifyResult {
-  /// Certificate is present and valid
-  Valid,
-  /// No certificate was presented
-  Missing,
-  /// Certificate downcast failed (unexpected type)
-  InvalidType,
-}
-
-/// Verify TLS client certificate for TlsClientCert authentication
-///
-/// This function checks if the peer identity (client certificate) is present
-/// and can be properly downcast to the expected certificate type.
-///
-/// # Arguments
-/// * `peer_identity` - Optional peer identity from `conn.peer_identity()`
-///
-/// # Returns
-/// * `Valid` if certificate is present and properly typed
-/// * `Missing` if no certificate was presented
-/// * `InvalidType` if certificate is present but has unexpected type
-pub fn verify_tls_client_cert(
-  peer_identity: Option<Box<dyn std::any::Any>>,
-) -> TlsClientCertVerifyResult {
-  match peer_identity {
-    Some(certificates) => {
-      // Verify the downcast to Vec<CertificateDer> succeeds
-      // The peer_identity returns Box<dyn Any>, and for rustls backend
-      // it should be downcastable to Vec<CertificateDer>
-      if certificates
-        .downcast::<Vec<CertificateDer<'static>>>()
-        .is_err()
-      {
-        TlsClientCertVerifyResult::InvalidType
-      } else {
-        TlsClientCertVerifyResult::Valid
-      }
-    }
-    None => TlsClientCertVerifyResult::Missing,
-  }
-}
-
-/// Authentication context passed from connection level to stream level.
-///
-/// This struct tracks whether the client has already authenticated via
-/// TLS client certificate, which is needed for multi-auth scenarios.
-#[derive(Clone, Default)]
-struct AuthContext {
-  /// Whether the client presented a valid TLS client certificate.
-  tls_client_cert_verified: bool,
-}
-
 /// Handle a single HTTP/3 connection
 async fn handle_h3_connection(
   conn: quinn::Connection,
   service: plugin::Service,
-  auth_config: Option<crate::auth::MultiAuthConfig>,
+  application_auth: crate::auth::ApplicationAuth,
   stream_tracker: Rc<StreamTracker>,
   shutdown_handle: plugin::ShutdownHandle,
 ) {
-  // Security check: Verify client certificate for TlsClientCert authentication
-  // For multi-auth (TLS client cert + password), client cert is OPTIONAL
-  // - If client presents valid cert, they are authenticated
-  // - If client presents no/invalid cert, they can still authenticate via password
-  let has_tls_client_cert =
-    auth_config.as_ref().is_some_and(|c| c.has_tls_client_cert());
-  let is_multi_auth =
-    auth_config.as_ref().is_some_and(|c| c.is_multi_auth());
-  let mut auth_context = AuthContext::default();
-
-  if has_tls_client_cert {
-    let verify_result = verify_tls_client_cert(conn.peer_identity());
-    match verify_result {
-      TlsClientCertVerifyResult::Valid => {
-        // Client certificate is present and valid
-        info!("TLS client certificate verified successfully");
-        auth_context.tls_client_cert_verified = true;
-      }
-      TlsClientCertVerifyResult::Missing => {
-        // For multi-auth, missing cert is OK - password auth can be used
-        // For single TLS client cert auth, missing cert is a failure
-        if !is_multi_auth {
-          warn!(
-            "No client certificate presented - closing connection for security"
-          );
-          // Close with H3_NO_ERROR code for graceful shutdown
-          conn.close(
-            quinn::VarInt::from_u32(H3_NO_ERROR_CODE),
-            b"client certificate required",
-          );
-          return;
-        }
-        info!("No client certificate presented, will check password auth");
-      }
-      TlsClientCertVerifyResult::InvalidType => {
-        warn!(
-          "Failed to downcast peer certificate - closing connection for \
-           security"
-        );
-        // Close with H3_NO_ERROR code for graceful shutdown
-        conn.close(
-          quinn::VarInt::from_u32(H3_NO_ERROR_CODE),
-          b"invalid client certificate",
-        );
-        return;
-      }
-    }
-  }
-
   // Create H3 connection
   let mut h3_conn = match h3::server::builder()
     .build(h3_quinn::Connection::new(conn))
@@ -872,8 +721,7 @@ async fn handle_h3_connection(
     match accept_result {
       Ok(Some(resolver)) => {
         let service = service.clone();
-        let auth_config = auth_config.clone();
-        let auth_context = auth_context.clone();
+        let application_auth = application_auth.clone();
         let stream_shutdown = stream_tracker.shutdown_handle();
         stream_tracker.register(async move {
           match resolver.resolve_request().await {
@@ -882,8 +730,7 @@ async fn handle_h3_connection(
                 req,
                 stream,
                 service,
-                auth_config,
-                auth_context,
+                application_auth,
                 stream_shutdown,
               )
               .await;
@@ -949,7 +796,7 @@ fn verify_key_file_permissions(key_path: &str) -> Result<()> {
 fn load_tls_config(
   cert_path: &str,
   key_path: &str,
-  auth_config: Option<&crate::auth::MultiAuthConfig>,
+  transport_auth: &crate::auth::TransportAuth,
 ) -> Result<Arc<rustls::ServerConfig>> {
   // Verify private key file permissions before loading
   verify_key_file_permissions(key_path)?;
@@ -972,65 +819,23 @@ fn load_tls_config(
   let key = rustls_pemfile::private_key(&mut key_reader)?
     .ok_or_else(|| anyhow!("No private key found in {}", key_path))?;
 
-  // Build TLS config based on auth configuration
-  let tls_config = match auth_config {
+  // Build TLS config based on transport auth
+  let tls_config = match transport_auth.rustls_verifier() {
+    Some(verifier) => {
+      // TLS client cert auth configured - client cert is REQUIRED
+      let mut config = rustls::ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(certs, key)?;
+      config.alpn_protocols = vec![ALPN.to_vec()];
+      config
+    }
     None => {
-      // No auth - no client cert verification
+      // No TLS client cert auth - no client cert verification
       let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
       config.alpn_protocols = vec![ALPN.to_vec()];
       config
-    }
-    Some(config) => {
-      let has_tls_client_cert = config.has_tls_client_cert();
-      let has_password = config.has_password();
-      let is_multi_auth = config.is_multi_auth();
-
-      if has_tls_client_cert && has_password && is_multi_auth {
-        // Multi-auth (TLS client cert + password):
-        // Use optional client cert verification - client cert is NOT required
-        // If client presents valid cert, they are authenticated at TLS level
-        // If client doesn't present cert, they can authenticate via password
-        let client_ca_path =
-          config.client_ca_pathbuf().ok_or_else(|| {
-            anyhow!(
-              "client_ca_path required for tls_client_cert auth"
-            )
-          })?;
-
-        // Use TlsClientCertVerifier with OPTIONAL verification for multi-auth
-        let verifier =
-          TlsClientCertVerifier::optional_from_ca_path(&client_ca_path)?;
-        let mut tls_config = rustls::ServerConfig::builder()
-          .with_client_cert_verifier(verifier.verifier())
-          .with_single_cert(certs, key)?;
-        tls_config.alpn_protocols = vec![ALPN.to_vec()];
-        tls_config
-      } else if has_tls_client_cert {
-        // TLS client cert only - client cert is REQUIRED
-        let client_ca_path =
-          config.client_ca_pathbuf().ok_or_else(|| {
-            anyhow!(
-              "client_ca_path required for tls_client_cert auth"
-            )
-          })?;
-
-        let verifier =
-          TlsClientCertVerifier::from_ca_path(&client_ca_path)?;
-        let mut tls_config = rustls::ServerConfig::builder()
-          .with_client_cert_verifier(verifier.verifier())
-          .with_single_cert(certs, key)?;
-        tls_config.alpn_protocols = vec![ALPN.to_vec()];
-        tls_config
-      } else {
-        // Password only or other - no client cert verification
-        let mut tls_config = rustls::ServerConfig::builder()
-          .with_no_client_auth()
-          .with_single_cert(certs, key)?;
-        tls_config.alpn_protocols = vec![ALPN.to_vec()];
-        tls_config
-      }
     }
   };
 
@@ -1049,8 +854,8 @@ pub struct Http3Listener {
   tls_config: Arc<rustls::ServerConfig>,
   /// QUIC configuration
   quic_config: QuicConfig,
-  /// Authentication configuration (None = no auth required)
-  auth_config: Option<crate::auth::MultiAuthConfig>,
+  /// Application-layer authentication (password)
+  application_auth: crate::auth::ApplicationAuth,
   /// Stream tracker
   stream_tracker: Rc<StreamTracker>,
   /// Shutdown handle
@@ -1081,7 +886,7 @@ impl Http3Listener {
     };
 
     // Parse authentication config (supports both single and multi-auth)
-    let auth_config: Option<crate::auth::MultiAuthConfig> = args
+    let multi_auth_config: Option<crate::auth::MultiAuthConfig> = args
       .auth
       .map(|a| {
         crate::auth::MultiAuthConfig::from_yaml(
@@ -1092,18 +897,29 @@ impl Http3Listener {
       .transpose()
       .map_err(|e| anyhow!("auth config validation failed: {}", e))?;
 
+    // Build transport auth (TLS client cert) and application auth (password)
+    let transport_auth = match &multi_auth_config {
+      Some(config) => crate::auth::TransportAuth::from_config_load(config)
+        .map_err(|e| anyhow!("transport auth setup failed: {}", e))?,
+      None => crate::auth::TransportAuth::none(),
+    };
+    let application_auth = match &multi_auth_config {
+      Some(config) => crate::auth::ApplicationAuth::from_config(config),
+      None => crate::auth::ApplicationAuth::none(),
+    };
+
     // Load TLS config
     let tls_config = load_tls_config(
       &args.cert_path,
       &args.key_path,
-      auth_config.as_ref(),
+      &transport_auth,
     )?;
 
     Ok(plugin::Listener::new(Self {
       address,
       tls_config,
       quic_config,
-      auth_config,
+      application_auth,
       stream_tracker: Rc::new(StreamTracker::new()),
       shutdown_handle: plugin::ShutdownHandle::new(),
       service: svc,
@@ -1116,7 +932,7 @@ impl plugin::Listening for Http3Listener {
     let address = self.address;
     let tls_config = self.tls_config.clone();
     let quic_config = self.quic_config.clone();
-    let auth_config = self.auth_config.clone();
+    let application_auth = self.application_auth.clone();
     let stream_tracker = self.stream_tracker.clone();
     let shutdown_handle = self.shutdown_handle.clone();
     let service = self.service.clone();
@@ -1187,7 +1003,7 @@ impl plugin::Listening for Http3Listener {
         match accept_result {
           Some(conn) => {
             let service = service.clone();
-            let auth_config = auth_config.clone();
+            let application_auth_for_conn = application_auth.clone();
             let tracker_for_register = stream_tracker.clone();
             let tracker_for_handler = stream_tracker.clone();
             let stream_shutdown = tracker_for_handler.shutdown_handle();
@@ -1198,7 +1014,7 @@ impl plugin::Listening for Http3Listener {
                   handle_h3_connection(
                     quinn_conn,
                     service,
-                    auth_config,
+                    application_auth_for_conn,
                     tracker_for_handler,
                     stream_shutdown,
                   )
@@ -1739,7 +1555,7 @@ type: invalid_type
     let header_value =
       http::HeaderValue::from_str("Basic dXNlcjpwYXNzd29yZA==")
         .unwrap();
-    let (username, password) = parse_basic_auth(&header_value).unwrap();
+    let (username, password) = crate::auth::parse_basic_auth(&header_value).unwrap();
     assert_eq!(username, "user");
     assert_eq!(password, "password");
   }
@@ -1748,7 +1564,7 @@ type: invalid_type
   fn test_parse_basic_auth_not_basic() {
     let header_value =
       http::HeaderValue::from_str("Bearer token123").unwrap();
-    let result = parse_basic_auth(&header_value);
+    let result = crate::auth::parse_basic_auth(&header_value);
     assert!(result.is_err());
   }
 
@@ -1757,7 +1573,7 @@ type: invalid_type
     // base64 of "user" is "dXNlcg=="
     let header_value =
       http::HeaderValue::from_str("Basic dXNlcg==").unwrap();
-    let result = parse_basic_auth(&header_value);
+    let result = crate::auth::parse_basic_auth(&header_value);
     assert!(result.is_err());
   }
 
@@ -2224,11 +2040,11 @@ key_path: "/path/to/key.pem"
       .expect("Failed to write key");
 
     // Test with no auth
-    let auth_config = None;
+    let transport_auth = crate::auth::TransportAuth::none();
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth,
     );
 
     assert!(
@@ -2253,11 +2069,11 @@ key_path: "/path/to/key.pem"
     write_key_file_secure(&key_path, &key_pem)
       .expect("Failed to write key");
 
-    let auth_config = None;
+    let transport_auth = crate::auth::TransportAuth::none();
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth,
     );
 
     assert!(
@@ -2283,11 +2099,11 @@ key_path: "/path/to/key.pem"
     let (cert_pem, _) = generate_test_cert("test");
     std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
 
-    let auth_config = None;
+    let transport_auth = crate::auth::TransportAuth::none();
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth,
     );
 
     assert!(
@@ -2315,11 +2131,11 @@ key_path: "/path/to/key.pem"
     write_key_file_secure(&key_path, &key_pem)
       .expect("Failed to write key");
 
-    let auth_config = None;
+    let transport_auth = crate::auth::TransportAuth::none();
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth,
     );
 
     assert!(
@@ -2342,21 +2158,12 @@ key_path: "/path/to/key.pem"
       .expect("Failed to write key");
 
     // Create password auth config using the new auth module
-    let auth_config = Some(crate::auth::MultiAuthConfig {
-      configs: vec![crate::auth::AuthConfig {
-        auth_type: AuthType::Password,
-        users: Some(vec![crate::auth::UserCredential {
-          username: "user".to_string(),
-          password: "test_password".to_string(),
-        }]),
-        client_ca_path: None,
-      }],
-    });
-
+    // Password auth means no TLS client cert, so TransportAuth::none()
+    let transport_auth = crate::auth::TransportAuth::none();
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth,
     );
 
     assert!(
@@ -2389,18 +2196,20 @@ key_path: "/path/to/key.pem"
     std::fs::write(&ca_path, ca_cert_pem)
       .expect("Failed to write CA cert");
 
-    let auth_config = Some(crate::auth::MultiAuthConfig {
+    let auth_config = crate::auth::MultiAuthConfig {
       configs: vec![crate::auth::AuthConfig {
         auth_type: AuthType::TlsClientCert,
         users: None,
         client_ca_path: Some(ca_path.to_str().unwrap().to_string()),
       }],
-    });
+    };
+    let transport_auth = crate::auth::TransportAuth::from_config_load(&auth_config)
+      .expect("should create TransportAuth");
 
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth,
     );
 
     assert!(
@@ -2425,23 +2234,18 @@ key_path: "/path/to/key.pem"
     write_key_file_secure(&key_path, &key_pem)
       .expect("Failed to write key");
 
-    let auth_config = Some(crate::auth::MultiAuthConfig {
+    let auth_config = crate::auth::MultiAuthConfig {
       configs: vec![crate::auth::AuthConfig {
         auth_type: AuthType::TlsClientCert,
         users: None,
         client_ca_path: Some(ca_path.to_str().unwrap().to_string()),
       }],
-    });
-
-    let result = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      auth_config.as_ref(),
-    );
+    };
+    let result = crate::auth::TransportAuth::from_config_load(&auth_config);
 
     assert!(
       result.is_err(),
-      "load_tls_config should fail when client CA file not found"
+      "TransportAuth::from_config_load should fail when client CA file not found"
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -2464,11 +2268,11 @@ key_path: "/path/to/key.pem"
     write_key_file_secure(&key_path, &key_pem)
       .expect("Failed to write key");
 
-    let auth_config = None;
+    let transport_auth = crate::auth::TransportAuth::none();
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth,
     );
 
     assert!(
@@ -2500,11 +2304,11 @@ key_path: "/path/to/key.pem"
       .expect("Failed to set permissions");
     }
 
-    let auth_config = None;
+    let transport_auth = crate::auth::TransportAuth::none();
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth,
     );
 
     assert!(
@@ -2526,11 +2330,11 @@ key_path: "/path/to/key.pem"
     // Write empty key file with secure permissions
     write_key_file_secure(&key_path, "").expect("Failed to write key");
 
-    let auth_config = None;
+    let transport_auth = crate::auth::TransportAuth::none();
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth,
     );
 
     assert!(
@@ -2547,7 +2351,7 @@ key_path: "/path/to/key.pem"
   #[test]
   fn test_load_tls_config_with_password_and_tls_client_cert_both() {
     ensure_crypto_provider();
-    use crate::auth::{AuthConfig, AuthType, UserCredential};
+    use crate::auth::{AuthConfig, AuthType};
     // Test that both Password and TlsClientCert use the same cert/key files
     let (cert_pem, key_pem) = generate_test_cert("test-server");
     let (ca_cert_pem, _) = generate_ca_cert();
@@ -2565,36 +2369,29 @@ key_path: "/path/to/key.pem"
     std::fs::write(&ca_path, ca_cert_pem)
       .expect("Failed to write CA cert");
 
-    // Test Password auth with plaintext password
-    let auth_config = Some(MultiAuthConfig {
-      configs: vec![AuthConfig {
-        auth_type: AuthType::Password,
-        users: Some(vec![UserCredential {
-          username: "user".to_string(),
-          password: "test_password".to_string(),
-        }]),
-        client_ca_path: None,
-      }],
-    });
+    // Test Password auth with plaintext password (no TLS client cert at transport)
+    let transport_auth1 = crate::auth::TransportAuth::none();
     let result1 = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth1,
     );
     assert!(result1.is_ok());
 
-    // Test TlsClientCert auth
-    let auth_config = Some(MultiAuthConfig {
+    // Test TlsClientCert auth at transport layer
+    let auth_config = MultiAuthConfig {
       configs: vec![AuthConfig {
         auth_type: AuthType::TlsClientCert,
         users: None,
         client_ca_path: Some(ca_path.to_str().unwrap().to_string()),
       }],
-    });
+    };
+    let transport_auth2 = crate::auth::TransportAuth::from_config_load(&auth_config)
+      .expect("should create TransportAuth");
     let result2 = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth2,
     );
     assert!(result2.is_ok());
   }
@@ -2629,11 +2426,11 @@ key_path: "/path/to/key.pem"
       .expect("Failed to set permissions");
     }
 
-    let auth_config = None;
+    let transport_auth = crate::auth::TransportAuth::none();
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth,
     );
 
     assert!(
@@ -2775,11 +2572,11 @@ key_path: "/path/to/key.pem"
     // Set insecure permissions
     set_file_permissions(&key_path, 0o644);
 
-    let auth_config = None;
+    let transport_auth = crate::auth::TransportAuth::none();
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth,
     );
 
     assert!(
@@ -2809,11 +2606,11 @@ key_path: "/path/to/key.pem"
     // Set secure permissions
     set_file_permissions(&key_path, 0o600);
 
-    let auth_config = None;
+    let transport_auth = crate::auth::TransportAuth::none();
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth,
     );
 
     assert!(
@@ -2838,11 +2635,11 @@ key_path: "/path/to/key.pem"
     // Set secure read-only permissions
     set_file_permissions(&key_path, 0o400);
 
-    let auth_config = None;
+    let transport_auth = crate::auth::TransportAuth::none();
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth,
     );
 
     assert!(
@@ -3021,39 +2818,6 @@ key_path: "/path/to/key.pem"
     );
   }
 
-  #[test]
-  fn test_handle_password_auth_missing_header() {
-    let credentials = HashMap::new();
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("example.com:443")
-      .body(())
-      .unwrap();
-
-    let result = handle_password_auth(&req, &credentials);
-    assert!(result.is_err(), "Missing auth header should fail");
-    assert!(
-      result
-        .unwrap_err()
-        .to_string()
-        .contains("Proxy Authentication Required")
-    );
-  }
-
-  #[test]
-  fn test_perform_authentication_none() {
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("example.com:443")
-      .body(())
-      .unwrap();
-    let auth_context = AuthContext::default();
-    assert!(
-      perform_authentication(&req, None, None, &auth_context).is_ok(),
-      "No auth should always pass"
-    );
-  }
-
   // ============== TransferDirection Tests ==============
 
   #[test]
@@ -3100,163 +2864,6 @@ key_path: "/path/to/key.pem"
       "Error should mention Bad Gateway: {}",
       err
     );
-  }
-
-  // ============== TLS Client Certificate Verification Tests ==============
-
-  #[test]
-  fn test_verify_tls_client_cert_missing() {
-    // Test when no peer identity is provided (None)
-    let result = verify_tls_client_cert(None);
-    assert_eq!(
-      result,
-      TlsClientCertVerifyResult::Missing,
-      "Should return Missing when peer_identity is None"
-    );
-  }
-
-  #[test]
-  fn test_verify_tls_client_cert_valid() {
-    // Test with valid certificate chain (Vec<CertificateDer>)
-    use rustls::pki_types::CertificateDer;
-
-    // Create a mock certificate (empty for test purposes)
-    let cert = CertificateDer::from(vec![0x30, 0x00]); // Minimal DER structure
-    let certs: Vec<CertificateDer<'static>> = vec![cert];
-
-    // Box it as dyn Any (simulating what quinn::Connection::peer_identity returns)
-    let peer_identity: Option<Box<dyn std::any::Any>> =
-      Some(Box::new(certs));
-
-    let result = verify_tls_client_cert(peer_identity);
-    assert_eq!(
-      result,
-      TlsClientCertVerifyResult::Valid,
-      "Should return Valid when certificate is present and properly typed"
-    );
-  }
-
-  #[test]
-  fn test_verify_tls_client_cert_invalid_type() {
-    // Test with wrong type (not Vec<CertificateDer>)
-    let peer_identity: Option<Box<dyn std::any::Any>> =
-      Some(Box::new("not a certificate".to_string()));
-
-    let result = verify_tls_client_cert(peer_identity);
-    assert_eq!(
-      result,
-      TlsClientCertVerifyResult::InvalidType,
-      "Should return InvalidType when peer_identity has wrong type"
-    );
-  }
-
-  #[test]
-  fn test_verify_tls_client_cert_empty_cert_chain() {
-    // Test with empty certificate chain
-    use rustls::pki_types::CertificateDer;
-
-    let certs: Vec<CertificateDer<'static>> = vec![];
-    let peer_identity: Option<Box<dyn std::any::Any>> =
-      Some(Box::new(certs));
-
-    let result = verify_tls_client_cert(peer_identity);
-    assert_eq!(
-      result,
-      TlsClientCertVerifyResult::Valid,
-      "Should return Valid even for empty chain (validation is at TLS level)"
-    );
-  }
-
-  #[test]
-  fn test_verify_tls_client_cert_multiple_certs() {
-    // Test with multiple certificates in chain
-    use rustls::pki_types::CertificateDer;
-
-    let cert1 = CertificateDer::from(vec![0x30, 0x01]);
-    let cert2 = CertificateDer::from(vec![0x30, 0x02]);
-    let certs: Vec<CertificateDer<'static>> = vec![cert1, cert2];
-
-    let peer_identity: Option<Box<dyn std::any::Any>> =
-      Some(Box::new(certs));
-
-    let result = verify_tls_client_cert(peer_identity);
-    assert_eq!(
-      result,
-      TlsClientCertVerifyResult::Valid,
-      "Should return Valid for certificate chain with multiple certs"
-    );
-  }
-
-  #[test]
-  fn test_tls_client_cert_verify_result_debug() {
-    // Test Debug trait implementation
-    assert_eq!(
-      format!("{:?}", TlsClientCertVerifyResult::Valid),
-      "Valid"
-    );
-    assert_eq!(
-      format!("{:?}", TlsClientCertVerifyResult::Missing),
-      "Missing"
-    );
-    assert_eq!(
-      format!("{:?}", TlsClientCertVerifyResult::InvalidType),
-      "InvalidType"
-    );
-  }
-
-  #[test]
-  fn test_tls_client_cert_verify_result_equality() {
-    // Test PartialEq and Eq trait implementations
-    assert_eq!(
-      TlsClientCertVerifyResult::Valid,
-      TlsClientCertVerifyResult::Valid
-    );
-    assert_eq!(
-      TlsClientCertVerifyResult::Missing,
-      TlsClientCertVerifyResult::Missing
-    );
-    assert_eq!(
-      TlsClientCertVerifyResult::InvalidType,
-      TlsClientCertVerifyResult::InvalidType
-    );
-
-    assert_ne!(
-      TlsClientCertVerifyResult::Valid,
-      TlsClientCertVerifyResult::Missing
-    );
-    assert_ne!(
-      TlsClientCertVerifyResult::Valid,
-      TlsClientCertVerifyResult::InvalidType
-    );
-    assert_ne!(
-      TlsClientCertVerifyResult::Missing,
-      TlsClientCertVerifyResult::InvalidType
-    );
-  }
-
-  #[test]
-  fn test_tls_client_cert_verify_result_clone() {
-    // Test Clone trait implementation
-    let result = TlsClientCertVerifyResult::Valid;
-    let cloned = result;
-    assert_eq!(result, cloned);
-
-    let result = TlsClientCertVerifyResult::Missing;
-    let cloned = result;
-    assert_eq!(result, cloned);
-
-    let result = TlsClientCertVerifyResult::InvalidType;
-    let cloned = result;
-    assert_eq!(result, cloned);
-  }
-
-  #[test]
-  fn test_tls_client_cert_verify_result_copy() {
-    // Test Copy trait implementation (should be implicitly Copy since all
-    // variants are unit variants)
-    let result = TlsClientCertVerifyResult::Valid;
-    let copied = result; // This should work without Clone due to Copy
-    assert_eq!(result, copied);
   }
 
   #[test]
@@ -3355,18 +2962,47 @@ key_path: "/path/to/key.pem"
   // Task 005-010: Password Authentication Tests
   // ============================================================================
 
-  // ============== Task 005: Proxy-Authorization Header Parsing Tests ==============
+  // ============== Task 005: Application Auth Tests ==============
 
   #[test]
-  fn test_proxy_authorization_header_missing_returns_407() {
-    // Test that missing Proxy-Authorization header returns 407 error
-    let credentials = HashMap::new();
+  fn test_perform_application_auth_no_auth() {
+    // Test that no auth always passes
     let req = http::Request::builder()
       .method(http::Method::CONNECT)
       .uri("example.com:443")
       .body(())
       .unwrap();
-    let result = handle_password_auth(&req, &credentials);
+    let application_auth = crate::auth::ApplicationAuth::none();
+    assert!(
+      perform_application_auth(&req, &application_auth).is_ok(),
+      "No auth should always pass"
+    );
+  }
+
+  #[test]
+  fn test_perform_application_auth_missing_header() {
+    // Test that missing Proxy-Authorization header returns error
+    use crate::auth::{AuthConfig, AuthType, MultiAuthConfig, UserCredential};
+
+    let req = http::Request::builder()
+      .method(http::Method::CONNECT)
+      .uri("example.com:443")
+      .body(())
+      .unwrap();
+
+    let auth_config = MultiAuthConfig {
+      configs: vec![AuthConfig {
+        auth_type: AuthType::Password,
+        users: Some(vec![UserCredential {
+          username: "admin".to_string(),
+          password: "secret".to_string(),
+        }]),
+        client_ca_path: None,
+      }],
+    };
+    let application_auth = crate::auth::ApplicationAuth::from_config(&auth_config);
+
+    let result = perform_application_auth(&req, &application_auth);
     assert!(result.is_err(), "Missing header should return error");
     let err = result.unwrap_err().to_string();
     assert!(
@@ -3376,20 +3012,61 @@ key_path: "/path/to/key.pem"
   }
 
   #[test]
-  fn test_proxy_authorization_header_present_but_invalid_format() {
-    // Test that invalid Proxy-Authorization format returns 407 error
-    let credentials = HashMap::new();
+  fn test_perform_application_auth_valid_credentials() {
+    // Test that valid credentials pass
+    use crate::auth::{AuthConfig, AuthType, MultiAuthConfig, UserCredential};
+
+    let credentials = BASE64_STANDARD.encode("admin:secret");
     let req = http::Request::builder()
       .method(http::Method::CONNECT)
       .uri("example.com:443")
-      .header(
-        http::header::PROXY_AUTHORIZATION,
-        "InvalidFormat somedata",
-      )
+      .header("Proxy-Authorization", format!("Basic {}", credentials))
       .body(())
       .unwrap();
-    let result = handle_password_auth(&req, &credentials);
-    assert!(result.is_err(), "Invalid format should return error");
+
+    let auth_config = MultiAuthConfig {
+      configs: vec![AuthConfig {
+        auth_type: AuthType::Password,
+        users: Some(vec![UserCredential {
+          username: "admin".to_string(),
+          password: "secret".to_string(),
+        }]),
+        client_ca_path: None,
+      }],
+    };
+    let application_auth = crate::auth::ApplicationAuth::from_config(&auth_config);
+
+    let result = perform_application_auth(&req, &application_auth);
+    assert!(result.is_ok(), "Valid credentials should pass");
+  }
+
+  #[test]
+  fn test_perform_application_auth_invalid_credentials() {
+    // Test that invalid credentials fail
+    use crate::auth::{AuthConfig, AuthType, MultiAuthConfig, UserCredential};
+
+    let credentials = BASE64_STANDARD.encode("admin:wrongpassword");
+    let req = http::Request::builder()
+      .method(http::Method::CONNECT)
+      .uri("example.com:443")
+      .header("Proxy-Authorization", format!("Basic {}", credentials))
+      .body(())
+      .unwrap();
+
+    let auth_config = MultiAuthConfig {
+      configs: vec![AuthConfig {
+        auth_type: AuthType::Password,
+        users: Some(vec![UserCredential {
+          username: "admin".to_string(),
+          password: "secret".to_string(),
+        }]),
+        client_ca_path: None,
+      }],
+    };
+    let application_auth = crate::auth::ApplicationAuth::from_config(&auth_config);
+
+    let result = perform_application_auth(&req, &application_auth);
+    assert!(result.is_err(), "Invalid credentials should fail");
   }
 
   // ============== Task 006: Basic Format Validation Tests ==============
@@ -3400,7 +3077,7 @@ key_path: "/path/to/key.pem"
     let header_value =
       http::HeaderValue::from_str("Basic dXNlcjpwYXNzd29yZA==")
         .unwrap();
-    let result = parse_basic_auth(&header_value);
+    let result = crate::auth::parse_basic_auth(&header_value);
     assert!(result.is_ok(), "Valid Basic format should parse");
     let (username, password) = result.unwrap();
     assert_eq!(username, "user");
@@ -3412,7 +3089,7 @@ key_path: "/path/to/key.pem"
     // Test non-Basic auth format
     let header_value =
       http::HeaderValue::from_str("Bearer token123").unwrap();
-    let result = parse_basic_auth(&header_value);
+    let result = crate::auth::parse_basic_auth(&header_value);
     assert!(result.is_err(), "Non-Basic format should return error");
     let err = result.unwrap_err().to_string();
     assert!(
@@ -3426,7 +3103,7 @@ key_path: "/path/to/key.pem"
     // Test Digest auth format (should be rejected)
     let header_value =
       http::HeaderValue::from_str("Digest username=\"user\"").unwrap();
-    let result = parse_basic_auth(&header_value);
+    let result = crate::auth::parse_basic_auth(&header_value);
     assert!(result.is_err(), "Digest format should return error");
   }
 
@@ -3439,7 +3116,7 @@ key_path: "/path/to/key.pem"
     let header_value =
       http::HeaderValue::from_str(&format!("Basic {}", encoded))
         .unwrap();
-    let result = parse_basic_auth(&header_value);
+    let result = crate::auth::parse_basic_auth(&header_value);
     assert!(result.is_ok(), "Valid Base64 should decode");
     let (username, password) = result.unwrap();
     assert_eq!(username, "testuser");
@@ -3451,7 +3128,7 @@ key_path: "/path/to/key.pem"
     // Test invalid Base64 string
     let header_value =
       http::HeaderValue::from_str("Basic !!invalid!!base64!!").unwrap();
-    let result = parse_basic_auth(&header_value);
+    let result = crate::auth::parse_basic_auth(&header_value);
     assert!(result.is_err(), "Invalid Base64 should return error");
   }
 
@@ -3462,7 +3139,7 @@ key_path: "/path/to/key.pem"
     let header_value =
       http::HeaderValue::from_str(&format!("Basic {}", encoded))
         .unwrap();
-    let result = parse_basic_auth(&header_value);
+    let result = crate::auth::parse_basic_auth(&header_value);
     assert!(
       result.is_err(),
       "Missing colon separator should return error"
@@ -3517,49 +3194,6 @@ key_path: "/path/to/key.pem"
   // ============================================================================
   // Task 012-018: HTTP/3 Listener Tests
   // ============================================================================
-
-  // ============== Task 012: TLS Client Certificate Authentication Tests ==============
-
-  #[test]
-  fn test_tls_client_cert_verify_valid_certificate() {
-    // Test TLS client cert verification with valid certificate
-    use rustls::pki_types::CertificateDer;
-    let cert = CertificateDer::from(vec![0x30, 0x00]);
-    let certs: Vec<CertificateDer<'static>> = vec![cert];
-    let peer_identity: Option<Box<dyn std::any::Any>> =
-      Some(Box::new(certs));
-    let result = verify_tls_client_cert(peer_identity);
-    assert_eq!(
-      result,
-      TlsClientCertVerifyResult::Valid,
-      "Valid certificate should return Valid"
-    );
-  }
-
-  #[test]
-  fn test_tls_client_cert_verify_missing_certificate() {
-    // Test TLS client cert verification when certificate is missing
-    let peer_identity: Option<Box<dyn std::any::Any>> = None;
-    let result = verify_tls_client_cert(peer_identity);
-    assert_eq!(
-      result,
-      TlsClientCertVerifyResult::Missing,
-      "Missing certificate should return Missing"
-    );
-  }
-
-  #[test]
-  fn test_tls_client_cert_verify_invalid_type() {
-    // Test TLS client cert verification with invalid type
-    let peer_identity: Option<Box<dyn std::any::Any>> =
-      Some(Box::new("not a certificate".to_string()));
-    let result = verify_tls_client_cert(peer_identity);
-    assert_eq!(
-      result,
-      TlsClientCertVerifyResult::InvalidType,
-      "Invalid type should return InvalidType"
-    );
-  }
 
   // ============== Task 013: Private Key Permission Tests ==============
 
@@ -3624,11 +3258,11 @@ key_path: "/path/to/key.pem"
     std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
     write_key_file_secure(&key_path, &key_pem)
       .expect("Failed to write key");
-    let auth_config = None;
+    let transport_auth = crate::auth::TransportAuth::none();
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth,
     );
     assert!(result.is_ok(), "Matching cert and key should succeed");
   }
@@ -3648,11 +3282,11 @@ key_path: "/path/to/key.pem"
       .expect("Failed to write cert");
     write_key_file_secure(&key_path, &key2_pem)
       .expect("Failed to write key");
-    let auth_config = None;
+    let transport_auth = crate::auth::TransportAuth::none();
     let result = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth,
     );
     assert!(result.is_err(), "Mismatched cert and key should fail");
   }
@@ -3671,11 +3305,11 @@ key_path: "/path/to/key.pem"
     std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
     write_key_file_secure(&key_path, &key_pem)
       .expect("Failed to write key");
-    let auth_config = None;
+    let transport_auth = crate::auth::TransportAuth::none();
     let tls_config = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth,
     )
     .expect("TLS config should load");
     // Verify ALPN protocol is set to h3 (required for HTTP/3)
@@ -3699,11 +3333,11 @@ key_path: "/path/to/key.pem"
     std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
     write_key_file_secure(&key_path, &key_pem)
       .expect("Failed to write key");
-    let auth_config = None;
+    let transport_auth = crate::auth::TransportAuth::none();
     let tls_config = load_tls_config(
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap(),
-      auth_config.as_ref(),
+      &transport_auth,
     )
     .expect("TLS config should load");
     assert_eq!(
@@ -3884,33 +3518,27 @@ key_path: "/path/to/key.pem"
       .await;
   }
 
-  // ========== New Auth Module Integration Tests ==========
+  // ========== Application Auth Integration Tests ==========
   // These tests verify HTTP/3 listener authentication behavior with the new auth module.
-  // The key change: perform_authentication and handle_password_auth now use crate::auth::MultiAuthConfig
+  // The key change: ApplicationAuth handles password authentication at HTTP layer.
 
   #[test]
-  fn test_http3_perform_authentication_with_none_auth() {
-    // When MultiAuthConfig is None (represented by Option<MultiAuthConfig> = None),
-    // authentication should pass without checking headers.
-    // This tests the listener's behavior, not just the MultiAuthConfig struct.
+  fn test_http3_application_auth_with_none() {
+    // When no auth is configured, authentication should pass without checking headers.
 
-    // Create a mock HTTP request without auth headers
     let req = http::Request::builder()
       .method("CONNECT")
       .uri("example.com:443")
       .body(())
       .expect("build request");
 
-    // Create auth context
-    let auth_context = AuthContext::default();
-
-    // With auth_config = None (no auth required), should succeed
-    let result = perform_authentication(&req, None, None, &auth_context);
+    let application_auth = crate::auth::ApplicationAuth::none();
+    let result = perform_application_auth(&req, &application_auth);
     assert!(result.is_ok(), "No auth should pass without credentials");
   }
 
   #[test]
-  fn test_http3_perform_authentication_with_password_missing_header() {
+  fn test_http3_application_auth_with_password_missing_header() {
     use crate::auth::{AuthConfig, AuthType, MultiAuthConfig, UserCredential};
 
     // Create request without Proxy-Authorization header
@@ -3921,7 +3549,7 @@ key_path: "/path/to/key.pem"
       .expect("build request");
 
     // Create password MultiAuthConfig
-    let auth_config = Some(MultiAuthConfig {
+    let auth_config = MultiAuthConfig {
       configs: vec![AuthConfig {
         auth_type: AuthType::Password,
         users: Some(vec![UserCredential {
@@ -3930,17 +3558,12 @@ key_path: "/path/to/key.pem"
         }]),
         client_ca_path: None,
       }],
-    });
+    };
 
-    // Pre-compute credentials (as done in handle_h3_stream)
-    let credentials = auth_config.as_ref().and_then(|c| c.users_map());
-
-    // Create auth context
-    let auth_context = AuthContext::default();
+    let application_auth = crate::auth::ApplicationAuth::from_config(&auth_config);
 
     // Should fail because no Proxy-Authorization header provided
-    // This tests listener behavior: HTTP/3 requires Proxy-Authorization for password auth
-    let result = perform_authentication(&req, auth_config.as_ref(), credentials.as_ref(), &auth_context);
+    let result = perform_application_auth(&req, &application_auth);
     assert!(
       result.is_err(),
       "Password auth should fail without header"
@@ -3948,8 +3571,7 @@ key_path: "/path/to/key.pem"
   }
 
   #[test]
-  fn test_http3_perform_authentication_with_password_valid_credentials()
-  {
+  fn test_http3_application_auth_with_password_valid_credentials() {
     use crate::auth::{AuthConfig, AuthType, MultiAuthConfig, UserCredential};
 
     // Create request with valid Proxy-Authorization header (Basic auth)
@@ -3962,7 +3584,7 @@ key_path: "/path/to/key.pem"
       .expect("build request");
 
     // Create password MultiAuthConfig with matching credentials
-    let auth_config = Some(MultiAuthConfig {
+    let auth_config = MultiAuthConfig {
       configs: vec![AuthConfig {
         auth_type: AuthType::Password,
         users: Some(vec![UserCredential {
@@ -3971,22 +3593,17 @@ key_path: "/path/to/key.pem"
         }]),
         client_ca_path: None,
       }],
-    });
+    };
 
-    // Pre-compute credentials (as done in handle_h3_stream)
-    let creds_map = auth_config.as_ref().and_then(|c| c.users_map());
-
-    // Create auth context
-    let auth_context = AuthContext::default();
+    let application_auth = crate::auth::ApplicationAuth::from_config(&auth_config);
 
     // Should succeed with valid plaintext password
-    // This tests that HTTP/3 listener uses PLAINTEXT comparison (not bcrypt)
-    let result = perform_authentication(&req, auth_config.as_ref(), creds_map.as_ref(), &auth_context);
+    let result = perform_application_auth(&req, &application_auth);
     assert!(result.is_ok(), "Valid credentials should pass");
   }
 
   #[test]
-  fn test_http3_perform_authentication_with_password_wrong_password() {
+  fn test_http3_application_auth_with_password_wrong_password() {
     use crate::auth::{AuthConfig, AuthType, MultiAuthConfig, UserCredential};
 
     // Create request with WRONG password in Proxy-Authorization header
@@ -3999,7 +3616,7 @@ key_path: "/path/to/key.pem"
       .expect("build request");
 
     // Create password MultiAuthConfig with DIFFERENT password
-    let auth_config = Some(MultiAuthConfig {
+    let auth_config = MultiAuthConfig {
       configs: vec![AuthConfig {
         auth_type: AuthType::Password,
         users: Some(vec![UserCredential {
@@ -4008,53 +3625,44 @@ key_path: "/path/to/key.pem"
         }]),
         client_ca_path: None,
       }],
-    });
+    };
 
-    // Pre-compute credentials (as done in handle_h3_stream)
-    let creds_map = auth_config.as_ref().and_then(|c| c.users_map());
-
-    // Create auth context
-    let auth_context = AuthContext::default();
+    let application_auth = crate::auth::ApplicationAuth::from_config(&auth_config);
 
     // Should fail with wrong password
-    // This tests listener's credential validation behavior
-    let result = perform_authentication(&req, auth_config.as_ref(), creds_map.as_ref(), &auth_context);
+    let result = perform_application_auth(&req, &application_auth);
     assert!(result.is_err(), "Wrong password should fail");
   }
 
   #[test]
-  fn test_http3_perform_authentication_with_tls_client_cert() {
+  fn test_http3_application_auth_with_tls_only_config() {
     use crate::auth::{AuthConfig, AuthType, MultiAuthConfig};
 
     // TLS client cert auth is handled at QUIC layer, not HTTP layer
-    // perform_authentication should pass for TLS cert type when cert is verified
+    // ApplicationAuth::from_config for TLS-only should return none()
     let req = http::Request::builder()
       .method("CONNECT")
       .uri("example.com:443")
       .body(())
       .expect("build request");
 
-    let auth_config = Some(MultiAuthConfig {
+    let auth_config = MultiAuthConfig {
       configs: vec![AuthConfig {
         auth_type: AuthType::TlsClientCert,
         users: None,
         client_ca_path: Some("/path/to/ca.pem".to_string()),
       }],
-    });
-
-    // Pre-compute credentials (as done in handle_h3_stream)
-    let credentials = auth_config.as_ref().and_then(|c| c.users_map());
-
-    // Create auth context with TLS cert verified
-    let auth_context = AuthContext {
-      tls_client_cert_verified: true,
     };
 
-    // TLS cert auth bypasses HTTP-layer auth check
-    let result = perform_authentication(&req, auth_config.as_ref(), credentials.as_ref(), &auth_context);
+    // TLS-only config should produce ApplicationAuth::none()
+    // because TLS client cert is handled at transport layer
+    let application_auth = crate::auth::ApplicationAuth::from_config(&auth_config);
+
+    // Should pass because there's no password auth configured
+    let result = perform_application_auth(&req, &application_auth);
     assert!(
       result.is_ok(),
-      "TLS client cert auth should pass at HTTP layer when cert is verified"
+      "TLS-only auth should pass at HTTP layer (transport handles cert)"
     );
   }
 }

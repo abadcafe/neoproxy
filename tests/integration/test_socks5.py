@@ -101,7 +101,6 @@ def create_socks5_config(
         ])
         auth_section = f"""
       auth:
-        type: password
         users:
 {users_yaml}"""
 
@@ -1808,7 +1807,6 @@ servers:
   - kind: fast_socks5.listener
     args:
       auth:
-        type: password
         users:
           - username: "test"
             password: "test"
@@ -1897,7 +1895,6 @@ servers:
       addresses:
         - "0.0.0.0:{proxy_port}"
       auth:
-        type: password
         users: []
   service: connect_tcp
 """
@@ -1920,9 +1917,10 @@ servers:
 
     def test_invalid_auth_type(self) -> None:
         """
-        TC-S5-031: Invalid auth type
+        TC-S5-031: Invalid auth config rejected
 
-        Test that proxy fails to start with invalid auth type.
+        Test that proxy fails to start with unknown field in auth config.
+        In the new unified auth format, unknown fields should be rejected.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = 29052
@@ -1943,8 +1941,7 @@ servers:
       addresses:
         - "0.0.0.0:{proxy_port}"
       auth:
-        type: invalid_mode
-        users: []
+        some_unknown_field: true
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "config.yaml")
@@ -2288,9 +2285,9 @@ class TestSocks5TlsClientCertRejected:
 
     def test_tls_client_cert_type_rejected(self) -> None:
         """
-        TC-S5-040: TLS client cert auth type rejected
+        TC-S5-040: TLS client cert auth rejected for SOCKS5
 
-        Test that SOCKS5 listener rejects tls_client_cert auth type.
+        Test that SOCKS5 listener rejects client_ca_path in auth config.
         SOCKS5 protocol only supports password authentication.
         """
         temp_dir = tempfile.mkdtemp()
@@ -2312,7 +2309,6 @@ servers:
       addresses:
         - "0.0.0.0:{proxy_port}"
       auth:
-        type: tls_client_cert
         client_ca_path: "/path/to/ca.pem"
   service: connect_tcp
 """

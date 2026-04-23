@@ -284,7 +284,9 @@ impl tower::Service<plugin::Request> for ConnectTcpService {
             }
           } else if let Some(http) = http_upgrade {
             match http.await {
-              Ok(upgraded) => Ok(ClientStream::Http(TokioIo::new(upgraded))),
+              Ok(upgraded) => {
+                Ok(ClientStream::Http(TokioIo::new(upgraded)))
+              }
               Err(e) => Err(format!("HTTP upgrade failed: {e}")),
             }
           } else {
@@ -1279,7 +1281,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_service_call_socks5_upgrade_refused_returns_bad_gateway() {
+  async fn test_service_call_socks5_upgrade_refused_returns_bad_gateway()
+   {
     use crate::plugin::Socks5OnUpgrade;
 
     let local_set = tokio::task::LocalSet::new();

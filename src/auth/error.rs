@@ -13,8 +13,6 @@ pub enum AuthError {
   ConfigError(String),
   /// TLS client certificate verification failed.
   TlsCertError(String),
-  /// Authentication type not supported by listener.
-  UnsupportedAuthType(String),
 }
 
 impl fmt::Display for AuthError {
@@ -23,9 +21,6 @@ impl fmt::Display for AuthError {
       Self::InvalidCredentials => write!(f, "invalid credentials"),
       Self::ConfigError(msg) => write!(f, "auth config error: {}", msg),
       Self::TlsCertError(msg) => write!(f, "TLS cert error: {}", msg),
-      Self::UnsupportedAuthType(t) => {
-        write!(f, "unsupported auth type: {}", t)
-      }
     }
   }
 }

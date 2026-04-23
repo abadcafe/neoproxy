@@ -1,13 +1,12 @@
 #![allow(clippy::await_holding_refcell_ref)]
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use hyper::{body as hyper_body, service as hyper_svc};
 use hyper_util::rt as rt_util;
 use hyper_util::server::conn::auto as conn_util;
@@ -16,7 +15,7 @@ use tokio::{net, task, time::timeout};
 use tower::util as tower_util;
 use tracing::{error, info, warn};
 
-use crate::auth::{AuthConfig, AuthType, parse_basic_auth, verify_password};
+use crate::auth::{ListenerAuthConfig, UserPasswordAuth};
 use crate::listeners::fast_socks5::ConnectionTracker;
 use crate::plugin;
 
@@ -29,16 +28,15 @@ const MONITORING_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 struct HyperServiceAdaptor {
   s: plugin::Service,
-  /// Cached users map, computed once at adaptor creation to avoid
-  /// per-request HashMap allocation from auth_config.users_map().
-  /// CR-010: This field doubles as the auth-required guard:
-  /// Some(_) means auth is configured, None means no auth.
-  credentials: Option<HashMap<String, String>>,
+  user_password_auth: UserPasswordAuth,
 }
 
 impl HyperServiceAdaptor {
-  fn new(s: plugin::Service, credentials: Option<HashMap<String, String>>) -> Self {
-    Self { s, credentials }
+  fn new(
+    s: plugin::Service,
+    user_password_auth: UserPasswordAuth,
+  ) -> Self {
+    Self { s, user_password_auth }
   }
 }
 
@@ -53,32 +51,22 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
     &self,
     req: http::Request<hyper_body::Incoming>,
   ) -> Self::Future {
-    // Check authentication if configured
-    // CR-010: Use self.credentials.is_some() as the auth-required guard
-    // instead of a separate auth field
-    if self.credentials.is_some() {
-      let auth_header = req.headers().get(http::header::PROXY_AUTHORIZATION);
+    // Build an http::Request<()> for auth verification, copying headers
+    let mut auth_req_builder = http::Request::builder()
+      .method(req.method().clone())
+      .uri(req.uri().clone())
+      .version(req.version());
 
-      match (auth_header, &self.credentials) {
-        (None, Some(_)) => {
-          // No auth header but auth required
-          return Box::pin(async { Ok(build_407_response()) });
-        }
-        (Some(header), Some(credentials)) => {
-          // Validate credentials
-          match parse_basic_auth(header) {
-            Ok((username, password)) => {
-              if let Err(_) = verify_password(credentials, &username, &password) {
-                return Box::pin(async { Ok(build_407_response()) });
-              }
-            }
-            Err(_) => {
-              return Box::pin(async { Ok(build_407_response()) });
-            }
-          }
-        }
-        _ => {}
-      }
+    // Copy headers from the original request (important for Proxy-Authorization)
+    for (name, value) in req.headers() {
+      auth_req_builder = auth_req_builder.header(name, value);
+    }
+
+    let auth_req = auth_req_builder.body(()).unwrap();
+
+    // Check authentication if configured
+    if let Err(_) = self.user_password_auth.verify(&auth_req) {
+      return Box::pin(async { Ok(build_407_response()) });
     }
 
     let (parts, body) = req.into_parts();
@@ -134,41 +122,62 @@ struct HyperListener {
   connection_tracker: ConnectionTracker,
   service: plugin::Service,
   graceful_shutdown_timeout: Duration,
-  /// CR-010: Store only the pre-computed credentials HashMap, not the full AuthConfig.
-  /// This avoids cloning the entire AuthConfig per connection.
-  credentials: Option<HashMap<String, String>>,
+  user_password_auth: UserPasswordAuth,
 }
 
 impl HyperListener {
   /// Create a HyperListener from parsed configuration.
-  fn from_args(args: HyperListenerArgs, svc: plugin::Service) -> Self {
-    let auth = args.auth.and_then(|yaml| {
-      AuthConfig::from_yaml(yaml, &[AuthType::Password])
-        .inspect_err(|e| warn!("Failed to parse auth config: {e}"))
-        .ok()
-    });
-    // CR-010: Pre-compute credentials once at listener creation instead of
-    // storing the full AuthConfig and recomputing per connection
-    let credentials = auth.as_ref().and_then(|c| c.users_map());
+  fn from_args(
+    args: HyperListenerArgs,
+    svc: plugin::Service,
+  ) -> Result<Self> {
+    // Parse auth config if present
+    let user_password_auth = match args.auth {
+      None => UserPasswordAuth::none(),
+      Some(yaml) => {
+        let auth_config: ListenerAuthConfig =
+          serde_yaml::from_value(yaml).map_err(|e| {
+            anyhow::anyhow!("failed to parse auth config: {e}")
+          })?;
 
-    Self {
-      addresses: args
-        .addresses
-        .iter()
-        .filter_map(|s| {
-          s.parse()
-            .inspect_err(|e| warn!("address '{s}' invalid: {e}"))
-            .ok()
-        })
-        .collect(),
+        // Validate the auth config
+        auth_config.validate().map_err(|e| {
+          anyhow::anyhow!("auth config validation failed: {e}")
+        })?;
+
+        // hyper.listener only supports password auth, reject client_ca_path
+        if auth_config.client_ca_path.is_some() {
+          bail!(
+            "client_ca_path is not supported on hyper.listener; only password authentication is supported"
+          );
+        }
+
+        UserPasswordAuth::from_config(&auth_config)
+      }
+    };
+
+    // Parse addresses, filtering out invalid ones
+    // Note: Config validator catches invalid addresses, but we also filter here for safety
+    let addresses: Vec<SocketAddr> = args
+      .addresses
+      .iter()
+      .filter_map(|s| {
+        s.parse()
+          .inspect_err(|e| warn!("address '{s}' invalid: {e}"))
+          .ok()
+      })
+      .collect();
+
+    Ok(Self {
+      addresses,
       _protocols: args.protocols,
       _hostnames: args.hostnames,
       listening_set: Rc::new(RefCell::new(task::JoinSet::new())),
       connection_tracker: ConnectionTracker::new(),
       service: svc,
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
-      credentials,
-    }
+      user_password_auth,
+    })
   }
 
   #[allow(clippy::new_ret_no_self)]
@@ -177,7 +186,7 @@ impl HyperListener {
     svc: plugin::Service,
   ) -> Result<plugin::Listener> {
     let args: HyperListenerArgs = serde_yaml::from_value(sargs)?;
-    Ok(plugin::Listener::new(Self::from_args(args, svc)))
+    Ok(plugin::Listener::new(Self::from_args(args, svc)?))
   }
 
   /// Create a HyperListener directly for testing purposes.
@@ -187,7 +196,7 @@ impl HyperListener {
     svc: plugin::Service,
   ) -> Result<Self> {
     let args: HyperListenerArgs = serde_yaml::from_value(sargs)?;
-    Ok(Self::from_args(args, svc))
+    Self::from_args(args, svc)
   }
 
   fn serve_addr(
@@ -205,7 +214,7 @@ impl HyperListener {
     let listener = socket.listen(1024)?;
     let connection_tracker = self.connection_tracker.clone();
     let shutdown_handle = self.connection_tracker.shutdown_handle();
-    let credentials = self.credentials.clone();
+    let user_password_auth = self.user_password_auth.clone();
     let accepting_fut = async move {
       // Log listener startup event
       info!("HTTP listener started on {}", addr);
@@ -223,7 +232,10 @@ impl HyperListener {
           }
           Ok((stream, _raddr)) => {
             let io = rt_util::TokioIo::new(stream);
-            let svc = HyperServiceAdaptor::new(svc.clone(), credentials.clone());
+            let svc = HyperServiceAdaptor::new(
+              svc.clone(),
+              user_password_auth.clone(),
+            );
             let builder =
               conn_util::Builder::new(TokioLocalExecutor {});
             connection_tracker.register(async move {
@@ -450,7 +462,8 @@ mod tests {
   #[test]
   fn test_hyper_service_adaptor_creation() {
     let svc = create_test_service();
-    let _adaptor = HyperServiceAdaptor::new(svc, None);
+    let _adaptor =
+      HyperServiceAdaptor::new(svc, UserPasswordAuth::none());
   }
 
   #[test]
@@ -568,7 +581,6 @@ addresses:
 protocols: []
 hostnames: []
 auth:
-  type: password
   users:
     - username: "user1"
       password: "pass1"
@@ -581,114 +593,149 @@ auth:
   #[test]
   fn test_build_407_response() {
     let resp = build_407_response();
-    assert_eq!(resp.status(), http::StatusCode::PROXY_AUTHENTICATION_REQUIRED);
+    assert_eq!(
+      resp.status(),
+      http::StatusCode::PROXY_AUTHENTICATION_REQUIRED
+    );
     assert!(resp.headers().contains_key("Proxy-Authenticate"));
   }
 
   #[test]
   fn test_check_auth_missing_header_returns_407() {
     // Test that requests without auth header return 407 when auth is configured
-    use crate::auth::AuthConfig;
+    use crate::auth::listener_auth_config::UserCredential;
 
-    let yaml = r#"
-type: password
-users:
-  - username: "user1"
-    password: "pass1"
-"#;
-    let auth_config: AuthConfig = serde_yaml::from_str(yaml).unwrap();
+    let config = ListenerAuthConfig {
+      users: Some(vec![UserCredential {
+        username: "user1".to_string(),
+        password: "pass1".to_string(),
+      }]),
+      client_ca_path: None,
+    };
+    let auth = UserPasswordAuth::from_config(&config);
 
     // Simulate missing auth header
-    let headers = http::HeaderMap::new();
-    let auth_header = headers.get(http::header::PROXY_AUTHORIZATION);
+    let req = http::Request::builder()
+      .method("GET")
+      .uri("http://example.com")
+      .body(())
+      .unwrap();
 
     // Should return 407 response requirement
-    let needs_407 = match (auth_header, auth_config.users_map()) {
-      (None, Some(_)) => true,
-      _ => false,
-    };
-    assert!(needs_407, "Missing auth header should require 407 response");
+    assert!(
+      auth.verify(&req).is_err(),
+      "Missing auth header should fail verification"
+    );
   }
 
   #[test]
   fn test_check_auth_wrong_credentials_returns_407() {
-    use crate::auth::AuthConfig;
+    use crate::auth::listener_auth_config::UserCredential;
 
-    let yaml = r#"
-type: password
-users:
-  - username: "user1"
-    password: "pass1"
-"#;
-    let auth_config: AuthConfig = serde_yaml::from_str(yaml).unwrap();
+    let config = ListenerAuthConfig {
+      users: Some(vec![UserCredential {
+        username: "user1".to_string(),
+        password: "pass1".to_string(),
+      }]),
+      client_ca_path: None,
+    };
+    let auth = UserPasswordAuth::from_config(&config);
 
     // Create header with wrong credentials (user2:wrongpass)
     let encoded = STANDARD.encode("user2:wrongpass");
-    let header = http::HeaderValue::from_str(&format!("Basic {}", encoded)).unwrap();
-
-    // Parse and verify
-    let result = parse_basic_auth(&header);
-    assert!(result.is_ok());
-    let (username, password) = result.unwrap();
+    let req = http::Request::builder()
+      .method("GET")
+      .uri("http://example.com")
+      .header("Proxy-Authorization", format!("Basic {}", encoded))
+      .body(())
+      .unwrap();
 
     // Verify against config - should fail
-    let verify_result = verify_password(&auth_config.users_map().unwrap(), &username, &password);
-    assert!(verify_result.is_err(), "Wrong credentials should fail verification");
+    assert!(
+      auth.verify(&req).is_err(),
+      "Wrong credentials should fail verification"
+    );
   }
 
   #[test]
   fn test_check_auth_valid_credentials_passes() {
-    use crate::auth::AuthConfig;
+    use crate::auth::listener_auth_config::UserCredential;
 
-    let yaml = r#"
-type: password
-users:
-  - username: "user1"
-    password: "pass1"
-"#;
-    let auth_config: AuthConfig = serde_yaml::from_str(yaml).unwrap();
+    let config = ListenerAuthConfig {
+      users: Some(vec![UserCredential {
+        username: "user1".to_string(),
+        password: "pass1".to_string(),
+      }]),
+      client_ca_path: None,
+    };
+    let auth = UserPasswordAuth::from_config(&config);
 
     // Create header with correct credentials
     let encoded = STANDARD.encode("user1:pass1");
-    let header = http::HeaderValue::from_str(&format!("Basic {}", encoded)).unwrap();
-
-    // Parse and verify
-    let result = parse_basic_auth(&header);
-    assert!(result.is_ok());
-    let (username, password) = result.unwrap();
+    let req = http::Request::builder()
+      .method("GET")
+      .uri("http://example.com")
+      .header("Proxy-Authorization", format!("Basic {}", encoded))
+      .body(())
+      .unwrap();
 
     // Verify against config - should pass
-    let verify_result = verify_password(&auth_config.users_map().unwrap(), &username, &password);
-    assert!(verify_result.is_ok(), "Valid credentials should pass verification");
+    assert!(
+      auth.verify(&req).is_ok(),
+      "Valid credentials should pass verification"
+    );
   }
 
   #[test]
-  fn test_adaptor_caches_credentials() {
-    use crate::auth::AuthConfig;
+  fn test_adaptor_with_auth() {
+    use crate::auth::listener_auth_config::UserCredential;
 
-    let yaml = r#"
-type: password
-users:
-  - username: "user1"
-    password: "pass1"
-"#;
-    let auth_config: AuthConfig = serde_yaml::from_str(yaml).unwrap();
-    let credentials = auth_config.users_map();
+    let config = ListenerAuthConfig {
+      users: Some(vec![UserCredential {
+        username: "user1".to_string(),
+        password: "pass1".to_string(),
+      }]),
+      client_ca_path: None,
+    };
+    let auth = UserPasswordAuth::from_config(&config);
     let svc = create_test_service();
-    let adaptor = HyperServiceAdaptor::new(svc, credentials);
+    let adaptor = HyperServiceAdaptor::new(svc, auth);
 
-    // Verify that credentials were cached at adaptor creation
-    assert!(adaptor.credentials.is_some(), "credentials should be cached");
-    let cached = adaptor.credentials.as_ref().unwrap();
-    assert_eq!(cached.get("user1"), Some(&"pass1".to_string()));
+    // Verify that auth was stored
+    assert!(
+      adaptor
+        .user_password_auth
+        .verify(
+          &http::Request::builder()
+            .method("GET")
+            .uri("http://example.com")
+            .body(())
+            .unwrap()
+        )
+        .is_err(),
+      "Without credentials, verify should fail"
+    );
   }
 
   #[test]
   fn test_adaptor_no_credentials_without_auth() {
     let svc = create_test_service();
-    let adaptor = HyperServiceAdaptor::new(svc, None);
+    let adaptor =
+      HyperServiceAdaptor::new(svc, UserPasswordAuth::none());
 
-    // Verify that credentials are None when no auth is configured
-    assert!(adaptor.credentials.is_none(), "credentials should be None without auth");
+    // Verify that without auth, verify passes
+    assert!(
+      adaptor
+        .user_password_auth
+        .verify(
+          &http::Request::builder()
+            .method("GET")
+            .uri("http://example.com")
+            .body(())
+            .unwrap()
+        )
+        .is_ok(),
+      "Without auth configured, verify should pass"
+    );
   }
 }

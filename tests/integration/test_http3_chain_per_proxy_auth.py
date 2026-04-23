@@ -7,8 +7,8 @@ Test nature: Black-box testing through external interface
 This test module covers:
 - Per-proxy password authentication
 - Per-proxy TLS client certificate authentication
-- Auth inheritance from default_upstream_auth
-- Explicit auth: none behavior
+- Auth inheritance from default_credential
+- Explicit credential: {} behavior (no credential override)
 - Error handling for auth failures
 - Non-auth error behavior (no fallback)
 
@@ -60,38 +60,38 @@ def create_http3_chain_config_with_per_proxy_auth(
     proxy_group: List[Tuple[str, int, int, Optional[str]]],
     ca_path: str,
     temp_dir: str,
-    default_upstream_auth: Optional[str] = None,
+    default_credential: Optional[str] = None,
     worker_threads: int = 1
 ) -> str:
     """
-    Create HTTP/3 Chain service configuration file with per-proxy auth.
+    Create HTTP/3 Chain service configuration file with per-proxy credential.
 
     Args:
         http_port: Port for the HTTP listener
-        proxy_group: List of (address, port, weight, auth_yaml) tuples.
-                     auth_yaml can be None to inherit default.
+        proxy_group: List of (address, port, weight, credential_yaml) tuples.
+                     credential_yaml can be None to inherit default.
         ca_path: CA certificate path
         temp_dir: Temporary directory for logs
-        default_upstream_auth: Optional YAML string for default_upstream_auth
+        default_credential: Optional YAML string for default_credential
         worker_threads: Number of worker threads
 
     Returns:
         str: Path to the configuration file
     """
     proxy_list = []
-    for addr, port, weight, auth_yaml in proxy_group:
+    for addr, port, weight, credential_yaml in proxy_group:
         proxy_entry = f"    - address: {addr}:{port}\n      weight: {weight}"
-        if auth_yaml:
-            proxy_entry += f"\n      auth:\n{auth_yaml}"
+        if credential_yaml:
+            proxy_entry += f"\n      credential:\n{credential_yaml}"
         proxy_list.append(proxy_entry)
 
     proxy_section = "\n".join(proxy_list)
 
-    default_auth_section = ""
-    if default_upstream_auth:
-        default_auth_section = f"""
-    default_upstream_auth:
-{default_upstream_auth}"""
+    default_credential_section = ""
+    if default_credential:
+        default_credential_section = f"""
+    default_credential:
+{default_credential}"""
 
     config_content = f"""worker_threads: {worker_threads}
 log_directory: "{temp_dir}/logs"
@@ -102,7 +102,7 @@ services:
   args:
     proxy_group:
 {proxy_section}
-    ca_path: "{ca_path}"{default_auth_section}
+    ca_path: "{ca_path}"{default_credential_section}
 
 servers:
 - name: http_proxy
@@ -164,14 +164,14 @@ class TestHTTP3ChainPerProxyPasswordAuth:
             assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0)
 
             # Start chain service with per-proxy password auth
-            auth_yaml = """
-        - type: "password"
+            credential_yaml = """
+        user:
           username: "proxy_user"
           password: "proxy_pass"
 """
             chain_config = create_http3_chain_config_with_per_proxy_auth(
                 http_port=http_port,
-                proxy_group=[("127.0.0.1", h3_port, 1, auth_yaml)],
+                proxy_group=[("127.0.0.1", h3_port, 1, credential_yaml)],
                 ca_path=ca_path,
                 temp_dir=temp_dir2
             )
@@ -260,14 +260,13 @@ class TestHTTP3ChainPerProxyTlsCertAuth:
             assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0)
 
             # Start chain service with per-proxy TLS cert auth
-            auth_yaml = f"""
-        - type: "tls_client_cert"
-          client_cert_path: "{client_cert_path}"
-          client_key_path: "{client_key_path}"
+            credential_yaml = f"""
+        client_cert_path: "{client_cert_path}"
+        client_key_path: "{client_key_path}"
 """
             chain_config = create_http3_chain_config_with_per_proxy_auth(
                 http_port=http_port,
-                proxy_group=[("127.0.0.1", h3_port, 1, auth_yaml)],
+                proxy_group=[("127.0.0.1", h3_port, 1, credential_yaml)],
                 ca_path=ca_cert_path,
                 temp_dir=temp_dir2
             )
@@ -318,9 +317,9 @@ class TestHTTP3ChainAuthInheritance:
 
     def test_chain_inherits_default_auth(self) -> None:
         """
-        TC-CHAIN-AUTH-004: Proxy inherits default_upstream_auth.
+        TC-CHAIN-AUTH-004: Proxy inherits default_credential.
 
-        Target: Verify proxy without auth field inherits default.
+        Target: Verify proxy without credential field inherits default.
         """
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
@@ -349,18 +348,18 @@ class TestHTTP3ChainAuthInheritance:
             h3_proc = start_proxy(h3_config)
             assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0)
 
-            # Proxy has NO auth field - should inherit default_upstream_auth
-            default_auth_yaml = """
-      - type: "password"
+            # Proxy has NO credential field - should inherit default_credential
+            default_credential_yaml = """
+      user:
         username: "default_user"
         password: "default_pass"
 """
             chain_config = create_http3_chain_config_with_per_proxy_auth(
                 http_port=http_port,
-                proxy_group=[("127.0.0.1", h3_port, 1, None)],  # No auth field
+                proxy_group=[("127.0.0.1", h3_port, 1, None)],  # No credential field
                 ca_path=ca_path,
                 temp_dir=temp_dir2,
-                default_upstream_auth=default_auth_yaml
+                default_credential=default_credential_yaml
             )
             chain_proc = start_proxy(chain_config)
             assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
@@ -404,13 +403,13 @@ class TestHTTP3ChainAuthInheritance:
 
 
 class TestHTTP3ChainAuthNone:
-    """Test explicit 'none' authentication scenarios."""
+    """Test explicit 'none' credential scenarios."""
 
     def test_chain_explicit_none_no_auth(self) -> None:
         """
-        TC-CHAIN-AUTH-005: Proxy with auth: [{type: none}] has no auth.
+        TC-CHAIN-AUTH-005: Proxy with credential: {} has no credential.
 
-        Target: Verify explicit none disables authentication.
+        Target: Verify empty credential object disables authentication inheritance.
         """
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
@@ -439,21 +438,21 @@ class TestHTTP3ChainAuthNone:
             h3_proc = start_proxy(h3_config)
             assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0)
 
-            # Proxy with explicit auth: [{type: none}] - should bypass default auth
-            auth_yaml = """
-        - type: "none"
+            # Proxy with explicit credential: {} - should bypass default credential
+            credential_yaml = """
+        {}
 """
-            default_auth_yaml = """
-      - type: "password"
+            default_credential_yaml = """
+      user:
         username: "ignored_user"
         password: "ignored_pass"
 """
             chain_config = create_http3_chain_config_with_per_proxy_auth(
                 http_port=http_port,
-                proxy_group=[("127.0.0.1", h3_port, 1, auth_yaml)],
+                proxy_group=[("127.0.0.1", h3_port, 1, credential_yaml)],
                 ca_path=ca_path,
                 temp_dir=temp_dir2,
-                default_upstream_auth=default_auth_yaml
+                default_credential=default_credential_yaml
             )
             chain_proc = start_proxy(chain_config)
             assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
@@ -527,18 +526,15 @@ class TestHTTP3ChainAuthFailure:
             h3_proc = start_proxy(h3_config)
             assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0)
 
-            # Configure WRONG credentials in auth chain
-            auth_yaml = """
-        - type: "password"
+            # Configure WRONG credentials in credential
+            credential_yaml = """
+        user:
           username: "wrong_user"
           password: "wrong_pass"
-        - type: "password"
-          username: "another_wrong"
-          password: "another_wrong_pass"
 """
             chain_config = create_http3_chain_config_with_per_proxy_auth(
                 http_port=http_port,
-                proxy_group=[("127.0.0.1", h3_port, 1, auth_yaml)],
+                proxy_group=[("127.0.0.1", h3_port, 1, credential_yaml)],
                 ca_path=ca_path,
                 temp_dir=temp_dir2
             )
@@ -592,19 +588,16 @@ class TestHTTP3ChainAuthFailure:
         try:
             cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
 
-            # Configure auth chain with multiple methods
-            auth_yaml = """
-        - type: "password"
+            # Configure credential
+            credential_yaml = """
+        user:
           username: "user1"
           password: "pass1"
-        - type: "password"
-          username: "user2"
-          password: "pass2"
 """
             # Point to a non-existent proxy address (will cause connection refused)
             chain_config = create_http3_chain_config_with_per_proxy_auth(
                 http_port=http_port,
-                proxy_group=[("127.0.0.1", 9999, 1, auth_yaml)],  # Non-existent port
+                proxy_group=[("127.0.0.1", 9999, 1, credential_yaml)],  # Non-existent port
                 ca_path=ca_path,
                 temp_dir=temp_dir2
             )

@@ -19,7 +19,9 @@ use tokio::net;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
-use crate::auth::AuthType;
+use crate::auth::{
+  ClientCertAuth, ListenerAuthConfig, UserPasswordAuth,
+};
 use crate::plugin;
 
 // ============================================================================
@@ -400,11 +402,11 @@ fn validate_target_address(req: &http::Request<()>) -> Result<String> {
 /// Err with error message otherwise.
 fn perform_application_auth(
   req: &http::Request<()>,
-  application_auth: &crate::auth::ApplicationAuth,
+  user_password_auth: &UserPasswordAuth,
 ) -> Result<()> {
-  application_auth.verify(req).map_err(|e| {
-    anyhow!("Proxy Authentication Required - {}", e)
-  })
+  user_password_auth
+    .verify(req)
+    .map_err(|e| anyhow!("Proxy Authentication Required - {}", e))
 }
 
 /// Connect to target server
@@ -438,7 +440,7 @@ enum ValidationError {
 /// Returns Ok(target_address) if validation passes, Err otherwise.
 fn validate_connect_request(
   req: &http::Request<()>,
-  application_auth: &crate::auth::ApplicationAuth,
+  user_password_auth: &UserPasswordAuth,
 ) -> std::result::Result<String, ValidationError> {
   // Step 1: Validate CONNECT method
   if let Err(e) = validate_connect_method(req) {
@@ -446,7 +448,7 @@ fn validate_connect_request(
   }
 
   // Step 2: Perform application-layer authentication
-  if let Err(e) = perform_application_auth(req, application_auth) {
+  if let Err(e) = perform_application_auth(req, user_password_auth) {
     return Err(ValidationError::Unauthorized(e.to_string()));
   }
 
@@ -581,7 +583,7 @@ async fn handle_h3_stream<S>(
   req: http::Request<()>,
   mut stream: server::RequestStream<S, Bytes>,
   _service: plugin::Service,
-  application_auth: crate::auth::ApplicationAuth,
+  user_password_auth: UserPasswordAuth,
   shutdown_handle: plugin::ShutdownHandle,
 ) where
   S: h3::quic::BidiStream<Bytes> + Send + 'static,
@@ -590,7 +592,7 @@ async fn handle_h3_stream<S>(
 {
   // Phase 1: Validate request
   let target_addr =
-    match validate_connect_request(&req, &application_auth) {
+    match validate_connect_request(&req, &user_password_auth) {
       Ok(addr) => addr,
       Err(e) => {
         handle_validation_error(&mut stream, e).await;
@@ -692,7 +694,7 @@ where
 async fn handle_h3_connection(
   conn: quinn::Connection,
   service: plugin::Service,
-  application_auth: crate::auth::ApplicationAuth,
+  user_password_auth: UserPasswordAuth,
   stream_tracker: Rc<StreamTracker>,
   shutdown_handle: plugin::ShutdownHandle,
 ) {
@@ -721,7 +723,7 @@ async fn handle_h3_connection(
     match accept_result {
       Ok(Some(resolver)) => {
         let service = service.clone();
-        let application_auth = application_auth.clone();
+        let user_password_auth = user_password_auth.clone();
         let stream_shutdown = stream_tracker.shutdown_handle();
         stream_tracker.register(async move {
           match resolver.resolve_request().await {
@@ -730,7 +732,7 @@ async fn handle_h3_connection(
                 req,
                 stream,
                 service,
-                application_auth,
+                user_password_auth,
                 stream_shutdown,
               )
               .await;
@@ -796,7 +798,7 @@ fn verify_key_file_permissions(key_path: &str) -> Result<()> {
 fn load_tls_config(
   cert_path: &str,
   key_path: &str,
-  transport_auth: &crate::auth::TransportAuth,
+  client_cert_auth: &ClientCertAuth,
 ) -> Result<Arc<rustls::ServerConfig>> {
   // Verify private key file permissions before loading
   verify_key_file_permissions(key_path)?;
@@ -819,8 +821,8 @@ fn load_tls_config(
   let key = rustls_pemfile::private_key(&mut key_reader)?
     .ok_or_else(|| anyhow!("No private key found in {}", key_path))?;
 
-  // Build TLS config based on transport auth
-  let tls_config = match transport_auth.rustls_verifier() {
+  // Build TLS config based on client cert auth
+  let tls_config = match client_cert_auth.rustls_verifier() {
     Some(verifier) => {
       // TLS client cert auth configured - client cert is REQUIRED
       let mut config = rustls::ServerConfig::builder()
@@ -855,7 +857,7 @@ pub struct Http3Listener {
   /// QUIC configuration
   quic_config: QuicConfig,
   /// Application-layer authentication (password)
-  application_auth: crate::auth::ApplicationAuth,
+  user_password_auth: UserPasswordAuth,
   /// Stream tracker
   stream_tracker: Rc<StreamTracker>,
   /// Shutdown handle
@@ -885,41 +887,42 @@ impl Http3Listener {
       None => QuicConfig::default(),
     };
 
-    // Parse authentication config (supports both single and multi-auth)
-    let multi_auth_config: Option<crate::auth::MultiAuthConfig> = args
+    // Parse authentication config using ListenerAuthConfig
+    let auth_config: Option<ListenerAuthConfig> = args
       .auth
       .map(|a| {
-        crate::auth::MultiAuthConfig::from_yaml(
-          a,
-          &[AuthType::Password, AuthType::TlsClientCert],
-        )
+        let config: ListenerAuthConfig = serde_yaml::from_value(a)?;
+        config.validate()?;
+        Ok(config)
       })
       .transpose()
-      .map_err(|e| anyhow!("auth config validation failed: {}", e))?;
+      .map_err(|e: anyhow::Error| {
+        anyhow!("auth config validation failed: {}", e)
+      })?;
 
-    // Build transport auth (TLS client cert) and application auth (password)
-    let transport_auth = match &multi_auth_config {
-      Some(config) => crate::auth::TransportAuth::from_config_load(config)
-        .map_err(|e| anyhow!("transport auth setup failed: {}", e))?,
-      None => crate::auth::TransportAuth::none(),
+    // Build client cert auth (TLS layer) and user password auth (application layer)
+    let client_cert_auth = match &auth_config {
+      Some(config) => ClientCertAuth::from_config(config)
+        .map_err(|e| anyhow!("client cert auth setup failed: {}", e))?,
+      None => ClientCertAuth::none(),
     };
-    let application_auth = match &multi_auth_config {
-      Some(config) => crate::auth::ApplicationAuth::from_config(config),
-      None => crate::auth::ApplicationAuth::none(),
+    let user_password_auth = match &auth_config {
+      Some(config) => UserPasswordAuth::from_config(config),
+      None => UserPasswordAuth::none(),
     };
 
     // Load TLS config
     let tls_config = load_tls_config(
       &args.cert_path,
       &args.key_path,
-      &transport_auth,
+      &client_cert_auth,
     )?;
 
     Ok(plugin::Listener::new(Self {
       address,
       tls_config,
       quic_config,
-      application_auth,
+      user_password_auth,
       stream_tracker: Rc::new(StreamTracker::new()),
       shutdown_handle: plugin::ShutdownHandle::new(),
       service: svc,
@@ -932,7 +935,7 @@ impl plugin::Listening for Http3Listener {
     let address = self.address;
     let tls_config = self.tls_config.clone();
     let quic_config = self.quic_config.clone();
-    let application_auth = self.application_auth.clone();
+    let user_password_auth = self.user_password_auth.clone();
     let stream_tracker = self.stream_tracker.clone();
     let shutdown_handle = self.shutdown_handle.clone();
     let service = self.service.clone();
@@ -1003,7 +1006,8 @@ impl plugin::Listening for Http3Listener {
         match accept_result {
           Some(conn) => {
             let service = service.clone();
-            let application_auth_for_conn = application_auth.clone();
+            let user_password_auth_for_conn =
+              user_password_auth.clone();
             let tracker_for_register = stream_tracker.clone();
             let tracker_for_handler = stream_tracker.clone();
             let stream_shutdown = tracker_for_handler.shutdown_handle();
@@ -1014,7 +1018,7 @@ impl plugin::Listening for Http3Listener {
                   handle_h3_connection(
                     quinn_conn,
                     service,
-                    application_auth_for_conn,
+                    user_password_auth_for_conn,
                     tracker_for_handler,
                     stream_shutdown,
                   )
@@ -1105,9 +1109,11 @@ pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::auth::listener_auth_config::UserCredential;
+  use base64::{
+    Engine, engine::general_purpose::STANDARD as BASE64_STANDARD,
+  };
   use http_body::Body;
-  use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
-  use crate::auth::MultiAuthConfig;
 
   // ============== QuicConfigArgs Tests ==============
 
@@ -1262,8 +1268,7 @@ mod tests {
     assert_eq!(config.receive_window, DEFAULT_RECEIVE_WINDOW);
   }
 
-  // ============== AuthConfig Tests ==============
-  // Tests for the new auth module integration
+  // ============== ListenerAuthConfig Tests ==============
 
   #[test]
   fn test_auth_config_none() {
@@ -1282,20 +1287,16 @@ mod tests {
   fn test_auth_config_password_plaintext() {
     // Test that plaintext password format works with new auth module
     let yaml = r#"
-type: password
 users:
   - username: admin
     password: plaintext_secret
 "#;
     let yaml_value: serde_yaml::Value =
       serde_yaml::from_str(yaml).expect("parse yaml");
-    let result = crate::auth::AuthConfig::from_yaml(
-      yaml_value,
-      &[AuthType::Password, AuthType::TlsClientCert],
-    );
-    assert!(result.is_ok());
-    let config = result.unwrap();
-    assert_eq!(config.auth_type, AuthType::Password);
+    let config: ListenerAuthConfig =
+      serde_yaml::from_value(yaml_value).unwrap();
+    config.validate().unwrap();
+    assert!(config.users.is_some());
     let users = config.users_map().expect("users should exist");
     assert_eq!(
       users.get("admin"),
@@ -1307,18 +1308,13 @@ users:
   fn test_auth_config_tls_client_cert() {
     // Test that TLS client cert format works with new auth module
     let yaml = r#"
-type: tls_client_cert
 client_ca_path: /path/to/ca.pem
 "#;
     let yaml_value: serde_yaml::Value =
       serde_yaml::from_str(yaml).expect("parse yaml");
-    let result = crate::auth::AuthConfig::from_yaml(
-      yaml_value,
-      &[AuthType::Password, AuthType::TlsClientCert],
-    );
-    assert!(result.is_ok());
-    let config = result.unwrap();
-    assert_eq!(config.auth_type, AuthType::TlsClientCert);
+    let config: ListenerAuthConfig =
+      serde_yaml::from_value(yaml_value).unwrap();
+    config.validate().unwrap();
     assert_eq!(
       config.client_ca_pathbuf(),
       Some(std::path::PathBuf::from("/path/to/ca.pem"))
@@ -1326,48 +1322,32 @@ client_ca_path: /path/to/ca.pem
   }
 
   #[test]
-  fn test_auth_config_password_missing_users() {
-    // Password auth without users should fail
+  fn test_auth_config_dual_factor() {
+    // Test that dual-factor (users + client_ca_path) works
     let yaml = r#"
-type: password
+users:
+  - username: admin
+    password: secret
+client_ca_path: /path/to/ca.pem
 "#;
     let yaml_value: serde_yaml::Value =
       serde_yaml::from_str(yaml).expect("parse yaml");
-    let result = crate::auth::AuthConfig::from_yaml(
-      yaml_value,
-      &[AuthType::Password, AuthType::TlsClientCert],
-    );
-    assert!(result.is_err());
+    let config: ListenerAuthConfig =
+      serde_yaml::from_value(yaml_value).unwrap();
+    config.validate().unwrap();
+    assert!(config.users.is_some());
+    assert!(config.client_ca_path.is_some());
   }
 
   #[test]
-  fn test_auth_config_tls_client_cert_missing_path() {
-    // TLS client cert without path should fail
-    let yaml = r#"
-type: tls_client_cert
-"#;
+  fn test_auth_config_empty_is_error() {
+    // Empty auth config should fail validation
+    let yaml = r#"{}"#;
     let yaml_value: serde_yaml::Value =
       serde_yaml::from_str(yaml).expect("parse yaml");
-    let result = crate::auth::AuthConfig::from_yaml(
-      yaml_value,
-      &[AuthType::Password, AuthType::TlsClientCert],
-    );
-    assert!(result.is_err());
-  }
-
-  #[test]
-  fn test_auth_config_invalid_type() {
-    // Invalid auth type should fail
-    let yaml = r#"
-type: invalid_type
-"#;
-    let yaml_value: serde_yaml::Value =
-      serde_yaml::from_str(yaml).expect("parse yaml");
-    let result = crate::auth::AuthConfig::from_yaml(
-      yaml_value,
-      &[AuthType::Password, AuthType::TlsClientCert],
-    );
-    assert!(result.is_err());
+    let config: ListenerAuthConfig =
+      serde_yaml::from_value(yaml_value).unwrap();
+    assert!(config.validate().is_err());
   }
 
   // ============== StreamTracker Tests ==============
@@ -1525,58 +1505,6 @@ type: invalid_type
     assert_eq!(resp.status(), http::StatusCode::OK);
   }
 
-  // ============== Base64 Decode Tests ==============
-
-  #[test]
-  fn test_base64_decode_simple() {
-    let result = BASE64_STANDARD.decode("dGVzdA==").unwrap();
-    assert_eq!(result, b"test");
-  }
-
-  #[test]
-  fn test_base64_decode_user_password() {
-    // base64 of "user:password"
-    let result =
-      BASE64_STANDARD.decode("dXNlcjpwYXNzd29yZA==").unwrap();
-    assert_eq!(result, b"user:password");
-  }
-
-  #[test]
-  fn test_base64_decode_invalid_character() {
-    let result = BASE64_STANDARD.decode("!!!invalid");
-    assert!(result.is_err());
-  }
-
-  // ============== Basic Auth Parsing Tests ==============
-
-  #[test]
-  fn test_parse_basic_auth_valid() {
-    // base64 of "user:password" is "dXNlcjpwYXNzd29yZA=="
-    let header_value =
-      http::HeaderValue::from_str("Basic dXNlcjpwYXNzd29yZA==")
-        .unwrap();
-    let (username, password) = crate::auth::parse_basic_auth(&header_value).unwrap();
-    assert_eq!(username, "user");
-    assert_eq!(password, "password");
-  }
-
-  #[test]
-  fn test_parse_basic_auth_not_basic() {
-    let header_value =
-      http::HeaderValue::from_str("Bearer token123").unwrap();
-    let result = crate::auth::parse_basic_auth(&header_value);
-    assert!(result.is_err());
-  }
-
-  #[test]
-  fn test_parse_basic_auth_missing_password() {
-    // base64 of "user" is "dXNlcg=="
-    let header_value =
-      http::HeaderValue::from_str("Basic dXNlcg==").unwrap();
-    let result = crate::auth::parse_basic_auth(&header_value);
-    assert!(result.is_err());
-  }
-
   // ============== Listener Name Tests ==============
 
   #[test]
@@ -1619,7 +1547,6 @@ quic:
   send_window: 20971520
   receive_window: 20971520
 auth:
-  type: password
   users:
     - username: user1
       password: secret123
@@ -1693,1976 +1620,5 @@ address: "0.0.0.0:443"
       "Internal Server Error",
     );
     assert_eq!(resp.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
-  }
-
-  // ============== Additional StreamTracker Tests ==============
-
-  #[tokio::test]
-  async fn test_stream_tracker_register_and_complete() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        let completed = Rc::new(std::cell::Cell::new(false));
-        let completed_clone = completed.clone();
-        tracker.register(async move {
-          completed_clone.set(true);
-        });
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.active_count(), 1);
-
-        // Wait for task to complete
-        tracker.wait_shutdown().await;
-        assert_eq!(tracker.active_count(), 0);
-        assert!(completed.get());
-      })
-      .await;
-  }
-
-  #[tokio::test]
-  async fn test_stream_tracker_shutdown_before_wait() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        let shutdown_handle = tracker.shutdown_handle();
-
-        tracker.register(async move {
-          // Wait for shutdown notification
-          shutdown_handle.notified().await;
-        });
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.active_count(), 1);
-
-        // Trigger shutdown
-        tracker.shutdown();
-
-        // Give time for notification to propagate
-        tokio::task::yield_now().await;
-
-        // Wait for tasks to complete
-        tracker.wait_shutdown().await;
-        assert_eq!(tracker.active_count(), 0);
-      })
-      .await;
-  }
-
-  // ============== QuicConfigArgs Edge Cases ==============
-
-  #[test]
-  fn test_quic_config_args_validate_boundary_values() {
-    // Test min boundary
-    let args = QuicConfigArgs {
-      max_concurrent_bidi_streams: Some(1),
-      max_idle_timeout_ms: Some(1),
-      initial_mtu: Some(1200),
-      send_window: Some(1),
-      receive_window: Some(1),
-    };
-    let config = args.validate_and_apply_defaults().unwrap();
-    assert_eq!(config.max_concurrent_bidi_streams, 1);
-    assert_eq!(config.max_idle_timeout_ms, 1);
-    assert_eq!(config.initial_mtu, 1200);
-    assert_eq!(config.send_window, 1);
-    assert_eq!(config.receive_window, 1);
-
-    // Test max boundary for max_concurrent_bidi_streams
-    let args = QuicConfigArgs {
-      max_concurrent_bidi_streams: Some(10000),
-      ..Default::default()
-    };
-    let config = args.validate_and_apply_defaults().unwrap();
-    assert_eq!(config.max_concurrent_bidi_streams, 10000);
-
-    // Test max boundary for initial_mtu
-    let args =
-      QuicConfigArgs { initial_mtu: Some(9000), ..Default::default() };
-    let config = args.validate_and_apply_defaults().unwrap();
-    assert_eq!(config.initial_mtu, 9000);
-  }
-
-  // ============== Http3ListenerArgs Edge Cases ==============
-
-  #[test]
-  fn test_http3_listener_args_with_quic_and_auth() {
-    let yaml = r#"
-address: "127.0.0.1:8443"
-cert_path: "/etc/ssl/cert.pem"
-key_path: "/etc/ssl/key.pem"
-quic:
-  max_concurrent_bidi_streams: 50
-auth:
-  type: tls_client_cert
-  client_ca_path: "/etc/ssl/client-ca.pem"
-"#;
-    let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(args.address, "127.0.0.1:8443");
-    assert!(args.quic.is_some());
-    assert!(args.auth.is_some());
-
-    let quic = args.quic.unwrap();
-    assert_eq!(quic.max_concurrent_bidi_streams, Some(50));
-  }
-
-  // ============== Additional Http3ListenerArgs Tests ==============
-
-  #[test]
-  fn test_http3_listener_args_invalid_address() {
-    // Test invalid address format (missing port)
-    let yaml = r#"
-address: "invalid_address"
-cert_path: "/path/to/cert.pem"
-key_path: "/path/to/key.pem"
-"#;
-    let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    // The args parse successfully, but creating listener would fail
-    // because the address is invalid for SocketAddr parsing
-    assert_eq!(args.address, "invalid_address");
-  }
-
-  #[test]
-  fn test_http3_listener_args_optional_defaults() {
-    // Test that optional parameters are None when not provided
-    let yaml = r#"
-address: "0.0.0.0:443"
-cert_path: "/path/to/cert.pem"
-key_path: "/path/to/key.pem"
-"#;
-    let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert!(args.quic.is_none());
-    assert!(args.auth.is_none());
-  }
-
-  // ============== StreamTracker Timeout Tests ==============
-
-  #[tokio::test]
-  async fn test_stream_tracker_shutdown_with_timeout() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        let _shutdown_handle = tracker.shutdown_handle();
-
-        // Register a pending task that will wait for shutdown
-        tracker.register(async move {
-          // This will wait forever unless shutdown is triggered
-          std::future::pending::<()>().await;
-        });
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.active_count(), 1);
-
-        // Trigger shutdown
-        tracker.shutdown();
-
-        // Wait with timeout - should timeout because task is pending
-        let wait_result = tokio::time::timeout(
-          Duration::from_millis(50),
-          tracker.wait_shutdown(),
-        )
-        .await;
-        assert!(
-          wait_result.is_err(),
-          "wait_shutdown should timeout with pending task"
-        );
-
-        // Force abort
-        tracker.abort_all();
-        tracker.wait_shutdown().await;
-        assert_eq!(tracker.active_count(), 0);
-      })
-      .await;
-  }
-
-  #[tokio::test]
-  async fn test_stream_tracker_multiple_shutdown_calls() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        tracker.register(async {});
-        tokio::task::yield_now().await;
-
-        // Multiple shutdown calls should be idempotent
-        tracker.shutdown();
-        tracker.shutdown();
-        tracker.shutdown();
-
-        tracker.wait_shutdown().await;
-        assert_eq!(tracker.active_count(), 0);
-      })
-      .await;
-  }
-
-  // ============== QuicConfigArgs Clone Tests ==============
-
-  #[test]
-  fn test_quic_config_args_clone() {
-    let args = QuicConfigArgs {
-      max_concurrent_bidi_streams: Some(200),
-      max_idle_timeout_ms: Some(60000),
-      initial_mtu: Some(1400),
-      send_window: Some(20971520),
-      receive_window: Some(20971520),
-    };
-    let cloned = args.clone();
-    assert_eq!(
-      cloned.max_concurrent_bidi_streams,
-      args.max_concurrent_bidi_streams
-    );
-  }
-
-  #[test]
-  fn test_quic_config_clone() {
-    let config = QuicConfig {
-      max_concurrent_bidi_streams: 200,
-      max_idle_timeout_ms: 60000,
-      initial_mtu: 1400,
-      send_window: 20971520,
-      receive_window: 20971520,
-    };
-    let cloned = config.clone();
-    assert_eq!(
-      cloned.max_concurrent_bidi_streams,
-      config.max_concurrent_bidi_streams
-    );
-  }
-
-  // ============== Http3ListenerArgs Clone Tests ==============
-
-  #[test]
-  fn test_http3_listener_args_clone() {
-    let args = Http3ListenerArgs {
-      address: "0.0.0.0:443".to_string(),
-      cert_path: "/path/to/cert.pem".to_string(),
-      key_path: "/path/to/key.pem".to_string(),
-      quic: None,
-      auth: None,
-    };
-    let cloned = args.clone();
-    assert_eq!(cloned.address, args.address);
-  }
-
-  // ============== Error Response Body Tests ==============
-
-  #[test]
-  fn test_build_error_response_with_body() {
-    let resp = build_error_response(
-      http::StatusCode::INTERNAL_SERVER_ERROR,
-      "Internal Server Error",
-    );
-    assert_eq!(resp.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
-  }
-
-  // ============== TLS Configuration Tests ==============
-
-  // Initialize CryptoProvider for tests that involve TLS
-  static CRYPTO_PROVIDER_INIT: std::sync::Once = std::sync::Once::new();
-
-  fn ensure_crypto_provider() {
-    CRYPTO_PROVIDER_INIT.call_once(|| {
-      let _ =
-        rustls::crypto::ring::default_provider().install_default();
-    });
-  }
-
-  /// Helper to generate a self-signed certificate using rcgen
-  fn generate_test_cert(common_name: &str) -> (String, String) {
-    let subject_alt_names = vec![common_name.to_string()];
-    let rcgen::CertifiedKey { cert, key_pair } =
-      rcgen::generate_simple_self_signed(subject_alt_names)
-        .expect("Failed to generate test certificate");
-    let cert_pem = cert.pem();
-    let key_pem = key_pair.serialize_pem();
-    (cert_pem, key_pem)
-  }
-
-  /// Helper to generate a CA certificate for client authentication
-  fn generate_ca_cert() -> (String, String) {
-    let mut params = rcgen::CertificateParams::default();
-    params.is_ca =
-      rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    params
-      .distinguished_name
-      .push(rcgen::DnType::CommonName, "Test CA");
-    let key_pair =
-      rcgen::KeyPair::generate().expect("Failed to generate key");
-    let cert = params
-      .self_signed(&key_pair)
-      .expect("Failed to generate test CA certificate");
-    let cert_pem = cert.pem();
-    let key_pem = key_pair.serialize_pem();
-    (cert_pem, key_pem)
-  }
-
-  /// Helper to set secure permissions on key file for Unix systems
-  #[cfg(unix)]
-  fn set_secure_key_permissions(path: &std::path::Path) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(
-      path,
-      std::fs::Permissions::from_mode(0o600),
-    )
-    .expect("Failed to set key file permissions");
-  }
-
-  /// Helper to set secure permissions on key file for Unix systems
-  /// (no-op on non-Unix systems)
-  #[cfg(not(unix))]
-  fn set_secure_key_permissions(_path: &std::path::Path) {
-    // No permission check on non-Unix systems
-  }
-
-  /// Helper to write key file with secure permissions
-  fn write_key_file_secure(
-    path: &std::path::Path,
-    content: &str,
-  ) -> std::io::Result<()> {
-    std::fs::write(path, content)?;
-    set_secure_key_permissions(path);
-    Ok(())
-  }
-
-  #[test]
-  fn test_load_tls_config_success() {
-    ensure_crypto_provider();
-    // Generate test certificate and key
-    let (cert_pem, key_pem) = generate_test_cert("test-server");
-
-    // Create temp directory for test files
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-
-    // Write certificate and key to files
-    std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
-    write_key_file_secure(&key_path, &key_pem)
-      .expect("Failed to write key");
-
-    // Test with no auth
-    let transport_auth = crate::auth::TransportAuth::none();
-    let result = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth,
-    );
-
-    assert!(
-      result.is_ok(),
-      "load_tls_config should succeed with valid cert and key"
-    );
-    let tls_config = result.unwrap();
-    // Verify ALPN protocol is set
-    assert!(tls_config.alpn_protocols.iter().any(|p| p == b"h3"));
-  }
-
-  #[test]
-  fn test_load_tls_config_cert_not_found() {
-    ensure_crypto_provider();
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("nonexistent.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-
-    // Only create key file, not cert
-    let (_, key_pem) = generate_test_cert("test");
-    write_key_file_secure(&key_path, &key_pem)
-      .expect("Failed to write key");
-
-    let transport_auth = crate::auth::TransportAuth::none();
-    let result = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth,
-    );
-
-    assert!(
-      result.is_err(),
-      "load_tls_config should fail when cert file not found"
-    );
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-      err_msg.contains("Failed to open certificate file"),
-      "Error should mention certificate file: {err_msg}"
-    );
-  }
-
-  #[test]
-  fn test_load_tls_config_key_not_found() {
-    ensure_crypto_provider();
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("nonexistent.pem");
-
-    // Only create cert file, not key
-    let (cert_pem, _) = generate_test_cert("test");
-    std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
-
-    let transport_auth = crate::auth::TransportAuth::none();
-    let result = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth,
-    );
-
-    assert!(
-      result.is_err(),
-      "load_tls_config should fail when key file not found"
-    );
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-      err_msg.contains("Failed to get metadata")
-        || err_msg.contains("Failed to open private key file"),
-      "Error should mention key file issue: {err_msg}"
-    );
-  }
-
-  #[test]
-  fn test_load_tls_config_no_auth() {
-    ensure_crypto_provider();
-    let (cert_pem, key_pem) = generate_test_cert("test-server");
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-
-    std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
-    write_key_file_secure(&key_path, &key_pem)
-      .expect("Failed to write key");
-
-    let transport_auth = crate::auth::TransportAuth::none();
-    let result = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth,
-    );
-
-    assert!(
-      result.is_ok(),
-      "load_tls_config should succeed with no auth"
-    );
-  }
-
-  #[test]
-  fn test_load_tls_config_password_auth() {
-    ensure_crypto_provider();
-    let (cert_pem, key_pem) = generate_test_cert("test-server");
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-
-    std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
-    write_key_file_secure(&key_path, &key_pem)
-      .expect("Failed to write key");
-
-    // Create password auth config using the new auth module
-    // Password auth means no TLS client cert, so TransportAuth::none()
-    let transport_auth = crate::auth::TransportAuth::none();
-    let result = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth,
-    );
-
-    assert!(
-      result.is_ok(),
-      "load_tls_config should succeed with password auth"
-    );
-    // Password auth should use no_client_auth like None
-    let tls_config = result.unwrap();
-    assert!(tls_config.alpn_protocols.iter().any(|p| p == b"h3"));
-  }
-
-  #[test]
-  fn test_load_tls_config_tls_client_cert_auth() {
-    ensure_crypto_provider();
-    // Generate server cert and CA cert
-    let (server_cert_pem, server_key_pem) =
-      generate_test_cert("test-server");
-    let (ca_cert_pem, _) = generate_ca_cert();
-
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-    let ca_path = tmp_dir.path().join("client_ca.pem");
-
-    std::fs::write(&cert_path, server_cert_pem)
-      .expect("Failed to write cert");
-    write_key_file_secure(&key_path, &server_key_pem)
-      .expect("Failed to write key");
-    std::fs::write(&ca_path, ca_cert_pem)
-      .expect("Failed to write CA cert");
-
-    let auth_config = crate::auth::MultiAuthConfig {
-      configs: vec![crate::auth::AuthConfig {
-        auth_type: AuthType::TlsClientCert,
-        users: None,
-        client_ca_path: Some(ca_path.to_str().unwrap().to_string()),
-      }],
-    };
-    let transport_auth = crate::auth::TransportAuth::from_config_load(&auth_config)
-      .expect("should create TransportAuth");
-
-    let result = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth,
-    );
-
-    assert!(
-      result.is_ok(),
-      "load_tls_config should succeed with TLS client cert auth"
-    );
-    let tls_config = result.unwrap();
-    assert!(tls_config.alpn_protocols.iter().any(|p| p == b"h3"));
-  }
-
-  #[test]
-  fn test_load_tls_config_tls_client_cert_auth_ca_not_found() {
-    ensure_crypto_provider();
-    let (cert_pem, key_pem) = generate_test_cert("test-server");
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-    let ca_path = tmp_dir.path().join("nonexistent_ca.pem");
-
-    std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
-    write_key_file_secure(&key_path, &key_pem)
-      .expect("Failed to write key");
-
-    let auth_config = crate::auth::MultiAuthConfig {
-      configs: vec![crate::auth::AuthConfig {
-        auth_type: AuthType::TlsClientCert,
-        users: None,
-        client_ca_path: Some(ca_path.to_str().unwrap().to_string()),
-      }],
-    };
-    let result = crate::auth::TransportAuth::from_config_load(&auth_config);
-
-    assert!(
-      result.is_err(),
-      "TransportAuth::from_config_load should fail when client CA file not found"
-    );
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-      err_msg.contains("failed to open CA file"),
-      "Error should mention CA file: {err_msg}"
-    );
-  }
-
-  #[test]
-  fn test_load_tls_config_invalid_cert_content() {
-    ensure_crypto_provider();
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-
-    // Write invalid content
-    std::fs::write(&cert_path, "not a valid certificate").unwrap();
-    let (_, key_pem) = generate_test_cert("test");
-    write_key_file_secure(&key_path, &key_pem)
-      .expect("Failed to write key");
-
-    let transport_auth = crate::auth::TransportAuth::none();
-    let result = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth,
-    );
-
-    assert!(
-      result.is_err(),
-      "load_tls_config should fail with invalid cert content"
-    );
-  }
-
-  #[test]
-  fn test_load_tls_config_invalid_key_content() {
-    ensure_crypto_provider();
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-
-    let (cert_pem, _) = generate_test_cert("test");
-    std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
-    // Write invalid key content with secure permissions
-    // (this is a test for invalid content, so we don't use write_key_file_secure)
-    std::fs::write(&key_path, "not a valid private key").unwrap();
-    #[cfg(unix)]
-    {
-      use std::os::unix::fs::PermissionsExt;
-      std::fs::set_permissions(
-        &key_path,
-        std::fs::Permissions::from_mode(0o600),
-      )
-      .expect("Failed to set permissions");
-    }
-
-    let transport_auth = crate::auth::TransportAuth::none();
-    let result = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth,
-    );
-
-    assert!(
-      result.is_err(),
-      "load_tls_config should fail with invalid key content"
-    );
-  }
-
-  #[test]
-  fn test_load_tls_config_empty_key_file() {
-    ensure_crypto_provider();
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-
-    let (cert_pem, _) = generate_test_cert("test");
-    std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
-    // Write empty key file with secure permissions
-    write_key_file_secure(&key_path, "").expect("Failed to write key");
-
-    let transport_auth = crate::auth::TransportAuth::none();
-    let result = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth,
-    );
-
-    assert!(
-      result.is_err(),
-      "load_tls_config should fail with empty key file"
-    );
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-      err_msg.contains("No private key found"),
-      "Error should mention no private key: {err_msg}"
-    );
-  }
-
-  #[test]
-  fn test_load_tls_config_with_password_and_tls_client_cert_both() {
-    ensure_crypto_provider();
-    use crate::auth::{AuthConfig, AuthType};
-    // Test that both Password and TlsClientCert use the same cert/key files
-    let (cert_pem, key_pem) = generate_test_cert("test-server");
-    let (ca_cert_pem, _) = generate_ca_cert();
-
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-    let ca_path = tmp_dir.path().join("client_ca.pem");
-
-    std::fs::write(&cert_path, cert_pem.clone())
-      .expect("Failed to write cert");
-    write_key_file_secure(&key_path, &key_pem)
-      .expect("Failed to write key");
-    std::fs::write(&ca_path, ca_cert_pem)
-      .expect("Failed to write CA cert");
-
-    // Test Password auth with plaintext password (no TLS client cert at transport)
-    let transport_auth1 = crate::auth::TransportAuth::none();
-    let result1 = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth1,
-    );
-    assert!(result1.is_ok());
-
-    // Test TlsClientCert auth at transport layer
-    let auth_config = MultiAuthConfig {
-      configs: vec![AuthConfig {
-        auth_type: AuthType::TlsClientCert,
-        users: None,
-        client_ca_path: Some(ca_path.to_str().unwrap().to_string()),
-      }],
-    };
-    let transport_auth2 = crate::auth::TransportAuth::from_config_load(&auth_config)
-      .expect("should create TransportAuth");
-    let result2 = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth2,
-    );
-    assert!(result2.is_ok());
-  }
-
-  #[test]
-  fn test_load_tls_config_multiple_certs_in_file() {
-    ensure_crypto_provider();
-    // Test with a certificate chain (multiple certs in one file)
-    let (cert_pem, key_pem) = generate_test_cert("test-server");
-    let (ca_cert_pem, _) = generate_ca_cert();
-
-    // Combine server cert and CA cert into one file
-    let combined_cert = format!("{cert_pem}{ca_cert_pem}");
-
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-
-    std::fs::write(&cert_path, combined_cert)
-      .expect("Failed to write cert");
-    // Set correct permissions for key file
-    std::fs::write(&key_path, key_pem.clone())
-      .expect("Failed to write key");
-    #[cfg(unix)]
-    {
-      use std::os::unix::fs::PermissionsExt;
-      std::fs::set_permissions(
-        &key_path,
-        std::fs::Permissions::from_mode(0o600),
-      )
-      .expect("Failed to set permissions");
-    }
-
-    let transport_auth = crate::auth::TransportAuth::none();
-    let result = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth,
-    );
-
-    assert!(
-      result.is_ok(),
-      "load_tls_config should handle certificate chains"
-    );
-  }
-
-  // ============== Private Key Permission Tests ==============
-
-  #[cfg(unix)]
-  fn set_file_permissions(path: &std::path::Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(
-      path,
-      std::fs::Permissions::from_mode(mode),
-    )
-    .expect("Failed to set permissions");
-  }
-
-  #[test]
-  #[cfg(unix)]
-  fn test_verify_key_file_permissions_600() {
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let key_path = tmp_dir.path().join("key.pem");
-
-    // Create file with 600 permissions
-    std::fs::write(&key_path, "test key").expect("Failed to write key");
-    set_file_permissions(&key_path, 0o600);
-
-    let result =
-      verify_key_file_permissions(key_path.to_str().unwrap());
-    assert!(
-      result.is_ok(),
-      "verify_key_file_permissions should accept 600 permissions"
-    );
-  }
-
-  #[test]
-  #[cfg(unix)]
-  fn test_verify_key_file_permissions_400() {
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let key_path = tmp_dir.path().join("key.pem");
-
-    // Create file with 400 permissions (read-only, also secure)
-    std::fs::write(&key_path, "test key").expect("Failed to write key");
-    set_file_permissions(&key_path, 0o400);
-
-    let result =
-      verify_key_file_permissions(key_path.to_str().unwrap());
-    assert!(
-      result.is_ok(),
-      "verify_key_file_permissions should accept 400 permissions"
-    );
-  }
-
-  #[test]
-  #[cfg(unix)]
-  fn test_verify_key_file_permissions_644_insecure() {
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let key_path = tmp_dir.path().join("key.pem");
-
-    // Create file with 644 permissions (insecure - group/others can read)
-    std::fs::write(&key_path, "test key").expect("Failed to write key");
-    set_file_permissions(&key_path, 0o644);
-
-    let result =
-      verify_key_file_permissions(key_path.to_str().unwrap());
-    assert!(
-      result.is_err(),
-      "verify_key_file_permissions should reject 644 permissions"
-    );
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-      err_msg.contains("insecure permissions"),
-      "Error should mention insecure permissions: {err_msg}"
-    );
-    assert!(
-      err_msg.contains("chmod 600"),
-      "Error should suggest chmod 600: {err_msg}"
-    );
-  }
-
-  #[test]
-  #[cfg(unix)]
-  fn test_verify_key_file_permissions_666_insecure() {
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let key_path = tmp_dir.path().join("key.pem");
-
-    // Create file with 666 permissions (insecure - everyone can read/write)
-    std::fs::write(&key_path, "test key").expect("Failed to write key");
-    set_file_permissions(&key_path, 0o666);
-
-    let result =
-      verify_key_file_permissions(key_path.to_str().unwrap());
-    assert!(
-      result.is_err(),
-      "verify_key_file_permissions should reject 666 permissions"
-    );
-  }
-
-  #[test]
-  #[cfg(unix)]
-  fn test_verify_key_file_permissions_nonexistent_file() {
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let key_path = tmp_dir.path().join("nonexistent.pem");
-
-    let result =
-      verify_key_file_permissions(key_path.to_str().unwrap());
-    assert!(
-      result.is_err(),
-      "verify_key_file_permissions should fail for nonexistent file"
-    );
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-      err_msg.contains("Failed to get metadata"),
-      "Error should mention metadata failure: {err_msg}"
-    );
-  }
-
-  #[test]
-  #[cfg(unix)]
-  fn test_load_tls_config_insecure_key_permissions() {
-    ensure_crypto_provider();
-    let (cert_pem, key_pem) = generate_test_cert("test-server");
-
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-
-    std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
-    std::fs::write(&key_path, key_pem).expect("Failed to write key");
-    // Set insecure permissions
-    set_file_permissions(&key_path, 0o644);
-
-    let transport_auth = crate::auth::TransportAuth::none();
-    let result = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth,
-    );
-
-    assert!(
-      result.is_err(),
-      "load_tls_config should fail with insecure key permissions"
-    );
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-      err_msg.contains("insecure permissions"),
-      "Error should mention insecure permissions: {err_msg}"
-    );
-  }
-
-  #[test]
-  #[cfg(unix)]
-  fn test_load_tls_config_secure_key_permissions_600() {
-    ensure_crypto_provider();
-    let (cert_pem, key_pem) = generate_test_cert("test-server");
-
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-
-    std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
-    std::fs::write(&key_path, key_pem).expect("Failed to write key");
-    // Set secure permissions
-    set_file_permissions(&key_path, 0o600);
-
-    let transport_auth = crate::auth::TransportAuth::none();
-    let result = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth,
-    );
-
-    assert!(
-      result.is_ok(),
-      "load_tls_config should succeed with 600 key permissions"
-    );
-  }
-
-  #[test]
-  #[cfg(unix)]
-  fn test_load_tls_config_secure_key_permissions_400() {
-    ensure_crypto_provider();
-    let (cert_pem, key_pem) = generate_test_cert("test-server");
-
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-
-    std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
-    std::fs::write(&key_path, key_pem).expect("Failed to write key");
-    // Set secure read-only permissions
-    set_file_permissions(&key_path, 0o400);
-
-    let transport_auth = crate::auth::TransportAuth::none();
-    let result = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth,
-    );
-
-    assert!(
-      result.is_ok(),
-      "load_tls_config should succeed with 400 key permissions"
-    );
-  }
-
-  // ============== Transfer Direction Display Tests ==============
-
-  #[test]
-  fn test_transfer_direction_display() {
-    // Test that the TransferDirection enum displays correctly
-    // Since it's defined inside handle_h3_stream, we test the logic here
-    // by verifying the format strings
-    assert_eq!(format!("{}", "H3->TCP"), "H3->TCP");
-    assert_eq!(format!("{}", "TCP->H3"), "TCP->H3");
-    assert_eq!(format!("{}", "shutdown"), "shutdown");
-  }
-
-  // ============== Http3Listener stop() Tests ==============
-
-  #[test]
-  fn test_stream_tracker_shutdown_handle_is_shutdown_after_stop() {
-    // Verify that StreamTracker's shutdown handle is triggered when
-    // shutdown() is called on it
-    let tracker = StreamTracker::new();
-    let handle = tracker.shutdown_handle();
-
-    assert!(
-      !handle.is_shutdown(),
-      "ShutdownHandle should not be shutdown initially"
-    );
-
-    // Call shutdown on tracker
-    tracker.shutdown();
-
-    assert!(
-      handle.is_shutdown(),
-      "ShutdownHandle should be shutdown after tracker.shutdown() is called"
-    );
-  }
-
-  #[test]
-  fn test_stream_tracker_shutdown_is_idempotent() {
-    // Verify that multiple calls to shutdown() don't cause issues
-    let tracker = StreamTracker::new();
-    let handle = tracker.shutdown_handle();
-
-    // Call shutdown multiple times
-    tracker.shutdown();
-    assert!(handle.is_shutdown());
-
-    tracker.shutdown();
-    assert!(handle.is_shutdown());
-
-    tracker.shutdown();
-    assert!(handle.is_shutdown());
-  }
-
-  #[tokio::test]
-  async fn test_stream_tracker_shutdown_notifies_pending_tasks() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        let handle = tracker.shutdown_handle();
-
-        let notified = Rc::new(std::cell::Cell::new(false));
-        let notified_clone = notified.clone();
-
-        // Register a task that waits for shutdown notification
-        tracker.register(async move {
-          handle.notified().await;
-          notified_clone.set(true);
-        });
-        tokio::task::yield_now().await;
-
-        // Trigger shutdown
-        tracker.shutdown();
-
-        // Give time for notification to propagate
-        tokio::task::yield_now().await;
-
-        // The task should have been notified
-        assert!(
-          notified.get(),
-          "Task should be notified after shutdown()"
-        );
-      })
-      .await;
-  }
-
-  // ============== Helper Functions Tests ==============
-
-  #[test]
-  fn test_validate_connect_method_valid() {
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("example.com:443")
-      .body(())
-      .unwrap();
-    assert!(
-      validate_connect_method(&req).is_ok(),
-      "CONNECT method should be valid"
-    );
-  }
-
-  #[test]
-  fn test_validate_connect_method_invalid() {
-    let req = http::Request::builder()
-      .method(http::Method::GET)
-      .uri("http://example.com/")
-      .body(())
-      .unwrap();
-    let result = validate_connect_method(&req);
-    assert!(result.is_err(), "Non-CONNECT method should be invalid");
-    let err = result.unwrap_err();
-    assert!(
-      err.to_string().contains("Method Not Allowed"),
-      "Error should mention method not allowed"
-    );
-  }
-
-  #[test]
-  fn test_validate_target_address_valid() {
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("example.com:443")
-      .body(())
-      .unwrap();
-    let result = validate_target_address(&req);
-    assert!(result.is_ok(), "Valid target address should pass");
-    assert_eq!(result.unwrap(), "example.com:443");
-  }
-
-  #[test]
-  fn test_validate_target_address_missing_authority() {
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("/")
-      .body(())
-      .unwrap();
-    let result = validate_target_address(&req);
-    assert!(result.is_err(), "Missing authority should fail");
-    assert!(
-      result.unwrap_err().to_string().contains("missing authority")
-    );
-  }
-
-  #[test]
-  fn test_validate_target_address_missing_port() {
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("example.com")
-      .body(())
-      .unwrap();
-    let result = validate_target_address(&req);
-    assert!(result.is_err(), "Missing port should fail");
-    assert!(result.unwrap_err().to_string().contains("missing port"));
-  }
-
-  #[test]
-  fn test_validate_target_address_zero_port() {
-    // Create a URI with port 0
-    let uri: http::Uri = "example.com:0".parse().unwrap();
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri(uri)
-      .body(())
-      .unwrap();
-    let result = validate_target_address(&req);
-    assert!(result.is_err(), "Port 0 should fail");
-    assert!(
-      result.unwrap_err().to_string().contains("port cannot be zero")
-    );
-  }
-
-  // ============== TransferDirection Tests ==============
-
-  #[test]
-  fn test_transfer_direction_variants() {
-    assert_eq!(TransferDirection::H3ToTcp.to_string(), "H3->TCP");
-    assert_eq!(TransferDirection::TcpToH3.to_string(), "TCP->H3");
-    assert_eq!(TransferDirection::Shutdown.to_string(), "shutdown");
-  }
-
-  #[test]
-  fn test_transfer_direction_equality() {
-    assert_eq!(TransferDirection::H3ToTcp, TransferDirection::H3ToTcp);
-    assert_ne!(TransferDirection::H3ToTcp, TransferDirection::TcpToH3);
-    assert_ne!(TransferDirection::H3ToTcp, TransferDirection::Shutdown);
-  }
-
-  // ============== connect_to_target Tests ==============
-
-  #[tokio::test]
-  async fn test_connect_to_target_invalid_address() {
-    // Try to connect to an invalid address that should fail
-    // Using a non-routable IP address to ensure connection fails quickly
-    let result = connect_to_target("10.255.255.1:9999").await;
-    assert!(
-      result.is_err(),
-      "Connection to invalid address should fail"
-    );
-    let err = result.unwrap_err();
-    assert!(
-      err.to_string().contains("Bad Gateway"),
-      "Error should mention Bad Gateway: {}",
-      err
-    );
-  }
-
-  #[tokio::test]
-  async fn test_connect_to_target_connection_refused() {
-    // Try to connect to localhost on a port that's unlikely to be in use
-    let result = connect_to_target("127.0.0.1:1").await;
-    assert!(result.is_err(), "Connection to refused port should fail");
-    let err = result.unwrap_err();
-    assert!(
-      err.to_string().contains("Bad Gateway"),
-      "Error should mention Bad Gateway: {}",
-      err
-    );
-  }
-
-  #[test]
-  fn test_h3_no_error_code_value() {
-    // Test that H3_NO_ERROR_CODE has the correct value per RFC 9114
-    // H3_NO_ERROR = 0x100 (256)
-    assert_eq!(H3_NO_ERROR_CODE, 0x100);
-    assert_eq!(H3_NO_ERROR_CODE, 256);
-  }
-
-  // ============== wait_shutdown_with_timeout Tests ==============
-
-  #[tokio::test]
-  async fn test_wait_shutdown_with_timeout_success() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-
-        // Register a task that completes immediately
-        tracker.register(async {});
-        tokio::task::yield_now().await;
-
-        // Wait with timeout should succeed
-        let result = tracker
-          .wait_shutdown_with_timeout(Duration::from_millis(100))
-          .await;
-        assert!(
-          result.is_ok(),
-          "wait_shutdown_with_timeout should succeed when tasks complete"
-        );
-        assert_eq!(tracker.active_count(), 0);
-      })
-      .await;
-  }
-
-  #[tokio::test]
-  async fn test_wait_shutdown_with_timeout_expires() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-
-        // Register a task that never completes
-        tracker.register(async {
-          std::future::pending::<()>().await;
-        });
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.active_count(), 1);
-
-        // Wait with short timeout should fail
-        let result = tracker
-          .wait_shutdown_with_timeout(Duration::from_millis(10))
-          .await;
-        assert!(
-          result.is_err(),
-          "wait_shutdown_with_timeout should timeout with pending task"
-        );
-
-        // Clean up
-        tracker.abort_all();
-        tracker.wait_shutdown().await;
-      })
-      .await;
-  }
-
-  #[tokio::test]
-  async fn test_wait_shutdown_with_timeout_after_abort() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-
-        // Register a pending task
-        tracker.register(async {
-          std::future::pending::<()>().await;
-        });
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.active_count(), 1);
-
-        // Abort and wait with timeout
-        tracker.abort_all();
-        let result = tracker
-          .wait_shutdown_with_timeout(Duration::from_millis(100))
-          .await;
-        assert!(
-          result.is_ok(),
-          "wait_shutdown_with_timeout should succeed after abort"
-        );
-        assert_eq!(tracker.active_count(), 0);
-      })
-      .await;
-  }
-
-  // ============================================================================
-  // Task 005-010: Password Authentication Tests
-  // ============================================================================
-
-  // ============== Task 005: Application Auth Tests ==============
-
-  #[test]
-  fn test_perform_application_auth_no_auth() {
-    // Test that no auth always passes
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("example.com:443")
-      .body(())
-      .unwrap();
-    let application_auth = crate::auth::ApplicationAuth::none();
-    assert!(
-      perform_application_auth(&req, &application_auth).is_ok(),
-      "No auth should always pass"
-    );
-  }
-
-  #[test]
-  fn test_perform_application_auth_missing_header() {
-    // Test that missing Proxy-Authorization header returns error
-    use crate::auth::{AuthConfig, AuthType, MultiAuthConfig, UserCredential};
-
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("example.com:443")
-      .body(())
-      .unwrap();
-
-    let auth_config = MultiAuthConfig {
-      configs: vec![AuthConfig {
-        auth_type: AuthType::Password,
-        users: Some(vec![UserCredential {
-          username: "admin".to_string(),
-          password: "secret".to_string(),
-        }]),
-        client_ca_path: None,
-      }],
-    };
-    let application_auth = crate::auth::ApplicationAuth::from_config(&auth_config);
-
-    let result = perform_application_auth(&req, &application_auth);
-    assert!(result.is_err(), "Missing header should return error");
-    let err = result.unwrap_err().to_string();
-    assert!(
-      err.contains("Proxy Authentication Required"),
-      "Error should indicate 407 status"
-    );
-  }
-
-  #[test]
-  fn test_perform_application_auth_valid_credentials() {
-    // Test that valid credentials pass
-    use crate::auth::{AuthConfig, AuthType, MultiAuthConfig, UserCredential};
-
-    let credentials = BASE64_STANDARD.encode("admin:secret");
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("example.com:443")
-      .header("Proxy-Authorization", format!("Basic {}", credentials))
-      .body(())
-      .unwrap();
-
-    let auth_config = MultiAuthConfig {
-      configs: vec![AuthConfig {
-        auth_type: AuthType::Password,
-        users: Some(vec![UserCredential {
-          username: "admin".to_string(),
-          password: "secret".to_string(),
-        }]),
-        client_ca_path: None,
-      }],
-    };
-    let application_auth = crate::auth::ApplicationAuth::from_config(&auth_config);
-
-    let result = perform_application_auth(&req, &application_auth);
-    assert!(result.is_ok(), "Valid credentials should pass");
-  }
-
-  #[test]
-  fn test_perform_application_auth_invalid_credentials() {
-    // Test that invalid credentials fail
-    use crate::auth::{AuthConfig, AuthType, MultiAuthConfig, UserCredential};
-
-    let credentials = BASE64_STANDARD.encode("admin:wrongpassword");
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("example.com:443")
-      .header("Proxy-Authorization", format!("Basic {}", credentials))
-      .body(())
-      .unwrap();
-
-    let auth_config = MultiAuthConfig {
-      configs: vec![AuthConfig {
-        auth_type: AuthType::Password,
-        users: Some(vec![UserCredential {
-          username: "admin".to_string(),
-          password: "secret".to_string(),
-        }]),
-        client_ca_path: None,
-      }],
-    };
-    let application_auth = crate::auth::ApplicationAuth::from_config(&auth_config);
-
-    let result = perform_application_auth(&req, &application_auth);
-    assert!(result.is_err(), "Invalid credentials should fail");
-  }
-
-  // ============== Task 006: Basic Format Validation Tests ==============
-
-  #[test]
-  fn test_basic_auth_format_valid() {
-    // Test valid Basic auth format
-    let header_value =
-      http::HeaderValue::from_str("Basic dXNlcjpwYXNzd29yZA==")
-        .unwrap();
-    let result = crate::auth::parse_basic_auth(&header_value);
-    assert!(result.is_ok(), "Valid Basic format should parse");
-    let (username, password) = result.unwrap();
-    assert_eq!(username, "user");
-    assert_eq!(password, "password");
-  }
-
-  #[test]
-  fn test_basic_auth_format_not_basic() {
-    // Test non-Basic auth format
-    let header_value =
-      http::HeaderValue::from_str("Bearer token123").unwrap();
-    let result = crate::auth::parse_basic_auth(&header_value);
-    assert!(result.is_err(), "Non-Basic format should return error");
-    let err = result.unwrap_err().to_string();
-    assert!(
-      err.contains("Not Basic authentication"),
-      "Error should indicate not Basic auth"
-    );
-  }
-
-  #[test]
-  fn test_basic_auth_format_digest() {
-    // Test Digest auth format (should be rejected)
-    let header_value =
-      http::HeaderValue::from_str("Digest username=\"user\"").unwrap();
-    let result = crate::auth::parse_basic_auth(&header_value);
-    assert!(result.is_err(), "Digest format should return error");
-  }
-
-  // ============== Task 007: Base64 Decode Validation Tests ==============
-
-  #[test]
-  fn test_base64_decode_valid_credentials() {
-    // Test valid Base64 encoded credentials
-    let encoded = BASE64_STANDARD.encode("testuser:testpass");
-    let header_value =
-      http::HeaderValue::from_str(&format!("Basic {}", encoded))
-        .unwrap();
-    let result = crate::auth::parse_basic_auth(&header_value);
-    assert!(result.is_ok(), "Valid Base64 should decode");
-    let (username, password) = result.unwrap();
-    assert_eq!(username, "testuser");
-    assert_eq!(password, "testpass");
-  }
-
-  #[test]
-  fn test_base64_decode_invalid_base64() {
-    // Test invalid Base64 string
-    let header_value =
-      http::HeaderValue::from_str("Basic !!invalid!!base64!!").unwrap();
-    let result = crate::auth::parse_basic_auth(&header_value);
-    assert!(result.is_err(), "Invalid Base64 should return error");
-  }
-
-  #[test]
-  fn test_base64_decode_missing_colon() {
-    // Test Base64 decoded value without colon separator
-    let encoded = BASE64_STANDARD.encode("userwithoutpassword");
-    let header_value =
-      http::HeaderValue::from_str(&format!("Basic {}", encoded))
-        .unwrap();
-    let result = crate::auth::parse_basic_auth(&header_value);
-    assert!(
-      result.is_err(),
-      "Missing colon separator should return error"
-    );
-  }
-
-  // ============== Task 010: 407 Response Validation Tests ==============
-
-  #[test]
-  fn test_407_response_status_code() {
-    // Test that 407 response has correct status code
-    let resp = build_error_response(
-      http::StatusCode::PROXY_AUTHENTICATION_REQUIRED,
-      "Proxy Authentication Required",
-    );
-    assert_eq!(
-      resp.status(),
-      http::StatusCode::PROXY_AUTHENTICATION_REQUIRED
-    );
-  }
-
-  #[test]
-  fn test_407_response_content_type() {
-    // Test that 407 response has correct Content-Type
-    let resp = build_error_response(
-      http::StatusCode::PROXY_AUTHENTICATION_REQUIRED,
-      "Proxy Authentication Required",
-    );
-    assert_eq!(
-      resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
-      "text/plain"
-    );
-  }
-
-  #[test]
-  fn test_407_response_body() {
-    // Test that 407 response has body
-    let resp = build_error_response(
-      http::StatusCode::PROXY_AUTHENTICATION_REQUIRED,
-      "Proxy Authentication Required",
-    );
-    // The body should contain the error message
-    let (_parts, body) = resp.into_parts();
-    // Body exists - we can't easily check content without async
-    assert!(
-      body.size_hint().lower() > 0
-        || body.size_hint().upper().is_some(),
-      "407 response should have a body"
-    );
-  }
-
-  // ============================================================================
-  // Task 012-018: HTTP/3 Listener Tests
-  // ============================================================================
-
-  // ============== Task 013: Private Key Permission Tests ==============
-
-  #[test]
-  #[cfg(unix)]
-  fn test_private_key_permissions_600_accepted() {
-    // Test that 600 permissions are accepted
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let key_path = tmp_dir.path().join("key.pem");
-    std::fs::write(&key_path, "test key").expect("Failed to write key");
-    set_file_permissions(&key_path, 0o600);
-    let result =
-      verify_key_file_permissions(key_path.to_str().unwrap());
-    assert!(result.is_ok(), "600 permissions should be accepted");
-  }
-
-  #[test]
-  #[cfg(unix)]
-  fn test_private_key_permissions_400_accepted() {
-    // Test that 400 permissions are accepted
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let key_path = tmp_dir.path().join("key.pem");
-    std::fs::write(&key_path, "test key").expect("Failed to write key");
-    set_file_permissions(&key_path, 0o400);
-    let result =
-      verify_key_file_permissions(key_path.to_str().unwrap());
-    assert!(result.is_ok(), "400 permissions should be accepted");
-  }
-
-  #[test]
-  #[cfg(unix)]
-  fn test_private_key_permissions_644_rejected() {
-    // Test that 644 permissions are rejected
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let key_path = tmp_dir.path().join("key.pem");
-    std::fs::write(&key_path, "test key").expect("Failed to write key");
-    set_file_permissions(&key_path, 0o644);
-    let result =
-      verify_key_file_permissions(key_path.to_str().unwrap());
-    assert!(result.is_err(), "644 permissions should be rejected");
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-      err_msg.contains("insecure permissions"),
-      "Error should mention insecure permissions"
-    );
-  }
-
-  // ============== Task 014: Certificate and Key Match Tests ==============
-
-  #[test]
-  fn test_cert_key_match_success() {
-    // Test that matching cert and key succeed
-    ensure_crypto_provider();
-    let (cert_pem, key_pem) = generate_test_cert("test-server");
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-    std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
-    write_key_file_secure(&key_path, &key_pem)
-      .expect("Failed to write key");
-    let transport_auth = crate::auth::TransportAuth::none();
-    let result = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth,
-    );
-    assert!(result.is_ok(), "Matching cert and key should succeed");
-  }
-
-  #[test]
-  fn test_cert_key_mismatch_fails() {
-    // Test that mismatched cert and key fail
-    ensure_crypto_provider();
-    // Generate two different key pairs
-    let (cert1_pem, _key1_pem) = generate_test_cert("server1");
-    let (_cert2_pem, key2_pem) = generate_test_cert("server2");
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-    std::fs::write(&cert_path, cert1_pem)
-      .expect("Failed to write cert");
-    write_key_file_secure(&key_path, &key2_pem)
-      .expect("Failed to write key");
-    let transport_auth = crate::auth::TransportAuth::none();
-    let result = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth,
-    );
-    assert!(result.is_err(), "Mismatched cert and key should fail");
-  }
-
-  // ============== Task 015: TLS 1.3 Enforcement Tests ==============
-
-  #[test]
-  fn test_tls_config_uses_tls13_only() {
-    // Test that TLS config is configured for TLS 1.3 only
-    ensure_crypto_provider();
-    let (cert_pem, key_pem) = generate_test_cert("test-server");
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-    std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
-    write_key_file_secure(&key_path, &key_pem)
-      .expect("Failed to write key");
-    let transport_auth = crate::auth::TransportAuth::none();
-    let tls_config = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth,
-    )
-    .expect("TLS config should load");
-    // Verify ALPN protocol is set to h3 (required for HTTP/3)
-    assert!(
-      tls_config.alpn_protocols.iter().any(|p| p == b"h3"),
-      "TLS config should have h3 ALPN protocol"
-    );
-    // Note: rustls 0.23+ only supports TLS 1.3 by default for QUIC
-    // The TLS 1.3 enforcement is implicit in the rustls version used
-  }
-
-  #[test]
-  fn test_tls_config_alpn_protocol_h3() {
-    // Test that ALPN protocol is set to h3
-    ensure_crypto_provider();
-    let (cert_pem, key_pem) = generate_test_cert("test-server");
-    let tmp_dir =
-      tempfile::tempdir().expect("Failed to create temp dir");
-    let cert_path = tmp_dir.path().join("cert.pem");
-    let key_path = tmp_dir.path().join("key.pem");
-    std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
-    write_key_file_secure(&key_path, &key_pem)
-      .expect("Failed to write key");
-    let transport_auth = crate::auth::TransportAuth::none();
-    let tls_config = load_tls_config(
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      &transport_auth,
-    )
-    .expect("TLS config should load");
-    assert_eq!(
-      tls_config.alpn_protocols.len(),
-      1,
-      "Should have exactly one ALPN protocol"
-    );
-    assert_eq!(
-      tls_config.alpn_protocols[0], b"h3",
-      "ALPN protocol should be h3"
-    );
-  }
-
-  // ============== Task 016: Graceful Shutdown Tests ==============
-
-  #[tokio::test]
-  async fn test_graceful_shutdown_normal_completion() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        let completed = Rc::new(std::cell::Cell::new(false));
-        let completed_clone = completed.clone();
-        tracker.register(async move {
-          tokio::time::sleep(Duration::from_millis(10)).await;
-          completed_clone.set(true);
-        });
-        tokio::task::yield_now().await;
-        tracker.shutdown();
-        let result = tracker
-          .wait_shutdown_with_timeout(Duration::from_secs(1))
-          .await;
-        assert!(
-          result.is_ok(),
-          "Graceful shutdown should complete within timeout"
-        );
-        assert!(completed.get(), "Task should have completed");
-      })
-      .await;
-  }
-
-  #[tokio::test]
-  async fn test_graceful_shutdown_timeout_abort() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        tracker.register(async {
-          std::future::pending::<()>().await;
-        });
-        tokio::task::yield_now().await;
-        tracker.shutdown();
-        let result = tracker
-          .wait_shutdown_with_timeout(Duration::from_millis(50))
-          .await;
-        assert!(
-          result.is_err(),
-          "Shutdown should timeout with pending task"
-        );
-        tracker.abort_all();
-        tracker.wait_shutdown().await;
-        assert_eq!(
-          tracker.active_count(),
-          0,
-          "All tasks should be aborted"
-        );
-      })
-      .await;
-  }
-
-  #[test]
-  fn test_graceful_shutdown_idempotent() {
-    let tracker = StreamTracker::new();
-    tracker.shutdown();
-    tracker.shutdown();
-    tracker.shutdown();
-    assert!(
-      tracker.shutdown_handle().is_shutdown(),
-      "Multiple shutdown calls should be idempotent"
-    );
-  }
-
-  // ============== Task 017: Monitoring Log Output Tests ==============
-
-  #[test]
-  fn test_monitoring_interval_constant() {
-    // Verify monitoring interval is 60 seconds
-    assert_eq!(
-      MONITORING_LOG_INTERVAL,
-      Duration::from_secs(60),
-      "Monitoring interval should be 60 seconds"
-    );
-  }
-
-  #[test]
-  fn test_monitoring_log_format() {
-    // Verify that StreamTracker provides the correct counts
-    let tracker = StreamTracker::new();
-    // Initially zero
-    assert_eq!(tracker.connection_count(), 0);
-    assert_eq!(tracker.active_count(), 0);
-    // After registering tasks, counts should reflect that
-    // (tested in other tests, but format verification is here)
-    let expected_format = format!(
-      "[http3.listener] active_connections={}, active_streams={}",
-      tracker.connection_count(),
-      tracker.active_count()
-    );
-    assert!(
-      expected_format.contains("active_connections"),
-      "Log format should contain active_connections"
-    );
-    assert!(
-      expected_format.contains("active_streams"),
-      "Log format should contain active_streams"
-    );
-  }
-
-  // ============== Task 018: StreamTracker Counter Tests ==============
-
-  #[tokio::test]
-  async fn test_stream_tracker_connection_count_accuracy() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        assert_eq!(tracker.connection_count(), 0);
-        tracker.register_connection(async {
-          tokio::time::sleep(Duration::from_millis(100)).await;
-        });
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.connection_count(), 1);
-        tracker.register_connection(async {
-          tokio::time::sleep(Duration::from_millis(100)).await;
-        });
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.connection_count(), 2);
-      })
-      .await;
-  }
-
-  #[tokio::test]
-  async fn test_stream_tracker_active_count_accuracy() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        assert_eq!(tracker.active_count(), 0);
-        tracker.register(async {
-          tokio::time::sleep(Duration::from_millis(100)).await;
-        });
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.active_count(), 1);
-        tracker.register(async {
-          tokio::time::sleep(Duration::from_millis(100)).await;
-        });
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.active_count(), 2);
-      })
-      .await;
-  }
-
-  #[tokio::test]
-  async fn test_stream_tracker_counts_after_completion() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        tracker.register(async {});
-        tracker.register_connection(async {});
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.active_count(), 1);
-        assert_eq!(tracker.connection_count(), 1);
-        tracker.wait_shutdown().await;
-        assert_eq!(tracker.active_count(), 0);
-        assert_eq!(tracker.connection_count(), 0);
-      })
-      .await;
-  }
-
-  // ========== Application Auth Integration Tests ==========
-  // These tests verify HTTP/3 listener authentication behavior with the new auth module.
-  // The key change: ApplicationAuth handles password authentication at HTTP layer.
-
-  #[test]
-  fn test_http3_application_auth_with_none() {
-    // When no auth is configured, authentication should pass without checking headers.
-
-    let req = http::Request::builder()
-      .method("CONNECT")
-      .uri("example.com:443")
-      .body(())
-      .expect("build request");
-
-    let application_auth = crate::auth::ApplicationAuth::none();
-    let result = perform_application_auth(&req, &application_auth);
-    assert!(result.is_ok(), "No auth should pass without credentials");
-  }
-
-  #[test]
-  fn test_http3_application_auth_with_password_missing_header() {
-    use crate::auth::{AuthConfig, AuthType, MultiAuthConfig, UserCredential};
-
-    // Create request without Proxy-Authorization header
-    let req = http::Request::builder()
-      .method("CONNECT")
-      .uri("example.com:443")
-      .body(())
-      .expect("build request");
-
-    // Create password MultiAuthConfig
-    let auth_config = MultiAuthConfig {
-      configs: vec![AuthConfig {
-        auth_type: AuthType::Password,
-        users: Some(vec![UserCredential {
-          username: "admin".to_string(),
-          password: "secret".to_string(),
-        }]),
-        client_ca_path: None,
-      }],
-    };
-
-    let application_auth = crate::auth::ApplicationAuth::from_config(&auth_config);
-
-    // Should fail because no Proxy-Authorization header provided
-    let result = perform_application_auth(&req, &application_auth);
-    assert!(
-      result.is_err(),
-      "Password auth should fail without header"
-    );
-  }
-
-  #[test]
-  fn test_http3_application_auth_with_password_valid_credentials() {
-    use crate::auth::{AuthConfig, AuthType, MultiAuthConfig, UserCredential};
-
-    // Create request with valid Proxy-Authorization header (Basic auth)
-    let credentials = BASE64_STANDARD.encode("admin:secret");
-    let req = http::Request::builder()
-      .method("CONNECT")
-      .uri("example.com:443")
-      .header("Proxy-Authorization", format!("Basic {}", credentials))
-      .body(())
-      .expect("build request");
-
-    // Create password MultiAuthConfig with matching credentials
-    let auth_config = MultiAuthConfig {
-      configs: vec![AuthConfig {
-        auth_type: AuthType::Password,
-        users: Some(vec![UserCredential {
-          username: "admin".to_string(),
-          password: "secret".to_string(),
-        }]),
-        client_ca_path: None,
-      }],
-    };
-
-    let application_auth = crate::auth::ApplicationAuth::from_config(&auth_config);
-
-    // Should succeed with valid plaintext password
-    let result = perform_application_auth(&req, &application_auth);
-    assert!(result.is_ok(), "Valid credentials should pass");
-  }
-
-  #[test]
-  fn test_http3_application_auth_with_password_wrong_password() {
-    use crate::auth::{AuthConfig, AuthType, MultiAuthConfig, UserCredential};
-
-    // Create request with WRONG password in Proxy-Authorization header
-    let credentials = BASE64_STANDARD.encode("admin:wrongpassword");
-    let req = http::Request::builder()
-      .method("CONNECT")
-      .uri("example.com:443")
-      .header("Proxy-Authorization", format!("Basic {}", credentials))
-      .body(())
-      .expect("build request");
-
-    // Create password MultiAuthConfig with DIFFERENT password
-    let auth_config = MultiAuthConfig {
-      configs: vec![AuthConfig {
-        auth_type: AuthType::Password,
-        users: Some(vec![UserCredential {
-          username: "admin".to_string(),
-          password: "secret".to_string(), // Different from request
-        }]),
-        client_ca_path: None,
-      }],
-    };
-
-    let application_auth = crate::auth::ApplicationAuth::from_config(&auth_config);
-
-    // Should fail with wrong password
-    let result = perform_application_auth(&req, &application_auth);
-    assert!(result.is_err(), "Wrong password should fail");
-  }
-
-  #[test]
-  fn test_http3_application_auth_with_tls_only_config() {
-    use crate::auth::{AuthConfig, AuthType, MultiAuthConfig};
-
-    // TLS client cert auth is handled at QUIC layer, not HTTP layer
-    // ApplicationAuth::from_config for TLS-only should return none()
-    let req = http::Request::builder()
-      .method("CONNECT")
-      .uri("example.com:443")
-      .body(())
-      .expect("build request");
-
-    let auth_config = MultiAuthConfig {
-      configs: vec![AuthConfig {
-        auth_type: AuthType::TlsClientCert,
-        users: None,
-        client_ca_path: Some("/path/to/ca.pem".to_string()),
-      }],
-    };
-
-    // TLS-only config should produce ApplicationAuth::none()
-    // because TLS client cert is handled at transport layer
-    let application_auth = crate::auth::ApplicationAuth::from_config(&auth_config);
-
-    // Should pass because there's no password auth configured
-    let result = perform_application_auth(&req, &application_auth);
-    assert!(
-      result.is_ok(),
-      "TLS-only auth should pass at HTTP layer (transport handles cert)"
-    );
   }
 }

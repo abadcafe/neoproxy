@@ -21,10 +21,6 @@ mod plugin;
 mod plugins;
 mod server;
 
-/// Graceful shutdown timeout in seconds.
-#[allow(dead_code)]
-const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// Thread check interval for detecting worker thread exit.
 const THREAD_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -109,36 +105,6 @@ fn init_log() -> tracing_appender::non_blocking::WorkerGuard {
     .init();
 
   guard
-}
-
-/// Waits for all server threads to finish with a timeout.
-/// Returns true if all threads finished successfully, false if timeout
-/// occurred.
-#[allow(dead_code)]
-async fn join_all_threads(
-  handles: Vec<thread::JoinHandle<Result<()>>>,
-) -> bool {
-  let mut all_success = true;
-  for h in handles {
-    let thread_name =
-      h.thread().name().unwrap_or("unknown").to_string();
-    match h.join() {
-      Err(e) => {
-        error!("worker thread '{}' panicked: {:?}", thread_name, e);
-        all_success = false;
-      }
-      Ok(res) => {
-        if let Err(e) = res {
-          error!(
-            "worker thread '{}' exited with error: {}",
-            thread_name, e
-          );
-          all_success = false;
-        }
-      }
-    }
-  }
-  all_success
 }
 
 /// Create a signal waiting future for SIGINT/SIGTERM.
@@ -392,18 +358,12 @@ fn main() -> Result<()> {
 mod tests {
   use super::*;
   use std::sync::Mutex;
-  use std::time::Instant;
 
   #[test]
   fn test_auth_module_exists() {
     // Verify the auth module exists by using a type from it
     use crate::auth::AuthError;
     let _error = AuthError::InvalidCredentials;
-  }
-
-  #[test]
-  fn test_graceful_shutdown_timeout_constant() {
-    assert_eq!(GRACEFUL_SHUTDOWN_TIMEOUT, Duration::from_secs(5));
   }
 
   #[test]
@@ -543,111 +503,6 @@ mod tests {
   fn test_determine_exit_code_priority_error_over_normal() {
     let reasons = vec![ExitReason::Normal, ExitReason::Error];
     assert_eq!(determine_exit_code(&reasons), 2);
-  }
-
-  // ============== join_all_threads Tests ==============
-
-  #[test]
-  fn test_join_all_threads_success() {
-    let rt = runtime::Builder::new_current_thread()
-      .enable_all()
-      .build()
-      .unwrap();
-
-    let handle = thread::spawn(|| Ok(()));
-    let handles = vec![handle];
-
-    let result = rt.block_on(join_all_threads(handles));
-    assert!(result);
-  }
-
-  #[test]
-  fn test_join_all_threads_thread_panic() {
-    let rt = runtime::Builder::new_current_thread()
-      .enable_all()
-      .build()
-      .unwrap();
-
-    let handle = thread::spawn(|| panic!("test panic"));
-    let handles = vec![handle];
-
-    let result = rt.block_on(join_all_threads(handles));
-    assert!(!result);
-  }
-
-  #[test]
-  fn test_join_all_threads_thread_error() {
-    let rt = runtime::Builder::new_current_thread()
-      .enable_all()
-      .build()
-      .unwrap();
-
-    let handle = thread::spawn(|| Err(anyhow::anyhow!("test error")));
-    let handles = vec![handle];
-
-    let result = rt.block_on(join_all_threads(handles));
-    assert!(!result);
-  }
-
-  #[test]
-  fn test_join_all_threads_mixed_results() {
-    let rt = runtime::Builder::new_current_thread()
-      .enable_all()
-      .build()
-      .unwrap();
-
-    let success_handle = thread::spawn(|| Ok(()));
-    let error_handle =
-      thread::spawn(|| Err(anyhow::anyhow!("test error")));
-    let handles = vec![success_handle, error_handle];
-
-    let result = rt.block_on(join_all_threads(handles));
-    assert!(!result);
-  }
-
-  #[test]
-  fn test_join_all_threads_empty() {
-    let rt = runtime::Builder::new_current_thread()
-      .enable_all()
-      .build()
-      .unwrap();
-
-    let handles: Vec<thread::JoinHandle<Result<()>>> = vec![];
-
-    let result = rt.block_on(join_all_threads(handles));
-    assert!(result);
-  }
-
-  #[test]
-  fn test_join_all_threads_multiple_threads() {
-    let rt = runtime::Builder::new_current_thread()
-      .enable_all()
-      .build()
-      .unwrap();
-
-    let counter = Arc::new(Mutex::new(0));
-    let mut handles = vec![];
-
-    for _i in 0..3 {
-      let counter_clone = counter.clone();
-      let handle = thread::spawn(move || {
-        let mut num = counter_clone.lock().unwrap();
-        *num += 1;
-        drop(num);
-        Ok(())
-      });
-      handles.push(handle);
-    }
-
-    let result = rt.block_on(join_all_threads(handles));
-    assert!(result);
-    assert_eq!(*counter.lock().unwrap(), 3);
-  }
-
-  #[test]
-  fn test_timeout_duration_is_five_seconds() {
-    assert_eq!(GRACEFUL_SHUTDOWN_TIMEOUT.as_secs(), 5);
-    assert_eq!(GRACEFUL_SHUTDOWN_TIMEOUT.as_millis(), 5000);
   }
 
   // ============== check_worker_threads Tests ==============
@@ -1257,113 +1112,6 @@ mod tests {
     assert!(set.contains(&2));
     assert!(!set.contains(&3));
     assert_eq!(set.len(), 2);
-  }
-
-  /// Test that join_all_threads handles timeout correctly with long-running
-  /// threads. The thread will be terminated via timeout mechanism.
-  #[test]
-  fn test_join_all_threads_timeout_with_blocking_thread() {
-    let rt = runtime::Builder::new_current_thread()
-      .enable_all()
-      .build()
-      .unwrap();
-
-    // Use a flag to control thread termination
-    let running = Arc::new(AtomicBool::new(true));
-    let running_clone = running.clone();
-
-    // Create a thread that will block until flag is cleared
-    let blocking_handle = thread::spawn(move || {
-      while running_clone.load(Ordering::SeqCst) {
-        thread::sleep(Duration::from_millis(10));
-      }
-      Ok(())
-    });
-
-    let handles = vec![blocking_handle];
-
-    // Test that join_all_threads completes when thread finishes
-    let start = Instant::now();
-
-    // Start join in a separate task so we can stop the blocking thread
-    let join_result = rt.block_on(async {
-      // Give the thread a moment to start
-      tokio::time::sleep(Duration::from_millis(20)).await;
-
-      // Signal the thread to stop
-      running.store(false, Ordering::SeqCst);
-
-      // Now join should complete quickly
-      join_all_threads(handles).await
-    });
-
-    let elapsed = start.elapsed();
-    assert!(join_result, "All threads should complete successfully");
-    // Should complete quickly after signaling stop
-    assert!(elapsed < Duration::from_secs(1));
-  }
-
-  /// Test wait_for_shutdown timeout behavior when threads don't respond
-  /// in time. This simulates the graceful shutdown timeout scenario.
-  #[test]
-  fn test_wait_for_shutdown_timeout_behavior() {
-    let rt = runtime::Builder::new_current_thread()
-      .enable_all()
-      .build()
-      .unwrap();
-
-    // Test the timeout behavior of join_all_threads with empty handles
-    let start = Instant::now();
-    let result = rt.block_on(async {
-      tokio::time::timeout(
-        GRACEFUL_SHUTDOWN_TIMEOUT,
-        join_all_threads(vec![]),
-      )
-      .await
-    });
-
-    // Should succeed immediately with empty handles
-    assert!(result.is_ok());
-    assert!(result.unwrap());
-    let elapsed = start.elapsed();
-    // Empty handles should complete very quickly
-    assert!(elapsed < Duration::from_millis(100));
-  }
-
-  /// Test that wait_for_shutdown handles empty thread list correctly.
-  /// This tests the notification and join mechanism without relying on
-  /// signals.
-  #[test]
-  fn test_wait_for_shutdown_empty_handles() {
-    let rt = runtime::Builder::new_current_thread()
-      .enable_all()
-      .build()
-      .unwrap();
-
-    let closer = Arc::new(sync::Notify::new());
-    let _handles: Vec<thread::JoinHandle<Result<()>>> = vec![];
-
-    // Create a task that will complete the wait_for_shutdown
-    let closer_clone = closer.clone();
-    let _shutdown_handle = rt.spawn(async move {
-      // Wait a bit then notify
-      tokio::time::sleep(Duration::from_millis(10)).await;
-      closer_clone.notify_waiters();
-    });
-
-    let closer_for_main = closer.clone();
-    let result = rt.block_on(async {
-      // Test that we can call join_all_threads with empty handles
-      // through the timeout mechanism
-      tokio::time::timeout(Duration::from_millis(100), async {
-        closer_for_main.notified().await;
-        join_all_threads(vec![]).await
-      })
-      .await
-    });
-
-    assert!(result.is_ok());
-    assert!(result.unwrap());
   }
 
   /// Test thread naming in run_server_threads (indirectly through

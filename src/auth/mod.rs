@@ -1,91 +1,27 @@
 //! Unified authentication module for neoproxy.
 
-mod config;
+mod client_cert_auth;
 mod error;
+pub mod listener_auth_config;
 mod password;
 mod tls_cert;
-mod transport;
-mod application;
+mod user_password_auth;
 
-#[allow(unused_imports)]
-pub use config::UserCredential;
-pub use config::{AuthConfig, AuthType, MultiAuthConfig};
+pub use client_cert_auth::ClientCertAuth;
 pub use error::AuthError;
+pub use listener_auth_config::{ListenerAuthConfig, UserCredential};
 pub use password::verify_password;
 #[allow(unused_imports)]
 pub use tls_cert::TlsClientCertVerifier;
-pub use transport::TransportAuth;
-pub use application::ApplicationAuth;
-
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use http::HeaderValue;
-
-/// Parse Proxy-Authorization header (Basic Auth)
-/// Returns (username, password) or error
-pub fn parse_basic_auth(header: &HeaderValue) -> Result<(String, String), AuthError> {
-  let header_str = header.to_str().map_err(|_| {
-    AuthError::ConfigError("Invalid Proxy-Authorization header encoding".to_string())
-  })?;
-
-  if !header_str.starts_with("Basic ") {
-    return Err(AuthError::ConfigError(
-      "Not Basic authentication".to_string()
-    ));
-  }
-
-  let encoded = &header_str[6..]; // Skip "Basic "
-  let decoded = BASE64_STANDARD.decode(encoded).map_err(|_| {
-    AuthError::ConfigError("Invalid Base64 encoding in credentials".to_string())
-  })?;
-
-  let decoded_str = String::from_utf8(decoded).map_err(|_| {
-    AuthError::ConfigError("Invalid UTF-8 in credentials".to_string())
-  })?;
-
-  let mut parts = decoded_str.splitn(2, ':');
-  let username = parts.next().unwrap_or("").to_string();
-  let password = parts.next().unwrap_or("").to_string();
-
-  if username.is_empty() {
-    return Err(AuthError::ConfigError("Empty username in credentials".to_string()));
-  }
-
-  // Check for missing colon (no password separator found)
-  if !decoded_str.contains(':') {
-    return Err(AuthError::ConfigError("Missing colon separator in credentials".to_string()));
-  }
-
-  Ok((username, password))
-}
+pub use user_password_auth::UserPasswordAuth;
 
 #[cfg(test)]
-mod parse_basic_auth_tests {
-  use super::*;
-  use http::HeaderValue;
-  use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
-
+mod module_structure_tests {
   #[test]
-  fn test_parse_basic_auth_valid() {
-    let header = HeaderValue::from_str("Basic dXNlcjpwYXNzd29yZA==").unwrap();
-    let result = parse_basic_auth(&header);
-    assert!(result.is_ok());
-    let (username, password) = result.unwrap();
-    assert_eq!(username, "user");
-    assert_eq!(password, "password");
-  }
-
-  #[test]
-  fn test_parse_basic_auth_not_basic() {
-    let header = HeaderValue::from_str("Bearer token123").unwrap();
-    let result = parse_basic_auth(&header);
-    assert!(result.is_err());
-  }
-
-  #[test]
-  fn test_parse_basic_auth_missing_colon() {
-    let encoded = BASE64_STANDARD.encode("userwithoutcolon");
-    let header = HeaderValue::from_str(&format!("Basic {}", encoded)).unwrap();
-    let result = parse_basic_auth(&header);
-    assert!(result.is_err());
+  fn test_new_types_are_accessible() {
+    let _: Option<super::ListenerAuthConfig> = None;
+    let _: Option<super::UserCredential> = None;
+    let _: Option<super::UserPasswordAuth> = None;
+    let _: Option<super::ClientCertAuth> = None;
   }
 }

@@ -326,13 +326,15 @@ impl std::error::Error for Socks5UpgradeError {
 #[derive(Clone)]
 pub struct Socks5OnUpgrade {
   receiver: Option<
-    Arc<std::sync::Mutex<
-      Option<
-        tokio::sync::oneshot::Receiver<
-          Result<tokio::net::TcpStream, Socks5UpgradeError>,
+    Arc<
+      std::sync::Mutex<
+        Option<
+          tokio::sync::oneshot::Receiver<
+            Result<tokio::net::TcpStream, Socks5UpgradeError>,
+          >,
         >,
       >,
-    >>,
+    >,
   >,
 }
 
@@ -362,7 +364,10 @@ impl Socks5OnUpgrade {
 impl std::future::Future for Socks5OnUpgrade {
   type Output = Result<tokio::net::TcpStream, Socks5UpgradeError>;
 
-  fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+  fn poll(
+    self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Self::Output> {
     match self.receiver {
       Some(ref rx) => {
         let mut guard = rx.lock().unwrap();
@@ -421,10 +426,7 @@ impl Socks5UpgradeTrigger {
     >,
   ) -> (Self, Socks5OnUpgrade) {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    let trigger = Self {
-      sender,
-      proto: Some(proto),
-    };
+    let trigger = Self { sender, proto: Some(proto) };
     let upgrade = Socks5OnUpgrade {
       receiver: Some(Arc::new(std::sync::Mutex::new(Some(receiver)))),
     };
@@ -466,7 +468,10 @@ impl Socks5UpgradeTrigger {
   /// Returns an error if the Service has already dropped the upgrade
   /// receiver. The SOCKS5 error reply has already been sent to the client,
   /// so this is less severe than a send_success failure.
-  pub async fn send_error(mut self, error: fast_socks5::ReplyError) -> Result<()> {
+  pub async fn send_error(
+    mut self,
+    error: fast_socks5::ReplyError,
+  ) -> Result<()> {
     let proto = self.proto.take().expect("proto already consumed");
     proto
       .reply_error(&error)
@@ -577,12 +582,18 @@ pub fn http_status_to_socks5_error(
   status: http::StatusCode,
 ) -> fast_socks5::ReplyError {
   match status {
-    http::StatusCode::BAD_GATEWAY => fast_socks5::ReplyError::ConnectionRefused,
+    http::StatusCode::BAD_GATEWAY => {
+      fast_socks5::ReplyError::ConnectionRefused
+    }
     http::StatusCode::SERVICE_UNAVAILABLE => {
       fast_socks5::ReplyError::ConnectionNotAllowed
     }
-    http::StatusCode::GATEWAY_TIMEOUT => fast_socks5::ReplyError::ConnectionTimeout,
-    http::StatusCode::FORBIDDEN => fast_socks5::ReplyError::ConnectionNotAllowed,
+    http::StatusCode::GATEWAY_TIMEOUT => {
+      fast_socks5::ReplyError::ConnectionTimeout
+    }
+    http::StatusCode::FORBIDDEN => {
+      fast_socks5::ReplyError::ConnectionNotAllowed
+    }
     _ => fast_socks5::ReplyError::GeneralFailure,
   }
 }
@@ -619,23 +630,6 @@ pub trait BuildService: Fn(SerializedArgs) -> Result<Service> {}
 impl<F> BuildService for F where F: Fn(SerializedArgs) -> Result<Service>
 {}
 
-#[allow(dead_code)]
-pub struct ServiceBuilder(Box<dyn BuildService>);
-
-#[allow(dead_code)]
-impl ServiceBuilder {
-  pub fn new<BS>(bs: BS) -> Self
-  where
-    BS: BuildService + 'static,
-  {
-    Self(Box::new(bs))
-  }
-
-  pub fn build(&self, args: SerializedArgs) -> Result<Service> {
-    self.0(args)
-  }
-}
-
 /// an alias for shorten complex trait definition.
 pub trait BuildListener:
   Fn(SerializedArgs, Service) -> Result<Listener> + Sync + Send
@@ -645,27 +639,6 @@ pub trait BuildListener:
 impl<F> BuildListener for F where
   F: Fn(SerializedArgs, Service) -> Result<Listener> + Sync + Send
 {
-}
-
-#[allow(dead_code)]
-pub struct ListenerBuilder(Box<dyn BuildListener>);
-
-#[allow(dead_code)]
-impl ListenerBuilder {
-  pub fn new<BL>(bl: BL) -> Self
-  where
-    BL: BuildListener + 'static,
-  {
-    Self(Box::new(bl))
-  }
-
-  pub fn build(
-    &self,
-    args: SerializedArgs,
-    svc: Service,
-  ) -> Result<Listener> {
-    self.0(args, svc)
-  }
 }
 
 pub trait Plugin {
@@ -685,23 +658,6 @@ pub trait Plugin {
 pub trait BuildPlugin: Fn() -> Box<dyn Plugin> + Sync + Send {}
 
 impl<F> BuildPlugin for F where F: Fn() -> Box<dyn Plugin> + Sync + Send {}
-
-#[allow(dead_code)]
-pub struct PluginBuilder(Box<dyn BuildPlugin>);
-
-#[allow(dead_code)]
-impl PluginBuilder {
-  pub fn new<BP>(bl: BP) -> Self
-  where
-    BP: BuildPlugin + 'static,
-  {
-    Self(Box::new(bl))
-  }
-
-  pub fn build(&self) -> Box<dyn Plugin> {
-    self.0()
-  }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1112,7 +1068,9 @@ mod tests {
   async fn test_socks5_on_upgrade_extracts_from_extensions() {
     // Create a request with Socks5OnUpgrade in extensions
     let (_tx, rx) = tokio::sync::oneshot::channel();
-    let upgrade = Socks5OnUpgrade { receiver: Some(Arc::new(Mutex::new(Some(rx)))) };
+    let upgrade = Socks5OnUpgrade {
+      receiver: Some(Arc::new(Mutex::new(Some(rx)))),
+    };
 
     let mut req = http::Request::builder()
       .method(http::Method::CONNECT)
@@ -1141,7 +1099,9 @@ mod tests {
     let (_tx, rx) = tokio::sync::oneshot::channel::<
       Result<tokio::net::TcpStream, Socks5UpgradeError>,
     >();
-    let upgrade = Socks5OnUpgrade { receiver: Some(Arc::new(Mutex::new(Some(rx)))) };
+    let upgrade = Socks5OnUpgrade {
+      receiver: Some(Arc::new(Mutex::new(Some(rx)))),
+    };
 
     let mut req = http::Request::builder()
       .method(http::Method::CONNECT)
@@ -1165,9 +1125,8 @@ mod tests {
   #[tokio::test]
   async fn test_socks5_on_upgrade_resolves_with_stream() {
     // Create a socket pair
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-      .await
-      .unwrap();
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let client_fut = tokio::net::TcpStream::connect(addr);
     let (client, server_res) =
@@ -1176,7 +1135,9 @@ mod tests {
     let (server, _) = server_res.unwrap();
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let upgrade = Socks5OnUpgrade { receiver: Some(Arc::new(Mutex::new(Some(rx)))) };
+    let upgrade = Socks5OnUpgrade {
+      receiver: Some(Arc::new(Mutex::new(Some(rx)))),
+    };
 
     // Send the stream through the channel
     tx.send(Ok(client)).ok();
@@ -1193,7 +1154,9 @@ mod tests {
     let (tx, rx) = tokio::sync::oneshot::channel::<
       Result<tokio::net::TcpStream, Socks5UpgradeError>,
     >();
-    let upgrade = Socks5OnUpgrade { receiver: Some(Arc::new(Mutex::new(Some(rx)))) };
+    let upgrade = Socks5OnUpgrade {
+      receiver: Some(Arc::new(Mutex::new(Some(rx)))),
+    };
 
     // Drop the sender to simulate cancellation
     drop(tx);
@@ -1209,18 +1172,22 @@ mod tests {
   fn test_http_status_to_socks5_error_mappings() {
     // BAD_GATEWAY (502) -> ConnectionRefused (target refused)
     assert_eq!(
-      http_status_to_socks5_error(http::StatusCode::BAD_GATEWAY).as_u8(),
+      http_status_to_socks5_error(http::StatusCode::BAD_GATEWAY)
+        .as_u8(),
       fast_socks5::consts::SOCKS5_REPLY_CONNECTION_REFUSED
     );
     // GATEWAY_TIMEOUT (504) -> ConnectionTimeout (REP=0x06 TTL expired)
     assert_eq!(
-      http_status_to_socks5_error(http::StatusCode::GATEWAY_TIMEOUT).as_u8(),
+      http_status_to_socks5_error(http::StatusCode::GATEWAY_TIMEOUT)
+        .as_u8(),
       fast_socks5::consts::SOCKS5_REPLY_TTL_EXPIRED
     );
     // SERVICE_UNAVAILABLE (503) -> ConnectionNotAllowed (service denied / shutting down)
     assert_eq!(
-      http_status_to_socks5_error(http::StatusCode::SERVICE_UNAVAILABLE)
-        .as_u8(),
+      http_status_to_socks5_error(
+        http::StatusCode::SERVICE_UNAVAILABLE
+      )
+      .as_u8(),
       fast_socks5::consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED
     );
     // FORBIDDEN (403) -> ConnectionNotAllowed (access denied / shutting down)
@@ -1230,8 +1197,10 @@ mod tests {
     );
     // Default -> GeneralFailure
     assert_eq!(
-      http_status_to_socks5_error(http::StatusCode::INTERNAL_SERVER_ERROR)
-        .as_u8(),
+      http_status_to_socks5_error(
+        http::StatusCode::INTERNAL_SERVER_ERROR
+      )
+      .as_u8(),
       fast_socks5::consts::SOCKS5_REPLY_GENERAL_FAILURE
     );
   }
@@ -1241,7 +1210,9 @@ mod tests {
     let (_tx, rx) = tokio::sync::oneshot::channel::<
       Result<tokio::net::TcpStream, Socks5UpgradeError>,
     >();
-    let upgrade = Socks5OnUpgrade { receiver: Some(Arc::new(Mutex::new(Some(rx)))) };
+    let upgrade = Socks5OnUpgrade {
+      receiver: Some(Arc::new(Mutex::new(Some(rx)))),
+    };
     let debug_str = format!("{:?}", upgrade);
     assert!(
       debug_str.contains("Socks5OnUpgrade"),
@@ -1262,19 +1233,21 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_socks5_on_upgrade_second_clone_returns_canceled_after_first_poll() {
+  async fn test_socks5_on_upgrade_second_clone_returns_canceled_after_first_poll()
+   {
     // After the first clone resolves the future, a second clone polling
     // the same shared receiver should return Canceled instead of panicking.
     let (tx, rx) = tokio::sync::oneshot::channel::<
       Result<tokio::net::TcpStream, Socks5UpgradeError>,
     >();
-    let upgrade1 = Socks5OnUpgrade { receiver: Some(Arc::new(Mutex::new(Some(rx)))) };
+    let upgrade1 = Socks5OnUpgrade {
+      receiver: Some(Arc::new(Mutex::new(Some(rx)))),
+    };
     let upgrade2 = upgrade1.clone();
 
     // Send a value so the first await resolves
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-      .await
-      .unwrap();
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let client_fut = tokio::net::TcpStream::connect(addr);
     let (client_res, server_res) =
@@ -1303,7 +1276,9 @@ mod tests {
   fn test_socks5_upgrade_error_display_uses_readable_format() {
     // Verify that Display uses the human-readable ReplyError messages
     // (e.g., "Connection refused") rather than Debug format (e.g., "ConnectionRefused")
-    let err = Socks5UpgradeError::ReplyError(fast_socks5::ReplyError::ConnectionRefused);
+    let err = Socks5UpgradeError::ReplyError(
+      fast_socks5::ReplyError::ConnectionRefused,
+    );
     let display_str = format!("{}", err);
     assert!(
       display_str.contains("Connection refused"),
@@ -1311,7 +1286,9 @@ mod tests {
       display_str
     );
 
-    let err = Socks5UpgradeError::ReplyError(fast_socks5::ReplyError::NetworkUnreachable);
+    let err = Socks5UpgradeError::ReplyError(
+      fast_socks5::ReplyError::NetworkUnreachable,
+    );
     let display_str = format!("{}", err);
     assert!(
       display_str.contains("Network unreachable"),
@@ -1370,23 +1347,27 @@ mod tests {
   // ============== Socks5UpgradeTrigger Channel Tests ==============
 
   #[tokio::test]
-  async fn test_socks5_upgrade_trigger_send_success_returns_error_when_receiver_dropped() {
+  async fn test_socks5_upgrade_trigger_send_success_returns_error_when_receiver_dropped()
+   {
     // Test that send_success returns an appropriate error when the Service
     // has dropped the receiver before the reply was delivered.
     // This tests the channel error handling path that would occur if:
     // 1. Service times out waiting for upgrade
     // 2. Service drops the Socks5OnUpgrade
     // 3. Listener tries to send the stream
-    let (trigger, _upgrade) = Socks5UpgradeTrigger::new_for_test_channel_only();
+    let (trigger, _upgrade) =
+      Socks5UpgradeTrigger::new_for_test_channel_only();
 
     // Drop the upgrade (receiver side) to simulate Service dropping it
     drop(_upgrade);
 
     // Create a dummy stream for the test
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let client_fut = tokio::net::TcpStream::connect(addr);
-    let (client_res, server_res) = tokio::join!(client_fut, listener.accept());
+    let (client_res, server_res) =
+      tokio::join!(client_fut, listener.accept());
     let client = client_res.unwrap();
     let (server, _) = server_res.unwrap();
 
@@ -1408,17 +1389,21 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_socks5_upgrade_trigger_send_error_returns_error_when_receiver_dropped() {
+  async fn test_socks5_upgrade_trigger_send_error_returns_error_when_receiver_dropped()
+   {
     // Test that send_error returns an appropriate error when the Service
     // has dropped the receiver before the error reply was delivered.
-    let (trigger, _upgrade) = Socks5UpgradeTrigger::new_for_test_channel_only();
+    let (trigger, _upgrade) =
+      Socks5UpgradeTrigger::new_for_test_channel_only();
 
     // Drop the upgrade (receiver side)
     drop(_upgrade);
 
     // Attempt to send an error - should fail because receiver is dropped
     let result = trigger.send_test_value_for_channel_test(Err(
-      Socks5UpgradeError::ReplyError(fast_socks5::ReplyError::ConnectionRefused),
+      Socks5UpgradeError::ReplyError(
+        fast_socks5::ReplyError::ConnectionRefused,
+      ),
     ));
 
     assert!(
@@ -1434,15 +1419,19 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_socks5_upgrade_trigger_send_success_succeeds_when_receiver_alive() {
+  async fn test_socks5_upgrade_trigger_send_success_succeeds_when_receiver_alive()
+   {
     // Test that send succeeds when the receiver is still alive
-    let (trigger, upgrade) = Socks5UpgradeTrigger::new_for_test_channel_only();
+    let (trigger, upgrade) =
+      Socks5UpgradeTrigger::new_for_test_channel_only();
 
     // Create a dummy stream for the test
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let client_fut = tokio::net::TcpStream::connect(addr);
-    let (client_res, server_res) = tokio::join!(client_fut, listener.accept());
+    let (client_res, server_res) =
+      tokio::join!(client_fut, listener.accept());
     let client = client_res.unwrap();
     let (server, _) = server_res.unwrap();
 
@@ -1455,22 +1444,23 @@ mod tests {
 
     // The upgrade should resolve with the stream
     let stream_result = upgrade.await;
-    assert!(
-      stream_result.is_ok(),
-      "Upgrade should resolve with Ok"
-    );
+    assert!(stream_result.is_ok(), "Upgrade should resolve with Ok");
 
     drop(server);
   }
 
   #[tokio::test]
-  async fn test_socks5_upgrade_trigger_send_error_succeeds_when_receiver_alive() {
+  async fn test_socks5_upgrade_trigger_send_error_succeeds_when_receiver_alive()
+   {
     // Test that send_error succeeds when the receiver is still alive
-    let (trigger, upgrade) = Socks5UpgradeTrigger::new_for_test_channel_only();
+    let (trigger, upgrade) =
+      Socks5UpgradeTrigger::new_for_test_channel_only();
 
     // Send an error
     let result = trigger.send_test_value_for_channel_test(Err(
-      Socks5UpgradeError::ReplyError(fast_socks5::ReplyError::ConnectionRefused),
+      Socks5UpgradeError::ReplyError(
+        fast_socks5::ReplyError::ConnectionRefused,
+      ),
     ));
     assert!(
       result.is_ok(),
@@ -1479,10 +1469,7 @@ mod tests {
 
     // The upgrade should resolve with the error
     let stream_result = upgrade.await;
-    assert!(
-      stream_result.is_err(),
-      "Upgrade should resolve with Err"
-    );
+    assert!(stream_result.is_err(), "Upgrade should resolve with Err");
     match stream_result {
       Err(Socks5UpgradeError::ReplyError(e)) => {
         assert!(

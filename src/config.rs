@@ -597,208 +597,157 @@ impl Config {
     }
   }
 
-  /// Validate HTTP/3 authentication configuration
-  /// Supports both single auth object and array of auth objects (multi-auth)
+  /// Validate HTTP/3 authentication configuration.
+  /// Auth must be a single object (not an array). Field presence determines auth type.
   fn validate_http3_auth_config(
     &self,
     auth: &serde_yaml::Value,
     location: &str,
     collector: &mut ConfigErrorCollector,
   ) {
-    // Check if auth is an array (multi-auth) or a single object
     if auth.is_sequence() {
-      // Multi-auth: validate each auth config in the array
-      let auth_array = auth.as_sequence().unwrap();
-      for (idx, auth_item) in auth_array.iter().enumerate() {
-        self.validate_single_http3_auth_config(
-          auth_item,
-          &format!("{}.args.auth[{}]", location, idx),
-          collector,
-        );
-      }
-    } else {
-      // Single auth config
-      self.validate_single_http3_auth_config(auth, &format!("{}.args.auth", location), collector);
+      collector.add(
+        format!("{}.args.auth", location),
+        "auth must be a single object, not an array".to_string(),
+        ConfigErrorKind::TypeMismatch,
+      );
+      return;
     }
+    self.validate_single_http3_auth_config(
+      auth,
+      &format!("{}.args.auth", location),
+      collector,
+    );
   }
 
-  /// Validate a single HTTP/3 authentication configuration entry
+  /// Validate a single HTTP/3 authentication configuration entry.
+  /// Field presence determines auth type:
+  /// - `users` present → password authentication
+  /// - `client_ca_path` present → TLS client cert authentication
+  /// - Both present → dual-factor AND
+  /// - Neither present → error (empty auth object is invalid for listeners)
   fn validate_single_http3_auth_config(
     &self,
     auth: &serde_yaml::Value,
     location: &str,
     collector: &mut ConfigErrorCollector,
   ) {
-    // Get authentication type
-    let auth_type = auth.get("type").and_then(|v| v.as_str());
+    let has_users = auth.get("users").is_some();
+    let has_client_ca = auth.get("client_ca_path").is_some();
 
-    match auth_type {
-      Some("password") => {
-        // NEW format: Password authentication with users array and plaintext password
-        if let Some(users) = auth.get("users") {
-          if let Some(users_seq) = users.as_sequence() {
-            if users_seq.is_empty() {
+    if !has_users && !has_client_ca {
+      collector.add(
+        location.to_string(),
+        "auth must have at least 'users' or 'client_ca_path'"
+          .to_string(),
+        ConfigErrorKind::MissingField,
+      );
+      return;
+    }
+
+    // Validate users if present
+    if let Some(users) = auth.get("users") {
+      if let Some(users_seq) = users.as_sequence() {
+        if users_seq.is_empty() {
+          collector.add(
+            format!("{}.users", location),
+            "users cannot be empty for password authentication"
+              .to_string(),
+            ConfigErrorKind::InvalidFormat,
+          );
+        }
+        for (idx, user) in users_seq.iter().enumerate() {
+          if let Some(user_map) = user.as_mapping() {
+            // Check username
+            if !user_map.contains_key(&serde_yaml::Value::String(
+              "username".to_string(),
+            )) {
               collector.add(
-                format!("{}.users", location),
-                "users cannot be empty for password authentication"
-                  .to_string(),
-                ConfigErrorKind::InvalidFormat,
+                format!("{}.users[{}].username", location, idx),
+                "username is required".to_string(),
+                ConfigErrorKind::MissingField,
               );
-            }
-            // Validate each user credential
-            for (idx, user) in users_seq.iter().enumerate() {
-              if let Some(user_map) = user.as_mapping() {
-                // Check username
-                if !user_map.contains_key(serde_yaml::Value::String(
-                  "username".to_string(),
-                )) {
+            } else if let Some(username_value) = user_map
+              .get(&serde_yaml::Value::String("username".to_string()))
+            {
+              if let Some(username_str) = username_value.as_str() {
+                if username_str.is_empty() {
                   collector.add(
-                    format!(
-                      "{}.users[{}].username",
-                      location, idx
-                    ),
-                    "username is required".to_string(),
-                    ConfigErrorKind::MissingField,
+                    format!("{}.users[{}].username", location, idx),
+                    "username cannot be empty".to_string(),
+                    ConfigErrorKind::InvalidFormat,
                   );
-                } else if let Some(username_value) = user_map.get(
-                  serde_yaml::Value::String("username".to_string()),
-                ) {
-                  // Validate username is non-empty string
-                  if let Some(username_str) = username_value.as_str() {
-                    if username_str.is_empty() {
-                      collector.add(
-                        format!(
-                          "{}.users[{}].username",
-                          location, idx
-                        ),
-                        "username cannot be empty".to_string(),
-                        ConfigErrorKind::InvalidFormat,
-                      );
-                    }
-                    if username_str.len() > 255 {
-                      collector.add(
-                        format!(
-                          "{}.users[{}].username",
-                          location, idx
-                        ),
-                        format!(
-                          "username '{}' is too long (max 255 bytes)",
-                          username_str
-                        ),
-                        ConfigErrorKind::InvalidFormat,
-                      );
-                    }
-                  } else {
-                    collector.add(
-                      format!(
-                        "{}.users[{}].username",
-                        location, idx
-                      ),
-                      "username must be a string".to_string(),
-                      ConfigErrorKind::TypeMismatch,
-                    );
-                  }
                 }
-                // Check password field exists
-                if !user_map.contains_key(serde_yaml::Value::String(
-                  "password".to_string(),
-                )) {
+                if username_str.len() > 255 {
                   collector.add(
+                    format!("{}.users[{}].username", location, idx),
                     format!(
-                      "{}.users[{}].password",
-                      location, idx
+                      "username '{}' is too long (max 255 bytes)",
+                      username_str
                     ),
-                    "password is required".to_string(),
-                    ConfigErrorKind::MissingField,
+                    ConfigErrorKind::InvalidFormat,
                   );
-                } else if let Some(password_value) = user_map.get(
-                  serde_yaml::Value::String("password".to_string()),
-                ) {
-                  // Validate password is non-empty string
-                  if let Some(password_str) = password_value.as_str() {
-                    if password_str.is_empty() {
-                      collector.add(
-                        format!(
-                          "{}.users[{}].password",
-                          location, idx
-                        ),
-                        "password cannot be empty".to_string(),
-                        ConfigErrorKind::InvalidFormat,
-                      );
-                    }
-                  } else {
-                    collector.add(
-                      format!(
-                        "{}.users[{}].password",
-                        location, idx
-                      ),
-                      "password must be a string".to_string(),
-                      ConfigErrorKind::TypeMismatch,
-                    );
-                  }
                 }
               } else {
                 collector.add(
-                  format!("{}.users[{}]", location, idx),
-                  "user entry must be a mapping".to_string(),
+                  format!("{}.users[{}].username", location, idx),
+                  "username must be a string".to_string(),
+                  ConfigErrorKind::TypeMismatch,
+                );
+              }
+            }
+            // Check password
+            if !user_map.contains_key(&serde_yaml::Value::String(
+              "password".to_string(),
+            )) {
+              collector.add(
+                format!("{}.users[{}].password", location, idx),
+                "password is required".to_string(),
+                ConfigErrorKind::MissingField,
+              );
+            } else if let Some(password_value) = user_map
+              .get(&serde_yaml::Value::String("password".to_string()))
+            {
+              if let Some(password_str) = password_value.as_str() {
+                if password_str.is_empty() {
+                  collector.add(
+                    format!("{}.users[{}].password", location, idx),
+                    "password cannot be empty".to_string(),
+                    ConfigErrorKind::InvalidFormat,
+                  );
+                }
+              } else {
+                collector.add(
+                  format!("{}.users[{}].password", location, idx),
+                  "password must be a string".to_string(),
                   ConfigErrorKind::TypeMismatch,
                 );
               }
             }
           } else {
             collector.add(
-              format!("{}.users", location),
-              "users must be an array".to_string(),
+              format!("{}.users[{}]", location, idx),
+              "user entry must be a mapping".to_string(),
               ConfigErrorKind::TypeMismatch,
             );
           }
-        } else {
-          collector.add(
-            format!("{}.users", location),
-            "users is required for password authentication".to_string(),
-            ConfigErrorKind::MissingField,
-          );
         }
-        // Note: For multi-auth, client_ca_path may be set in another auth entry
-        // We don't warn about it here since this is valid in multi-auth context
-      }
-      Some("tls_client_cert") => {
-        // TLS client cert authentication: client_ca_path must be present
-        if let Some(client_ca_path) = auth.get("client_ca_path") {
-          if let Some(ca_path_str) = client_ca_path.as_str() {
-            // Validate client CA file
-            self.validate_client_ca_file(
-              ca_path_str,
-              &format!("{}.client_ca_path", location),
-              collector,
-            );
-          }
-        } else {
-          collector.add(
-            format!("{}.client_ca_path", location),
-            "client_ca_path is required for tls_client_cert authentication"
-              .to_string(),
-            ConfigErrorKind::MissingField,
-          );
-        }
-        // Note: For multi-auth, users may be set in another auth entry
-        // We don't warn about it here since this is valid in multi-auth context
-      }
-      Some("none") => {
-        // No auth - no additional validation needed
-      }
-      Some(other) => {
+      } else {
         collector.add(
-          format!("{}.type", location),
-          format!("invalid authentication type '{}'", other),
-          ConfigErrorKind::InvalidFormat,
+          format!("{}.users", location),
+          "users must be an array".to_string(),
+          ConfigErrorKind::TypeMismatch,
         );
       }
-      None => {
-        collector.add(
-          format!("{}.type", location),
-          "authentication type is required".to_string(),
-          ConfigErrorKind::MissingField,
+    }
+
+    // Validate client_ca_path if present
+    if let Some(client_ca_path) = auth.get("client_ca_path") {
+      if let Some(ca_path_str) = client_ca_path.as_str() {
+        self.validate_client_ca_file(
+          ca_path_str,
+          &format!("{}.client_ca_path", location),
+          collector,
         );
       }
     }
@@ -2206,7 +2155,6 @@ worker_threads: [
   "cert_path": "{}",
   "key_path": "{}",
   "auth": {{
-    "type": "password",
     "users": [
       {{
         "username": "user1",
@@ -2253,13 +2201,15 @@ worker_threads: [
     // Use real certificates for cert/key matching validation
     let (cert_path, key_path) = generate_test_certificates();
 
+    // New format: auth with users but users is missing
+    // This should pass validation since users is optional field with default None
+    // But to test "missing users" error, we need an auth object with no valid fields
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
   "cert_path": "{}",
   "key_path": "{}",
   "auth": {{
-    "type": "password"
   }}
 }}"#,
       cert_path.to_str().unwrap(),
@@ -2286,10 +2236,10 @@ worker_threads: [
 
     assert!(collector.has_errors());
     let errors = collector.errors();
-    let users_errors: Vec<_> =
-      errors.iter().filter(|e| e.location.contains("users")).collect();
-    assert!(!users_errors.is_empty());
-    assert_eq!(users_errors[0].kind, ConfigErrorKind::MissingField);
+    // Empty auth object should fail - needs users or client_ca_path
+    let auth_errors: Vec<_> =
+      errors.iter().filter(|e| e.location.contains("auth")).collect();
+    assert!(!auth_errors.is_empty());
   }
 
   #[test]
@@ -2305,7 +2255,6 @@ worker_threads: [
   "cert_path": "{}",
   "key_path": "{}",
   "auth": {{
-    "type": "password",
     "users": []
   }}
 }}"#,
@@ -2353,7 +2302,6 @@ worker_threads: [
   "cert_path": "{}",
   "key_path": "{}",
   "auth": {{
-    "type": "password",
     "users": [
       {{
         "password": "secret123"
@@ -2406,7 +2354,6 @@ worker_threads: [
   "cert_path": "{}",
   "key_path": "{}",
   "auth": {{
-    "type": "password",
     "users": [
       {{
         "username": "user1"
@@ -2460,7 +2407,6 @@ worker_threads: [
   "cert_path": "{}",
   "key_path": "{}",
   "auth": {{
-    "type": "tls_client_cert",
     "client_ca_path": "{}"
   }}
 }}"#,
@@ -2514,13 +2460,14 @@ worker_threads: [
     )
     .unwrap();
 
+    // New format: auth with client_ca_path pointing to non-existent file
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
   "cert_path": "{}",
   "key_path": "{}",
   "auth": {{
-    "type": "tls_client_cert"
+    "client_ca_path": "/nonexistent/ca.pem"
   }}
 }}"#,
       cert_path.to_str().unwrap(),
@@ -2552,7 +2499,7 @@ worker_threads: [
       .filter(|e| e.location.contains("client_ca_path"))
       .collect();
     assert!(!ca_errors.is_empty());
-    assert_eq!(ca_errors[0].kind, ConfigErrorKind::MissingField);
+    assert_eq!(ca_errors[0].kind, ConfigErrorKind::FileRead);
   }
 
   #[test]
@@ -2580,7 +2527,6 @@ worker_threads: [
   "cert_path": "{}",
   "key_path": "{}",
   "auth": {{
-    "type": "tls_client_cert",
     "client_ca_path": "{}"
   }}
 }}"#,
@@ -2643,7 +2589,6 @@ worker_threads: [
   "cert_path": "{}",
   "key_path": "{}",
   "auth": {{
-    "type": "tls_client_cert",
     "client_ca_path": "{}"
   }}
 }}"#,
@@ -2689,13 +2634,15 @@ worker_threads: [
     // Use real certificates for cert/key matching validation
     let (cert_path, key_path) = generate_test_certificates();
 
+    // New format: auth with users array containing invalid field
+    // Test that an unknown field doesn't cause errors (serde ignores unknown fields)
+    // Instead, test that empty auth object is rejected
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
   "cert_path": "{}",
   "key_path": "{}",
   "auth": {{
-    "type": "invalid_type"
   }}
 }}"#,
       cert_path.to_str().unwrap(),
@@ -2722,14 +2669,12 @@ worker_threads: [
 
     assert!(collector.has_errors());
     let errors = collector.errors();
-    let type_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| e.location.contains("auth.type"))
-      .collect();
-    assert!(!type_errors.is_empty());
-    assert_eq!(type_errors[0].kind, ConfigErrorKind::InvalidFormat);
+    let auth_errors: Vec<_> =
+      errors.iter().filter(|e| e.location.contains("auth")).collect();
+    assert!(!auth_errors.is_empty());
     assert!(
-      type_errors[0].message.contains("invalid authentication type")
+      auth_errors[0].message.contains("users")
+        || auth_errors[0].message.contains("client_ca_path")
     );
   }
 
@@ -2740,12 +2685,16 @@ worker_threads: [
     // Use real certificates for cert/key matching validation
     let (cert_path, key_path) = generate_test_certificates();
 
+    // New format: valid auth with users (no type field needed)
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
   "cert_path": "{}",
   "key_path": "{}",
   "auth": {{
+    "users": [
+      {{"username": "admin", "password": "secret"}}
+    ]
   }}
 }}"#,
       cert_path.to_str().unwrap(),
@@ -2770,14 +2719,17 @@ worker_threads: [
     let _ = std::fs::remove_file(&cert_path);
     let _ = std::fs::remove_file(&key_path);
 
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    let type_errors: Vec<_> = errors
+    // New format with users should be valid (no type field needed)
+    let auth_errors: Vec<_> = collector
+      .errors()
       .iter()
-      .filter(|e| e.location.contains("auth.type"))
+      .filter(|e| e.location.contains("auth"))
       .collect();
-    assert!(!type_errors.is_empty());
-    assert_eq!(type_errors[0].kind, ConfigErrorKind::MissingField);
+    assert!(
+      auth_errors.is_empty(),
+      "New auth format (no type field, users directly) should be accepted, but got errors: {:?}",
+      auth_errors
+    );
   }
 
   #[test]
@@ -2793,7 +2745,6 @@ worker_threads: [
   "cert_path": "{}",
   "key_path": "{}",
   "auth": {{
-    "type": "password",
     "users": "not_an_array"
   }}
 }}"#,
@@ -2850,7 +2801,6 @@ worker_threads: [
   "cert_path": "{}",
   "key_path": "{}",
   "auth": {{
-    "type": "password",
     "users": [
       {{
         "username": "user1",
@@ -3738,14 +3688,13 @@ worker_threads: [
 
     let (cert_path, key_path) = generate_test_certificates();
 
-    // Config with NEW auth format: users array with plaintext password
+    // Config with NEW auth format: users array with plaintext password (no type field)
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
   "cert_path": "{}",
   "key_path": "{}",
   "auth": {{
-    "type": "password",
     "users": [
       {{
         "username": "admin",
@@ -3802,7 +3751,6 @@ worker_threads: [
   "cert_path": "{}",
   "key_path": "{}",
   "auth": {{
-    "type": "tls_client_cert",
     "client_ca_path": "{}"
   }}
 }}"#,
@@ -3840,6 +3788,313 @@ worker_threads: [
     assert!(
       auth_errors.is_empty(),
       "NEW tls_client_cert format should be accepted"
+    );
+  }
+
+  // =========================================================================
+  // NEW Auth Format Validation Tests (from task Step 23)
+  // =========================================================================
+
+  #[test]
+  fn test_validate_http3_auth_new_format_no_type_field_password() {
+    ensure_crypto_provider();
+    let temp_dir = get_temp_dir();
+
+    let cert_path = temp_dir.join("neoproxy_test_cert_new_auth.pem");
+    let key_path = temp_dir.join("neoproxy_test_key_new_auth.pem");
+    // Generate self-signed cert+key for validation to pass cert checks
+    let output = std::process::Command::new("openssl")
+      .args([
+        "req",
+        "-new",
+        "-x509",
+        "-nodes",
+        "-keyout",
+        key_path.to_str().unwrap(),
+        "-out",
+        cert_path.to_str().unwrap(),
+        "-days",
+        "1",
+        "-subj",
+        "/CN=test",
+      ])
+      .output()
+      .expect("openssl command failed");
+    assert!(output.status.success());
+
+    // New format: no 'type' field, just 'users' directly under 'auth'
+    let args: serde_yaml::Value = serde_yaml::from_str(&format!(
+      r#"{{
+  "address": "127.0.0.1:8443",
+  "cert_path": "{}",
+  "key_path": "{}",
+  "auth": {{
+    "users": [
+      {{"username": "admin", "password": "secret123"}}
+    ]
+  }}
+}}"#,
+      cert_path.to_str().unwrap(),
+      key_path.to_str().unwrap()
+    ))
+    .unwrap();
+
+    let config = Config {
+      servers: vec![Server {
+        name: "test".to_string(),
+        listeners: vec![Listener {
+          kind: "http3.listener".to_string(),
+          args,
+        }],
+        service: "".to_string(),
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+
+    let _ = std::fs::remove_file(&cert_path);
+    let _ = std::fs::remove_file(&key_path);
+
+    // New format with 'users' directly should be accepted (no errors about auth)
+    let auth_errors: Vec<_> = collector
+      .errors()
+      .iter()
+      .filter(|e| e.location.contains("auth"))
+      .collect();
+    assert!(
+      auth_errors.is_empty(),
+      "New auth format (no type field, users directly) should be accepted, but got errors: {:?}",
+      auth_errors
+    );
+  }
+
+  #[test]
+  fn test_validate_http3_auth_new_format_empty_object_rejected() {
+    ensure_crypto_provider();
+    let temp_dir = get_temp_dir();
+
+    let cert_path = temp_dir.join("neoproxy_test_cert_empty_auth.pem");
+    let key_path = temp_dir.join("neoproxy_test_key_empty_auth.pem");
+    let output = std::process::Command::new("openssl")
+      .args([
+        "req",
+        "-new",
+        "-x509",
+        "-nodes",
+        "-keyout",
+        key_path.to_str().unwrap(),
+        "-out",
+        cert_path.to_str().unwrap(),
+        "-days",
+        "1",
+        "-subj",
+        "/CN=test",
+      ])
+      .output()
+      .expect("openssl command failed");
+    assert!(output.status.success());
+
+    // Empty auth object: auth: {} — should be rejected for listeners
+    let args: serde_yaml::Value = serde_yaml::from_str(&format!(
+      r#"{{
+  "address": "127.0.0.1:8443",
+  "cert_path": "{}",
+  "key_path": "{}",
+  "auth": {{}}
+}}"#,
+      cert_path.to_str().unwrap(),
+      key_path.to_str().unwrap()
+    ))
+    .unwrap();
+
+    let config = Config {
+      servers: vec![Server {
+        name: "test".to_string(),
+        listeners: vec![Listener {
+          kind: "http3.listener".to_string(),
+          args,
+        }],
+        service: "".to_string(),
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+
+    let _ = std::fs::remove_file(&cert_path);
+    let _ = std::fs::remove_file(&key_path);
+
+    // Empty auth object must be rejected
+    let auth_errors: Vec<_> = collector
+      .errors()
+      .iter()
+      .filter(|e| e.location.contains("auth"))
+      .collect();
+    assert!(
+      !auth_errors.is_empty(),
+      "Empty auth object should be rejected for listeners"
+    );
+    assert!(
+      auth_errors.iter().any(|e| e.message.contains("users")
+        || e.message.contains("client_ca_path")
+        || e.message.contains("at least")),
+      "Error should mention that users or client_ca_path is required, got: {:?}",
+      auth_errors
+    );
+  }
+
+  #[test]
+  fn test_validate_http3_auth_new_format_empty_users_rejected() {
+    ensure_crypto_provider();
+    let temp_dir = get_temp_dir();
+
+    let cert_path = temp_dir.join("neoproxy_test_cert_empty_users.pem");
+    let key_path = temp_dir.join("neoproxy_test_key_empty_users.pem");
+    let output = std::process::Command::new("openssl")
+      .args([
+        "req",
+        "-new",
+        "-x509",
+        "-nodes",
+        "-keyout",
+        key_path.to_str().unwrap(),
+        "-out",
+        cert_path.to_str().unwrap(),
+        "-days",
+        "1",
+        "-subj",
+        "/CN=test",
+      ])
+      .output()
+      .expect("openssl command failed");
+    assert!(output.status.success());
+
+    // auth with empty users array — should be rejected
+    let args: serde_yaml::Value = serde_yaml::from_str(&format!(
+      r#"{{
+  "address": "127.0.0.1:8443",
+  "cert_path": "{}",
+  "key_path": "{}",
+  "auth": {{
+    "users": []
+  }}
+}}"#,
+      cert_path.to_str().unwrap(),
+      key_path.to_str().unwrap()
+    ))
+    .unwrap();
+
+    let config = Config {
+      servers: vec![Server {
+        name: "test".to_string(),
+        listeners: vec![Listener {
+          kind: "http3.listener".to_string(),
+          args,
+        }],
+        service: "".to_string(),
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+
+    let _ = std::fs::remove_file(&cert_path);
+    let _ = std::fs::remove_file(&key_path);
+
+    // Empty users array must be rejected
+    let auth_errors: Vec<_> = collector
+      .errors()
+      .iter()
+      .filter(|e| {
+        e.location.contains("auth") || e.location.contains("users")
+      })
+      .collect();
+    assert!(
+      !auth_errors.is_empty(),
+      "Empty users array should be rejected"
+    );
+    assert!(
+      auth_errors.iter().any(|e| e.message.contains("empty")
+        || e.message.contains("cannot be empty")),
+      "Error should mention users cannot be empty, got: {:?}",
+      auth_errors
+    );
+  }
+
+  #[test]
+  fn test_validate_http3_auth_new_format_array_rejected() {
+    ensure_crypto_provider();
+    let temp_dir = get_temp_dir();
+
+    let cert_path = temp_dir.join("neoproxy_test_cert_array_auth.pem");
+    let key_path = temp_dir.join("neoproxy_test_key_array_auth.pem");
+    let output = std::process::Command::new("openssl")
+      .args([
+        "req",
+        "-new",
+        "-x509",
+        "-nodes",
+        "-keyout",
+        key_path.to_str().unwrap(),
+        "-out",
+        cert_path.to_str().unwrap(),
+        "-days",
+        "1",
+        "-subj",
+        "/CN=test",
+      ])
+      .output()
+      .expect("openssl command failed");
+    assert!(output.status.success());
+
+    // Old array format — should be rejected in new design
+    let args: serde_yaml::Value = serde_yaml::from_str(&format!(
+      r#"{{
+  "address": "127.0.0.1:8443",
+  "cert_path": "{}",
+  "key_path": "{}",
+  "auth": [
+    {{"users": [{{"username": "admin", "password": "secret"}}]}}
+  ]
+}}"#,
+      cert_path.to_str().unwrap(),
+      key_path.to_str().unwrap()
+    ))
+    .unwrap();
+
+    let config = Config {
+      servers: vec![Server {
+        name: "test".to_string(),
+        listeners: vec![Listener {
+          kind: "http3.listener".to_string(),
+          args,
+        }],
+        service: "".to_string(),
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+
+    let _ = std::fs::remove_file(&cert_path);
+    let _ = std::fs::remove_file(&key_path);
+
+    // Array auth format must be rejected
+    let auth_errors: Vec<_> = collector
+      .errors()
+      .iter()
+      .filter(|e| e.location.contains("auth"))
+      .collect();
+    assert!(
+      !auth_errors.is_empty(),
+      "Array auth format should be rejected in new design"
+    );
+    assert!(
+      auth_errors.iter().any(|e| e.message.contains("single object")
+        || e.message.contains("array")),
+      "Error should mention auth must be a single object, got: {:?}",
+      auth_errors
     );
   }
 }

@@ -64,6 +64,8 @@ servers:
           # 监听器特定参数
 ```
 
+> **注意：** neoproxy 在启动时验证配置文件。无效配置将在日志中报告为警告。
+
 ---
 
 ## Listener 详解
@@ -109,7 +111,6 @@ listeners:
       addresses:
         - "0.0.0.0:8080"
       auth:
-        type: password
         users:
           - username: user1
             password: secret123
@@ -131,7 +132,7 @@ HTTP/3 (QUIC) 监听器，提供更快的连接建立和更好的弱网表现。
 | `cert_path` | `String` | 是 | TLS 证书文件路径 (PEM) |
 | `key_path` | `String` | 是 | TLS 私钥文件路径 (PEM) |
 | `quic` | `Object` | 否 | QUIC 协议参数 |
-| `auth` | `Object` | 否 | 认证配置 |
+| `auth` | `Object` | 否 | 认证配置（单个对象，字段存在即表示认证类型） |
 
 #### QUIC 参数
 
@@ -149,7 +150,6 @@ HTTP/3 (QUIC) 监听器，提供更快的连接建立和更好的弱网表现。
 
 ```yaml
 auth:
-  type: password
   users:
     - username: user1
       password: secret123
@@ -161,7 +161,16 @@ auth:
 
 ```yaml
 auth:
-  type: tls_client_cert
+  client_ca_path: /path/to/client_ca.pem
+```
+
+**双因素认证（密码 AND TLS 客户端证书）：**
+
+```yaml
+auth:
+  users:
+    - username: user1
+      password: secret123
   client_ca_path: /path/to/client_ca.pem
 ```
 
@@ -178,14 +187,13 @@ SOCKS5 监听器，完全兼容 RFC 1928 和 RFC 1929。
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | `addresses` | `[String]` | 是 | - | 监听地址列表 |
-| `handshake_timeout` | `u64` | 否 | 10 | 握手超时（秒） |
+| `handshake_timeout` | `String` | 否 | `"10s"` | 握手超时（时长字符串，如 `"10s"`、`"30s"`） |
 | `auth` | `Object` | 否 | - | 认证配置 |
 
 #### 认证配置
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `type` | `String` | 是 | 认证类型：`password`（SOCKS5 仅支持密码认证） |
 | `users` | `[Object]` | 是 | 用户列表 |
 
 用户条目格式：
@@ -217,9 +225,8 @@ listeners:
     args:
       addresses:
         - "0.0.0.0:1080"
-      handshake_timeout: 15
+      handshake_timeout: "15s"
       auth:
-        type: password
         users:
           - username: admin
             password: secret123
@@ -279,6 +286,7 @@ HTTP/3 代理链服务，通过 HTTP/3 协议连接到上游代理服务器。
 |------|------|------|------|
 | `proxy_group` | `[Object]` | 是 | 上游代理组 |
 | `ca_path` | `String` | 是 | CA 证书路径（用于验证上游代理） |
+| `default_credential` | `Object` | 否 | 默认凭证（无显式 `credential` 的代理继承此配置） |
 
 proxy_group 条目格式：
 
@@ -286,6 +294,7 @@ proxy_group 条目格式：
 |------|------|------|
 | `address` | `String` | 上游代理地址 `host:port` |
 | `weight` | `usize` | 权重（负载均衡用） |
+| `credential` | `Object` | 可选凭证覆盖。省略则继承 `default_credential`。使用 `{}` 表示无凭证 |
 
 #### 配置示例
 
@@ -336,40 +345,58 @@ servers:
 
 http3_chain 支持两种上游代理认证方式：
 
-**密码认证：**
+**密码凭证：**
 
 ```yaml
-services:
-  - name: proxy_chain
-    kind: http3_chain.http3_chain
-    args:
-      proxy_group:
-        - address: "upstream.example.com:443"
-          weight: 1
-      ca_path: /path/to/ca.pem
-      username: user1
-      password: secret123
+default_credential:
+  user:
+    username: user1
+    password: secret123
 ```
 
-**TLS 客户端证书认证：**
+**TLS 客户端证书凭证：**
 
 ```yaml
-services:
-  - name: proxy_chain
-    kind: http3_chain.http3_chain
-    args:
-      proxy_group:
-        - address: "upstream.example.com:443"
-          weight: 1
-      ca_path: /path/to/ca.pem
-      client_cert_path: /path/to/client.crt
-      client_key_path: /path/to/client.key
+default_credential:
+  client_cert_path: /path/to/client.crt
+  client_key_path: /path/to/client.key
+```
+
+**双因素认证（密码 AND TLS 客户端证书）：**
+
+```yaml
+default_credential:
+  user:
+    username: user1
+    password: secret123
+  client_cert_path: /path/to/client.crt
+  client_key_path: /path/to/client.key
+```
+
+**代理级凭证覆盖：**
+
+```yaml
+proxy_group:
+  - address: "upstream1.example.com:443"
+    weight: 1
+    credential:
+      user:
+        username: special_user
+        password: special_pass
+  - address: "upstream2.example.com:443"
+    weight: 1
+    # 省略 credential -> 继承 default_credential
+  - address: "upstream3.example.com:443"
+    weight: 1
+    credential: {}  # 显式无凭证
 ```
 
 **配置规则：**
-- `username` 和 `password` 必须同时配置或同时不配置
-- `client_cert_path` 和 `client_key_path` 必须同时配置或同时不配置
-- 两种认证方式可以同时使用
+- `user.username` 和 `user.password` 必须同时存在
+- `client_cert_path` 和 `client_key_path` 必须同时存在或同时省略
+- 两种凭证类型可以同时使用（双因素）
+- `credential: {}` 显式覆盖为无凭证
+- 省略 `credential` 则继承 `default_credential`
 
 ---
 
@@ -442,7 +469,6 @@ servers:
           addresses:
             - "0.0.0.0:1080"
           auth:
-            type: password
             users:
               - username: admin
                 password: secret123
@@ -468,7 +494,6 @@ servers:
           cert_path: /etc/neoproxy/cert.pem
           key_path: /etc/neoproxy/key.pem
           auth:
-            type: password
             users:
               - username: admin
                 password: secret123
@@ -548,9 +573,23 @@ neoproxy 支持优雅关闭：
 
 优雅关闭流程：
 1. 停止接收新连接
-2. 等待现有连接完成（Listener 层超时 3 秒，Service 层超时 5 秒）
+2. 等待现有连接完成（Listener 层超时 3 秒，Plugin uninstall 层超时 5 秒）
 3. 强制关闭剩余连接
 4. 退出程序
+
+### 退出码
+
+| 退出码 | 含义 |
+|--------|------|
+| 0 | 正常退出 |
+| 1 | 工作线程崩溃 |
+| 2 | 工作线程错误退出 |
+
+---
+
+## 监控
+
+neoproxy 每 60 秒在 INFO 级别记录一次活跃连接数。
 
 ---
 

@@ -107,7 +107,6 @@ servers:
       cert_path: "{cert_path}"
       key_path: "{key_path}"{quic_section}
       auth:
-        type: "password"
         users:
 {users_section}
   service: connect_tcp
@@ -164,7 +163,6 @@ servers:
       cert_path: "{cert_path}"
       key_path: "{key_path}"{quic_section}
       auth:
-        type: "tls_client_cert"
         client_ca_path: "{client_ca_path}"
   service: connect_tcp
 """
@@ -233,10 +231,8 @@ servers:
       cert_path: "{cert_path}"
       key_path: "{key_path}"{quic_section}
       auth:
-        - type: "tls_client_cert"
-          client_ca_path: "{client_ca_path}"
-        - type: "password"
-          users:
+        client_ca_path: "{client_ca_path}"
+        users:
 {users_section}
   service: connect_tcp
 """
@@ -492,7 +488,6 @@ servers:
       cert_path: "{cert_path}"
       key_path: "{key_path}"
       auth:
-        type: "password"
         users: []
   service: connect_tcp
 """
@@ -594,7 +589,6 @@ servers:
       cert_path: "{cert_path}"
       key_path: "{key_path}"
       auth:
-        type: "tls_client_cert"
         client_ca_path: "/nonexistent/ca.pem"
   service: connect_tcp
 """
@@ -1279,9 +1273,9 @@ class TestHTTP3AuthConfigValidation:
 
     def test_invalid_auth_type_rejected(self) -> None:
         """
-        TC-H3-AUTH-CFG-001: Invalid auth type causes startup failure.
+        TC-H3-AUTH-CFG-001: Auth config with unknown field causes startup failure.
 
-        Target: Verify HTTP/3 listener fails with invalid auth type
+        Target: Verify HTTP/3 listener fails when auth config contains unrecognized fields
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = 31020
@@ -1305,7 +1299,7 @@ servers:
       cert_path: "{cert_path}"
       key_path: "{key_path}"
       auth:
-        type: "invalid_auth_type"
+        some_unknown_field: true
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "invalid_auth_type.yaml")
@@ -1360,8 +1354,7 @@ servers:
       address: "0.0.0.0:{proxy_port}"
       cert_path: "{cert_path}"
       key_path: "{key_path}"
-      auth:
-        type: "password"
+      auth: {{}}
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "missing_creds.yaml")
@@ -1416,8 +1409,7 @@ servers:
       address: "0.0.0.0:{proxy_port}"
       cert_path: "{cert_path}"
       key_path: "{key_path}"
-      auth:
-        type: "tls_client_cert"
+      auth: {{}}
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "missing_ca_path.yaml")

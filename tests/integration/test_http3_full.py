@@ -793,7 +793,6 @@ servers:
       cert_path: "{cert_path}"
       key_path: "{key_path}"
       auth:
-        type: "password"
         credentials:
         - username: "testuser"
           password_hash: "invalid_hash_format_not_bcrypt"
@@ -856,7 +855,6 @@ servers:
       cert_path: "{cert_path}"
       key_path: "{key_path}"
       auth:
-        type: "password"
         users:
         - username: "testuser"
           password: "plaintext_secret"

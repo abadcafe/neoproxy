@@ -73,7 +73,6 @@ servers:
           cert_path: "{cert_path}"
           key_path: "{key_path}"
           auth:
-            type: password
             users:
               - username: user1
                 password: pass1
@@ -109,7 +108,6 @@ servers:
           cert_path: "{cert_path}"
           key_path: "{key_path}"
           auth:
-            type: tls_client_cert
             client_ca_path: "{client_ca_path}"
 """
     config_path = os.path.join(temp_dir, "upstream_tls_cert.yaml")
@@ -135,8 +133,8 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
-          auth:
-            - type: password
+          credential:
+            user:
               username: user1
               password: pass1
       ca_path: "{ca_path}"
@@ -152,7 +150,6 @@ servers:
           protocols: []
           hostnames: []
           auth:
-            type: password
             users:
               - username: user1
                 password: pass1
@@ -182,10 +179,9 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
-          auth:
-            - type: tls_client_cert
-              client_cert_path: "{client_cert_path}"
-              client_key_path: "{client_key_path}"
+          credential:
+            client_cert_path: "{client_cert_path}"
+            client_key_path: "{client_key_path}"
       ca_path: "{ca_path}"
 
 servers:
@@ -199,7 +195,6 @@ servers:
           protocols: []
           hostnames: []
           auth:
-            type: password
             users:
               - username: user1
                 password: pass1
@@ -227,8 +222,8 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
-          auth:
-            - type: password
+          credential:
+            user:
               username: user1
               password: pass1
       ca_path: "{ca_path}"
@@ -242,7 +237,6 @@ servers:
           addresses:
             - "127.0.0.1:{socks5_port}"
           auth:
-            type: password
             users:
               - username: user1
                 password: pass1
@@ -272,10 +266,9 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
-          auth:
-            - type: tls_client_cert
-              client_cert_path: "{client_cert_path}"
-              client_key_path: "{client_key_path}"
+          credential:
+            client_cert_path: "{client_cert_path}"
+            client_key_path: "{client_key_path}"
       ca_path: "{ca_path}"
 
 servers:
@@ -287,7 +280,6 @@ servers:
           addresses:
             - "127.0.0.1:{socks5_port}"
           auth:
-            type: password
             users:
               - username: user1
                 password: pass1
@@ -635,7 +627,6 @@ servers:
           protocols: []
           hostnames: []
           auth:
-            type: password
             users:
               - username: user1
                 password: pass1
@@ -674,7 +665,6 @@ servers:
           addresses:
             - "127.0.0.1:{socks5_port}"
           auth:
-            type: password
             users:
               - username: user1
                 password: pass1
@@ -702,8 +692,8 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
-          auth:
-            - type: password
+          credential:
+            user:
               username: wrong_user
               password: wrong_pass
       ca_path: "{ca_path}"
@@ -719,7 +709,6 @@ servers:
           protocols: []
           hostnames: []
           auth:
-            type: password
             users:
               - username: user1
                 password: pass1

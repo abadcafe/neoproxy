@@ -24,11 +24,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use tokio::task::JoinSet;
 use tracing::warn;
 
 use crate::auth::{ListenerAuthConfig, UserPasswordAuth};
 use crate::plugin;
+use crate::shutdown::StreamTracker;
 use tower::Service;
 
 /// Listener shutdown timeout in seconds.
@@ -50,7 +50,7 @@ pub struct Socks5Listener {
   addresses: Vec<SocketAddr>,
   /// Connection tracker for graceful shutdown.
   /// This also serves as the shutdown handle for the listener itself.
-  connection_tracker: ConnectionTracker,
+  connection_tracker: Rc<StreamTracker>,
   /// Associated service for handling connections.
   service: plugin::Service,
   /// Graceful shutdown timeout.
@@ -95,7 +95,7 @@ impl Socks5Listener {
 
     Ok(plugin::Listener::new(Self {
       addresses,
-      connection_tracker: ConnectionTracker::new(),
+      connection_tracker: Rc::new(StreamTracker::new()),
       service: svc,
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
       handshake_timeout: args.handshake_timeout,
@@ -119,7 +119,7 @@ impl Socks5Listener {
 
     Ok(Self {
       addresses,
-      connection_tracker: ConnectionTracker::new(),
+      connection_tracker: Rc::new(StreamTracker::new()),
       service: svc,
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
       handshake_timeout: args.handshake_timeout,
@@ -145,7 +145,7 @@ impl Socks5Listener {
     &self,
     addr: SocketAddr,
     service: plugin::Service,
-    connection_tracker: ConnectionTracker,
+    connection_tracker: Rc<StreamTracker>,
     shutdown_handle: plugin::ShutdownHandle,
     handshake_timeout: Duration,
     user_password_auth: UserPasswordAuth,
@@ -554,7 +554,7 @@ impl plugin::Listening for Socks5Listener {
 /// Clone implementation for Socks5Listener.
 ///
 /// This is needed because we need to create multiple listeners
-/// (one per address), but ConnectionTracker uses Rc internally.
+/// (one per address), but StreamTracker uses Rc internally.
 impl Clone for Socks5Listener {
   fn clone(&self) -> Self {
     Self {
@@ -564,151 +564,6 @@ impl Clone for Socks5Listener {
       graceful_shutdown_timeout: self.graceful_shutdown_timeout,
       handshake_timeout: self.handshake_timeout,
       user_password_auth: self.user_password_auth.clone(),
-    }
-  }
-}
-
-/// Connection task tracker for SOCKS5 listener.
-///
-/// Tracks active connection tasks and supports graceful shutdown.
-/// When receiving a shutdown notification, connection tasks should
-/// actively exit data transmission.
-///
-/// # Shutdown Flow
-///
-/// When `shutdown()` is called:
-/// 1. Trigger shutdown notification, notify all connection tasks
-/// 2. Connection tasks should listen for notification in data
-///    transmission loop and actively exit
-///
-/// When `abort_all()` is called:
-/// 1. Forcefully terminate all connection tasks
-/// 2. Usually called after `shutdown()` timeout
-///
-/// # Example
-///
-/// ```ignore
-/// let tracker = ConnectionTracker::new();
-///
-/// // Register connection task
-/// tracker.register(async move {
-///     // Handle connection data transmission
-/// });
-///
-/// // Graceful shutdown: trigger notification, wait for tasks to exit
-/// tracker.shutdown();
-///
-/// // Force terminate after timeout
-/// tokio::time::timeout(Duration::from_secs(3), tracker.wait_shutdown()).await.ok();
-/// tracker.abort_all();
-/// ```
-pub struct ConnectionTracker {
-  /// Active connection tasks
-  connections: Rc<RefCell<JoinSet<()>>>,
-  /// Shutdown notification (reusing existing plugin::ShutdownHandle)
-  shutdown_handle: plugin::ShutdownHandle,
-}
-
-impl ConnectionTracker {
-  /// Create a new ConnectionTracker.
-  pub fn new() -> Self {
-    Self {
-      connections: Rc::new(RefCell::new(JoinSet::new())),
-      shutdown_handle: plugin::ShutdownHandle::new(),
-    }
-  }
-
-  /// Register a new connection task.
-  ///
-  /// Adds the connection task to the tracking list. The task will
-  /// execute in the background. When `shutdown()` is called, the
-  /// task will receive a shutdown notification. When `abort_all()`
-  /// is called, the task will be forcefully terminated.
-  pub fn register(
-    &self,
-    connection_future: impl Future<Output = ()> + 'static,
-  ) {
-    self.connections.borrow_mut().spawn_local(connection_future);
-  }
-
-  /// Trigger shutdown notification.
-  ///
-  /// # Behavior
-  ///
-  /// Triggers shutdown notification to notify all connection tasks
-  /// to prepare for shutdown. Connection tasks should listen for
-  /// `shutdown_handle().notified()` via `select!` in their data
-  /// transmission loop and actively exit.
-  ///
-  /// # Note
-  ///
-  /// This method only triggers notification, does not forcefully
-  /// terminate tasks. If you need to forcefully terminate after
-  /// timeout, use the `abort_all()` method.
-  /// Typical usage pattern:
-  /// ```ignore
-  /// tracker.shutdown();
-  /// tokio::time::timeout(Duration::from_secs(3), tracker.wait_shutdown()).await.ok();
-  /// tracker.abort_all();
-  /// ```
-  pub fn shutdown(&self) {
-    self.shutdown_handle.shutdown();
-  }
-
-  /// Forcefully terminate all connection tasks.
-  ///
-  /// # Behavior
-  ///
-  /// Immediately terminates all registered connection tasks without
-  /// waiting for them to actively exit. Usually called after
-  /// `shutdown()` timeout.
-  ///
-  /// # Note
-  ///
-  /// This method forcefully terminates tasks, which may result in
-  /// resources not being properly released. You should prioritize
-  /// using `shutdown()` to wait for tasks to actively exit.
-  /// Due to `JoinSet::abort_all()` behavior, tasks may still remain
-  /// in the set until joined. If you need to wait for tasks to be
-  /// fully cleaned up, use `wait_shutdown()` method after calling
-  /// this method.
-  pub fn abort_all(&self) {
-    self.connections.borrow_mut().abort_all();
-  }
-
-  /// Wait for all connection tasks to be cleaned up.
-  ///
-  /// Use this method after calling `shutdown()` to wait for all
-  /// tasks to be removed from the `JoinSet`.
-  pub async fn wait_shutdown(&self) {
-    while self.connections.borrow_mut().join_next().await.is_some() {}
-  }
-
-  /// Get the shutdown handle.
-  ///
-  /// The returned ShutdownHandle can be used to listen for
-  /// shutdown notifications within connection tasks.
-  pub fn shutdown_handle(&self) -> plugin::ShutdownHandle {
-    self.shutdown_handle.clone()
-  }
-
-  /// Get the current number of active connections.
-  pub fn active_count(&self) -> usize {
-    self.connections.borrow().len()
-  }
-}
-
-impl Default for ConnectionTracker {
-  fn default() -> Self {
-    Self::new()
-  }
-}
-
-impl Clone for ConnectionTracker {
-  fn clone(&self) -> Self {
-    Self {
-      connections: self.connections.clone(),
-      shutdown_handle: self.shutdown_handle.clone(),
     }
   }
 }
@@ -1459,26 +1314,24 @@ mod tests {
   use crate::auth::listener_auth_config::UserCredential;
   use crate::plugin::Listening;
 
-  // ========== ConnectionTracker Tests ==========
+  // ========== StreamTracker Tests ==========
 
   #[test]
-  fn test_connection_tracker_new() {
-    let tracker = ConnectionTracker::new();
+  fn test_stream_tracker_new() {
+    let tracker = StreamTracker::new();
     assert_eq!(tracker.active_count(), 0);
   }
 
   #[test]
-  fn test_connection_tracker_default() {
-    let tracker = ConnectionTracker::default();
+  fn test_stream_tracker_default() {
+    let tracker = StreamTracker::default();
     assert_eq!(tracker.active_count(), 0);
   }
 
   #[test]
-  fn test_connection_tracker_clone() {
-    fn assert_clone<T: Clone>() {}
-    assert_clone::<ConnectionTracker>();
-
-    let tracker = ConnectionTracker::new();
+  fn test_stream_tracker_in_rc() {
+    // Verify Rc<StreamTracker> can be cloned
+    let tracker = Rc::new(StreamTracker::new());
     let cloned = tracker.clone();
     assert_eq!(cloned.active_count(), 0);
 
@@ -1489,11 +1342,11 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_connection_tracker_register() {
+  async fn test_stream_tracker_register() {
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
-        let tracker = ConnectionTracker::new();
+        let tracker = StreamTracker::new();
         tracker.register(async {});
         // Need to yield for the task to be spawned
         tokio::task::yield_now().await;
@@ -1503,11 +1356,11 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_connection_tracker_abort_all() {
+  async fn test_stream_tracker_abort_all() {
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
-        let tracker = ConnectionTracker::new();
+        let tracker = StreamTracker::new();
         tracker.register(async {
           std::future::pending::<()>().await;
         });

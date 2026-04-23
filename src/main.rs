@@ -16,10 +16,15 @@ use crate::config::Config;
 mod auth;
 mod config;
 mod config_validator;
+mod connect_utils;
+mod http_types;
 mod listeners;
 mod plugin;
 mod plugins;
 mod server;
+mod shutdown;
+mod stream;
+mod h3_stream;
 
 /// Thread check interval for detecting worker thread exit.
 const THREAD_CHECK_INTERVAL: Duration = Duration::from_millis(100);

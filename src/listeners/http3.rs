@@ -1,5 +1,4 @@
 #![allow(clippy::await_holding_refcell_ref)]
-use std::cell::RefCell;
 use std::fs;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -9,20 +8,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use h3::server;
 use http_body_util::BodyExt;
 use quinn::crypto::rustls::QuicServerConfig;
 use rustls::pki_types::CertificateDer;
 use serde::Deserialize;
-use tokio::net;
-use tokio::task::JoinSet;
 use tracing::{info, warn};
+use tower::Service;
 
 use crate::auth::{
   ClientCertAuth, ListenerAuthConfig, UserPasswordAuth,
 };
 use crate::plugin;
+use crate::shutdown::StreamTracker;
+use crate::stream::H3UpgradeTrigger;
 
 // ============================================================================
 // Constants
@@ -185,131 +185,6 @@ impl Default for QuicConfig {
 }
 
 // ============================================================================
-// Stream Tracker
-// ============================================================================
-
-/// Stream task tracker for graceful shutdown
-///
-/// Tracks all active HTTP/3 stream tasks and provides graceful shutdown
-/// capabilities. When shutdown is triggered, stream tasks should listen
-/// to the shutdown notification and exit gracefully.
-///
-/// # Example
-///
-/// ```ignore
-/// let tracker = StreamTracker::new();
-///
-/// // Register a stream task
-/// tracker.register(async move {
-///     // Handle stream data transfer
-/// });
-///
-/// // Graceful shutdown: trigger notification, wait for streams to exit
-/// tracker.shutdown();
-/// tokio::time::timeout(Duration::from_secs(5), tracker.wait_shutdown()).await.ok();
-/// tracker.abort_all();
-/// ```
-pub struct StreamTracker {
-  /// Active stream tasks
-  streams: Rc<RefCell<JoinSet<()>>>,
-  /// Active connection tasks (for connection_count)
-  connections: Rc<RefCell<JoinSet<()>>>,
-  /// Shutdown notification handle
-  shutdown_handle: plugin::ShutdownHandle,
-}
-
-impl StreamTracker {
-  /// Create a new StreamTracker
-  pub fn new() -> Self {
-    Self {
-      streams: Rc::new(RefCell::new(JoinSet::new())),
-      connections: Rc::new(RefCell::new(JoinSet::new())),
-      shutdown_handle: plugin::ShutdownHandle::new(),
-    }
-  }
-
-  /// Register a new stream task
-  ///
-  /// The stream task will be tracked and can be notified on shutdown.
-  pub fn register(
-    &self,
-    stream_future: impl Future<Output = ()> + 'static,
-  ) {
-    self.streams.borrow_mut().spawn_local(stream_future);
-  }
-
-  /// Register a connection task (for connection tracking)
-  pub fn register_connection(
-    &self,
-    conn_future: impl Future<Output = ()> + 'static,
-  ) {
-    self.connections.borrow_mut().spawn_local(conn_future);
-  }
-
-  /// Trigger shutdown notification
-  ///
-  /// Notifies all stream tasks to prepare for shutdown.
-  /// Stream tasks should listen to `shutdown_handle().notified()`.
-  pub fn shutdown(&self) {
-    self.shutdown_handle.shutdown();
-  }
-
-  /// Forcefully abort all stream tasks
-  ///
-  /// Immediately terminates all registered stream tasks.
-  /// Should be called after `shutdown()` timeout.
-  pub fn abort_all(&self) {
-    self.streams.borrow_mut().abort_all();
-    self.connections.borrow_mut().abort_all();
-  }
-
-  /// Wait for all stream tasks to complete
-  ///
-  /// Returns when all stream tasks have finished.
-  /// Efficiently waits using join_next in a loop.
-  pub async fn wait_shutdown(&self) {
-    // Wait for all streams to complete
-    while self.streams.borrow_mut().join_next().await.is_some() {}
-    // Wait for all connections to complete
-    while self.connections.borrow_mut().join_next().await.is_some() {}
-  }
-
-  /// Wait for all stream tasks to complete with timeout
-  ///
-  /// Returns Ok(()) if all tasks complete within timeout.
-  /// Returns Err(()) if timeout expires before all tasks complete.
-  pub async fn wait_shutdown_with_timeout(
-    &self,
-    timeout: Duration,
-  ) -> std::result::Result<(), ()> {
-    tokio::time::timeout(timeout, self.wait_shutdown())
-      .await
-      .map_err(|_| ())
-  }
-
-  /// Get the shutdown handle for listening to shutdown notifications
-  pub fn shutdown_handle(&self) -> plugin::ShutdownHandle {
-    self.shutdown_handle.clone()
-  }
-
-  /// Get the count of active streams
-  pub fn active_count(&self) -> usize {
-    self.streams.borrow().len()
-  }
-
-  /// Get the count of active connections
-  pub fn connection_count(&self) -> usize {
-    self.connections.borrow().len()
-  }
-}
-
-impl Default for StreamTracker {
-  fn default() -> Self {
-    Self::new()
-  }
-}
-
-// ============================================================================
 // Error Response Helpers
 // ============================================================================
 
@@ -332,320 +207,124 @@ fn build_error_response(
 }
 
 /// Build an empty response with the given status
+#[allow(dead_code)]
 fn build_empty_response(status: http::StatusCode) -> plugin::Response {
-  let empty = http_body_util::Empty::new();
-  let bytes_buf = plugin::BytesBufBodyWrapper::new(empty);
-  let body = plugin::ResponseBody::new(bytes_buf);
+  let body = plugin::ResponseBody::new(plugin::BytesBufBodyWrapper::new(
+    http_body_util::Empty::<Bytes>::new(),
+  ));
   let mut resp = plugin::Response::new(body);
   *resp.status_mut() = status;
   resp
 }
 
 // ============================================================================
-// HTTP/3 Stream Handler Helpers
+// Authentication
 // ============================================================================
-
-/// Transfer direction indicator for logging
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TransferDirection {
-  H3ToTcp,
-  TcpToH3,
-  Shutdown,
-}
-
-impl std::fmt::Display for TransferDirection {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    match self {
-      TransferDirection::H3ToTcp => write!(f, "H3->TCP"),
-      TransferDirection::TcpToH3 => write!(f, "TCP->H3"),
-      TransferDirection::Shutdown => write!(f, "shutdown"),
-    }
-  }
-}
-
-/// Validate HTTP method for CONNECT request
-///
-/// Returns Ok(()) if method is CONNECT, Err with error response otherwise.
-fn validate_connect_method(req: &http::Request<()>) -> Result<()> {
-  if req.method() == http::Method::CONNECT {
-    Ok(())
-  } else {
-    bail!(
-      "Method Not Allowed: only CONNECT is supported, got {}",
-      req.method()
-    )
-  }
-}
-
-/// Validate target address from CONNECT request
-///
-/// Returns Ok(target_address) if valid, Err with error message otherwise.
-fn validate_target_address(req: &http::Request<()>) -> Result<String> {
-  let authority = req.uri().authority().ok_or_else(|| {
-    anyhow!("Bad Request: invalid target address - missing authority")
-  })?;
-
-  let port = authority.port_u16().ok_or_else(|| {
-    anyhow!("Bad Request: invalid target address - missing port")
-  })?;
-
-  if port == 0 {
-    bail!("Bad Request: invalid target address - port cannot be zero");
-  }
-
-  Ok(authority.to_string())
-}
 
 /// Perform application-layer authentication
 ///
-/// Returns Ok(()) if authentication succeeds or no auth needed,
-/// Err with error message otherwise.
+/// Verifies the request against the configured user password authentication.
+/// Returns Ok(()) if authentication passes or if no authentication is required.
+/// Returns Err(()) if authentication fails.
 fn perform_application_auth(
-  req: &http::Request<()>,
   user_password_auth: &UserPasswordAuth,
-) -> Result<()> {
-  user_password_auth
-    .verify(req)
-    .map_err(|e| anyhow!("Proxy Authentication Required - {}", e))
-}
-
-/// Connect to target server
-///
-/// Returns Ok(TcpStream) if connection succeeds, Err with error message otherwise.
-async fn connect_to_target(
-  target_addr: &str,
-) -> Result<net::TcpStream> {
-  match net::TcpStream::connect(target_addr).await {
-    Ok(s) => Ok(s),
-    Err(e) => {
-      warn!("Failed to connect to target {}: {}", target_addr, e);
-      bail!("Bad Gateway: failed to connect to target")
-    }
-  }
+  req: &http::Request<()>,
+) -> Result<(), ()> {
+  user_password_auth.verify(req).map_err(|_| ())
 }
 
 // ============================================================================
 // HTTP/3 Stream Handler
 // ============================================================================
 
-/// Result of CONNECT request validation
-enum ValidationError {
-  MethodNotAllowed(String),
-  Unauthorized(String),
-  BadRequest(String),
-}
-
-/// Validate CONNECT request (method, authentication, target address)
+/// Handle a single HTTP/3 stream by delegating to the Service.
 ///
-/// Returns Ok(target_address) if validation passes, Err otherwise.
-fn validate_connect_request(
-  req: &http::Request<()>,
-  user_password_auth: &UserPasswordAuth,
-) -> std::result::Result<String, ValidationError> {
-  // Step 1: Validate CONNECT method
-  if let Err(e) = validate_connect_method(req) {
-    return Err(ValidationError::MethodNotAllowed(e.to_string()));
-  }
-
-  // Step 2: Perform application-layer authentication
-  if let Err(e) = perform_application_auth(req, user_password_auth) {
-    return Err(ValidationError::Unauthorized(e.to_string()));
-  }
-
-  // Step 3: Validate target address
-  match validate_target_address(req) {
-    Ok(addr) => Ok(addr),
-    Err(e) => Err(ValidationError::BadRequest(e.to_string())),
-  }
-}
-
-/// Log the result of bidirectional transfer
-fn log_transfer_result(
-  direction: TransferDirection,
-  result: &Result<()>,
-) {
-  match result {
-    Ok(()) => {
-      info!(
-        "Bidirectional transfer completed normally on {} direction",
-        direction
-      );
-    }
-    Err(e) => {
-      if direction == TransferDirection::Shutdown {
-        info!("Bidirectional transfer terminated by shutdown");
-      } else {
-        warn!(
-          "Bidirectional transfer terminated with error on {} direction: {}",
-          direction, e
-        );
-      }
-    }
-  }
-}
-
-/// Result of bidirectional transfer
-struct TransferResult {
-  direction: TransferDirection,
-  result: Result<()>,
-}
-
-/// Perform bidirectional data transfer between H3 stream and TCP
+/// Flow:
+/// 1. Authentication check (fail -> send 407 directly)
+/// 2. Create (trigger, on_upgrade) pair
+/// 3. Build plugin::Request with on_upgrade in extensions
+/// 4. Call service.call(request)
+/// 5. Based on response status, trigger.send_success() or trigger.send_error()
 ///
-/// This function handles the data transfer phase of a CONNECT tunnel,
-/// simultaneously transferring data in both directions until one side
-/// closes, an error occurs, or shutdown is signaled.
-async fn perform_bidirectional_transfer<S>(
-  stream: server::RequestStream<S, Bytes>,
-  target_stream: net::TcpStream,
-  shutdown_handle: plugin::ShutdownHandle,
-) -> TransferResult
-where
-  S: h3::quic::BidiStream<Bytes> + Send + 'static,
-  <S as h3::quic::BidiStream<Bytes>>::SendStream: Send,
-  <S as h3::quic::BidiStream<Bytes>>::RecvStream: Send,
-{
-  let (mut tcp_read, mut tcp_write) = target_stream.into_split();
-  let (mut send_stream, mut recv_stream) = stream.split();
-
-  let (direction, result) = tokio::select! {
-    res = async {
-      // H3 stream -> TCP
-      use tokio::io::AsyncWriteExt;
-      while let Some(mut data) = recv_stream.recv_data().await? {
-        while data.has_remaining() {
-          let chunk = data.chunk();
-          tcp_write.write_all(chunk).await?;
-          data.advance(chunk.len());
-        }
-      }
-      Ok::<_, anyhow::Error>(())
-    } => {
-      (TransferDirection::H3ToTcp, res)
-    }
-    res = async {
-      // TCP -> H3 stream
-      use tokio::io::AsyncReadExt;
-      let mut buf = [0u8; 8192];
-      loop {
-        let n = tcp_read.read(&mut buf).await?;
-        if n == 0 {
-          break;
-        }
-        send_stream.send_data(Bytes::copy_from_slice(&buf[..n])).await?;
-      }
-      Ok::<_, anyhow::Error>(())
-    } => {
-      (TransferDirection::TcpToH3, res)
-    }
-    _ = shutdown_handle.notified() => {
-      (TransferDirection::Shutdown, Err(anyhow!("shutdown notification")))
-    }
-  };
-
-  // Finish the send stream to properly close the H3 stream
-  if let Err(e) = send_stream.finish().await {
-    warn!("Failed to finish send stream: {e}");
-  }
-
-  TransferResult { direction, result }
-}
-
-/// Send error response for a validation error
-///
-/// Maps ValidationError to appropriate HTTP status codes and sends
-/// the error response to the client.
-async fn handle_validation_error<S>(
-  stream: &mut server::RequestStream<S, Bytes>,
-  error: ValidationError,
-) where
-  S: h3::quic::SendStream<Bytes>,
-{
-  match error {
-    ValidationError::MethodNotAllowed(msg) => {
-      send_error_response(stream, msg, 405, true).await;
-    }
-    ValidationError::Unauthorized(msg) => {
-      send_error_response(stream, msg, 407, true).await;
-    }
-    ValidationError::BadRequest(msg) => {
-      send_error_response(stream, msg, 400, true).await;
-    }
-  }
-}
-
-/// Handle a single HTTP/3 stream (CONNECT request)
-///
-/// This function orchestrates the complete handling of an HTTP/3 CONNECT
-/// request including validation, authentication, target connection, and
-/// bidirectional data transfer.
-async fn handle_h3_stream<S>(
+/// Returns unit `()` because all errors are handled internally via logging
+/// and H3 error responses. This function never propagates errors upward.
+async fn handle_h3_stream(
   req: http::Request<()>,
-  mut stream: server::RequestStream<S, Bytes>,
-  _service: plugin::Service,
+  stream: server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+  mut service: plugin::Service,
   user_password_auth: UserPasswordAuth,
-  shutdown_handle: plugin::ShutdownHandle,
-) where
-  S: h3::quic::BidiStream<Bytes> + Send + 'static,
-  <S as h3::quic::BidiStream<Bytes>>::SendStream: Send,
-  <S as h3::quic::BidiStream<Bytes>>::RecvStream: Send,
-{
-  // Phase 1: Validate request
-  let target_addr =
-    match validate_connect_request(&req, &user_password_auth) {
-      Ok(addr) => addr,
-      Err(e) => {
-        handle_validation_error(&mut stream, e).await;
-        return;
-      }
-    };
-
-  // Phase 2: Connect to target
-  let target_stream = match connect_to_target(&target_addr).await {
-    Ok(s) => s,
-    Err(e) => {
-      send_error_response(&mut stream, e.to_string(), 502, true).await;
-      return;
+  _shutdown_handle: plugin::ShutdownHandle,
+) -> () {
+  // Phase 1: Authentication
+  if perform_application_auth(&user_password_auth, &req).is_err() {
+    // Auth failed: send 407 directly, do NOT call Service
+    let resp = build_error_response(
+      http::StatusCode::PROXY_AUTHENTICATION_REQUIRED,
+      "Proxy Authentication Required",
+    );
+    let mut stream = stream;
+    if let Err(e) = send_h3_response(&mut stream, resp, true).await {
+      warn!("Failed to send 407 response: {e}");
     }
-  };
-
-  // Phase 3: Send 200 OK response
-  let resp = build_empty_response(http::StatusCode::OK);
-  if let Err(e) = send_h3_response(&mut stream, resp, false).await {
-    warn!("Failed to send HTTP/3 response: {e}");
     return;
   }
 
-  // Phase 4: Perform bidirectional transfer
-  let transfer_result = perform_bidirectional_transfer(
-    stream,
-    target_stream,
-    shutdown_handle,
-  )
-  .await;
+  // Phase 2: Create upgrade pair
+  let (trigger, on_upgrade) = H3UpgradeTrigger::pair(stream);
 
-  log_transfer_result(
-    transfer_result.direction,
-    &transfer_result.result,
-  );
-}
+  // Phase 3: Build plugin::Request with on_upgrade in extensions
+  let mut request = http::Request::builder()
+    .method(req.method().clone())
+    .uri(req.uri().clone())
+    .version(req.version())
+    .body(plugin::RequestBody::new(
+      plugin::BytesBufBodyWrapper::new(
+        http_body_util::Empty::<Bytes>::new(),
+      ),
+    ))
+    .expect("failed to build request");
 
-/// Send an error response to the client
-///
-/// Helper function to send error responses with proper logging.
-async fn send_error_response<S>(
-  stream: &mut server::RequestStream<S, Bytes>,
-  message: String,
-  status_code: u16,
-  finish_stream: bool,
-) where
-  S: h3::quic::SendStream<Bytes>,
-{
-  let status = http::StatusCode::from_u16(status_code)
-    .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
-  let resp = build_error_response(status, &message);
-  if let Err(e) = send_h3_response(stream, resp, finish_stream).await {
-    warn!("Failed to send {} response: {}", status_code, e);
+  // Copy headers from original request
+  for (name, value) in req.headers() {
+    request.headers_mut().insert(name.clone(), value.clone());
+  }
+
+  request.extensions_mut().insert(on_upgrade);
+
+  // Phase 4: Call Service
+  let result = service.call(request).await;
+
+  // Phase 5: Handle Service response
+  match result {
+    Ok(resp) => {
+      if resp.status() == http::StatusCode::OK {
+        if let Err(e) = trigger.send_success().await {
+          warn!("H3 failed to send success: {e}");
+        }
+      } else {
+        // Extract body from response before sending
+        let status = resp.status();
+        let body_bytes = match http_body_util::BodyExt::collect(resp.into_body()).await {
+          Ok(collected) => collected.to_bytes(),
+          Err(e) => {
+            warn!("H3 failed to collect response body: {e}");
+            Bytes::new()
+          }
+        };
+        if let Err(e) = trigger.send_error_with_body(status, body_bytes).await {
+          warn!("H3 failed to send error: {e}");
+        }
+      }
+    }
+    Err(e) => {
+      warn!("H3 service error: {e}");
+      if let Err(e) = trigger
+        .send_error(http::StatusCode::BAD_GATEWAY)
+        .await
+      {
+        warn!("H3 failed to send error: {e}");
+      }
+    }
   }
 }
 
@@ -657,14 +336,11 @@ async fn send_error_response<S>(
 /// * `finish_stream` - If true, close the stream after sending response.
 ///   Should be false for CONNECT success response to allow bidirectional
 ///   data transfer.
-async fn send_h3_response<S>(
-  stream: &mut server::RequestStream<S, Bytes>,
+async fn send_h3_response(
+  stream: &mut server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
   resp: plugin::Response,
   finish_stream: bool,
-) -> Result<()>
-where
-  S: h3::quic::SendStream<Bytes>,
-{
+) -> Result<()> {
   let (parts, body) = resp.into_parts();
   let resp = http::Response::from_parts(parts, ());
 
@@ -1350,119 +1026,6 @@ client_ca_path: /path/to/ca.pem
     assert!(config.validate().is_err());
   }
 
-  // ============== StreamTracker Tests ==============
-
-  #[test]
-  fn test_stream_tracker_new() {
-    let tracker = StreamTracker::new();
-    assert_eq!(tracker.active_count(), 0);
-    assert_eq!(tracker.connection_count(), 0);
-  }
-
-  #[test]
-  fn test_stream_tracker_default() {
-    let tracker = StreamTracker::default();
-    assert_eq!(tracker.active_count(), 0);
-  }
-
-  #[tokio::test]
-  async fn test_stream_tracker_register() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        tracker.register(async {});
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.active_count(), 1);
-      })
-      .await;
-  }
-
-  #[tokio::test]
-  async fn test_stream_tracker_register_multiple() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        tracker.register(async {});
-        tracker.register(async {});
-        tracker.register(async {});
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.active_count(), 3);
-      })
-      .await;
-  }
-
-  #[tokio::test]
-  async fn test_stream_tracker_shutdown() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        let shutdown_handle = tracker.shutdown_handle();
-
-        let notified = Rc::new(std::cell::Cell::new(false));
-        let notified_clone = notified.clone();
-        tracker.register(async move {
-          shutdown_handle.notified().await;
-          notified_clone.set(true);
-        });
-        tokio::task::yield_now().await;
-
-        tracker.shutdown();
-        tracker.wait_shutdown().await;
-        assert_eq!(tracker.active_count(), 0);
-        assert!(notified.get());
-      })
-      .await;
-  }
-
-  #[tokio::test]
-  async fn test_stream_tracker_abort_all() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        tracker.register(async {
-          std::future::pending::<()>().await;
-        });
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.active_count(), 1);
-
-        tracker.abort_all();
-        tracker.wait_shutdown().await;
-        assert_eq!(tracker.active_count(), 0);
-      })
-      .await;
-  }
-
-  #[test]
-  fn test_stream_tracker_abort_all_empty() {
-    let tracker = StreamTracker::new();
-    tracker.abort_all();
-    assert_eq!(tracker.active_count(), 0);
-  }
-
-  #[test]
-  fn test_stream_tracker_shutdown_handle() {
-    let tracker = StreamTracker::new();
-    let _handle = tracker.shutdown_handle();
-  }
-
-  #[tokio::test]
-  async fn test_stream_tracker_connection_count() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        tracker.register_connection(async {});
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.connection_count(), 1);
-        assert_eq!(tracker.active_count(), 0);
-      })
-      .await;
-  }
-
   // ============== Error Response Tests ==============
 
   #[test]
@@ -1497,12 +1060,6 @@ client_ca_path: /path/to/ca.pem
       resp.status(),
       http::StatusCode::PROXY_AUTHENTICATION_REQUIRED
     );
-  }
-
-  #[test]
-  fn test_build_empty_response_ok() {
-    let resp = build_empty_response(http::StatusCode::OK);
-    assert_eq!(resp.status(), http::StatusCode::OK);
   }
 
   // ============== Listener Name Tests ==============
@@ -1620,5 +1177,101 @@ address: "0.0.0.0:443"
       "Internal Server Error",
     );
     assert_eq!(resp.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+  }
+
+  // ============== build_empty_response Tests ==============
+
+  #[test]
+  fn test_build_empty_response_ok() {
+    let resp = build_empty_response(http::StatusCode::OK);
+    assert_eq!(resp.status(), http::StatusCode::OK);
+  }
+
+  #[test]
+  fn test_build_empty_response_created() {
+    let resp = build_empty_response(http::StatusCode::CREATED);
+    assert_eq!(resp.status(), http::StatusCode::CREATED);
+  }
+
+  // ============== perform_application_auth Tests ==============
+
+  #[test]
+  fn test_perform_application_auth_no_auth_required() {
+    // When no auth is configured, any request should pass
+    let user_password_auth = UserPasswordAuth::none();
+    let req = http::Request::builder()
+      .method(http::Method::CONNECT)
+      .uri("http://example.com:80")
+      .body(())
+      .unwrap();
+    assert!(perform_application_auth(&user_password_auth, &req).is_ok());
+  }
+
+  #[test]
+  fn test_perform_application_auth_with_valid_credentials() {
+    // When auth is configured, valid credentials should pass
+    let user_password_auth = UserPasswordAuth::from_config(&ListenerAuthConfig {
+      users: Some(vec![UserCredential {
+        username: "testuser".to_string(),
+        password: "testpass".to_string(),
+      }]),
+      client_ca_path: None,
+    });
+    let req = http::Request::builder()
+      .method(http::Method::CONNECT)
+      .uri("http://example.com:80")
+      .header(
+        "Proxy-Authorization",
+        format!(
+          "Basic {}",
+          BASE64_STANDARD.encode("testuser:testpass")
+        ),
+      )
+      .body(())
+      .unwrap();
+    assert!(perform_application_auth(&user_password_auth, &req).is_ok());
+  }
+
+  #[test]
+  fn test_perform_application_auth_with_invalid_credentials() {
+    // When auth is configured, invalid credentials should fail
+    let user_password_auth = UserPasswordAuth::from_config(&ListenerAuthConfig {
+      users: Some(vec![UserCredential {
+        username: "testuser".to_string(),
+        password: "testpass".to_string(),
+      }]),
+      client_ca_path: None,
+    });
+    let req = http::Request::builder()
+      .method(http::Method::CONNECT)
+      .uri("http://example.com:80")
+      .header(
+        "Proxy-Authorization",
+        format!(
+          "Basic {}",
+          BASE64_STANDARD.encode("testuser:wrongpass")
+        ),
+      )
+      .body(())
+      .unwrap();
+    assert!(perform_application_auth(&user_password_auth, &req).is_err());
+  }
+
+  #[test]
+  fn test_perform_application_auth_missing_credentials() {
+    // When auth is configured, missing credentials should fail
+    let user_password_auth = UserPasswordAuth::from_config(&ListenerAuthConfig {
+      users: Some(vec![UserCredential {
+        username: "testuser".to_string(),
+        password: "testpass".to_string(),
+      }]),
+      client_ca_path: None,
+    });
+    let req = http::Request::builder()
+      .method(http::Method::CONNECT)
+      .uri("http://example.com:80")
+      .body(())
+      .unwrap();
+    assert!(perform_application_auth(&user_password_auth, &req).is_err());
   }
 }

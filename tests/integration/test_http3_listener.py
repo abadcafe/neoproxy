@@ -927,3 +927,107 @@ class TestHTTP3GracefulShutdown:
                 proxy_proc.terminate()
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+# ==============================================================================
+# Test cases - Service delegation scenarios (for refactoring)
+# ==============================================================================
+
+
+class TestHTTP3ServiceDelegation:
+    """Test that H3 listener delegates to Service without method restriction.
+
+    After the refactoring, the H3 listener should NOT reject non-CONNECT
+    requests. Instead, it should forward all requests to the Service, which
+    decides how to handle them.
+
+    This is a critical behavioral change from the monolithic H3 listener.
+    """
+
+    def test_h3_listener_non_connect_method_handled_by_service(self) -> None:
+        """
+        TC-H3-DELEGATION-001: Non-CONNECT method is forwarded to Service.
+
+        Target: Verify that after refactoring, the H3 listener forwards
+        non-CONNECT requests to the Service instead of rejecting them
+        at the listener level.
+
+        Before refactoring: Listener rejected non-CONNECT with 405 and a
+        message containing "got {method}".
+        After refactoring: Listener forwards to Service; Service decides
+        the response.
+
+        This test verifies the request is forwarded to the service by checking
+        that we get a response (not a connection error or listener-level reject).
+        The connect_tcp service returns 405 for non-CONNECT methods, which is
+        the expected behavior.
+        """
+        import asyncio
+        from .utils.http3_client import (
+            AIOQUIC_AVAILABLE,
+            H3Client,
+        )
+
+        if not AIOQUIC_AVAILABLE:
+            pytest.skip("aioquic library not available")
+
+        temp_dir = tempfile.mkdtemp()
+        proxy_port = 30480
+        proxy_proc: Optional[subprocess.Popen] = None
+
+        try:
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            config_path = create_http3_listener_config(
+                proxy_port, cert_path, key_path, temp_dir
+            )
+
+            proxy_proc = start_proxy(config_path)
+
+            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+                "HTTP/3 listener failed to start"
+
+            # Send a GET request (non-CONNECT) using HTTP/3 client
+            async def do_get_request():
+                client = H3Client("127.0.0.1", proxy_port, ca_path=ca_path)
+                connected = await asyncio.wait_for(client.connect(), timeout=15.0)
+                if not connected:
+                    return False, 0, "Connection failed"
+
+                response = await asyncio.wait_for(
+                    client.send_request("GET", "/"),
+                    timeout=15.0
+                )
+                await client.close()
+                return True, response.status_code, response.body
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                success, status_code, body = loop.run_until_complete(do_get_request())
+            finally:
+                loop.close()
+
+            # KEY ASSERTION: Request was forwarded to service and we got a response.
+            # Before refactoring, the listener rejected with a specific message
+            # "Method Not Allowed: only CONNECT is supported, got GET".
+            # After refactoring, the listener forwards to the service, which
+            # returns 405 because connect_tcp only supports CONNECT.
+            assert success, "HTTP/3 connection should succeed (request forwarded to service)"
+            assert status_code == 405, (
+                f"Service should return 405 for non-CONNECT, got {status_code}"
+            )
+
+            # CRITICAL: Verify the response came from the SERVICE, not listener-level rejection.
+            # The connect_tcp service returns "Only CONNECT method is supported" for non-CONNECT.
+            # The old listener (pre-refactoring) would return "Method Not Allowed: only CONNECT is supported".
+            # Checking the body confirms the request was actually forwarded to the service.
+            assert b"Only CONNECT method is supported" in body, (
+                f"Response body should contain service's message, got: {body!r}. "
+                f"This verifies the request was forwarded to the service, not rejected at listener level."
+            )
+
+        finally:
+            if proxy_proc:
+                proxy_proc.send_signal(signal.SIGTERM)
+                proxy_proc.wait(timeout=10)
+            shutil.rmtree(temp_dir, ignore_errors=True)

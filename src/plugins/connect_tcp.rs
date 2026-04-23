@@ -15,7 +15,7 @@ use tokio::task::JoinSet;
 use tokio::{self, net};
 use tracing::{error, warn};
 
-use super::utils::{self, ConnectTargetError};
+use crate::connect_utils::{self as utils, ConnectTargetError};
 use crate::plugin;
 use crate::plugin::ClientStream;
 
@@ -211,15 +211,19 @@ impl tower::Service<plugin::Request> for ConnectTcpService {
   fn call(&mut self, mut req: plugin::Request) -> Self::Future {
     let tunnel_tracker = self.tunnel_tracker.clone();
 
-    // Check for SOCKS5 upgrade (similar to hyper::upgrade::on)
+    // Check for SOCKS5 upgrade
     let socks5_upgrade = plugin::Socks5OnUpgrade::on(&mut req);
 
-    // Check for HTTP upgrade (only if no SOCKS5)
-    let http_upgrade = if socks5_upgrade.is_none() {
-      Some(hyper::upgrade::on(&mut req))
-    } else {
-      None
-    };
+    // Check for H3 upgrade
+    let h3_upgrade = plugin::H3OnUpgrade::on(&mut req);
+
+    // Check for HTTP upgrade (only if no SOCKS5 and no H3)
+    let http_upgrade =
+      if socks5_upgrade.is_none() && h3_upgrade.is_none() {
+        Some(hyper::upgrade::on(&mut req))
+      } else {
+        None
+      };
 
     // Parse target address
     let (parts, _body) = req.into_parts();
@@ -275,12 +279,17 @@ impl tower::Service<plugin::Request> for ConnectTcpService {
 
       // Background task: wait for upgrade, then bidirectional transfer
       tunnel_tracker.register(async move {
-        // Get client stream (SOCKS5 or HTTP upgrade)
+        // Get client stream (SOCKS5, H3, or HTTP upgrade)
         let client_result: Result<ClientStream, String> =
           if let Some(socks5) = socks5_upgrade {
             match socks5.await {
               Ok(stream) => Ok(ClientStream::Socks5(stream)),
               Err(e) => Err(format!("SOCKS5 upgrade failed: {e}")),
+            }
+          } else if let Some(h3) = h3_upgrade {
+            match h3.await {
+              Ok(stream) => Ok(ClientStream::H3(stream)),
+              Err(e) => Err(format!("H3 upgrade failed: {e}")),
             }
           } else if let Some(http) = http_upgrade {
             match http.await {
@@ -1308,6 +1317,107 @@ mod tests {
 
         let resp = service.call(req).await.unwrap();
         // Connection refused -> BAD_GATEWAY
+        assert_eq!(resp.status(), http::StatusCode::BAD_GATEWAY);
+      })
+      .await;
+  }
+
+  // ============== H3 Upgrade Tests ==============
+
+  #[tokio::test]
+  async fn test_service_call_with_h3_upgrade_extracts_upgrade() {
+    use crate::plugin::H3OnUpgrade;
+
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        // Start a real TCP listener so the target connection succeeds
+        let target_listener =
+          tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+
+        let service = ConnectTcpService::new_for_test();
+        // Clone tunnel_tracker BEFORE wrapping in plugin::Service,
+        // so we can observe the background task's state.
+        let tunnel_tracker = service.tunnel_tracker.clone();
+        let mut service = plugin::Service::new(service);
+
+        // Create H3OnUpgrade with a LIVE sender (don't drop tx).
+        // If the service correctly extracts H3OnUpgrade, the background
+        // tunnel task will await it and block (sender alive = pending).
+        // If the service does NOT extract it, it falls through to
+        // hyper::upgrade::on() which fails immediately on a synthetic
+        // request, causing the tunnel task to exit.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let upgrade = H3OnUpgrade::new_for_test(rx);
+
+        let mut req = make_connect_request(
+          http::Method::CONNECT,
+          &format!("127.0.0.1:{}", target_addr.port()),
+        );
+        req.extensions_mut().insert(upgrade);
+
+        // Service should return 200 (target is reachable)
+        let resp = service.call(req).await.unwrap();
+        assert_eq!(
+          resp.status(),
+          http::StatusCode::OK,
+          "Service should return 200 when target is reachable"
+        );
+
+        // Yield to let the background tunnel task start and reach
+        // the upgrade await point.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        // KEY ASSERTION: The tunnel task is still alive, blocked on
+        // h3.await (because tx is alive). This proves the H3 upgrade
+        // path was taken. If the service fell through to HTTP upgrade,
+        // the task would have already exited (upgrade fails on
+        // synthetic request) and active_count would be 0.
+        assert_eq!(
+          tunnel_tracker.active_count(),
+          1,
+          "Tunnel task should be alive, blocked on H3 upgrade await. \
+           If 0, the service did not extract H3OnUpgrade and fell \
+           through to the HTTP upgrade path which fails immediately."
+        );
+
+        // Clean up: drop sender so the tunnel task can exit
+        drop(tx);
+        tunnel_tracker.abort_all();
+        tunnel_tracker.wait_shutdown().await;
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_service_call_h3_upgrade_refused_returns_bad_gateway() {
+    use crate::plugin::H3OnUpgrade;
+
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        // Get a port that is NOT listening
+        let listener =
+          tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
+
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let upgrade = H3OnUpgrade::new_for_test(rx);
+
+        let mut req = make_connect_request(
+          http::Method::CONNECT,
+          &format!("127.0.0.1:{}", addr.port()),
+        );
+        req.extensions_mut().insert(upgrade);
+
+        let resp = service.call(req).await.unwrap();
+        // Connection refused -> BAD_GATEWAY (before reaching upgrade)
         assert_eq!(resp.status(), http::StatusCode::BAD_GATEWAY);
       })
       .await;

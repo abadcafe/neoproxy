@@ -1,4 +1,3 @@
-#![allow(clippy::await_holding_refcell_ref)]
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::{self, Future};
@@ -7,27 +6,29 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::Mutex;
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 use std::{fs, path};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use h3::client as h3_cli;
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::CertificateDer;
 use rustls_native_certs::CertificateResult;
 use rustls_pemfile;
 use serde::Deserialize;
-use tokio::{io, task};
+use tokio::task;
 use tracing::{error, info, warn};
 
-use super::utils;
 use crate::auth::UserCredential;
-use crate::listeners::http3::StreamTracker;
+use crate::connect_utils as utils;
+use crate::h3_stream::H3ClientBidiStream;
 use crate::plugin;
 use crate::plugin::ClientStream;
+use crate::shutdown::StreamTracker;
 
 /// Error indicating proxy authentication failure (HTTP 407)
 #[derive(Debug)]
@@ -78,7 +79,22 @@ impl ActiveConnection {
 }
 
 /// Tracker for active QUIC connections.
+///
 /// This allows us to close all connections gracefully during shutdown.
+/// The tracker maintains references to all active connections so they can
+/// be properly closed with H3_NO_ERROR during graceful shutdown.
+///
+/// # Usage Pattern
+///
+/// The typical lifecycle is:
+/// 1. `register()` - Add a new connection when established
+/// 2. `close_and_remove()` - Close and remove a specific connection (e.g., on auth failure)
+/// 3. `close_all()` then `clear()` - During shutdown, close all then clear the tracker
+///
+/// # Important
+///
+/// Always call `close_all()` before `clear()`. Calling `clear()` without `close_all()`
+/// will leave connections open but untracked, potentially causing resource leaks.
 #[derive(Clone, Default)]
 struct ActiveConnectionTracker {
   connections: Rc<RefCell<Vec<ActiveConnection>>>,
@@ -89,13 +105,18 @@ impl ActiveConnectionTracker {
     Self::default()
   }
 
-  /// Register a new active connection
+  /// Register a new active connection.
+  ///
+  /// Call this when a new QUIC connection is successfully established.
   fn register(&self, conn: quinn::Connection) {
     self.connections.borrow_mut().push(ActiveConnection::new(conn));
   }
 
-  /// Close and remove a specific connection by its stable_id
-  /// This is useful when auth fails and we need to close the failed connection
+  /// Close and remove a specific connection by its stable_id.
+  ///
+  /// This is useful when authentication fails and we need to close the
+  /// failed connection without affecting other connections.
+  #[allow(dead_code)]
   fn close_and_remove(&self, conn: &quinn::Connection) {
     let target_id = conn.stable_id();
     let mut connections = self.connections.borrow_mut();
@@ -108,7 +129,13 @@ impl ActiveConnectionTracker {
     }
   }
 
-  /// Close all registered connections with H3_NO_ERROR
+  /// Close all registered connections with H3_NO_ERROR.
+  ///
+  /// Sends CONNECTION_CLOSE frames to all tracked connections.
+  /// After calling this, the connections are still tracked but will be
+  /// closed by the QUIC layer. Call `clear()` to remove the references.
+  ///
+  /// **Important**: Call this before `clear()` to ensure graceful shutdown.
   fn close_all(&self) {
     let connections = self.connections.borrow();
     for conn in connections.iter() {
@@ -120,12 +147,16 @@ impl ActiveConnectionTracker {
     );
   }
 
-  /// Get the count of active connections
+  /// Get the count of active connections.
   fn count(&self) -> usize {
     self.connections.borrow().len()
   }
 
-  /// Clear all connection references (used after close_all)
+  /// Clear all connection references.
+  ///
+  /// **Important**: Call `close_all()` before this to ensure connections
+  /// are gracefully closed. Calling `clear()` alone does NOT close the
+  /// connections - it only removes them from tracking.
   fn clear(&self) {
     self.connections.borrow_mut().clear();
   }
@@ -175,6 +206,9 @@ impl UserPasswordCredential {
   fn none() -> Self {
     Self { user: None }
   }
+  /// Check if a user credential is configured.
+  /// Used by tests to verify credential resolution logic.
+  #[allow(dead_code)]
   fn is_set(&self) -> bool {
     self.user.is_some()
   }
@@ -202,6 +236,9 @@ impl ClientCertCredential {
   fn none() -> Self {
     Self { cert_path: None, key_path: None }
   }
+  /// Check if client certificate credentials are configured.
+  /// Used by tests to verify credential resolution logic.
+  #[allow(dead_code)]
   fn is_set(&self) -> bool {
     self.cert_path.is_some() && self.key_path.is_some()
   }
@@ -263,35 +300,6 @@ fn build_tls_client_config(
   client_cert_credential: &ClientCertCredential,
 ) -> Result<rustls::ClientConfig> {
   client_cert_credential.build_tls_config(roots)
-}
-
-/// Check if an error is a TLS handshake failure (indicating auth failure)
-///
-/// This function uses type-based detection when possible (via downcast to quinn::ConnectionError)
-/// and falls back to string matching for other error types.
-///
-/// TLS handshake errors are detected when:
-/// 1. The error is a quinn::ConnectionError::TransportError with a crypto error code (0x100-0x1FF)
-/// 2. The error message contains TLS-related keywords (fallback for other error types)
-fn is_tls_handshake_error(e: &anyhow::Error) -> bool {
-  // First, try type-based detection for quinn::ConnectionError
-  if let Some(conn_err) = e.downcast_ref::<quinn::ConnectionError>() {
-    match conn_err {
-      quinn::ConnectionError::TransportError(transport_err) => {
-        // Crypto error codes are in range 0x100-0x1FF (256-511)
-        // These indicate TLS handshake failures
-        let code: u64 = transport_err.code.into();
-        return code >= 0x100 && code < 0x200;
-      }
-      _ => return false,
-    }
-  }
-
-  // Fallback: check for common TLS handshake error patterns in error message
-  let err_str = e.to_string().to_lowercase();
-  err_str.contains("tls")
-    && (err_str.contains("handshake")
-      || err_str.contains("certificate"))
 }
 
 struct ProxyGroup {
@@ -483,258 +491,6 @@ fn build_empty_response(
   resp
 }
 
-use h3::error::StreamError;
-
-/// State for an in-progress send_data or finish operation.
-/// The future OWNS the send stream (taken from the Option) to avoid
-/// self-referential borrows.
-///
-/// State machine transitions:
-///
-/// 1. poll_write path:
-///    Idle -> Sending { fut, len } -> Idle (after fut completes)
-///
-/// 2. poll_shutdown path:
-///    Idle -> Finishing { fut } -> Idle (after fut completes)
-///    OR
-///    Sending { fut, .. } -> (poll fut) -> Idle -> Finishing { fut } -> Idle
-///
-/// 3. Error conditions:
-///    - poll_write during Finishing: returns error "stream is shutting down"
-///    - poll_flush: always returns Ok(()) (no-op)
-///
-/// Key invariants:
-/// - Only one send operation at a time (enforced by state machine)
-/// - Send stream ownership transfers to future, returns on completion
-/// - H3_NO_ERROR is treated as success in poll_write result handling
-enum SendState {
-  /// Ready for new data. The send stream is in H3BidirectionalStream.send.
-  Idle,
-  /// A send_data operation is in progress.
-  /// The boxed future owns the send stream and will return it on completion.
-  Sending {
-    fut: Pin<
-      Box<
-        dyn Future<
-          Output = (
-            h3_cli::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
-            Result<(), StreamError>,
-          ),
-        >,
-      >,
-    >,
-    len: usize,
-  },
-  /// A finish operation is in progress.
-  Finishing {
-    fut: Pin<
-      Box<
-        dyn Future<
-          Output = (
-            h3_cli::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
-            Result<(), StreamError>,
-          ),
-        >,
-      >,
-    >,
-  },
-}
-
-/// HTTP/3 bidirectional stream wrapper.
-///
-/// Combines h3 SendStream and RecvStream into a single type
-/// implementing AsyncRead + AsyncWrite, enabling use with
-/// `tokio::io::copy_bidirectional`.
-///
-/// # Send Side (AsyncWrite)
-///
-/// - Only one send operation at a time (state machine enforced via SendState)
-/// - poll_flush is a no-op (returns Ok immediately)
-/// - poll_shutdown sends finish to the stream
-/// - poll_write during Finishing state returns error "stream is shutting down"
-///
-/// # Receive Side (AsyncRead)
-///
-/// - recv_buf holds partial read data
-/// - Buffered data returned before polling for new data
-/// - Copy min(data.len(), buf.remaining()) bytes per read
-/// - If partial read, remaining bytes stored in recv_buf for next poll_read
-///
-/// # Ownership
-///
-/// - Send stream is owned by the future during operations
-/// - Returned to struct after operation completes
-///
-/// # Testing
-///
-/// This component requires real h3 streams which cannot be easily mocked.
-/// It is tested through integration tests:
-/// - `tests/integration/test_proxy_chain.py` - proxy chain with data transmission
-/// - `tests/integration/test_http3_chain.py` - HTTP/3 chain data transmission tests
-struct H3BidirectionalStream {
-  /// Send stream (AsyncWrite), wrapped in Option for ownership transfer
-  send:
-    Option<h3_cli::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>>,
-  /// Receive stream (AsyncRead via poll_recv_data)
-  recv: h3_cli::RequestStream<h3_quinn::RecvStream, Bytes>,
-  /// Buffer for partially-read data from recv
-  recv_buf: Option<Bytes>,
-  /// State machine for send operations
-  send_state: SendState,
-}
-
-impl H3BidirectionalStream {
-  fn new(
-    send: h3_cli::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
-    recv: h3_cli::RequestStream<h3_quinn::RecvStream, Bytes>,
-  ) -> Self {
-    Self {
-      send: Some(send),
-      recv,
-      recv_buf: None,
-      send_state: SendState::Idle,
-    }
-  }
-}
-
-impl io::AsyncWrite for H3BidirectionalStream {
-  fn poll_write(
-    mut self: Pin<&mut Self>,
-    cx: &mut TaskContext<'_>,
-    buf: &[u8],
-  ) -> Poll<Result<usize, std::io::Error>> {
-    loop {
-      match &mut self.send_state {
-        SendState::Idle => {
-          // Take the send stream out (ownership transfer)
-          let mut send = self
-            .send
-            .take()
-            .expect("send stream missing in Idle state");
-          let data = Bytes::copy_from_slice(buf);
-          let len = data.len();
-
-          // Create a future that OWNS the send stream
-          let fut = Box::pin(async move {
-            let result = send.send_data(data).await;
-            (send, result)
-          });
-
-          self.send_state = SendState::Sending { fut, len };
-          // Loop to poll the new state immediately
-        }
-        SendState::Sending { fut, len } => {
-          let len = *len;
-          match fut.as_mut().poll(cx) {
-            Poll::Ready((send, result)) => {
-              // Restore the send stream
-              self.send = Some(send);
-              self.send_state = SendState::Idle;
-              return match result {
-                Ok(()) => Poll::Ready(Ok(len)),
-                Err(e) if e.is_h3_no_error() => Poll::Ready(Ok(len)),
-                Err(e) => Poll::Ready(Err(std::io::Error::other(e))),
-              };
-            }
-            Poll::Pending => return Poll::Pending,
-          }
-        }
-        SendState::Finishing { .. } => {
-          // Cannot write while finishing
-          return Poll::Ready(Err(std::io::Error::other(
-            "stream is shutting down",
-          )));
-        }
-      }
-    }
-  }
-
-  fn poll_flush(
-    self: Pin<&mut Self>,
-    _cx: &mut TaskContext<'_>,
-  ) -> Poll<Result<(), std::io::Error>> {
-    Poll::Ready(Ok(()))
-  }
-
-  fn poll_shutdown(
-    mut self: Pin<&mut Self>,
-    cx: &mut TaskContext<'_>,
-  ) -> Poll<Result<(), std::io::Error>> {
-    loop {
-      match &mut self.send_state {
-        SendState::Idle => {
-          // Take the send stream out (ownership transfer)
-          let mut send = self
-            .send
-            .take()
-            .expect("send stream missing in Idle state");
-
-          let fut = Box::pin(async move {
-            let result = send.finish().await;
-            (send, result)
-          });
-
-          self.send_state = SendState::Finishing { fut };
-          // Loop to poll the new state immediately
-        }
-        SendState::Sending { fut, .. } => {
-          // Must complete pending send before finishing
-          match fut.as_mut().poll(cx) {
-            Poll::Ready((send, _result)) => {
-              self.send = Some(send);
-              self.send_state = SendState::Idle;
-              // Loop to start the finish operation
-            }
-            Poll::Pending => return Poll::Pending,
-          }
-        }
-        SendState::Finishing { fut } => match fut.as_mut().poll(cx) {
-          Poll::Ready((send, result)) => {
-            self.send = Some(send);
-            self.send_state = SendState::Idle;
-            return result.map_err(std::io::Error::other).into();
-          }
-          Poll::Pending => return Poll::Pending,
-        },
-      }
-    }
-  }
-}
-
-impl io::AsyncRead for H3BidirectionalStream {
-  fn poll_read(
-    mut self: Pin<&mut Self>,
-    cx: &mut TaskContext<'_>,
-    buf: &mut io::ReadBuf<'_>,
-  ) -> Poll<Result<(), std::io::Error>> {
-    // Return buffered data first
-    if let Some(data) = self.recv_buf.take() {
-      let n = std::cmp::min(data.len(), buf.remaining());
-      buf.put_slice(&data[..n]);
-      if n < data.len() {
-        self.recv_buf = Some(data.slice(n..));
-      }
-      return Poll::Ready(Ok(()));
-    }
-
-    // Poll for new data
-    match self.recv.poll_recv_data(cx) {
-      Poll::Ready(Ok(Some(mut data))) => {
-        let bytes = data.copy_to_bytes(data.remaining());
-        let n = std::cmp::min(bytes.len(), buf.remaining());
-        buf.put_slice(&bytes[..n]);
-        if n < bytes.len() {
-          self.recv_buf = Some(bytes.slice(n..));
-        }
-        Poll::Ready(Ok(()))
-      }
-      Poll::Ready(Ok(None)) => Poll::Ready(Ok(())), // EOF
-      Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::other(e))),
-      Poll::Pending => Poll::Pending,
-    }
-  }
-}
-
 // ============================================================================
 // HTTP/3 Chain Service Configuration
 // ============================================================================
@@ -824,7 +580,7 @@ impl Http3ChainServiceArgs {
 
 #[derive(Clone)]
 struct Http3ChainService {
-  proxy_group: Rc<RefCell<ProxyGroup>>,
+  proxy_group: Arc<Mutex<ProxyGroup>>,
   stream_tracker: Rc<StreamTracker>,
   conn_tracker: ActiveConnectionTracker,
 }
@@ -868,7 +624,7 @@ impl Http3ChainService {
       ProxyGroup::new(args.ca_path.into(), proxy_addresses);
 
     Ok(plugin::Service::new(Self {
-      proxy_group: Rc::new(RefCell::new(proxy_group)),
+      proxy_group: Arc::new(Mutex::new(proxy_group)),
       stream_tracker,
       conn_tracker,
     }))
@@ -898,15 +654,19 @@ impl tower::Service<plugin::Request> for Http3ChainService {
     let ct = self.conn_tracker.clone();
     let is_shutting_down = self.is_shutting_down();
 
-    // Check for SOCKS5 upgrade (similar to hyper::upgrade::on)
+    // Check for SOCKS5 upgrade
     let socks5_upgrade = plugin::Socks5OnUpgrade::on(&mut req);
 
-    // Check for HTTP upgrade (only if no SOCKS5)
-    let http_upgrade = if socks5_upgrade.is_none() {
-      Some(hyper::upgrade::on(&mut req))
-    } else {
-      None
-    };
+    // Check for H3 upgrade
+    let h3_upgrade = plugin::H3OnUpgrade::on(&mut req);
+
+    // Check for HTTP upgrade (only if no SOCKS5 and no H3)
+    let http_upgrade =
+      if socks5_upgrade.is_none() && h3_upgrade.is_none() {
+        Some(hyper::upgrade::on(&mut req))
+      } else {
+        None
+      };
 
     let (req_headers, _req_body) = req.into_parts();
 
@@ -927,7 +687,7 @@ impl tower::Service<plugin::Request> for Http3ChainService {
         _proxy_idx,
         user_password_credential,
         _client_cert_credential,
-      ) = match pg.borrow_mut().get_proxy_conn(&st, &ct).await {
+      ) = match pg.lock().await.get_proxy_conn(&st, &ct).await {
         Ok(r) => r,
         Err(e) => {
           warn!(
@@ -947,6 +707,7 @@ impl tower::Service<plugin::Request> for Http3ChainService {
         &user_password_credential,
         &st,
         socks5_upgrade,
+        h3_upgrade,
         http_upgrade,
       )
       .await
@@ -962,6 +723,7 @@ async fn send_connect_and_tunnel_with_credential(
   user_password_credential: &UserPasswordCredential,
   st: &Rc<StreamTracker>,
   socks5_upgrade: Option<plugin::Socks5OnUpgrade>,
+  h3_upgrade: Option<plugin::H3OnUpgrade>,
   http_upgrade: Option<hyper::upgrade::OnUpgrade>,
 ) -> Result<plugin::Response> {
   // Build CONNECT request
@@ -1000,6 +762,7 @@ async fn send_connect_and_tunnel_with_credential(
     receiving_stream,
     st,
     socks5_upgrade,
+    h3_upgrade,
     http_upgrade,
   )
   .await
@@ -1014,6 +777,7 @@ async fn complete_tunnel(
   receiving_stream: h3_cli::RequestStream<h3_quinn::RecvStream, Bytes>,
   st: &Rc<StreamTracker>,
   socks5_upgrade: Option<plugin::Socks5OnUpgrade>,
+  h3_upgrade: Option<plugin::H3OnUpgrade>,
   http_upgrade: Option<hyper::upgrade::OnUpgrade>,
 ) -> Result<plugin::Response> {
   let resp = build_empty_response(http::StatusCode::OK);
@@ -1038,6 +802,15 @@ async fn complete_tunnel(
           },
           Err(e) => Err(format!("SOCKS5 upgrade failed: {e}")),
         }
+      } else if let Some(h3) = h3_upgrade {
+        info!("Http3ChainService: waiting for H3 upgrade");
+        match h3.await {
+          Ok(stream) => {
+            info!("Http3ChainService: H3 upgrade succeeded");
+            Ok(ClientStream::H3(stream))
+          },
+          Err(e) => Err(format!("H3 upgrade failed: {e}")),
+        }
       } else if let Some(http) = http_upgrade {
         info!("Http3ChainService: waiting for HTTP upgrade");
         match http.await {
@@ -1061,7 +834,7 @@ async fn complete_tunnel(
     };
 
     info!("Http3ChainService: client upgrade complete, starting bidirectional transfer");
-    let mut h3_stream = H3BidirectionalStream::new(sending_stream, receiving_stream);
+    let mut h3_stream = H3ClientBidiStream::new(sending_stream, receiving_stream);
 
     let result = tokio::select! {
       res = tokio::io::copy_bidirectional(&mut client, &mut h3_stream) => res,

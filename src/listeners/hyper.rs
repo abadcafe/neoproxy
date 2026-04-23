@@ -16,8 +16,8 @@ use tower::util as tower_util;
 use tracing::{error, info, warn};
 
 use crate::auth::{ListenerAuthConfig, UserPasswordAuth};
-use crate::listeners::fast_socks5::ConnectionTracker;
 use crate::plugin;
+use crate::shutdown::StreamTracker;
 
 /// Listener shutdown timeout in seconds.
 /// This is the timeout for Phase 1 of graceful shutdown.
@@ -119,7 +119,7 @@ struct HyperListener {
   _protocols: Vec<String>,
   _hostnames: Vec<String>,
   listening_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
-  connection_tracker: ConnectionTracker,
+  connection_tracker: Rc<StreamTracker>,
   service: plugin::Service,
   graceful_shutdown_timeout: Duration,
   user_password_auth: UserPasswordAuth,
@@ -173,7 +173,7 @@ impl HyperListener {
       _protocols: args.protocols,
       _hostnames: args.hostnames,
       listening_set: Rc::new(RefCell::new(task::JoinSet::new())),
-      connection_tracker: ConnectionTracker::new(),
+      connection_tracker: Rc::new(StreamTracker::new()),
       service: svc,
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
       user_password_auth,

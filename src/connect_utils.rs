@@ -1,15 +1,11 @@
 use std::fmt;
 
-/// CONNECT 目标地址解析错误
+/// CONNECT target address parse error
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectTargetError {
-  /// 非 CONNECT 方法
   NotConnectMethod,
-  /// URI 中无 authority
   NoAuthority,
-  /// authority 中无端口号
   NoPort,
-  /// 端口号为 0
   PortZero,
 }
 
@@ -34,14 +30,14 @@ impl fmt::Display for ConnectTargetError {
 
 impl std::error::Error for ConnectTargetError {}
 
-/// 解析 CONNECT 请求的目标地址
+/// Parse CONNECT request target address
 ///
-/// # 参数
-/// - `parts`: HTTP 请求的 Parts
+/// # Parameters
+/// - `parts`: HTTP request Parts
 ///
-/// # 返回
-/// - `Ok((host, port))`: 目标主机名和端口号
-/// - `Err(ConnectTargetError)`: 解析失败
+/// # Returns
+/// - `Ok((host, port))`: Target hostname and port number
+/// - `Err(ConnectTargetError)`: Parse failed
 pub fn parse_connect_target(
   parts: &http::request::Parts,
 ) -> Result<(String, u16), ConnectTargetError> {

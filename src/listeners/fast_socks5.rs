@@ -16,7 +16,6 @@
 
 #![allow(clippy::await_holding_refcell_ref)]
 
-use std::cell::RefCell;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::rc::Rc;
@@ -29,6 +28,7 @@ use tracing::warn;
 use crate::auth::{ListenerAuthConfig, UserPasswordAuth};
 use crate::plugin;
 use crate::shutdown::StreamTracker;
+use crate::stream::{Socks5UpgradeTrigger, http_status_to_socks5_error};
 use tower::Service;
 
 /// Listener shutdown timeout in seconds.
@@ -101,30 +101,6 @@ impl Socks5Listener {
       handshake_timeout: args.handshake_timeout,
       user_password_auth: args.user_password_auth,
     }))
-  }
-
-  /// Create a Socks5Listener directly for testing purposes.
-  #[cfg(test)]
-  fn new_for_test(
-    args: Socks5ListenerArgs,
-    svc: plugin::Service,
-  ) -> Result<Self> {
-    let addresses = resolve_addresses(&args.addresses);
-
-    if addresses.is_empty() {
-      bail!(
-        "all configured addresses are invalid; listener cannot start"
-      );
-    }
-
-    Ok(Self {
-      addresses,
-      connection_tracker: Rc::new(StreamTracker::new()),
-      service: svc,
-      graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
-      handshake_timeout: args.handshake_timeout,
-      user_password_auth: args.user_password_auth,
-    })
   }
 
   /// Create a TCP listener for a single address.
@@ -297,12 +273,6 @@ impl Socks5Listener {
                           peer_addr
                         );
                       }
-                      CommandError::AddressTypeNotSupported { atyp: _ } => {
-                        tracing::warn!(
-                          "SOCKS5 address type not supported from {}",
-                          peer_addr
-                        );
-                      }
                       CommandError::ClientDisconnected => {
                         tracing::warn!(
                           "SOCKS5 client disconnected during command processing from {}",
@@ -322,7 +292,7 @@ impl Socks5Listener {
                 };
 
               // Step 3: Create upgrade pair
-              let (trigger, on_upgrade) = plugin::Socks5UpgradeTrigger::pair(
+              let (trigger, on_upgrade) = Socks5UpgradeTrigger::pair(
                 command_result.proto,
               );
 
@@ -358,7 +328,7 @@ impl Socks5Listener {
                       );
                     }
                   } else {
-                    let error = plugin::http_status_to_socks5_error(resp.status());
+                    let error = http_status_to_socks5_error(resp.status());
                     if let Err(e) = trigger.send_error(error).await {
                       tracing::warn!(
                         "SOCKS5 failed to send error reply to {}: {}",
@@ -693,16 +663,6 @@ pub enum CommandError {
     command: u8,
   },
 
-  /// Address type not supported.
-  ///
-  /// According to architecture requirements, we send REP=0x08
-  /// and close the connection.
-  #[allow(dead_code)]
-  AddressTypeNotSupported {
-    /// The address type that was not supported.
-    atyp: u8,
-  },
-
   /// Client disconnected during command processing.
   ClientDisconnected,
 
@@ -718,9 +678,6 @@ impl std::fmt::Display for CommandError {
       }
       Self::UnknownCommand { command } => {
         write!(f, "unknown command: 0x{:02x}", command)
-      }
-      Self::AddressTypeNotSupported { atyp } => {
-        write!(f, "address type not supported: 0x{:02x}", atyp)
       }
       Self::ClientDisconnected => {
         write!(f, "client disconnected during command processing")
@@ -835,7 +792,6 @@ impl std::fmt::Debug for CommandResult {
 /// On failure, returns a `CommandError`. The appropriate response
 /// has already been sent to the client for these errors:
 /// - `CommandNotSupported`: REP=0x07 was sent
-/// - `AddressTypeNotSupported`: REP=0x08 was sent (handled by fast-socks5)
 ///
 /// # Example
 ///
@@ -1311,8 +1267,6 @@ pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::auth::listener_auth_config::UserCredential;
-  use crate::plugin::Listening;
 
   // ========== StreamTracker Tests ==========
 

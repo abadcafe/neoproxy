@@ -24,7 +24,7 @@ use tokio::task;
 use tracing::{error, info, warn};
 
 use crate::auth::UserCredential;
-use crate::connect_utils as utils;
+use crate::connect_utils::{self as utils, ConnectTargetError};
 use crate::h3_stream::H3ClientBidiStream;
 use crate::plugin;
 use crate::plugin::ClientStream;
@@ -88,8 +88,7 @@ impl ActiveConnection {
 ///
 /// The typical lifecycle is:
 /// 1. `register()` - Add a new connection when established
-/// 2. `close_and_remove()` - Close and remove a specific connection (e.g., on auth failure)
-/// 3. `close_all()` then `clear()` - During shutdown, close all then clear the tracker
+/// 2. `close_all()` then `clear()` - During shutdown, close all then clear the tracker
 ///
 /// # Important
 ///
@@ -110,23 +109,6 @@ impl ActiveConnectionTracker {
   /// Call this when a new QUIC connection is successfully established.
   fn register(&self, conn: quinn::Connection) {
     self.connections.borrow_mut().push(ActiveConnection::new(conn));
-  }
-
-  /// Close and remove a specific connection by its stable_id.
-  ///
-  /// This is useful when authentication fails and we need to close the
-  /// failed connection without affecting other connections.
-  #[allow(dead_code)]
-  fn close_and_remove(&self, conn: &quinn::Connection) {
-    let target_id = conn.stable_id();
-    let mut connections = self.connections.borrow_mut();
-    // Find and remove the connection by stable_id, then close it
-    if let Some(pos) =
-      connections.iter().position(|ac| ac.conn.stable_id() == target_id)
-    {
-      let active_conn = connections.remove(pos);
-      active_conn.close();
-    }
   }
 
   /// Close all registered connections with H3_NO_ERROR.
@@ -206,12 +188,6 @@ impl UserPasswordCredential {
   fn none() -> Self {
     Self { user: None }
   }
-  /// Check if a user credential is configured.
-  /// Used by tests to verify credential resolution logic.
-  #[allow(dead_code)]
-  fn is_set(&self) -> bool {
-    self.user.is_some()
-  }
   fn apply(&self, req: &mut http::Request<()>) {
     if let Some(ref user) = self.user {
       let credentials = base64::engine::general_purpose::STANDARD
@@ -235,12 +211,6 @@ struct ClientCertCredential {
 impl ClientCertCredential {
   fn none() -> Self {
     Self { cert_path: None, key_path: None }
-  }
-  /// Check if client certificate credentials are configured.
-  /// Used by tests to verify credential resolution logic.
-  #[allow(dead_code)]
-  fn is_set(&self) -> bool {
-    self.cert_path.is_some() && self.key_path.is_some()
   }
   fn build_tls_config(
     &self,
@@ -491,6 +461,22 @@ fn build_empty_response(
   resp
 }
 
+fn build_error_response(
+  status_code: http::StatusCode,
+  message: &str,
+) -> plugin::Response {
+  let full = http_body_util::Full::new(bytes::Bytes::from(message.to_string()));
+  let bytes_buf = plugin::BytesBufBodyWrapper::new(full);
+  let body = plugin::ResponseBody::new(bytes_buf);
+  let mut resp = plugin::Response::new(body);
+  *resp.status_mut() = status_code;
+  resp.headers_mut().insert(
+    http::header::CONTENT_TYPE,
+    http::header::HeaderValue::from_static("text/plain"),
+  );
+  resp
+}
+
 // ============================================================================
 // HTTP/3 Chain Service Configuration
 // ============================================================================
@@ -679,7 +665,25 @@ impl tower::Service<plugin::Request> for Http3ChainService {
         ));
       }
 
-      let (host, port) = utils::parse_connect_target(&req_headers)?;
+      let (host, port) = match utils::parse_connect_target(&req_headers) {
+        Ok(result) => result,
+        Err(ConnectTargetError::NotConnectMethod) => {
+          return Ok(build_error_response(
+            http::StatusCode::METHOD_NOT_ALLOWED,
+            "Only CONNECT method is supported",
+          ));
+        }
+        Err(
+          ConnectTargetError::NoAuthority
+          | ConnectTargetError::NoPort
+          | ConnectTargetError::PortZero,
+        ) => {
+          return Ok(build_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "Invalid target address",
+          ));
+        }
+      };
 
       // Get proxy connection and credentials
       let (
@@ -989,16 +993,6 @@ mod tests {
   use crate::plugin::Plugin;
   use std::future::pending;
 
-  // Initialize CryptoProvider for tests that involve TLS
-  static CRYPTO_PROVIDER_INIT: std::sync::Once = std::sync::Once::new();
-
-  fn ensure_crypto_provider() {
-    CRYPTO_PROVIDER_INIT.call_once(|| {
-      let _ =
-        rustls::crypto::ring::default_provider().install_default();
-    });
-  }
-
   // ============== ClientCredentialConfig Tests ==============
 
   #[test]
@@ -1037,7 +1031,7 @@ user:
   #[test]
   fn test_user_password_credential_none() {
     let cred = UserPasswordCredential::none();
-    assert!(!cred.is_set());
+    assert!(cred.user.is_none());
   }
 
   #[test]
@@ -1048,7 +1042,7 @@ user:
         password: "secret".to_string(),
       }),
     };
-    assert!(cred.is_set());
+    assert!(cred.user.is_some());
     let mut req = http::Request::builder()
       .method("CONNECT")
       .uri("example.com:443")
@@ -1073,7 +1067,8 @@ user:
   #[test]
   fn test_client_cert_credential_none() {
     let cred = ClientCertCredential::none();
-    assert!(!cred.is_set());
+    assert!(cred.cert_path.is_none());
+    assert!(cred.key_path.is_none());
   }
 
   // ============== resolve_credential Tests ==============
@@ -1095,10 +1090,13 @@ user:
     // None means inherit default_credential
     let (upc, ccc) = args.resolve_credential(&None);
     assert!(
-      upc.is_set(),
+      upc.user.is_some(),
       "Should inherit password credential from default"
     );
-    assert!(!ccc.is_set(), "Default has no cert credential");
+    assert!(
+      ccc.cert_path.is_none(),
+      "Default has no cert credential"
+    );
   }
 
   #[test]
@@ -1123,11 +1121,11 @@ user:
     });
     let (upc, ccc) = args.resolve_credential(&empty);
     assert!(
-      !upc.is_set(),
+      upc.user.is_none(),
       "Empty object should override default to no password credential"
     );
     assert!(
-      !ccc.is_set(),
+      ccc.cert_path.is_none(),
       "Empty object should override default to no cert credential"
     );
   }
@@ -1156,8 +1154,8 @@ user:
       client_key_path: None,
     });
     let (upc, ccc) = args.resolve_credential(&explicit);
-    assert!(upc.is_set(), "Should use explicit password credential");
-    assert!(!ccc.is_set(), "Explicit has no cert credential");
+    assert!(upc.user.is_some(), "Should use explicit password credential");
+    assert!(ccc.cert_path.is_none(), "Explicit has no cert credential");
   }
 
   #[test]
@@ -1169,8 +1167,8 @@ user:
     };
     // None means inherit, but no default → no credential
     let (upc, ccc) = args.resolve_credential(&None);
-    assert!(!upc.is_set(), "No default means no password credential");
-    assert!(!ccc.is_set(), "No default means no cert credential");
+    assert!(upc.user.is_none(), "No default means no password credential");
+    assert!(ccc.cert_path.is_none(), "No default means no cert credential");
   }
 
   #[test]
@@ -1530,5 +1528,107 @@ ca_path: "/tmp/ca.pem"
     let resp =
       build_empty_response(http::StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(resp.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+  }
+
+  // ============== build_error_response Tests ==============
+
+  #[test]
+  fn test_build_error_response_method_not_allowed() {
+    let resp = build_error_response(
+      http::StatusCode::METHOD_NOT_ALLOWED,
+      "Only CONNECT method is supported",
+    );
+    assert_eq!(resp.status(), http::StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+      resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
+      "text/plain"
+    );
+  }
+
+  #[test]
+  fn test_build_error_response_bad_request() {
+    let resp = build_error_response(
+      http::StatusCode::BAD_REQUEST,
+      "Invalid target address",
+    );
+    assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+    assert_eq!(
+      resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
+      "text/plain"
+    );
+  }
+
+  // ============== call() CONNECT validation Tests ==============
+
+  #[test]
+  fn test_non_connect_method_produces_405() {
+    use crate::connect_utils::{self as utils, ConnectTargetError};
+
+    // Build a GET request's header parts
+    let req = http::Request::builder()
+      .method(http::Method::GET)
+      .uri("http://example.com/")
+      .body(())
+      .unwrap();
+    let (parts, _) = req.into_parts();
+
+    // Simulate the match logic from call()
+    let result = utils::parse_connect_target(&parts);
+    assert!(matches!(result, Err(ConnectTargetError::NotConnectMethod)));
+
+    // Verify the response that would be built
+    let resp = build_error_response(
+      http::StatusCode::METHOD_NOT_ALLOWED,
+      "Only CONNECT method is supported",
+    );
+    assert_eq!(resp.status(), http::StatusCode::METHOD_NOT_ALLOWED);
+  }
+
+  #[test]
+  fn test_connect_missing_port_produces_400() {
+    use crate::connect_utils::{self as utils, ConnectTargetError};
+
+    // Build a CONNECT request with no port
+    let req = http::Request::builder()
+      .method(http::Method::CONNECT)
+      .uri("example.com")
+      .body(())
+      .unwrap();
+    let (parts, _) = req.into_parts();
+
+    let result = utils::parse_connect_target(&parts);
+    assert!(matches!(
+      result,
+      Err(ConnectTargetError::NoAuthority)
+        | Err(ConnectTargetError::NoPort)
+    ));
+
+    // Verify the response that would be built
+    let resp = build_error_response(
+      http::StatusCode::BAD_REQUEST,
+      "Invalid target address",
+    );
+    assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+  }
+
+  #[test]
+  fn test_connect_port_zero_produces_400() {
+    use crate::connect_utils::{self as utils, ConnectTargetError};
+
+    let req = http::Request::builder()
+      .method(http::Method::CONNECT)
+      .uri("example.com:0")
+      .body(())
+      .unwrap();
+    let (parts, _) = req.into_parts();
+
+    let result = utils::parse_connect_target(&parts);
+    assert!(matches!(result, Err(ConnectTargetError::PortZero)));
+
+    let resp = build_error_response(
+      http::StatusCode::BAD_REQUEST,
+      "Invalid target address",
+    );
+    assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
   }
 }

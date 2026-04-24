@@ -362,7 +362,6 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::sync::Mutex;
 
   #[test]
   fn test_auth_module_exists() {

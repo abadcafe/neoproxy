@@ -206,17 +206,6 @@ fn build_error_response(
   resp
 }
 
-/// Build an empty response with the given status
-#[allow(dead_code)]
-fn build_empty_response(status: http::StatusCode) -> plugin::Response {
-  let body = plugin::ResponseBody::new(plugin::BytesBufBodyWrapper::new(
-    http_body_util::Empty::<Bytes>::new(),
-  ));
-  let mut resp = plugin::Response::new(body);
-  *resp.status_mut() = status;
-  resp
-}
-
 // ============================================================================
 // Authentication
 // ============================================================================
@@ -789,7 +778,6 @@ mod tests {
   use base64::{
     Engine, engine::general_purpose::STANDARD as BASE64_STANDARD,
   };
-  use http_body::Body;
 
   // ============== QuicConfigArgs Tests ==============
 
@@ -1177,20 +1165,6 @@ address: "0.0.0.0:443"
       "Internal Server Error",
     );
     assert_eq!(resp.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
-  }
-
-  // ============== build_empty_response Tests ==============
-
-  #[test]
-  fn test_build_empty_response_ok() {
-    let resp = build_empty_response(http::StatusCode::OK);
-    assert_eq!(resp.status(), http::StatusCode::OK);
-  }
-
-  #[test]
-  fn test_build_empty_response_created() {
-    let resp = build_empty_response(http::StatusCode::CREATED);
-    assert_eq!(resp.status(), http::StatusCode::CREATED);
   }
 
   // ============== perform_application_auth Tests ==============

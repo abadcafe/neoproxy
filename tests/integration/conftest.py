@@ -41,13 +41,35 @@ def get_unique_port() -> int:
     """
     Get a unique port number for testing.
 
+    This function verifies that the port is actually available by attempting
+    to bind to it. If the port is not available (e.g., in TIME_WAIT state),
+    it will try the next port until an available one is found.
+
     Returns:
         int: Available port number
+
+    Raises:
+        RuntimeError: If no available port can be found after 100 attempts
     """
     global _port_counter
     with _port_lock:
-        _port_counter += 1
-        return _port_counter
+        for _ in range(100):  # Limit attempts to avoid infinite loop
+            _port_counter += 1
+            port = _port_counter
+
+            # Verify the port is actually available by trying to bind
+            test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                test_sock.bind(("0.0.0.0", port))
+                test_sock.close()
+                return port
+            except OSError:
+                # Port is not available, try next one
+                test_sock.close()
+                continue
+
+        raise RuntimeError("Could not find an available port after 100 attempts")
 
 
 # ==============================================================================

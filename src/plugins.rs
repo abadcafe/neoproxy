@@ -7,7 +7,6 @@ use crate::plugin;
 pub mod connect_tcp;
 pub mod echo;
 pub mod http3_chain;
-pub mod hyper_h3;
 
 pub struct PluginBuilderSet {
   builders: HashMap<&'static str, Box<dyn plugin::BuildPlugin>>,

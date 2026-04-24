@@ -11,8 +11,6 @@ pub use client_cert_auth::ClientCertAuth;
 pub use error::AuthError;
 pub use listener_auth_config::{ListenerAuthConfig, UserCredential};
 pub use password::verify_password;
-#[allow(unused_imports)]
-pub use tls_cert::TlsClientCertVerifier;
 pub use user_password_auth::UserPasswordAuth;
 
 #[cfg(test)]

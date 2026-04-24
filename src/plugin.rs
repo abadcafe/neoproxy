@@ -5,18 +5,12 @@ use std::task::{Context, Poll};
 
 use anyhow::Result;
 
-// Re-exports from new modules
-pub use crate::connect_utils::{parse_connect_target, ConnectTargetError};
-pub use crate::h3_stream::{H3ClientBidiStream, H3ServerBidiStream};
+// Re-exports: only types that are part of the plugin framework's public API
 pub use crate::http_types::{
   BytesBufBodyWrapper, Request, RequestBody, Response, ResponseBody,
 };
 pub use crate::shutdown::ShutdownHandle;
-pub use crate::shutdown::StreamTracker;
-pub use crate::stream::{
-  ClientStream, H3OnUpgrade, H3UpgradeError, H3UpgradeTrigger, Socks5OnUpgrade,
-  Socks5UpgradeError, Socks5UpgradeTrigger, http_status_to_socks5_error,
-};
+pub use crate::stream::{ClientStream, H3OnUpgrade, Socks5OnUpgrade};
 
 /// To add `clone()` function to the `Service`. The `Clone` trait can
 /// not be added into the type definition of the `Service` directly, in

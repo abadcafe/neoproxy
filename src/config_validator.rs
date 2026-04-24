@@ -69,7 +69,7 @@ impl ConfigErrorCollector {
   }
 
   /// Get all errors
-  #[allow(dead_code)]
+  #[cfg(test)]
   pub fn errors(&self) -> &[ConfigError] {
     &self.errors
   }

@@ -4,7 +4,6 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use anyhow::Result;
-use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::Response;
 
@@ -82,6 +81,7 @@ pub fn create_plugin() -> Box<dyn plugin::Plugin> {
 mod tests {
   use super::*;
   use crate::plugin::Plugin;
+  use bytes::Bytes;
   use http_body_util::BodyExt;
   use std::task::{Context, Poll, RawWaker, RawWakerVTable};
   use tower::Service;

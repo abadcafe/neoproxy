@@ -70,7 +70,6 @@ impl H3OnUpgrade {
   ///
   /// This method is used by Services (connect_tcp, http3_chain) to extract
   /// H3OnUpgrade from requests received from the H3 listener.
-  #[allow(dead_code)]
   pub fn on(req: &mut http::Request<RequestBody>) -> Option<Self> {
     req.extensions_mut().remove::<Self>()
   }
@@ -247,12 +246,6 @@ pub enum ClientStream {
   /// An HTTP upgraded stream wrapped in `TokioIo`.
   Http(hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>),
   /// An HTTP/3 bidirectional stream from H3 listener.
-  ///
-  /// TODO: This variant will be constructed by the H3 listener (coming in a later task)
-  /// when handling inbound HTTP/3 CONNECT requests. The listener will create an
-  /// `H3ServerBidiStream` from the accepted H3 request stream and wrap it in this
-  /// variant for use by the Service.
-  #[allow(dead_code)]
   H3(H3ServerBidiStream),
 }
 
@@ -660,7 +653,6 @@ mod tests {
   use super::*;
   use crate::http_types::{BytesBufBodyWrapper, RequestBody};
   use std::sync::Mutex;
-  use std::time::Duration;
 
   #[tokio::test]
   async fn test_socks5_on_upgrade_extracts_from_extensions() {

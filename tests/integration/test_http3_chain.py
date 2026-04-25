@@ -31,99 +31,14 @@ from .utils.helpers import (
     terminate_process,
 )
 
+from .utils.http_echo import http_echo_handler
+
 from .test_http3_listener import (
     generate_test_certificates,
     create_http3_listener_config,
     create_http3_chain_config,
     wait_for_udp_port,
 )
-
-
-# ==============================================================================
-# Helper: Robust HTTP echo handler
-# ==============================================================================
-
-
-def _read_http_request(conn: socket.socket, timeout: float = 5.0) -> bytes:
-    """Read a complete HTTP request from a socket connection.
-
-    Reads headers until \\r\\n\\r\\n, then reads Content-Length bytes of body.
-    This is more robust than a single recv() call which may not receive
-    the complete request due to TCP segmentation.
-
-    Args:
-        conn: Client connection socket.
-        timeout: Socket timeout in seconds.
-
-    Returns:
-        The POST body bytes, or empty bytes if no body.
-    """
-    conn.settimeout(timeout)
-    buf = b""
-
-    # Read until we find the end of headers
-    while b"\r\n\r\n" not in buf:
-        try:
-            chunk = conn.recv(4096)
-            if not chunk:
-                return b""
-            buf += chunk
-        except socket.timeout:
-            return b""
-
-    # Split headers and any body data already received
-    header_end = buf.index(b"\r\n\r\n") + 4
-    headers_data = buf[:header_end]
-    body_received = buf[header_end:]
-
-    # Parse Content-Length from headers
-    content_length = 0
-    for line in headers_data.split(b"\r\n"):
-        if line.lower().startswith(b"content-length:"):
-            try:
-                content_length = int(line.split(b":", 1)[1].strip())
-            except ValueError:
-                pass
-            break
-
-    # Read remaining body bytes if needed
-    while len(body_received) < content_length:
-        try:
-            chunk = conn.recv(min(4096, content_length - len(body_received)))
-            if not chunk:
-                break
-            body_received += chunk
-        except socket.timeout:
-            break
-
-    return body_received[:content_length]
-
-
-def _http_echo_handler(conn: socket.socket) -> None:
-    """HTTP echo handler that properly parses HTTP requests and echoes POST body.
-
-    This handler reads the complete HTTP request (headers + body) using
-    Content-Length, then sends back a valid HTTP 200 response with the
-    POST body as the response body.
-
-    Args:
-        conn: Client connection socket.
-    """
-    try:
-        body = _read_http_request(conn)
-
-        # Send HTTP response with the body
-        response = (
-            b"HTTP/1.1 200 OK\r\n"
-            b"Content-Type: text/plain\r\n"
-            b"Content-Length: " + str(len(body)).encode() + b"\r\n"
-            b"\r\n"
-        ) + body
-        conn.sendall(response)
-    except Exception:
-        pass
-    finally:
-        conn.close()
 
 
 # ==============================================================================
@@ -259,11 +174,12 @@ class TestHTTP3ChainProxy:
 
     def test_http3_chain_missing_ca(self) -> None:
         """
-        TC-CHAIN-004: HTTP/3 Chain with missing CA certificate.
+        TC-CHAIN-004: HTTP/3 Chain with missing CA certificate in default_credential.
 
-        Target: Verify http3_chain service fails at startup when CA file is missing.
-        Note: ca_path is validated at config parsing time (startup), not at runtime.
-        This provides fail-fast behavior for configuration errors.
+        Target: Verify http3_chain service behavior when CA file is missing.
+        Note: With new config structure, server_ca_path in default_credential is NOT
+        validated at startup - validation happens at connection time.
+        The service should start successfully and fail only when attempting connections.
         """
         temp_dir = tempfile.mkdtemp()
         http_port = 30587
@@ -279,7 +195,8 @@ services:
     proxy_group:
     - address: 127.0.0.1:30588
       weight: 1
-    ca_path: "/nonexistent/ca.pem"
+    default_credential:
+      server_ca_path: "/nonexistent/ca.pem"
 
 servers:
 - name: http_proxy
@@ -303,17 +220,18 @@ servers:
                 text=False
             )
 
-            # Service should fail at startup because CA file is validated at config time
+            # With new config structure, server_ca_path in credential is not
+            # validated at startup. The service starts but connections will fail.
+            # Verify the service starts (does not crash at config parse time).
             try:
-                return_code = proc.wait(timeout=10)
+                return_code = proc.wait(timeout=5)
+                # If it exits, it should be due to other config issues
+                assert False, \
+                    f"Service should start with missing CA in default_credential, got exit code {return_code}"
             except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-                raise AssertionError("Process should have exited within expected time")
-
-            # Should exit with error code due to missing CA file
-            assert return_code == 1, \
-                f"Expected exit code 1 for missing CA file, got {return_code}"
+                # Service started successfully - this is expected with new format
+                proc.send_signal(signal.SIGTERM)
+                proc.wait(timeout=10)
 
         finally:
             if proc and proc.poll() is None:
@@ -343,7 +261,7 @@ servers:
 
             # Create target echo server (HTTP response for curl compatibility)
             _, target_socket = create_target_server(
-                "127.0.0.1", target_port, _http_echo_handler
+                "127.0.0.1", target_port, http_echo_handler
             )
 
             # Start HTTP/3 listener
@@ -752,7 +670,7 @@ class TestWRRLoadBalancing:
 
             # Create target echo server
             _, target_socket = create_target_server(
-                "127.0.0.1", target_port, _http_echo_handler
+                "127.0.0.1", target_port, http_echo_handler
             )
 
             # Start HTTP/3 listener 1 (weight 2)

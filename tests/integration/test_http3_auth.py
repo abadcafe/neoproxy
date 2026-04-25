@@ -104,8 +104,8 @@ servers:
   - kind: http3.listener
     args:
       address: "0.0.0.0:{proxy_port}"
-      cert_path: "{cert_path}"
-      key_path: "{key_path}"{quic_section}
+      server_cert_path: "{cert_path}"
+      server_key_path: "{key_path}"{quic_section}
       auth:
         users:
 {users_section}
@@ -160,8 +160,8 @@ servers:
   - kind: http3.listener
     args:
       address: "0.0.0.0:{proxy_port}"
-      cert_path: "{cert_path}"
-      key_path: "{key_path}"{quic_section}
+      server_cert_path: "{cert_path}"
+      server_key_path: "{key_path}"{quic_section}
       auth:
         client_ca_path: "{client_ca_path}"
   service: connect_tcp
@@ -228,8 +228,8 @@ servers:
   - kind: http3.listener
     args:
       address: "0.0.0.0:{proxy_port}"
-      cert_path: "{cert_path}"
-      key_path: "{key_path}"{quic_section}
+      server_cert_path: "{cert_path}"
+      server_key_path: "{key_path}"{quic_section}
       auth:
         client_ca_path: "{client_ca_path}"
         users:
@@ -485,8 +485,8 @@ servers:
   - kind: http3.listener
     args:
       address: "0.0.0.0:{proxy_port}"
-      cert_path: "{cert_path}"
-      key_path: "{key_path}"
+      server_cert_path: "{cert_path}"
+      server_key_path: "{key_path}"
       auth:
         users: []
   service: connect_tcp
@@ -586,8 +586,8 @@ servers:
   - kind: http3.listener
     args:
       address: "0.0.0.0:{proxy_port}"
-      cert_path: "{cert_path}"
-      key_path: "{key_path}"
+      server_cert_path: "{cert_path}"
+      server_key_path: "{key_path}"
       auth:
         client_ca_path: "/nonexistent/ca.pem"
   service: connect_tcp
@@ -1296,8 +1296,8 @@ servers:
   - kind: http3.listener
     args:
       address: "0.0.0.0:{proxy_port}"
-      cert_path: "{cert_path}"
-      key_path: "{key_path}"
+      server_cert_path: "{cert_path}"
+      server_key_path: "{key_path}"
       auth:
         some_unknown_field: true
   service: connect_tcp
@@ -1352,8 +1352,8 @@ servers:
   - kind: http3.listener
     args:
       address: "0.0.0.0:{proxy_port}"
-      cert_path: "{cert_path}"
-      key_path: "{key_path}"
+      server_cert_path: "{cert_path}"
+      server_key_path: "{key_path}"
       auth: {{}}
   service: connect_tcp
 """
@@ -1407,8 +1407,8 @@ servers:
   - kind: http3.listener
     args:
       address: "0.0.0.0:{proxy_port}"
-      cert_path: "{cert_path}"
-      key_path: "{key_path}"
+      server_cert_path: "{cert_path}"
+      server_key_path: "{key_path}"
       auth: {{}}
   service: connect_tcp
 """

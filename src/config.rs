@@ -325,11 +325,11 @@ impl Config {
     }
 
     // Validate certificate path and get content for matching check
-    let cert_content = if let Some(cert_path) = args.get("cert_path") {
+    let cert_content = if let Some(cert_path) = args.get("server_cert_path") {
       if let Some(cert_path_str) = cert_path.as_str() {
         self.validate_certificate_file(
           cert_path_str,
-          &format!("{}.args.cert_path", location),
+          &format!("{}.args.server_cert_path", location),
           collector,
         )
       } else {
@@ -340,11 +340,11 @@ impl Config {
     };
 
     // Validate private key path and get content for matching check
-    let key_content = if let Some(key_path) = args.get("key_path") {
+    let key_content = if let Some(key_path) = args.get("server_key_path") {
       if let Some(key_path_str) = key_path.as_str() {
         self.validate_private_key_file(
           key_path_str,
-          &format!("{}.args.key_path", location),
+          &format!("{}.args.server_key_path", location),
           collector,
         )
       } else {
@@ -1697,8 +1697,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}"
+  "server_cert_path": "{}",
+  "server_key_path": "{}"
 }}"#,
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap()
@@ -1734,8 +1734,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "invalid-address",
-  "cert_path": "{}",
-  "key_path": "{}"
+  "server_cert_path": "{}",
+  "server_key_path": "{}"
 }}"#,
       temp_dir.join("cert.pem").to_str().unwrap(),
       temp_dir.join("key.pem").to_str().unwrap()
@@ -1782,8 +1782,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}"
+  "server_cert_path": "{}",
+  "server_key_path": "{}"
 }}"#,
       non_existent_cert.to_str().unwrap(),
       key_path.to_str().unwrap()
@@ -1834,8 +1834,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}"
+  "server_cert_path": "{}",
+  "server_key_path": "{}"
 }}"#,
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap()
@@ -1886,8 +1886,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}"
+  "server_cert_path": "{}",
+  "server_key_path": "{}"
 }}"#,
       cert_path.to_str().unwrap(),
       non_existent_key.to_str().unwrap()
@@ -1936,8 +1936,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}"
+  "server_cert_path": "{}",
+  "server_key_path": "{}"
 }}"#,
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap()
@@ -1992,8 +1992,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}"
+  "server_cert_path": "{}",
+  "server_key_path": "{}"
 }}"#,
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap()
@@ -2047,8 +2047,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}"
+  "server_cert_path": "{}",
+  "server_key_path": "{}"
 }}"#,
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap()
@@ -2104,8 +2104,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}"
+  "server_cert_path": "{}",
+  "server_key_path": "{}"
 }}"#,
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap()
@@ -2152,8 +2152,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{
     "users": [
       {{
@@ -2207,8 +2207,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{
   }}
 }}"#,
@@ -2252,8 +2252,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{
     "users": []
   }}
@@ -2299,8 +2299,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{
     "users": [
       {{
@@ -2351,8 +2351,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{
     "users": [
       {{
@@ -2404,8 +2404,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{
     "client_ca_path": "{}"
   }}
@@ -2464,8 +2464,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{
     "client_ca_path": "/nonexistent/ca.pem"
   }}
@@ -2524,8 +2524,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{
     "client_ca_path": "{}"
   }}
@@ -2586,8 +2586,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{
     "client_ca_path": "{}"
   }}
@@ -2640,8 +2640,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{
   }}
 }}"#,
@@ -2689,8 +2689,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{
     "users": [
       {{"username": "admin", "password": "secret"}}
@@ -2742,8 +2742,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{
     "users": "not_an_array"
   }}
@@ -2798,8 +2798,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{
     "users": [
       {{
@@ -2867,8 +2867,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}"
+  "server_cert_path": "{}",
+  "server_key_path": "{}"
 }}"#,
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap()
@@ -2919,8 +2919,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}"
+  "server_cert_path": "{}",
+  "server_key_path": "{}"
 }}"#,
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap()
@@ -2970,8 +2970,8 @@ worker_threads: [
       let args = serde_yaml::from_str(&format!(
         r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}"
+  "server_cert_path": "{}",
+  "server_key_path": "{}"
 }}"#,
         cert_path1.to_str().unwrap(),
         key_path2.to_str().unwrap()
@@ -3035,8 +3035,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}"
+  "server_cert_path": "{}",
+  "server_key_path": "{}"
 }}"#,
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap()
@@ -3097,8 +3097,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}"
+  "server_cert_path": "{}",
+  "server_key_path": "{}"
 }}"#,
       cert_path.to_str().unwrap(),
       key_path.to_str().unwrap()
@@ -3150,8 +3150,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "quic": {{
     "max_concurrent_bidi_streams": 100,
     "max_idle_timeout_ms": 30000,
@@ -3200,8 +3200,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "quic": {{
     "max_concurrent_bidi_streams": 0
   }}
@@ -3247,8 +3247,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "quic": {{
     "max_concurrent_bidi_streams": 20000
   }}
@@ -3294,8 +3294,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "quic": {{
     "max_idle_timeout_ms": 0
   }}
@@ -3339,8 +3339,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "quic": {{
     "initial_mtu": 1000
   }}
@@ -3382,8 +3382,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "quic": {{
     "initial_mtu": 10000
   }}
@@ -3425,8 +3425,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "quic": {{
     "send_window": 0
   }}
@@ -3468,8 +3468,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "quic": {{
     "receive_window": 0
   }}
@@ -3518,7 +3518,7 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "key_path": "{}"
+  "server_key_path": "{}"
 }}"#,
       key_path.to_str().unwrap()
     ))
@@ -3560,7 +3560,7 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}"
+  "server_cert_path": "{}"
 }}"#,
       cert_path.to_str().unwrap()
     ))
@@ -3602,8 +3602,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": 123,
-  "key_path": "{}"
+  "server_cert_path": 123,
+  "server_key_path": "{}"
 }}"#,
       key_path.to_str().unwrap()
     ))
@@ -3645,8 +3645,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": 456
+  "server_cert_path": "{}",
+  "server_key_path": 456
 }}"#,
       cert_path.to_str().unwrap()
     ))
@@ -3692,8 +3692,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{
     "users": [
       {{
@@ -3748,8 +3748,8 @@ worker_threads: [
     let args = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{
     "client_ca_path": "{}"
   }}
@@ -3826,8 +3826,8 @@ worker_threads: [
     let args: serde_yaml::Value = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{
     "users": [
       {{"username": "admin", "password": "secret123"}}
@@ -3899,8 +3899,8 @@ worker_threads: [
     let args: serde_yaml::Value = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{}}
 }}"#,
       cert_path.to_str().unwrap(),
@@ -3974,8 +3974,8 @@ worker_threads: [
     let args: serde_yaml::Value = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": {{
     "users": []
   }}
@@ -4052,8 +4052,8 @@ worker_threads: [
     let args: serde_yaml::Value = serde_yaml::from_str(&format!(
       r#"{{
   "address": "127.0.0.1:8443",
-  "cert_path": "{}",
-  "key_path": "{}",
+  "server_cert_path": "{}",
+  "server_key_path": "{}",
   "auth": [
     {{"users": [{{"username": "admin", "password": "secret"}}]}}
   ]

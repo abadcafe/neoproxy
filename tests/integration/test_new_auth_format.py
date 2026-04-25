@@ -28,9 +28,7 @@ from .test_http3_listener import (
     generate_test_certificates,
     wait_for_udp_port,
 )
-from .test_http3_chain import (
-    _http_echo_handler,
-)
+from .utils.http_echo import http_echo_handler
 from .utils.helpers import create_target_server
 
 
@@ -378,8 +376,8 @@ servers:
       - kind: http3.listener
         args:
           address: "127.0.0.1:{udp_port}"
-          cert_path: "{cert_path}"
-          key_path: "{key_path}"{auth_block}
+          server_cert_path: "{cert_path}"
+          server_key_path: "{key_path}"{auth_block}
     service: connect_tcp
 """
         return write_config(temp_dir, config)
@@ -407,7 +405,7 @@ servers:
 
         # Create target server
         _, target_socket = create_target_server(
-            "127.0.0.1", target_port, _http_echo_handler
+            "127.0.0.1", target_port, http_echo_handler
         )
 
         # Create upstream HTTP/3 proxy with password auth
@@ -430,8 +428,8 @@ services:
       proxy_group:
         - address: "127.0.0.1:{upstream_port}"
           weight: 1
-      ca_path: "{ca_path}"
       default_credential:
+        server_ca_path: "{ca_path}"
         user:
           username: chain_user
           password: chain_pass
@@ -507,7 +505,7 @@ servers:
 
         # Create target server
         _, target_socket = create_target_server(
-            "127.0.0.1", target_port, _http_echo_handler
+            "127.0.0.1", target_port, http_echo_handler
         )
 
         upstream_dir = os.path.join(temp_dir, "upstream")
@@ -532,8 +530,8 @@ services:
             user:
               username: special_user
               password: special_pass
-      ca_path: "{ca_path}"
       default_credential:
+        server_ca_path: "{ca_path}"
         user:
           username: default_user
           password: default_pass
@@ -618,7 +616,7 @@ servers:
 
         # Create target server
         _, target_socket = create_target_server(
-            "127.0.0.1", target_port, _http_echo_handler
+            "127.0.0.1", target_port, http_echo_handler
         )
 
         # Upstream requires auth matching the per-proxy credential (not default)
@@ -644,8 +642,8 @@ services:
             user:
               username: override_user
               password: override_pass
-      ca_path: "{ca_path}"
       default_credential:
+        server_ca_path: "{ca_path}"
         user:
           username: default_user
           password: default_pass
@@ -724,7 +722,7 @@ servers:
 
         # Create target server
         _, target_socket = create_target_server(
-            "127.0.0.1", target_port, _http_echo_handler
+            "127.0.0.1", target_port, http_echo_handler
         )
 
         upstream_dir = os.path.join(temp_dir, "upstream")
@@ -745,8 +743,8 @@ services:
       proxy_group:
         - address: "127.0.0.1:{upstream_port}"
           weight: 1
-      ca_path: "{ca_path}"
       default_credential:
+        server_ca_path: "{ca_path}"
         user:
           username: inherited_user
           password: inherited_pass
@@ -832,7 +830,7 @@ servers:
 
         # Create target server
         _, target_socket = create_target_server(
-            "127.0.0.1", target_port, _http_echo_handler
+            "127.0.0.1", target_port, http_echo_handler
         )
 
         # Upstream requires auth matching default_credential
@@ -857,8 +855,8 @@ services:
         - address: "127.0.0.1:{upstream_port}"
           weight: 1
           credential: {{}}
-      ca_path: "{ca_path}"
       default_credential:
+        server_ca_path: "{ca_path}"
         user:
           username: default_user
           password: default_pass

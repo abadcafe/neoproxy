@@ -87,10 +87,14 @@ def create_http3_chain_config_with_per_proxy_auth(
 
     proxy_section = "\n".join(proxy_list)
 
-    default_credential_section = ""
+    # Always include server_ca_path in default_credential
+    default_credential_section = (
+        f'\n    default_credential:\n      server_ca_path: "{ca_path}"'
+    )
     if default_credential:
         default_credential_section = f"""
     default_credential:
+      server_ca_path: "{ca_path}"
 {default_credential}"""
 
     config_content = f"""worker_threads: {worker_threads}
@@ -101,8 +105,7 @@ services:
   kind: http3_chain.http3_chain
   args:
     proxy_group:
-{proxy_section}
-    ca_path: "{ca_path}"{default_credential_section}
+{proxy_section}{default_credential_section}
 
 servers:
 - name: http_proxy

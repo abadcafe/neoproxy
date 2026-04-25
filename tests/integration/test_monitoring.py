@@ -1179,8 +1179,8 @@ servers:
   - kind: http3.listener
     args:
       address: "0.0.0.0:{http3_port}"
-      cert_path: "{cert_path}"
-      key_path: "{key_path}"
+      server_cert_path: "{cert_path}"
+      server_key_path: "{key_path}"
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "multi_listener_config.yaml")

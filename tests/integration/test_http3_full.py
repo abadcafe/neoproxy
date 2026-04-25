@@ -790,8 +790,8 @@ servers:
   - kind: http3.listener
     args:
       address: "0.0.0.0:{proxy_port}"
-      cert_path: "{cert_path}"
-      key_path: "{key_path}"
+      server_cert_path: "{cert_path}"
+      server_key_path: "{key_path}"
       auth:
         credentials:
         - username: "testuser"
@@ -852,8 +852,8 @@ servers:
   - kind: http3.listener
     args:
       address: "0.0.0.0:{proxy_port}"
-      cert_path: "{cert_path}"
-      key_path: "{key_path}"
+      server_cert_path: "{cert_path}"
+      server_key_path: "{key_path}"
       auth:
         users:
         - username: "testuser"

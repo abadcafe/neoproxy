@@ -36,10 +36,7 @@ from .test_http3_listener import (
     wait_for_udp_port,
 )
 
-from .test_http3_chain import (
-    _http_echo_handler,
-    _read_http_request,
-)
+from .utils.http_echo import http_echo_handler, read_http_request
 
 from .conftest import get_unique_port
 
@@ -70,8 +67,8 @@ servers:
       - kind: http3.listener
         args:
           address: "0.0.0.0:{h3_port}"
-          cert_path: "{cert_path}"
-          key_path: "{key_path}"
+          server_cert_path: "{cert_path}"
+          server_key_path: "{key_path}"
           auth:
             users:
               - username: user1
@@ -105,8 +102,8 @@ servers:
       - kind: http3.listener
         args:
           address: "0.0.0.0:{h3_port}"
-          cert_path: "{cert_path}"
-          key_path: "{key_path}"
+          server_cert_path: "{cert_path}"
+          server_key_path: "{key_path}"
           auth:
             client_ca_path: "{client_ca_path}"
 """
@@ -137,7 +134,7 @@ services:
             user:
               username: user1
               password: pass1
-      ca_path: "{ca_path}"
+            server_ca_path: "{ca_path}"
 
 servers:
   - name: entry_http
@@ -182,7 +179,7 @@ services:
           credential:
             client_cert_path: "{client_cert_path}"
             client_key_path: "{client_key_path}"
-      ca_path: "{ca_path}"
+            server_ca_path: "{ca_path}"
 
 servers:
   - name: entry_http
@@ -226,7 +223,7 @@ services:
             user:
               username: user1
               password: pass1
-      ca_path: "{ca_path}"
+            server_ca_path: "{ca_path}"
 
 servers:
   - name: entry_socks5
@@ -269,7 +266,7 @@ services:
           credential:
             client_cert_path: "{client_cert_path}"
             client_key_path: "{client_key_path}"
-      ca_path: "{ca_path}"
+            server_ca_path: "{ca_path}"
 
 servers:
   - name: entry_socks5
@@ -313,7 +310,7 @@ def create_echo_target_server(
     Returns:
         Tuple[threading.Thread, socket.socket]: Server thread and socket
     """
-    return create_target_server(host, port, _http_echo_handler)
+    return create_target_server(host, port, http_echo_handler)
 
 
 # ==============================================================================
@@ -614,7 +611,8 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
-      ca_path: "{ca_path}"
+      default_credential:
+        server_ca_path: "{ca_path}"
 
 servers:
   - name: entry_http
@@ -654,7 +652,8 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
-      ca_path: "{ca_path}"
+      default_credential:
+        server_ca_path: "{ca_path}"
 
 servers:
   - name: entry_socks5
@@ -696,7 +695,7 @@ services:
             user:
               username: wrong_user
               password: wrong_pass
-      ca_path: "{ca_path}"
+            server_ca_path: "{ca_path}"
 
 servers:
   - name: entry_http
@@ -740,8 +739,8 @@ servers:
       - kind: http3.listener
         args:
           address: "0.0.0.0:{h3_port}"
-          cert_path: "{cert_path}"
-          key_path: "{key_path}"
+          server_cert_path: "{cert_path}"
+          server_key_path: "{key_path}"
 """
     config_path = os.path.join(temp_dir, "upstream_no_auth.yaml")
     with open(config_path, "w") as f:

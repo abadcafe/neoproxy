@@ -157,6 +157,8 @@ struct ClientCredentialConfig {
   client_cert_path: Option<String>,
   #[serde(default)]
   client_key_path: Option<String>,
+  #[serde(default)]
+  server_ca_path: Option<String>,
 }
 
 impl ClientCredentialConfig {
@@ -171,10 +173,32 @@ impl ClientCredentialConfig {
     Ok(())
   }
 
+  #[allow(dead_code)]
   fn is_empty(&self) -> bool {
     self.user.is_none()
       && self.client_cert_path.is_none()
       && self.client_key_path.is_none()
+      && self.server_ca_path.is_none()
+  }
+
+  /// Deep merge with a default credential.
+  /// Fields in `self` take priority; missing fields are inherited from `default`.
+  fn deep_merge(&self, default: &ClientCredentialConfig) -> ClientCredentialConfig {
+    ClientCredentialConfig {
+      user: self.user.clone().or_else(|| default.user.clone()),
+      client_cert_path: self
+        .client_cert_path
+        .clone()
+        .or_else(|| default.client_cert_path.clone()),
+      client_key_path: self
+        .client_key_path
+        .clone()
+        .or_else(|| default.client_key_path.clone()),
+      server_ca_path: self
+        .server_ca_path
+        .clone()
+        .or_else(|| default.server_ca_path.clone()),
+    }
   }
 }
 
@@ -251,6 +275,7 @@ struct Proxy {
   current_weight: isize,
   user_password_credential: UserPasswordCredential,
   client_cert_credential: ClientCertCredential,
+  server_ca_path: Option<String>,
 }
 
 async fn connection_maintaining(
@@ -273,22 +298,21 @@ fn build_tls_client_config(
 }
 
 struct ProxyGroup {
-  ca_path: path::PathBuf,
   proxies: Vec<Proxy>,
 }
 
 impl ProxyGroup {
   fn new(
-    ca_path: path::PathBuf,
     addresses: Vec<(
       SocketAddr,
       usize,
       UserPasswordCredential,
       ClientCertCredential,
+      Option<String>,
     )>,
   ) -> Self {
     let mut proxies = vec![];
-    for (addr, weight, upc, ccc) in addresses {
+    for (addr, weight, upc, ccc, server_ca) in addresses {
       proxies.push(Proxy {
         address: addr,
         conn_handle: None,
@@ -297,10 +321,10 @@ impl ProxyGroup {
         current_weight: 0,
         user_password_credential: upc,
         client_cert_credential: ccc,
+        server_ca_path: server_ca,
       });
     }
-
-    Self { ca_path, proxies }
+    Self { proxies }
   }
 
   fn schedule_wrr(&mut self) -> usize {
@@ -338,23 +362,26 @@ impl ProxyGroup {
       error!("couldn't load default trust roots: {e}");
     }
 
-    // Load CA certificate (PEM format) for server verification
-    info!("Loading CA certificate from: {:?}", self.ca_path);
-    let ca_file = fs::File::open(self.ca_path.as_path())?;
-    let mut ca_reader = std::io::BufReader::new(ca_file);
-    let ca_certs: Vec<CertificateDer> =
-      rustls_pemfile::certs(&mut ca_reader)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| {
-          anyhow::anyhow!("failed to parse CA certificate: {e}")
-        })?;
+    // Load custom CA certificate if provided (per-proxy)
+    if let Some(ref ca_path_str) = self.proxies[proxy_idx].server_ca_path {
+      let ca_path = path::Path::new(ca_path_str);
+      info!("Loading CA certificate from: {:?}", ca_path);
+      let ca_file = fs::File::open(ca_path)?;
+      let mut ca_reader = std::io::BufReader::new(ca_file);
+      let ca_certs: Vec<CertificateDer> =
+        rustls_pemfile::certs(&mut ca_reader)
+          .collect::<Result<Vec<_>, _>>()
+          .map_err(|e| {
+            anyhow::anyhow!("failed to parse CA certificate: {e}")
+          })?;
 
-    info!("Loaded {} CA certificates", ca_certs.len());
-    for cert in ca_certs {
-      if let Err(e) = roots.add(cert) {
-        error!("failed to add CA certificate to trust store: {e}");
-      } else {
-        info!("Successfully added CA certificate to trust store");
+      info!("Loaded {} CA certificates", ca_certs.len());
+      for cert in ca_certs {
+        if let Err(e) = roots.add(cert) {
+          error!("failed to add CA certificate to trust store: {e}");
+        } else {
+          info!("Successfully added CA certificate to trust store");
+        }
       }
     }
 
@@ -490,23 +517,15 @@ struct Http3ChainServiceArgsProxyGroup {
 }
 
 #[derive(Deserialize, Default, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 struct Http3ChainServiceArgs {
   proxy_group: Vec<Http3ChainServiceArgsProxyGroup>,
-  ca_path: String,
   #[serde(default)]
   default_credential: Option<ClientCredentialConfig>,
 }
 
 impl Http3ChainServiceArgs {
   fn validate(&self) -> Result<()> {
-    if self.ca_path.is_empty() {
-      bail!("ca_path is required");
-    }
-    // Validate CA file exists at startup for fail-fast behavior
-    let ca_path = path::Path::new(&self.ca_path);
-    if !ca_path.exists() {
-      bail!("ca_path file does not exist: {}", self.ca_path);
-    }
     if self.proxy_group.is_empty() {
       bail!("proxy_group cannot be empty");
     }
@@ -531,17 +550,30 @@ impl Http3ChainServiceArgs {
   fn resolve_credential(
     &self,
     proxy_credential: &Option<ClientCredentialConfig>,
-  ) -> (UserPasswordCredential, ClientCertCredential) {
-    let effective = match proxy_credential {
-      None => self.default_credential.as_ref(),
-      Some(config) => Some(config),
+  ) -> (UserPasswordCredential, ClientCertCredential, Option<String>) {
+    let effective = match (proxy_credential, &self.default_credential) {
+      // If proxy credential is explicitly set but empty, it means "no auth credential"
+      // - user and client_cert are NOT inherited from default_credential
+      // - but server_ca_path IS inherited for TLS verification
+      (Some(proxy), Some(default)) if proxy.is_empty() => {
+        Some(ClientCredentialConfig {
+          user: None,
+          client_cert_path: None,
+          client_key_path: None,
+          server_ca_path: default.server_ca_path.clone(),
+        })
+      }
+      (Some(proxy), None) if proxy.is_empty() => None,
+      // Normal merge/inherit cases
+      (Some(proxy), Some(default)) => Some(proxy.deep_merge(default)),
+      (Some(proxy), None) => Some(proxy.clone()),
+      (None, Some(default)) => Some(default.clone()),
+      (None, None) => None,
     };
+
     match effective {
       None => {
-        (UserPasswordCredential::none(), ClientCertCredential::none())
-      }
-      Some(config) if config.is_empty() => {
-        (UserPasswordCredential::none(), ClientCertCredential::none())
+        (UserPasswordCredential::none(), ClientCertCredential::none(), None)
       }
       Some(config) => {
         let upc = match &config.user {
@@ -558,7 +590,8 @@ impl Http3ChainServiceArgs {
             },
             _ => ClientCertCredential::none(),
           };
-        (upc, ccc)
+        let server_ca = config.server_ca_path.clone();
+        (upc, ccc, server_ca)
       }
     }
   }
@@ -587,6 +620,7 @@ impl Http3ChainService {
       usize,
       UserPasswordCredential,
       ClientCertCredential,
+      Option<String>,
     )> = args
       .proxy_group
       .iter()
@@ -597,17 +631,16 @@ impl Http3ChainService {
           credential,
         } = e;
 
-        let (upc, ccc) = args.resolve_credential(credential);
+        let (upc, ccc, server_ca) = args.resolve_credential(credential);
 
         s.parse()
           .inspect_err(|e| error!("address '{s}' invalid: {e}"))
           .ok()
-          .map(|a| (a, *w, upc, ccc))
+          .map(|a| (a, *w, upc, ccc, server_ca))
       })
       .collect();
 
-    let proxy_group =
-      ProxyGroup::new(args.ca_path.into(), proxy_addresses);
+    let proxy_group = ProxyGroup::new(proxy_addresses);
 
     Ok(plugin::Service::new(Self {
       proxy_group: Arc::new(Mutex::new(proxy_group)),
@@ -993,6 +1026,50 @@ mod tests {
   use crate::plugin::Plugin;
   use std::future::pending;
 
+  // ============== Http3ChainServiceArgs Tests (new format without service-level server_ca_path) ==============
+
+  #[test]
+  fn test_service_args_deserialize_new_format_no_service_level_ca() {
+    let yaml = r#"
+proxy_group:
+  - address: "127.0.0.1:8080"
+    weight: 1
+default_credential:
+  server_ca_path: "/tmp/ca.pem"
+"#;
+    let args: Http3ChainServiceArgs =
+      serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(args.proxy_group.len(), 1);
+    assert!(args.default_credential.is_some());
+    let dc = args.default_credential.as_ref().unwrap();
+    assert_eq!(dc.server_ca_path, Some("/tmp/ca.pem".to_string()));
+  }
+
+  #[test]
+  fn test_service_args_rejects_unknown_fields() {
+    // CR-002: After removing service-level server_ca_path, users with old configs
+    // should get a clear error instead of silent ignore
+    let yaml = r#"
+proxy_group:
+  - address: "127.0.0.1:8080"
+    weight: 1
+server_ca_path: "/tmp/ca.pem"
+"#;
+    let result: Result<Http3ChainServiceArgs, _> =
+      serde_yaml::from_str(yaml);
+    assert!(
+      result.is_err(),
+      "Should reject unknown field 'server_ca_path' with deny_unknown_fields"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+      err.contains("unknown field")
+        || err.contains("server_ca_path"),
+      "Error should mention unknown field, got: {}",
+      err
+    );
+  }
+
   // ============== ClientCredentialConfig Tests ==============
 
   #[test]
@@ -1018,12 +1095,28 @@ user:
   }
 
   #[test]
+  fn test_client_credential_config_deserialize_with_server_ca_path() {
+    let yaml = r#"
+server_ca_path: /path/to/ca.pem
+"#;
+    let config: ClientCredentialConfig =
+      serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(
+      config.server_ca_path,
+      Some("/path/to/ca.pem".to_string())
+    );
+    assert!(config.user.is_none());
+    assert!(config.client_cert_path.is_none());
+  }
+
+  #[test]
   fn test_client_credential_config_validate_cert_without_key_is_error()
   {
     let config = ClientCredentialConfig {
       user: None,
       client_cert_path: Some("/path/to/cert.pem".to_string()),
       client_key_path: None,
+      server_ca_path: None,
     };
     assert!(config.validate_if_non_empty().is_err());
   }
@@ -1071,13 +1164,90 @@ user:
     assert!(cred.key_path.is_none());
   }
 
+  // ============== deep_merge Tests ==============
+
+  #[test]
+  fn test_deep_merge_proxy_overrides_default_server_ca() {
+    let default_cred = ClientCredentialConfig {
+      user: Some(UserCredential {
+        username: "default_user".to_string(),
+        password: "default_pass".to_string(),
+      }),
+      client_cert_path: None,
+      client_key_path: None,
+      server_ca_path: Some("/default/ca.pem".to_string()),
+    };
+    let proxy_cred = ClientCredentialConfig {
+      user: None,
+      client_cert_path: None,
+      client_key_path: None,
+      server_ca_path: Some("/proxy/ca.pem".to_string()),
+    };
+    let merged = proxy_cred.deep_merge(&default_cred);
+    // proxy's server_ca_path overrides default
+    assert_eq!(merged.server_ca_path, Some("/proxy/ca.pem".to_string()));
+    // user inherited from default
+    assert!(merged.user.is_some());
+    assert_eq!(merged.user.as_ref().unwrap().username, "default_user");
+  }
+
+  #[test]
+  fn test_deep_merge_inherits_all_from_default() {
+    let default_cred = ClientCredentialConfig {
+      user: Some(UserCredential {
+        username: "default_user".to_string(),
+        password: "default_pass".to_string(),
+      }),
+      client_cert_path: Some("/default/cert.pem".to_string()),
+      client_key_path: Some("/default/key.pem".to_string()),
+      server_ca_path: Some("/default/ca.pem".to_string()),
+    };
+    let proxy_cred = ClientCredentialConfig {
+      user: None,
+      client_cert_path: None,
+      client_key_path: None,
+      server_ca_path: None,
+    };
+    let merged = proxy_cred.deep_merge(&default_cred);
+    assert_eq!(merged.user.as_ref().unwrap().username, "default_user");
+    assert_eq!(merged.client_cert_path, Some("/default/cert.pem".to_string()));
+    assert_eq!(merged.client_key_path, Some("/default/key.pem".to_string()));
+    assert_eq!(merged.server_ca_path, Some("/default/ca.pem".to_string()));
+  }
+
+  #[test]
+  fn test_deep_merge_proxy_overrides_all() {
+    let default_cred = ClientCredentialConfig {
+      user: Some(UserCredential {
+        username: "default_user".to_string(),
+        password: "default_pass".to_string(),
+      }),
+      client_cert_path: Some("/default/cert.pem".to_string()),
+      client_key_path: Some("/default/key.pem".to_string()),
+      server_ca_path: Some("/default/ca.pem".to_string()),
+    };
+    let proxy_cred = ClientCredentialConfig {
+      user: Some(UserCredential {
+        username: "proxy_user".to_string(),
+        password: "proxy_pass".to_string(),
+      }),
+      client_cert_path: Some("/proxy/cert.pem".to_string()),
+      client_key_path: Some("/proxy/key.pem".to_string()),
+      server_ca_path: Some("/proxy/ca.pem".to_string()),
+    };
+    let merged = proxy_cred.deep_merge(&default_cred);
+    assert_eq!(merged.user.as_ref().unwrap().username, "proxy_user");
+    assert_eq!(merged.client_cert_path, Some("/proxy/cert.pem".to_string()));
+    assert_eq!(merged.client_key_path, Some("/proxy/key.pem".to_string()));
+    assert_eq!(merged.server_ca_path, Some("/proxy/ca.pem".to_string()));
+  }
+
   // ============== resolve_credential Tests ==============
 
   #[test]
-  fn test_resolve_credential_none_inherits_default() {
+  fn test_resolve_credential_deep_merges_with_default() {
     let args = Http3ChainServiceArgs {
       proxy_group: vec![],
-      ca_path: "/tmp/ca.pem".to_string(),
       default_credential: Some(ClientCredentialConfig {
         user: Some(UserCredential {
           username: "default_user".to_string(),
@@ -1085,10 +1255,46 @@ user:
         }),
         client_cert_path: None,
         client_key_path: None,
+        server_ca_path: Some("/default/ca.pem".to_string()),
+      }),
+    };
+    // Proxy has only server_ca_path, should inherit user from default
+    let proxy_cred = Some(ClientCredentialConfig {
+      user: None,
+      client_cert_path: None,
+      client_key_path: None,
+      server_ca_path: Some("/proxy/ca.pem".to_string()),
+    });
+    let (upc, _ccc, server_ca) = args.resolve_credential(&proxy_cred);
+    // user should be inherited from default via deep merge
+    assert!(
+      upc.user.is_some(),
+      "Should inherit user from default via deep merge"
+    );
+    // server_ca_path should be from proxy (override)
+    assert_eq!(
+      server_ca,
+      Some("/proxy/ca.pem".to_string()),
+      "server_ca_path should come from proxy credential"
+    );
+  }
+
+  #[test]
+  fn test_resolve_credential_none_inherits_default() {
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      default_credential: Some(ClientCredentialConfig {
+        user: Some(UserCredential {
+          username: "default_user".to_string(),
+          password: "default_pass".to_string(),
+        }),
+        client_cert_path: None,
+        client_key_path: None,
+        server_ca_path: None,
       }),
     };
     // None means inherit default_credential
-    let (upc, ccc) = args.resolve_credential(&None);
+    let (upc, ccc, _server_ca) = args.resolve_credential(&None);
     assert!(
       upc.user.is_some(),
       "Should inherit password credential from default"
@@ -1100,10 +1306,9 @@ user:
   }
 
   #[test]
-  fn test_resolve_credential_empty_object_overrides_to_none() {
+  fn test_resolve_credential_empty_object_inherits_from_default() {
     let args = Http3ChainServiceArgs {
       proxy_group: vec![],
-      ca_path: "/tmp/ca.pem".to_string(),
       default_credential: Some(ClientCredentialConfig {
         user: Some(UserCredential {
           username: "default_user".to_string(),
@@ -1111,22 +1316,29 @@ user:
         }),
         client_cert_path: None,
         client_key_path: None,
+        server_ca_path: Some("/path/to/ca.pem".to_string()),
       }),
     };
-    // Some(empty) means explicit no credential, overriding default
+    // Some(empty) means "no auth" - user and client cert are NOT inherited
+    // but server_ca_path IS inherited for TLS verification
     let empty = Some(ClientCredentialConfig {
       user: None,
       client_cert_path: None,
       client_key_path: None,
+      server_ca_path: None,
     });
-    let (upc, ccc) = args.resolve_credential(&empty);
+    let (upc, ccc, server_ca) = args.resolve_credential(&empty);
     assert!(
       upc.user.is_none(),
-      "Empty object should override default to no password credential"
+      "Empty proxy credential should NOT inherit user from default (no auth)"
     );
     assert!(
       ccc.cert_path.is_none(),
-      "Empty object should override default to no cert credential"
+      "Empty proxy credential should NOT inherit client cert from default"
+    );
+    assert!(
+      server_ca.is_some(),
+      "Empty proxy credential should inherit server_ca_path from default for TLS verification"
     );
   }
 
@@ -1134,7 +1346,6 @@ user:
   fn test_resolve_credential_explicit_overrides_default() {
     let args = Http3ChainServiceArgs {
       proxy_group: vec![],
-      ca_path: "/tmp/ca.pem".to_string(),
       default_credential: Some(ClientCredentialConfig {
         user: Some(UserCredential {
           username: "default_user".to_string(),
@@ -1142,6 +1353,7 @@ user:
         }),
         client_cert_path: None,
         client_key_path: None,
+        server_ca_path: None,
       }),
     };
     // Some(explicit) means use this credential, not default
@@ -1152,8 +1364,9 @@ user:
       }),
       client_cert_path: None,
       client_key_path: None,
+      server_ca_path: None,
     });
-    let (upc, ccc) = args.resolve_credential(&explicit);
+    let (upc, ccc, _server_ca) = args.resolve_credential(&explicit);
     assert!(upc.user.is_some(), "Should use explicit password credential");
     assert!(ccc.cert_path.is_none(), "Explicit has no cert credential");
   }
@@ -1162,79 +1375,27 @@ user:
   fn test_resolve_credential_none_with_no_default() {
     let args = Http3ChainServiceArgs {
       proxy_group: vec![],
-      ca_path: "/tmp/ca.pem".to_string(),
       default_credential: None,
     };
     // None means inherit, but no default → no credential
-    let (upc, ccc) = args.resolve_credential(&None);
+    let (upc, ccc, _server_ca) = args.resolve_credential(&None);
     assert!(upc.user.is_none(), "No default means no password credential");
     assert!(ccc.cert_path.is_none(), "No default means no cert credential");
   }
 
   #[test]
-  fn test_validate_ca_file_must_exist() {
-    let args = Http3ChainServiceArgs {
-      proxy_group: vec![Http3ChainServiceArgsProxyGroup {
-        address: "127.0.0.1:443".to_string(),
-        weight: 1,
-        credential: None,
-      }],
-      ca_path: "/nonexistent/path/to/ca.pem".to_string(),
-      default_credential: None,
-    };
-    let result = args.validate();
-    assert!(
-      result.is_err(),
-      "CA file validation should fail for non-existent file"
-    );
-    let err = result.unwrap_err().to_string();
-    assert!(
-      err.contains("ca_path file does not exist"),
-      "Error should mention CA file not found, got: {}",
-      err
-    );
-  }
-
-  #[test]
-  fn test_validate_ca_path_empty() {
-    let args = Http3ChainServiceArgs {
-      proxy_group: vec![Http3ChainServiceArgsProxyGroup {
-        address: "127.0.0.1:443".to_string(),
-        weight: 1,
-        credential: None,
-      }],
-      ca_path: "".to_string(),
-      default_credential: None,
-    };
-    let result = args.validate();
-    assert!(result.is_err(), "Empty ca_path should fail validation");
-    let err = result.unwrap_err().to_string();
-    assert!(
-      err.contains("ca_path is required"),
-      "Error should mention ca_path is required, got: {}",
-      err
-    );
-  }
-
-  #[test]
   fn test_validate_credential_cert_without_key_in_default() {
-    // Use a temp file that exists for CA path so we can test credential validation
-    let temp_dir = std::env::temp_dir();
-    let ca_path = temp_dir.join("neoproxy_test_ca.pem");
-    // Create the temp file if it doesn't exist
-    std::fs::write(&ca_path, "test CA content").ok();
-
     let args = Http3ChainServiceArgs {
       proxy_group: vec![Http3ChainServiceArgsProxyGroup {
         address: "127.0.0.1:443".to_string(),
         weight: 1,
         credential: None,
       }],
-      ca_path: ca_path.to_string_lossy().to_string(),
       default_credential: Some(ClientCredentialConfig {
         user: None,
         client_cert_path: Some("/path/to/cert.pem".to_string()),
         client_key_path: None,
+        server_ca_path: None,
       }),
     };
     let result = args.validate();
@@ -1242,7 +1403,6 @@ user:
       result.is_err(),
       "default_credential with cert but no key should fail validation"
     );
-    // The error context adds "default_credential" to the chain
     let err = result.unwrap_err().to_string();
     assert!(
       err.contains("client_cert_path and client_key_path")
@@ -1250,9 +1410,6 @@ user:
       "Error should be about cert/key pair or default_credential, got: {}",
       err
     );
-
-    // Cleanup
-    std::fs::remove_file(&ca_path).ok();
   }
 
   // ============== Http3ChainPlugin Tests ==============
@@ -1406,15 +1563,17 @@ user:
         1,
         UserPasswordCredential::none(),
         ClientCertCredential::none(),
+        None,
       ),
       (
         "127.0.0.1:8081".parse().unwrap(),
         2,
         UserPasswordCredential::none(),
         ClientCertCredential::none(),
+        None,
       ),
     ];
-    let group = ProxyGroup::new("/tmp/ca.pem".into(), addresses);
+    let group = ProxyGroup::new(addresses);
 
     assert_eq!(group.proxies.len(), 2);
     assert_eq!(group.proxies[0].weight, 1);
@@ -1428,8 +1587,9 @@ user:
       1,
       UserPasswordCredential::none(),
       ClientCertCredential::none(),
+      None,
     )];
-    let mut group = ProxyGroup::new("/tmp/ca.pem".into(), addresses);
+    let mut group = ProxyGroup::new(addresses);
 
     // With single proxy, should always select index 0
     assert_eq!(group.schedule_wrr(), 0);
@@ -1445,15 +1605,17 @@ user:
         2,
         UserPasswordCredential::none(),
         ClientCertCredential::none(),
+        None,
       ), // weight 2
       (
         "127.0.0.1:8081".parse().unwrap(),
         1,
         UserPasswordCredential::none(),
         ClientCertCredential::none(),
+        None,
       ), // weight 1
     ];
-    let mut group = ProxyGroup::new("/tmp/ca.pem".into(), addresses);
+    let mut group = ProxyGroup::new(addresses);
 
     // Run 6 iterations (total weight = 3, so 6 = 2 full cycles)
     let selections: Vec<usize> =
@@ -1484,12 +1646,15 @@ proxy_group:
     weight: 1
   - address: "127.0.0.1:8081"
     weight: 2
-ca_path: "/tmp/ca.pem"
+default_credential:
+  server_ca_path: "/tmp/ca.pem"
 "#;
     let args: Http3ChainServiceArgs =
       serde_yaml::from_str(yaml).unwrap();
     assert_eq!(args.proxy_group.len(), 2);
-    assert_eq!(args.ca_path, "/tmp/ca.pem");
+    assert!(args.default_credential.is_some());
+    let dc = args.default_credential.as_ref().unwrap();
+    assert_eq!(dc.server_ca_path, Some("/tmp/ca.pem".to_string()));
     assert_eq!(args.proxy_group[0].address, "127.0.0.1:8080");
     assert_eq!(args.proxy_group[0].weight, 1);
     assert_eq!(args.proxy_group[1].address, "127.0.0.1:8081");
@@ -1500,7 +1665,7 @@ ca_path: "/tmp/ca.pem"
   fn test_service_args_default() {
     let args = Http3ChainServiceArgs::default();
     assert!(args.proxy_group.is_empty());
-    assert!(args.ca_path.is_empty());
+    assert!(args.default_credential.is_none());
   }
 
   // ============== build_empty_response Tests ==============

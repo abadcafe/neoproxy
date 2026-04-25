@@ -231,8 +231,8 @@ servers:
   - kind: http3.listener
     args:
       address: "0.0.0.0:{proxy_port}"
-      cert_path: "{cert_path}"
-      key_path: "{key_path}"{quic_section}{auth_section}
+      server_cert_path: "{cert_path}"
+      server_key_path: "{key_path}"{quic_section}{auth_section}
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "http3_config.yaml")
@@ -276,7 +276,8 @@ services:
   args:
     proxy_group:
 {proxy_section}
-    ca_path: "{ca_path}"
+    default_credential:
+      server_ca_path: "{ca_path}"
 
 servers:
 - name: http_proxy
@@ -545,8 +546,8 @@ servers:
   - kind: http3.listener
     args:
       address: "0.0.0.0:{proxy_port}"
-      cert_path: "/nonexistent/path/to/cert.pem"
-      key_path: "/nonexistent/path/to/key.pem"
+      server_cert_path: "/nonexistent/path/to/cert.pem"
+      server_key_path: "/nonexistent/path/to/key.pem"
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "invalid_config.yaml")
@@ -599,8 +600,8 @@ servers:
   - kind: http3.listener
     args:
       address: "0.0.0.0:{proxy_port}"
-      cert_path: "{cert_path}"
-      key_path: "/nonexistent/path/to/key.pem"
+      server_cert_path: "{cert_path}"
+      server_key_path: "/nonexistent/path/to/key.pem"
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "invalid_config.yaml")
@@ -661,8 +662,8 @@ servers:
   - kind: http3.listener
     args:
       address: "0.0.0.0:{proxy_port}"
-      cert_path: "{cert_path1}"
-      key_path: "{key_path2}"
+      server_cert_path: "{cert_path1}"
+      server_key_path: "{key_path2}"
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "mismatch_config.yaml")
@@ -748,7 +749,7 @@ class TestHTTP3ConfigValidation:
         proxy_port = 30461
 
         try:
-            # Missing cert_path and key_path
+            # Missing server_cert_path and server_key_path
             config_content = f"""worker_threads: 1
 log_directory: "{temp_dir}/logs"
 
@@ -811,8 +812,8 @@ servers:
   - kind: http3.listener
     args:
       address: "invalid_address_format"
-      cert_path: "{cert_path}"
-      key_path: "{key_path}"
+      server_cert_path: "{cert_path}"
+      server_key_path: "{key_path}"
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "invalid_addr.yaml")

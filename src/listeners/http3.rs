@@ -67,9 +67,9 @@ pub struct Http3ListenerArgs {
   /// Listening address in "host:port" format
   pub address: String,
   /// TLS certificate file path (PEM format)
-  pub cert_path: String,
+  pub server_cert_path: String,
   /// TLS private key file path (PEM format)
-  pub key_path: String,
+  pub server_key_path: String,
   /// QUIC protocol parameters (optional)
   pub quic: Option<QuicConfigArgs>,
   /// Authentication configuration (optional, raw YAML value)
@@ -578,8 +578,8 @@ impl Http3Listener {
 
     // Load TLS config
     let tls_config = load_tls_config(
-      &args.cert_path,
-      &args.key_path,
+      &args.server_cert_path,
+      &args.server_key_path,
       &client_cert_auth,
     )?;
 
@@ -939,8 +939,8 @@ mod tests {
     // No auth configured (None) should work
     let args = Http3ListenerArgs {
       address: "0.0.0.0:443".to_string(),
-      cert_path: "/path/cert.pem".to_string(),
-      key_path: "/path/key.pem".to_string(),
+      server_cert_path: "/path/cert.pem".to_string(),
+      server_key_path: "/path/key.pem".to_string(),
       auth: None,
       quic: None,
     };
@@ -1068,13 +1068,13 @@ client_ca_path: /path/to/ca.pem
   fn test_http3_listener_args_deserialize_minimal() {
     let yaml = r#"
 address: "0.0.0.0:443"
-cert_path: "/path/to/cert.pem"
-key_path: "/path/to/key.pem"
+server_cert_path: "/path/to/cert.pem"
+server_key_path: "/path/to/key.pem"
 "#;
     let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(args.address, "0.0.0.0:443");
-    assert_eq!(args.cert_path, "/path/to/cert.pem");
-    assert_eq!(args.key_path, "/path/to/key.pem");
+    assert_eq!(args.server_cert_path, "/path/to/cert.pem");
+    assert_eq!(args.server_key_path, "/path/to/key.pem");
     assert!(args.quic.is_none());
     assert!(args.auth.is_none());
   }
@@ -1083,8 +1083,8 @@ key_path: "/path/to/key.pem"
   fn test_http3_listener_args_deserialize_full() {
     let yaml = r#"
 address: "0.0.0.0:443"
-cert_path: "/path/to/cert.pem"
-key_path: "/path/to/key.pem"
+server_cert_path: "/path/to/cert.pem"
+server_key_path: "/path/to/key.pem"
 quic:
   max_concurrent_bidi_streams: 200
   max_idle_timeout_ms: 60000

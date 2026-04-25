@@ -207,19 +207,39 @@ fn build_error_response(
 }
 
 // ============================================================================
-// Authentication
+// Access Log Recording
 // ============================================================================
 
-/// Perform application-layer authentication
+/// Record an access log entry for an HTTP/3 request.
 ///
-/// Verifies the request against the configured user password authentication.
-/// Returns Ok(()) if authentication passes or if no authentication is required.
-/// Returns Err(()) if authentication fails.
-fn perform_application_auth(
-  user_password_auth: &UserPasswordAuth,
-  req: &http::Request<()>,
-) -> Result<(), ()> {
-  user_password_auth.verify(req).map_err(|_| ())
+/// Extracted from handle_h3_stream to enable unit testing.
+fn record_access_log(
+  writer: &crate::access_log::AccessLogWriter,
+  client_addr: SocketAddr,
+  user: Option<String>,
+  auth_type: crate::access_log::AuthType,
+  method: String,
+  target: String,
+  status: u16,
+  duration: std::time::Duration,
+  service_name: String,
+  service_metrics: crate::access_log::ServiceMetrics,
+) {
+  let entry = crate::access_log::AccessLogEntry {
+    time: time::OffsetDateTime::now_local()
+      .unwrap_or_else(|_| time::OffsetDateTime::now_utc()),
+    client_ip: client_addr.ip().to_string(),
+    client_port: client_addr.port(),
+    user,
+    auth_type,
+    method,
+    target,
+    status,
+    duration_ms: duration.as_millis() as u64,
+    service: service_name,
+    service_metrics,
+  };
+  writer.write(&entry);
 }
 
 // ============================================================================
@@ -243,20 +263,34 @@ async fn handle_h3_stream(
   mut service: plugin::Service,
   user_password_auth: UserPasswordAuth,
   _shutdown_handle: plugin::ShutdownHandle,
+  access_log_writer: Option<crate::access_log::AccessLogWriter>,
+  service_name: String,
+  client_addr: SocketAddr,
 ) -> () {
-  // Phase 1: Authentication
-  if perform_application_auth(&user_password_auth, &req).is_err() {
-    // Auth failed: send 407 directly, do NOT call Service
-    let resp = build_error_response(
-      http::StatusCode::PROXY_AUTHENTICATION_REQUIRED,
-      "Proxy Authentication Required",
-    );
-    let mut stream = stream;
-    if let Err(e) = send_h3_response(&mut stream, resp, true).await {
-      warn!("Failed to send 407 response: {e}");
+  // Capture start time for access log
+  let start_time = std::time::Instant::now();
+  let method = req.method().to_string();
+  let target = req.uri().to_string();
+
+  // Phase 1: Authentication - verify and extract username in one pass
+  // This avoids duplicated extraction logic (CR-001) and wasteful computation when auth fails (CR-002)
+  let auth_result = user_password_auth.verify_and_extract_username(&req);
+  let (user, auth_type) = match auth_result {
+    Ok(Some(username)) => (Some(username), crate::access_log::AuthType::Password),
+    Ok(None) => (None, crate::access_log::AuthType::None),
+    Err(_) => {
+      // Auth failed: send 407 directly, do NOT call Service
+      let resp = build_error_response(
+        http::StatusCode::PROXY_AUTHENTICATION_REQUIRED,
+        "Proxy Authentication Required",
+      );
+      let mut stream = stream;
+      if let Err(e) = send_h3_response(&mut stream, resp, true).await {
+        warn!("Failed to send 407 response: {e}");
+      }
+      return;
     }
-    return;
-  }
+  };
 
   // Phase 2: Create upgrade pair
   let (trigger, on_upgrade) = H3UpgradeTrigger::pair(stream);
@@ -283,9 +317,21 @@ async fn handle_h3_stream(
   // Phase 4: Call Service
   let result = service.call(request).await;
 
+  // Track status and service metrics for access log
+  let mut final_status: u16 = 502;
+  let mut service_metrics = crate::access_log::ServiceMetrics::new();
+
   // Phase 5: Handle Service response
   match result {
     Ok(resp) => {
+      final_status = resp.status().as_u16();
+      // Extract ServiceMetrics from response extensions
+      service_metrics = resp
+        .extensions()
+        .get::<crate::access_log::ServiceMetrics>()
+        .cloned()
+        .unwrap_or_default();
+
       if resp.status() == http::StatusCode::OK {
         if let Err(e) = trigger.send_success().await {
           warn!("H3 failed to send success: {e}");
@@ -314,6 +360,24 @@ async fn handle_h3_stream(
         warn!("H3 failed to send error: {e}");
       }
     }
+  }
+
+  // Record access log by calling the tested helper
+  if let Some(ref writer) = access_log_writer {
+    let duration = start_time.elapsed();
+
+    record_access_log(
+      writer,
+      client_addr,
+      user,
+      auth_type,
+      method,
+      target,
+      final_status,
+      duration,
+      service_name,
+      service_metrics,
+    );
   }
 }
 
@@ -362,7 +426,12 @@ async fn handle_h3_connection(
   user_password_auth: UserPasswordAuth,
   stream_tracker: Rc<StreamTracker>,
   shutdown_handle: plugin::ShutdownHandle,
+  access_log_writer: Option<crate::access_log::AccessLogWriter>,
+  service_name: String,
 ) {
+  // Get client address from connection for access log
+  let client_addr = conn.remote_address();
+
   // Create H3 connection
   let mut h3_conn = match h3::server::builder()
     .build(h3_quinn::Connection::new(conn))
@@ -390,6 +459,8 @@ async fn handle_h3_connection(
         let service = service.clone();
         let user_password_auth = user_password_auth.clone();
         let stream_shutdown = stream_tracker.shutdown_handle();
+        let access_log_writer = access_log_writer.clone();
+        let service_name = service_name.clone();
         stream_tracker.register(async move {
           match resolver.resolve_request().await {
             Ok((req, stream)) => {
@@ -399,6 +470,9 @@ async fn handle_h3_connection(
                 service,
                 user_password_auth,
                 stream_shutdown,
+                access_log_writer,
+                service_name,
+                client_addr,
               )
               .await;
             }
@@ -529,6 +603,10 @@ pub struct Http3Listener {
   shutdown_handle: plugin::ShutdownHandle,
   /// Associated service
   service: plugin::Service,
+  /// Access log writer for logging request/response information.
+  access_log_writer: Option<crate::access_log::AccessLogWriter>,
+  /// Service name for identification in logs.
+  service_name: String,
 }
 
 impl Http3Listener {
@@ -537,6 +615,7 @@ impl Http3Listener {
   pub fn new(
     sargs: plugin::SerializedArgs,
     svc: plugin::Service,
+    ctx: plugin::ListenerBuildContext,
   ) -> Result<plugin::Listener> {
     let args: Http3ListenerArgs = serde_yaml::from_value(sargs)?;
 
@@ -591,6 +670,8 @@ impl Http3Listener {
       stream_tracker: Rc::new(StreamTracker::new()),
       shutdown_handle: plugin::ShutdownHandle::new(),
       service: svc,
+      access_log_writer: ctx.access_log_writer,
+      service_name: ctx.service_name,
     }))
   }
 }
@@ -604,6 +685,8 @@ impl plugin::Listening for Http3Listener {
     let stream_tracker = self.stream_tracker.clone();
     let shutdown_handle = self.shutdown_handle.clone();
     let service = self.service.clone();
+    let access_log_writer = self.access_log_writer.clone();
+    let service_name = self.service_name.clone();
 
     Box::pin(async move {
       // Create Quinn server config
@@ -676,6 +759,8 @@ impl plugin::Listening for Http3Listener {
             let tracker_for_register = stream_tracker.clone();
             let tracker_for_handler = stream_tracker.clone();
             let stream_shutdown = tracker_for_handler.shutdown_handle();
+            let access_log_writer = access_log_writer.clone();
+            let service_name = service_name.clone();
 
             tracker_for_register.register_connection(async move {
               match conn.await {
@@ -686,6 +771,8 @@ impl plugin::Listening for Http3Listener {
                     user_password_auth_for_conn,
                     tracker_for_handler,
                     stream_shutdown,
+                    access_log_writer,
+                    service_name,
                   )
                   .await;
                 }
@@ -1167,23 +1254,12 @@ address: "0.0.0.0:443"
     assert_eq!(resp.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
   }
 
-  // ============== perform_application_auth Tests ==============
-
   #[test]
-  fn test_perform_application_auth_no_auth_required() {
-    // When no auth is configured, any request should pass
-    let user_password_auth = UserPasswordAuth::none();
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("http://example.com:80")
-      .body(())
-      .unwrap();
-    assert!(perform_application_auth(&user_password_auth, &req).is_ok());
-  }
+  fn test_verify_and_extract_username_combines_auth_and_extraction() {
+    // Test that verify_and_extract_username correctly combines auth and extraction
+    // This verifies CR-001 and CR-002 fixes: no duplicated logic, no wasteful computation
 
-  #[test]
-  fn test_perform_application_auth_with_valid_credentials() {
-    // When auth is configured, valid credentials should pass
+    // Case 1: Auth required, valid credentials - should return username
     let user_password_auth = UserPasswordAuth::from_config(&ListenerAuthConfig {
       users: Some(vec![UserCredential {
         username: "testuser".to_string(),
@@ -1203,20 +1279,12 @@ address: "0.0.0.0:443"
       )
       .body(())
       .unwrap();
-    assert!(perform_application_auth(&user_password_auth, &req).is_ok());
-  }
+    let result = user_password_auth.verify_and_extract_username(&req);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), Some("testuser".to_string()));
 
-  #[test]
-  fn test_perform_application_auth_with_invalid_credentials() {
-    // When auth is configured, invalid credentials should fail
-    let user_password_auth = UserPasswordAuth::from_config(&ListenerAuthConfig {
-      users: Some(vec![UserCredential {
-        username: "testuser".to_string(),
-        password: "testpass".to_string(),
-      }]),
-      client_ca_path: None,
-    });
-    let req = http::Request::builder()
+    // Case 2: Auth required, invalid credentials - should return error
+    let req_invalid = http::Request::builder()
       .method(http::Method::CONNECT)
       .uri("http://example.com:80")
       .header(
@@ -1228,24 +1296,91 @@ address: "0.0.0.0:443"
       )
       .body(())
       .unwrap();
-    assert!(perform_application_auth(&user_password_auth, &req).is_err());
-  }
+    let result = user_password_auth.verify_and_extract_username(&req_invalid);
+    assert!(result.is_err());
 
-  #[test]
-  fn test_perform_application_auth_missing_credentials() {
-    // When auth is configured, missing credentials should fail
-    let user_password_auth = UserPasswordAuth::from_config(&ListenerAuthConfig {
-      users: Some(vec![UserCredential {
-        username: "testuser".to_string(),
-        password: "testpass".to_string(),
-      }]),
-      client_ca_path: None,
-    });
-    let req = http::Request::builder()
+    // Case 3: No auth required - should return Ok(None)
+    let no_auth = UserPasswordAuth::none();
+    let req_no_auth = http::Request::builder()
       .method(http::Method::CONNECT)
       .uri("http://example.com:80")
       .body(())
       .unwrap();
-    assert!(perform_application_auth(&user_password_auth, &req).is_err());
+    let result = no_auth.verify_and_extract_username(&req_no_auth);
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_none());
+  }
+
+  // ============== record_access_log Tests ==============
+
+  #[test]
+  fn test_record_access_log_writes_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = crate::access_log::AccessLogConfig {
+      enabled: true,
+      path_prefix: "h3test.log".to_string(),
+      format: crate::access_log::LogFormat::Text,
+      buffer: crate::access_log::HumanBytes(64),
+      flush: crate::access_log::HumanDuration(
+        std::time::Duration::from_millis(100),
+      ),
+      max_size: crate::access_log::HumanBytes(1024 * 1024),
+    };
+    let writer = crate::access_log::AccessLogWriter::new(
+      dir.path().to_str().unwrap(),
+      &config,
+    );
+
+    let client_addr: SocketAddr = "192.168.1.1:54321".parse().unwrap();
+    let mut metrics = crate::access_log::ServiceMetrics::new();
+    metrics.add("connect_ms", 42u64);
+
+    record_access_log(
+      &writer,
+      client_addr,
+      Some("testuser".to_string()),
+      crate::access_log::AuthType::Password,
+      "CONNECT".to_string(),
+      "example.com:443".to_string(),
+      200,
+      std::time::Duration::from_millis(50),
+      "tunnel".to_string(),
+      metrics,
+    );
+
+    writer.flush();
+
+    // Verify log file was created and contains expected fields
+    let mut found = false;
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+      let entry = entry.unwrap();
+      let name = entry.file_name().to_string_lossy().to_string();
+      if name.starts_with("h3test.log") {
+        let content = std::fs::read_to_string(entry.path()).unwrap();
+        assert!(
+          content.contains("192.168.1.1:54321"),
+          "Should contain client addr"
+        );
+        assert!(
+          content.contains("CONNECT example.com:443"),
+          "Should contain request line"
+        );
+        assert!(content.contains("200"), "Should contain status code");
+        assert!(
+          content.contains("service=tunnel"),
+          "Should contain service name"
+        );
+        assert!(
+          content.contains("service.connect_ms=42"),
+          "Should contain service metrics"
+        );
+        assert!(
+          content.contains("auth=password"),
+          "Should contain auth type"
+        );
+        found = true;
+      }
+    }
+    assert!(found, "Access log file should exist");
   }
 }

@@ -252,8 +252,9 @@ impl tower::Service<plugin::Request> for ConnectTcpService {
     };
 
     Box::pin(async move {
-      // Connect to target server
+      // Connect to target server with timing
       let addr = format!("{host}:{port}");
+      let connect_start = std::time::Instant::now();
       let target_stream = match net::TcpStream::connect(&addr).await {
         Ok(stream) => stream,
         Err(e) => {
@@ -270,9 +271,13 @@ impl tower::Service<plugin::Request> for ConnectTcpService {
           return Ok(build_empty_response(status));
         }
       };
+      let connect_ms = connect_start.elapsed().as_millis() as u64;
 
-      // Build 200 response
-      let resp = build_empty_response(http::StatusCode::OK);
+      // Build 200 response with ServiceMetrics
+      let mut resp = build_empty_response(http::StatusCode::OK);
+      let mut metrics = crate::access_log::ServiceMetrics::new();
+      metrics.add("connect_ms", connect_ms);
+      resp.extensions_mut().insert(metrics);
 
       // Get shutdown handle
       let shutdown_handle = tunnel_tracker.shutdown_handle();
@@ -1419,6 +1424,54 @@ mod tests {
         let resp = service.call(req).await.unwrap();
         // Connection refused -> BAD_GATEWAY (before reaching upgrade)
         assert_eq!(resp.status(), http::StatusCode::BAD_GATEWAY);
+      })
+      .await;
+  }
+
+  // ============== ServiceMetrics Tests ==============
+
+  #[tokio::test]
+  async fn test_service_response_contains_service_metrics() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        // Start a local TCP server
+        let target_listener =
+          tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+
+        let service = ConnectTcpService::new_for_test();
+        let mut service = plugin::Service::new(service);
+        let req = make_connect_request(
+          http::Method::CONNECT,
+          &format!("127.0.0.1:{}", target_addr.port()),
+        );
+        let resp = service.call(req).await.unwrap();
+
+        // Must assert status first so a failed connect is a clear test failure
+        assert_eq!(
+          resp.status(),
+          http::StatusCode::OK,
+          "CONNECT to local TCP server must succeed"
+        );
+
+        // Response should have ServiceMetrics in extensions
+        let metrics = resp
+          .extensions()
+          .get::<crate::access_log::ServiceMetrics>();
+        assert!(
+          metrics.is_some(),
+          "Response should contain ServiceMetrics"
+        );
+        let metrics = metrics.unwrap();
+        // Should have connect_ms at minimum
+        let has_connect = metrics
+          .iter()
+          .any(|(k, _)| k == "connect_ms");
+        assert!(
+          has_connect,
+          "ServiceMetrics should contain connect_ms"
+        );
       })
       .await;
   }

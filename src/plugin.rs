@@ -116,6 +116,18 @@ impl Listener {
 
 pub type SerializedArgs = serde_yaml::Value;
 
+/// Context passed to listener builders alongside args and service.
+///
+/// This struct carries additional information needed by listeners,
+/// such as access log writer and service name for logging purposes.
+#[derive(Clone)]
+pub struct ListenerBuildContext {
+  /// Optional access log writer for logging request/response information.
+  pub access_log_writer: Option<crate::access_log::AccessLogWriter>,
+  /// Service name for identification in logs.
+  pub service_name: String,
+}
+
 /// an alias for shorten complex trait definition.
 pub trait BuildService: Fn(SerializedArgs) -> Result<Service> {}
 
@@ -123,12 +135,16 @@ impl<F> BuildService for F where F: Fn(SerializedArgs) -> Result<Service> {}
 
 /// an alias for shorten complex trait definition.
 pub trait BuildListener:
-  Fn(SerializedArgs, Service) -> Result<Listener> + Sync + Send
+  Fn(SerializedArgs, Service, ListenerBuildContext) -> Result<Listener>
+  + Sync
+  + Send
 {
 }
 
 impl<F> BuildListener for F where
-  F: Fn(SerializedArgs, Service) -> Result<Listener> + Sync + Send
+  F: Fn(SerializedArgs, Service, ListenerBuildContext) -> Result<Listener>
+    + Sync
+    + Send
 {
 }
 
@@ -400,5 +416,117 @@ mod tests {
       result.is_ok(),
       "Default uninstall should complete immediately"
     );
+  }
+
+  // ============== ListenerBuildContext Tests ==============
+
+  #[test]
+  fn test_listener_build_context_new() {
+    let ctx = ListenerBuildContext {
+      access_log_writer: None,
+      service_name: "test_service".to_string(),
+    };
+    assert!(ctx.access_log_writer.is_none());
+    assert_eq!(ctx.service_name, "test_service");
+  }
+
+  #[test]
+  fn test_listener_build_context_clone() {
+    let ctx = ListenerBuildContext {
+      access_log_writer: None,
+      service_name: "test_service".to_string(),
+    };
+    let cloned = ctx.clone();
+    assert_eq!(ctx.service_name, cloned.service_name);
+  }
+
+  #[test]
+  fn test_listener_build_context_empty_service_name() {
+    let ctx = ListenerBuildContext {
+      access_log_writer: None,
+      service_name: String::new(),
+    };
+    assert!(ctx.service_name.is_empty());
+  }
+
+  /// A dummy service for testing BuildListener trait.
+  #[derive(Clone)]
+  struct DummyTestService;
+
+  impl tower::Service<Request> for DummyTestService {
+    type Error = anyhow::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Response>>>>;
+    type Response = Response;
+
+    fn poll_ready(
+      &mut self,
+      _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<()>> {
+      std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _req: Request) -> Self::Future {
+      Box::pin(async { anyhow::bail!("DummyTestService not implemented") })
+    }
+  }
+
+  /// A test listener builder that accepts ListenerBuildContext.
+  fn test_listener_builder(
+    _args: SerializedArgs,
+    _svc: Service,
+    ctx: ListenerBuildContext,
+  ) -> Result<Listener> {
+    // Verify that we received the context
+    assert!(!ctx.service_name.is_empty() || ctx.access_log_writer.is_none());
+    // Return a dummy listener
+    struct DummyListener;
+    impl Listening for DummyListener {
+      fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+        Box::pin(async { Ok(()) })
+      }
+      fn stop(&self) {}
+    }
+    Ok(Listener::new(DummyListener))
+  }
+
+  #[test]
+  fn test_build_listener_trait_with_context() {
+    // Verify that the BuildListener trait accepts a function with
+    // ListenerBuildContext parameter
+    let builder: Box<dyn BuildListener> = Box::new(test_listener_builder);
+    let ctx = ListenerBuildContext {
+      access_log_writer: None,
+      service_name: "my_service".to_string(),
+    };
+    let dummy_service = Service::new(DummyTestService);
+    let result = builder(SerializedArgs::Null, dummy_service, ctx);
+    assert!(result.is_ok());
+  }
+
+  #[test]
+  fn test_build_listener_with_empty_context() {
+    fn builder(
+      _args: SerializedArgs,
+      _svc: Service,
+      _ctx: ListenerBuildContext,
+    ) -> Result<Listener> {
+      struct DummyListener;
+      impl Listening for DummyListener {
+        fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+          Box::pin(async { Ok(()) })
+        }
+        fn stop(&self) {}
+      }
+      Ok(Listener::new(DummyListener))
+    }
+
+    let builder: Box<dyn BuildListener> = Box::new(builder);
+    let ctx = ListenerBuildContext {
+      access_log_writer: None,
+      service_name: String::new(),
+    };
+    let dummy_service = Service::new(DummyTestService);
+    let result = builder(SerializedArgs::Null, dummy_service, ctx);
+    assert!(result.is_ok());
   }
 }

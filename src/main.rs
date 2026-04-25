@@ -25,9 +25,48 @@ mod server;
 mod shutdown;
 mod stream;
 mod h3_stream;
+mod access_log;
 
 /// Thread check interval for detecting worker thread exit.
 const THREAD_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Configuration for the non-blocking log writer.
+///
+/// This struct holds configuration for the tracing_appender non-blocking writer.
+/// The default `buffered_lines_limit(1)` ensures logs are written immediately
+/// without buffering delay.
+#[derive(Debug, Clone, Copy)]
+struct LogWriterConfig {
+  /// Number of lines to buffer before flushing.
+  /// Set to 1 to ensure each log line is sent to the background thread immediately.
+  buffered_lines_limit: usize,
+}
+
+impl Default for LogWriterConfig {
+  fn default() -> Self {
+    Self {
+      buffered_lines_limit: 1,
+    }
+  }
+}
+
+impl LogWriterConfig {
+  /// Build a NonBlocking writer with the configured settings.
+  fn build<W>(
+    &self,
+    writer: W,
+  ) -> (
+    tracing_appender::non_blocking::NonBlocking,
+    tracing_appender::non_blocking::WorkerGuard,
+  )
+  where
+    W: std::io::Write + Send + 'static,
+  {
+    tracing_appender::non_blocking::NonBlockingBuilder::default()
+      .buffered_lines_limit(self.buffered_lines_limit)
+      .finish(writer)
+  }
+}
 
 /// Exit reason for determining the exit code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,7 +128,9 @@ fn init_log() -> tracing_appender::non_blocking::WorkerGuard {
     "neoproxy.log",
   );
 
-  let (writer, guard) = tracing_appender::non_blocking(log_appender);
+  let config = LogWriterConfig::default();
+  let (writer, guard) = config.build(log_appender);
+
   let filter = tracing_subscriber::EnvFilter::builder()
     .with_default_directive(
       tracing_subscriber::filter::LevelFilter::INFO.into(),
@@ -1140,6 +1181,31 @@ mod tests {
       assert!(name.contains("neoproxy"));
       assert!(name.contains(&format!("{i}")));
     }
+  }
+
+  // ============== LogWriterConfig Tests ==============
+
+  /// Test that LogWriterConfig defaults to buffered_lines_limit(1) to fix
+  /// the runtime log delay issue. Without this, logs are buffered and
+  /// written with delay.
+  #[test]
+  fn test_log_writer_config_buffered_lines_limit_defaults_to_1() {
+    let config = LogWriterConfig::default();
+    assert_eq!(
+      config.buffered_lines_limit, 1,
+      "buffered_lines_limit should be 1 to ensure logs are written immediately"
+    );
+  }
+
+  /// Test that LogWriterConfig can build a NonBlocking writer.
+  #[test]
+  fn test_log_writer_config_builds_non_blocking_writer() {
+    use std::io::Cursor;
+
+    let config = LogWriterConfig::default();
+    let cursor = Cursor::new(Vec::new());
+    let (_writer, _guard) = config.build(cursor);
+    // If we get here without panicking, the build succeeded
   }
 
   // ============== create_signal_future Tests ==============

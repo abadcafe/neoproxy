@@ -9,6 +9,7 @@ use anyhow::Result;
 use tokio::{runtime, sync, task, time::timeout};
 use tracing::{info, warn};
 
+use crate::access_log::{AccessLogConfig, AccessLogWriter};
 use crate::config::Config;
 use crate::config_validator::parse_kind;
 use crate::listeners::ListenerBuilderSet;
@@ -184,6 +185,7 @@ impl PluginSet {
 async fn server_thread_main(shutdown: Arc<sync::Notify>) -> Result<()> {
   let mut ctx = ShutdownContext::new();
   let mut services = HashMap::new();
+  let mut access_log_writers: Vec<AccessLogWriter> = Vec::new();
 
   // Build all services
   // Note: Config validation ensures all plugins and builders exist
@@ -208,10 +210,42 @@ async fn server_thread_main(shutdown: Arc<sync::Notify>) -> Result<()> {
   // Note: Config validation ensures all builders, and service
   // references exist
   for sc in &Config::global().servers {
+    // Resolve effective access log config for this server
+    let effective_access_log = match (
+      &Config::global().access_log,
+      &sc.access_log,
+    ) {
+      (Some(base), Some(override_cfg)) => Some(base.merge(override_cfg)),
+      (Some(base), None) => Some(base.clone()),
+      (None, Some(override_cfg)) => {
+        // No top-level config; merge override onto defaults
+        Some(AccessLogConfig::default().merge(override_cfg))
+      }
+      (None, None) => None,
+    };
+
+    // Create writer if access log is enabled
+    let access_log_writer = effective_access_log
+      .as_ref()
+      .filter(|c| c.enabled)
+      .map(|c| {
+        AccessLogWriter::new(Config::global().log_directory.as_str(), c)
+      });
+
+    // Collect writers for shutdown flush
+    if let Some(ref w) = access_log_writer {
+      access_log_writers.push(w.clone());
+    }
+
     for lc in &sc.listeners {
       let builder = ListenerBuilderSet::global()
         .listener_builder(&lc.kind)
         .expect("listener builder should exist (validated)");
+
+      let build_ctx = plugin::ListenerBuildContext {
+        access_log_writer: access_log_writer.clone(),
+        service_name: sc.service.clone(),
+      };
 
       let l: plugin::Listener = builder(
         lc.args.clone(),
@@ -219,6 +253,7 @@ async fn server_thread_main(shutdown: Arc<sync::Notify>) -> Result<()> {
           .get(sc.service.as_str())
           .expect("service should exist (validated)")
           .clone(),
+        build_ctx,
       )?;
       let l = Rc::new(l);
       ctx.listeners.push(Rc::clone(&l));
@@ -228,6 +263,11 @@ async fn server_thread_main(shutdown: Arc<sync::Notify>) -> Result<()> {
 
   // Wait for shutdown signal
   shutdown.notified().await;
+
+  // Flush all access log writers before shutdown
+  for w in &access_log_writers {
+    w.flush();
+  }
 
   // Execute graceful shutdown
   ctx.graceful_shutdown().await;

@@ -504,6 +504,19 @@ fn build_error_response(
   resp
 }
 
+/// Build a 200 OK tunnel response with ServiceMetrics attached.
+///
+/// Extracted to enable unit testing of the metrics insertion logic.
+fn build_tunnel_response_with_metrics(
+  connect_ms: u64,
+) -> plugin::Response {
+  let mut resp = build_empty_response(http::StatusCode::OK);
+  let mut metrics = crate::access_log::ServiceMetrics::new();
+  metrics.add("connect_ms", connect_ms);
+  resp.extensions_mut().insert(metrics);
+  resp
+}
+
 // ============================================================================
 // HTTP/3 Chain Service Configuration
 // ============================================================================
@@ -773,8 +786,10 @@ async fn send_connect_and_tunnel_with_credential(
   user_password_credential.apply(&mut proxy_req);
 
   info!("Http3ChainService: sending CONNECT request");
+  let proxy_start = std::time::Instant::now();
   let mut proxy_stream = requester.send_request(proxy_req).await?;
   let proxy_resp = proxy_stream.recv_response().await?;
+  let proxy_ms = proxy_start.elapsed().as_millis() as u64;
   info!(
     "Http3ChainService: received CONNECT response: status={}",
     proxy_resp.status()
@@ -801,6 +816,7 @@ async fn send_connect_and_tunnel_with_credential(
     socks5_upgrade,
     h3_upgrade,
     http_upgrade,
+    proxy_ms,
   )
   .await
 }
@@ -816,8 +832,9 @@ async fn complete_tunnel(
   socks5_upgrade: Option<plugin::Socks5OnUpgrade>,
   h3_upgrade: Option<plugin::H3OnUpgrade>,
   http_upgrade: Option<hyper::upgrade::OnUpgrade>,
+  connect_ms: u64,
 ) -> Result<plugin::Response> {
-  let resp = build_empty_response(http::StatusCode::OK);
+  let resp = build_tunnel_response_with_metrics(connect_ms);
   let shutdown_handle = st.shutdown_handle();
 
   st.register(async move {
@@ -1795,5 +1812,30 @@ default_credential:
       "Invalid target address",
     );
     assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+  }
+
+  // ============== ServiceMetrics Tests ==============
+
+  #[test]
+  fn test_build_tunnel_response_with_metrics() {
+    let resp = build_tunnel_response_with_metrics(42);
+
+    assert_eq!(resp.status(), http::StatusCode::OK);
+
+    let metrics = resp
+      .extensions()
+      .get::<crate::access_log::ServiceMetrics>();
+    assert!(
+      metrics.is_some(),
+      "Response should contain ServiceMetrics"
+    );
+    let metrics = metrics.unwrap();
+    let has_connect = metrics
+      .iter()
+      .any(|(k, v)| k == "connect_ms" && v == "42");
+    assert!(
+      has_connect,
+      "ServiceMetrics should contain connect_ms=42"
+    );
   }
 }

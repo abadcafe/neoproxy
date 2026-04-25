@@ -29,14 +29,26 @@ const MONITORING_LOG_INTERVAL: Duration = Duration::from_secs(60);
 struct HyperServiceAdaptor {
   s: plugin::Service,
   user_password_auth: UserPasswordAuth,
+  access_log_writer: Option<crate::access_log::AccessLogWriter>,
+  service_name: String,
+  client_addr: Option<SocketAddr>,
 }
 
 impl HyperServiceAdaptor {
   fn new(
     s: plugin::Service,
     user_password_auth: UserPasswordAuth,
+    access_log_writer: Option<crate::access_log::AccessLogWriter>,
+    service_name: String,
+    client_addr: Option<SocketAddr>,
   ) -> Self {
-    Self { s, user_password_auth }
+    Self {
+      s,
+      user_password_auth,
+      access_log_writer,
+      service_name,
+      client_addr,
+    }
   }
 }
 
@@ -51,6 +63,8 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
     &self,
     req: http::Request<hyper_body::Incoming>,
   ) -> Self::Future {
+    let start_time = std::time::Instant::now();
+
     // Build an http::Request<()> for auth verification, copying headers
     let mut auth_req_builder = http::Request::builder()
       .method(req.method().clone())
@@ -64,18 +78,70 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
 
     let auth_req = auth_req_builder.body(()).unwrap();
 
-    // Check authentication if configured
-    if let Err(_) = self.user_password_auth.verify(&auth_req) {
-      return Box::pin(async { Ok(build_407_response()) });
-    }
+    // Check authentication if configured and extract username in one pass
+    let verify_result = self.user_password_auth.verify_and_extract_username(&auth_req);
+    let (user, auth_type) = match verify_result {
+      Ok(Some(username)) => (Some(username), crate::access_log::AuthType::Password),
+      Ok(None) => (None, crate::access_log::AuthType::None),
+      Err(_) => return Box::pin(async { Ok(build_407_response()) }),
+    };
 
     let (parts, body) = req.into_parts();
     let req = plugin::Request::from_parts(
       parts,
       plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(body)),
     );
+
+    // Capture values for the async block
+    let access_log_writer = self.access_log_writer.clone();
+    let service_name = self.service_name.clone();
+    let client_addr = self.client_addr;
+    let method = req.method().to_string();
+    let target = req.uri().to_string();
+
     let s = self.s.clone();
-    Box::pin(tower_util::Oneshot::new(s, req))
+    Box::pin(async move {
+      let resp = tower_util::Oneshot::new(s, req).await;
+
+      // Record access log by calling the tested helper
+      if let Some(ref writer) = access_log_writer {
+        let duration = start_time.elapsed();
+        let status = match &resp {
+          Ok(r) => r.status().as_u16(),
+          Err(_) => 500,
+        };
+
+        let addr = client_addr
+          .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+
+        // Extract ServiceMetrics from response extensions
+        let service_metrics = resp
+          .as_ref()
+          .ok()
+          .and_then(|r| {
+            r.extensions()
+              .get::<crate::access_log::ServiceMetrics>()
+              .cloned()
+          })
+          .unwrap_or_default();
+
+        let params = crate::access_log::HttpAccessLogParams {
+          client_addr: addr,
+          user,
+          auth_type,
+          method,
+          target,
+          status,
+          duration,
+          service_name,
+          service_metrics,
+        };
+
+        record_access_log(writer, &params);
+      }
+
+      resp
+    })
   }
 }
 
@@ -91,6 +157,30 @@ fn build_407_response() -> plugin::Response {
     http::HeaderValue::from_static("Basic realm=\"proxy\""),
   );
   resp
+}
+
+/// Record an access log entry for an HTTP request.
+///
+/// Extracted from HyperServiceAdaptor::call() to enable unit testing.
+fn record_access_log(
+  writer: &crate::access_log::AccessLogWriter,
+  params: &crate::access_log::HttpAccessLogParams,
+) {
+  let entry = crate::access_log::AccessLogEntry {
+    time: time::OffsetDateTime::now_local()
+      .unwrap_or_else(|_| time::OffsetDateTime::now_utc()),
+    client_ip: params.client_addr.ip().to_string(),
+    client_port: params.client_addr.port(),
+    user: params.user.clone(),
+    auth_type: params.auth_type,
+    method: params.method.clone(),
+    target: params.target.clone(),
+    status: params.status,
+    duration_ms: params.duration.as_millis() as u64,
+    service: params.service_name.clone(),
+    service_metrics: params.service_metrics.clone(),
+  };
+  writer.write(&entry);
 }
 
 #[derive(Clone)]
@@ -123,6 +213,8 @@ struct HyperListener {
   service: plugin::Service,
   graceful_shutdown_timeout: Duration,
   user_password_auth: UserPasswordAuth,
+  access_log_writer: Option<crate::access_log::AccessLogWriter>,
+  service_name: String,
 }
 
 impl HyperListener {
@@ -130,6 +222,7 @@ impl HyperListener {
   fn from_args(
     args: HyperListenerArgs,
     svc: plugin::Service,
+    ctx: plugin::ListenerBuildContext,
   ) -> Result<Self> {
     // Parse auth config if present
     let user_password_auth = match args.auth {
@@ -177,6 +270,8 @@ impl HyperListener {
       service: svc,
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
       user_password_auth,
+      access_log_writer: ctx.access_log_writer,
+      service_name: ctx.service_name,
     })
   }
 
@@ -184,9 +279,10 @@ impl HyperListener {
   fn new(
     sargs: plugin::SerializedArgs,
     svc: plugin::Service,
+    ctx: plugin::ListenerBuildContext,
   ) -> Result<plugin::Listener> {
     let args: HyperListenerArgs = serde_yaml::from_value(sargs)?;
-    Ok(plugin::Listener::new(Self::from_args(args, svc)?))
+    Ok(plugin::Listener::new(Self::from_args(args, svc, ctx)?))
   }
 
   /// Create a HyperListener directly for testing purposes.
@@ -196,7 +292,11 @@ impl HyperListener {
     svc: plugin::Service,
   ) -> Result<Self> {
     let args: HyperListenerArgs = serde_yaml::from_value(sargs)?;
-    Self::from_args(args, svc)
+    let ctx = plugin::ListenerBuildContext {
+      access_log_writer: None,
+      service_name: String::new(),
+    };
+    Self::from_args(args, svc, ctx)
   }
 
   fn serve_addr(
@@ -215,6 +315,8 @@ impl HyperListener {
     let connection_tracker = self.connection_tracker.clone();
     let shutdown_handle = self.connection_tracker.shutdown_handle();
     let user_password_auth = self.user_password_auth.clone();
+    let access_log_writer = self.access_log_writer.clone();
+    let service_name = self.service_name.clone();
     let accepting_fut = async move {
       // Log listener startup event
       info!("HTTP listener started on {}", addr);
@@ -230,11 +332,14 @@ impl HyperListener {
           Err(e) => {
             error!("accepting new connection failed: {e}");
           }
-          Ok((stream, _raddr)) => {
+          Ok((stream, raddr)) => {
             let io = rt_util::TokioIo::new(stream);
             let svc = HyperServiceAdaptor::new(
               svc.clone(),
               user_password_auth.clone(),
+              access_log_writer.clone(),
+              service_name.clone(),
+              Some(raddr),
             );
             let builder =
               conn_util::Builder::new(TokioLocalExecutor {});
@@ -406,7 +511,11 @@ mod tests {
     let builder = create_listener_builder();
     let args = create_test_listener_args();
     let svc = create_test_service();
-    let result = builder(args, svc);
+    let ctx = plugin::ListenerBuildContext {
+      access_log_writer: None,
+      service_name: String::new(),
+    };
+    let result = builder(args, svc, ctx);
     assert!(result.is_ok());
   }
 
@@ -414,7 +523,11 @@ mod tests {
   fn test_hyper_listener_new_valid() {
     let args = create_test_listener_args();
     let svc = create_test_service();
-    let result = HyperListener::new(args, svc);
+    let ctx = plugin::ListenerBuildContext {
+      access_log_writer: None,
+      service_name: String::new(),
+    };
+    let result = HyperListener::new(args, svc, ctx);
     assert!(result.is_ok());
   }
 
@@ -422,7 +535,11 @@ mod tests {
   fn test_hyper_listener_new_invalid_address() {
     let args = create_test_listener_args_with_invalid();
     let svc = create_test_service();
-    let result = HyperListener::new(args, svc);
+    let ctx = plugin::ListenerBuildContext {
+      access_log_writer: None,
+      service_name: String::new(),
+    };
+    let result = HyperListener::new(args, svc, ctx);
     // Invalid addresses are filtered out, so it should still succeed
     assert!(result.is_ok());
   }
@@ -433,7 +550,11 @@ mod tests {
       serde_yaml::from_str(r#"{protocols: [], hostnames: []}"#)
         .unwrap();
     let svc = create_test_service();
-    let result = HyperListener::new(args, svc);
+    let ctx = plugin::ListenerBuildContext {
+      access_log_writer: None,
+      service_name: String::new(),
+    };
+    let result = HyperListener::new(args, svc, ctx);
     // Missing required field should fail
     assert!(result.is_err());
   }
@@ -462,8 +583,13 @@ mod tests {
   #[test]
   fn test_hyper_service_adaptor_creation() {
     let svc = create_test_service();
-    let _adaptor =
-      HyperServiceAdaptor::new(svc, UserPasswordAuth::none());
+    let _adaptor = HyperServiceAdaptor::new(
+      svc,
+      UserPasswordAuth::none(),
+      None,
+      String::new(),
+      None,
+    );
   }
 
   #[test]
@@ -518,7 +644,11 @@ hostnames:
     // Verify struct has all expected fields
     let args = create_test_listener_args();
     let svc = create_test_service();
-    let listener = HyperListener::new(args, svc);
+    let ctx = plugin::ListenerBuildContext {
+      access_log_writer: None,
+      service_name: String::new(),
+    };
+    let listener = HyperListener::new(args, svc, ctx);
 
     // This test verifies the constructor succeeds
     assert!(listener.is_ok());
@@ -699,7 +829,13 @@ auth:
     };
     let auth = UserPasswordAuth::from_config(&config);
     let svc = create_test_service();
-    let adaptor = HyperServiceAdaptor::new(svc, auth);
+    let adaptor = HyperServiceAdaptor::new(
+      svc,
+      auth,
+      None,
+      String::new(),
+      None,
+    );
 
     // Verify that auth was stored
     assert!(
@@ -718,10 +854,136 @@ auth:
   }
 
   #[test]
+  fn test_record_access_log_writes_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = crate::access_log::AccessLogConfig {
+      enabled: true,
+      path_prefix: "hypertest.log".to_string(),
+      format: crate::access_log::LogFormat::Text,
+      buffer: crate::access_log::HumanBytes(64),
+      flush: crate::access_log::HumanDuration(
+        std::time::Duration::from_millis(100),
+      ),
+      max_size: crate::access_log::HumanBytes(1024 * 1024),
+    };
+    let writer = crate::access_log::AccessLogWriter::new(
+      dir.path().to_str().unwrap(),
+      &config,
+    );
+
+    let client_addr: SocketAddr =
+      "192.168.1.1:54321".parse().unwrap();
+    let mut metrics = crate::access_log::ServiceMetrics::new();
+    metrics.add("connect_ms", 42u64);
+
+    let params = crate::access_log::HttpAccessLogParams {
+      client_addr,
+      user: Some("testuser".to_string()),
+      auth_type: crate::access_log::AuthType::Password,
+      method: "CONNECT".to_string(),
+      target: "example.com:443".to_string(),
+      status: 200,
+      duration: std::time::Duration::from_millis(50),
+      service_name: "tunnel".to_string(),
+      service_metrics: metrics,
+    };
+
+    record_access_log(&writer, &params);
+
+    writer.flush();
+
+    // Verify log file was created and contains expected fields
+    let mut found = false;
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+      let entry = entry.unwrap();
+      let name = entry.file_name().to_string_lossy().to_string();
+      if name.starts_with("hypertest.log") {
+        let content =
+          std::fs::read_to_string(entry.path()).unwrap();
+        assert!(
+          content.contains("192.168.1.1:54321"),
+          "Should contain client addr"
+        );
+        assert!(
+          content.contains("CONNECT example.com:443"),
+          "Should contain request line"
+        );
+        assert!(
+          content.contains("200"),
+          "Should contain status code"
+        );
+        assert!(
+          content.contains("service=tunnel"),
+          "Should contain service name"
+        );
+        assert!(
+          content.contains("service.connect_ms=42"),
+          "Should contain service metrics"
+        );
+        assert!(
+          content.contains("auth=password"),
+          "Should contain auth type"
+        );
+        found = true;
+      }
+    }
+    assert!(found, "Access log file should exist");
+  }
+
+  #[test]
+  fn test_hyper_listener_stores_access_log_writer() {
+    let args = create_test_listener_args();
+    let svc = create_test_service();
+    let ctx = plugin::ListenerBuildContext {
+      access_log_writer: None,
+      service_name: "test_service".to_string(),
+    };
+    let listener =
+      HyperListener::new(args, svc, ctx).unwrap();
+    // Should compile and create without error
+    drop(listener);
+  }
+
+  #[test]
+  fn test_hyper_listener_with_access_log_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = crate::access_log::AccessLogConfig {
+      enabled: true,
+      path_prefix: "test.log".to_string(),
+      format: crate::access_log::LogFormat::Text,
+      buffer: crate::access_log::HumanBytes(256),
+      flush: crate::access_log::HumanDuration(
+        std::time::Duration::from_millis(100),
+      ),
+      max_size: crate::access_log::HumanBytes(1024 * 1024),
+    };
+    let writer = crate::access_log::AccessLogWriter::new(
+      dir.path().to_str().unwrap(),
+      &config,
+    );
+
+    let args = create_test_listener_args();
+    let svc = create_test_service();
+    let ctx = plugin::ListenerBuildContext {
+      access_log_writer: Some(writer),
+      service_name: "tunnel".to_string(),
+    };
+    let listener =
+      HyperListener::new(args, svc, ctx).unwrap();
+    // Should compile and create without error
+    drop(listener);
+  }
+
+  #[test]
   fn test_adaptor_no_credentials_without_auth() {
     let svc = create_test_service();
-    let adaptor =
-      HyperServiceAdaptor::new(svc, UserPasswordAuth::none());
+    let adaptor = HyperServiceAdaptor::new(
+      svc,
+      UserPasswordAuth::none(),
+      None,
+      String::new(),
+      None,
+    );
 
     // Verify that without auth, verify passes
     assert!(

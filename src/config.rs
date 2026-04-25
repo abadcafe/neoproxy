@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use serde::Deserialize;
 
+use crate::access_log::{AccessLogConfig, AccessLogOverride};
 use crate::config_validator::{
   ConfigErrorCollector, ConfigErrorKind, parse_kind,
 };
@@ -49,6 +50,8 @@ pub struct Server {
   pub name: String,
   pub listeners: Vec<Listener>,
   pub service: String,
+  #[serde(default)]
+  pub access_log: Option<AccessLogOverride>,
 }
 
 #[derive(Deserialize, Default, Clone, Debug)]
@@ -74,6 +77,8 @@ pub struct Service {
 pub struct Config {
   pub worker_threads: usize,
   pub log_directory: String,
+  #[serde(default)]
+  pub access_log: Option<AccessLogConfig>,
   pub services: Vec<Service>,
   pub servers: Vec<Server>,
 }
@@ -83,6 +88,7 @@ impl Default for Config {
     Self {
       worker_threads: 1,
       log_directory: String::from("logs/"),
+      access_log: None,
       services: vec![],
       servers: vec![],
     }
@@ -244,7 +250,12 @@ impl Config {
     // Validate args by calling the builder with a dummy service
     // This will catch args parsing errors
     let dummy_service = plugin::Service::new(DummyService {});
-    if let Err(e) = builder(listener.args.clone(), dummy_service) {
+    let dummy_context = plugin::ListenerBuildContext {
+      access_log_writer: None,
+      service_name: String::new(),
+    };
+    if let Err(e) = builder(listener.args.clone(), dummy_service, dummy_context)
+    {
       collector.add(
         args_location,
         e.to_string(),
@@ -1075,6 +1086,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1093,6 +1105,7 @@ worker_threads: [
           args: serde_yaml::Value::Null,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1114,6 +1127,7 @@ worker_threads: [
           args: serde_yaml::Value::Null,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1138,6 +1152,7 @@ worker_threads: [
         name: "test_server".to_string(),
         listeners: vec![],
         service: "nonexistent".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1165,6 +1180,7 @@ worker_threads: [
         name: "test_server".to_string(),
         listeners: vec![],
         service: "existing".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1187,6 +1203,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1209,6 +1226,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1234,6 +1252,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1262,6 +1281,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1303,6 +1323,7 @@ worker_threads: [
             args: listener_args.clone(),
           }],
           service: "echo".to_string(),
+          ..Default::default()
         },
         Server {
           name: "server2".to_string(),
@@ -1311,6 +1332,7 @@ worker_threads: [
             args: listener_args,
           }],
           service: "connect".to_string(),
+          ..Default::default()
         },
       ],
       ..Default::default()
@@ -1341,6 +1363,7 @@ worker_threads: [
         name: "server".to_string(),
         listeners: vec![],
         service: "nonexistent".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1393,6 +1416,7 @@ worker_threads: [
     let config = Config {
       worker_threads: 2,
       log_directory: "test/".to_string(),
+      access_log: None,
       services: vec![],
       servers: vec![],
     };
@@ -1410,6 +1434,7 @@ worker_threads: [
           args: serde_yaml::Value::Null,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1432,6 +1457,7 @@ worker_threads: [
         name: "test".to_string(),
         listeners: vec![],
         service: "".to_string(), // empty service name should be allowed
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1455,6 +1481,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1482,6 +1509,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1524,6 +1552,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1713,6 +1742,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1750,6 +1780,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1798,6 +1829,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1850,6 +1882,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1902,6 +1935,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -1952,6 +1986,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2008,6 +2043,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2063,6 +2099,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2120,6 +2157,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2176,6 +2214,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2225,6 +2264,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2271,6 +2311,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2322,6 +2363,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2374,6 +2416,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2424,6 +2467,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2483,6 +2527,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2544,6 +2589,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2606,6 +2652,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2658,6 +2705,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2710,6 +2758,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2761,6 +2810,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2826,6 +2876,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2883,6 +2934,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2935,6 +2987,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -2986,6 +3039,7 @@ worker_threads: [
             args,
           }],
           service: "".to_string(),
+        ..Default::default()
         }],
         ..Default::default()
       };
@@ -3051,6 +3105,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3113,6 +3168,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3173,6 +3229,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3219,6 +3276,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3266,6 +3324,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3313,6 +3372,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3358,6 +3418,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3401,6 +3462,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3444,6 +3506,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3487,6 +3550,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3532,6 +3596,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3574,6 +3639,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3617,6 +3683,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3660,6 +3727,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3716,6 +3784,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3768,6 +3837,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3847,6 +3917,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3916,6 +3987,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -3993,6 +4065,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -4071,6 +4144,7 @@ worker_threads: [
           args,
         }],
         service: "".to_string(),
+        ..Default::default()
       }],
       ..Default::default()
     };
@@ -4096,5 +4170,82 @@ worker_threads: [
       "Error should mention auth must be a single object, got: {:?}",
       auth_errors
     );
+  }
+
+  // =========================================================================
+  // Access Log Config Tests
+  // =========================================================================
+
+  #[test]
+  fn test_config_with_access_log() {
+    let yaml = r#"
+worker_threads: 1
+log_directory: logs/
+access_log:
+  enabled: true
+  path_prefix: "access.log"
+  format: text
+  buffer: 32kb
+  flush: 1s
+  max_size: 200mb
+services: []
+servers: []
+"#;
+    let mut config = Config::default();
+    config.parse_string(yaml).unwrap();
+    assert!(config.access_log.is_some());
+    let al = config.access_log.as_ref().unwrap();
+    assert!(al.enabled);
+    assert_eq!(al.path_prefix, "access.log");
+  }
+
+  #[test]
+  fn test_config_without_access_log() {
+    let yaml = r#"
+worker_threads: 1
+log_directory: logs/
+services: []
+servers: []
+"#;
+    let mut config = Config::default();
+    config.parse_string(yaml).unwrap();
+    assert!(config.access_log.is_none());
+  }
+
+  #[test]
+  fn test_server_with_access_log_override() {
+    let yaml = r#"
+worker_threads: 1
+log_directory: logs/
+access_log:
+  enabled: true
+  format: text
+servers:
+  - name: http_proxy
+    service: tunnel
+    access_log:
+      path_prefix: "http_access.log"
+      format: json
+    listeners: []
+services:
+  - name: tunnel
+    kind: connect_tcp.connect_tcp
+"#;
+    let mut config = Config::default();
+    config.parse_string(yaml).unwrap();
+    assert!(config.access_log.is_some());
+    assert!(config.servers[0].access_log.is_some());
+    let server_al = config.servers[0].access_log.as_ref().unwrap();
+    assert_eq!(
+      server_al.path_prefix,
+      Some("http_access.log".to_string())
+    );
+    // format is explicitly set
+    assert!(matches!(
+      server_al.format,
+      Some(crate::access_log::LogFormat::Json)
+    ));
+    // buffer is NOT set, should be None (inherited from top-level at merge time)
+    assert!(server_al.buffer.is_none());
   }
 }

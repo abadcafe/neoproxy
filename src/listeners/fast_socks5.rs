@@ -59,6 +59,10 @@ pub struct Socks5Listener {
   handshake_timeout: Duration,
   /// User password authentication.
   user_password_auth: UserPasswordAuth,
+  /// Access log writer for logging request/response information.
+  access_log_writer: Option<crate::access_log::AccessLogWriter>,
+  /// Service name for identification in logs.
+  service_name: String,
 }
 
 impl Socks5Listener {
@@ -82,6 +86,7 @@ impl Socks5Listener {
   pub fn new(
     args: Socks5ListenerArgs,
     svc: plugin::Service,
+    ctx: plugin::ListenerBuildContext,
   ) -> Result<plugin::Listener> {
     // Resolve addresses, skipping invalid ones
     let addresses = resolve_addresses(&args.addresses);
@@ -100,6 +105,8 @@ impl Socks5Listener {
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
       handshake_timeout: args.handshake_timeout,
       user_password_auth: args.user_password_auth,
+      access_log_writer: ctx.access_log_writer,
+      service_name: ctx.service_name,
     }))
   }
 
@@ -113,6 +120,8 @@ impl Socks5Listener {
   /// * `shutdown_handle` - Shutdown notification handle
   /// * `handshake_timeout` - Timeout for SOCKS5 handshake
   /// * `user_password_auth` - User password authentication
+  /// * `access_log_writer` - Access log writer (optional)
+  /// * `service_name` - Service name for access log
   ///
   /// # Returns
   ///
@@ -125,6 +134,8 @@ impl Socks5Listener {
     shutdown_handle: plugin::ShutdownHandle,
     handshake_timeout: Duration,
     user_password_auth: UserPasswordAuth,
+    access_log_writer: Option<crate::access_log::AccessLogWriter>,
+    service_name: String,
   ) -> Result<std::pin::Pin<Box<dyn Future<Output = Result<()>>>>> {
     // Create TCP socket based on address type
     let socket = match addr {
@@ -150,6 +161,8 @@ impl Socks5Listener {
       let shutdown_handle = shutdown_handle;
       let connection_tracker = connection_tracker;
       let service = service;
+      let access_log_writer = access_log_writer;
+      let service_name = service_name;
 
       // Create monitoring interval timer
       let mut monitoring_interval =
@@ -189,9 +202,14 @@ impl Socks5Listener {
             // Clone handles for use in connection handler
             let mut service = service.clone();
             let user_password_auth = user_password_auth.clone();
+            let access_log_writer = access_log_writer.clone();
+            let service_name = service_name.clone();
 
             // Register connection handler
             connection_tracker.register(async move {
+              // Capture start time for access log
+              let start_time = std::time::Instant::now();
+
               // Step 1: Perform SOCKS5 handshake with timeout protection
               let handshake_result =
                 match perform_handshake(stream, handshake_timeout, &user_password_auth)
@@ -316,9 +334,20 @@ impl Socks5Listener {
               // Step 5: Call the associated Service
               let result = service.call(request).await;
 
+              // Variables for access log
+              let status: u16;
+              let service_metrics: crate::access_log::ServiceMetrics;
+
               // Step 6: Based on Response, send SOCKS5 reply via trigger
               match result {
                 Ok(resp) => {
+                  status = resp.status().as_u16();
+                  service_metrics = resp
+                    .extensions()
+                    .get::<crate::access_log::ServiceMetrics>()
+                    .cloned()
+                    .unwrap_or_default();
+
                   if resp.status() == http::StatusCode::OK {
                     if let Err(e) = trigger.send_success().await {
                       tracing::warn!(
@@ -339,6 +368,9 @@ impl Socks5Listener {
                   }
                 }
                 Err(e) => {
+                  status = 500;
+                  service_metrics = crate::access_log::ServiceMetrics::new();
+
                   tracing::error!(
                     "SOCKS5 service error from {}: {}",
                     peer_addr,
@@ -355,6 +387,29 @@ impl Socks5Listener {
                     );
                   }
                 }
+              }
+
+              // Record access log after Step 6
+              if let Some(ref writer) = access_log_writer {
+                let duration = start_time.elapsed();
+                let auth_type = if handshake_result.username.is_some() {
+                  crate::access_log::AuthType::Password
+                } else {
+                  crate::access_log::AuthType::None
+                };
+
+                record_access_log(
+                  writer,
+                  peer_addr,
+                  handshake_result.username,
+                  auth_type,
+                  "CONNECT".to_string(),
+                  command_result.target_addr.to_string(),
+                  status,
+                  duration,
+                  service_name,
+                  service_metrics,
+                );
               }
             });
             false
@@ -430,6 +485,8 @@ impl plugin::Listening for Socks5Listener {
       let shutdown_handle = shutdown_handle.clone();
       let handshake_timeout = self.handshake_timeout;
       let user_password_auth = self.user_password_auth.clone();
+      let access_log_writer = self.access_log_writer.clone();
+      let service_name = self.service_name.clone();
 
       match self.serve_addr(
         addr,
@@ -438,6 +495,8 @@ impl plugin::Listening for Socks5Listener {
         shutdown_handle,
         handshake_timeout,
         user_password_auth,
+        access_log_writer,
+        service_name,
       ) {
         Ok(fut) => {
           listening_tasks.push(fut);
@@ -534,6 +593,8 @@ impl Clone for Socks5Listener {
       graceful_shutdown_timeout: self.graceful_shutdown_timeout,
       handshake_timeout: self.handshake_timeout,
       user_password_auth: self.user_password_auth.clone(),
+      access_log_writer: self.access_log_writer.clone(),
+      service_name: self.service_name.clone(),
     }
   }
 }
@@ -1255,13 +1316,49 @@ pub fn listener_name() -> &'static str {
 /// Returns a builder function that parses configuration and creates
 /// a Socks5Listener instance.
 pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
-  Box::new(|args: plugin::SerializedArgs, svc: plugin::Service| {
-    // Parse configuration
-    let listener_args = parse_config(args)?;
+  Box::new(
+    |args: plugin::SerializedArgs,
+     svc: plugin::Service,
+     ctx: plugin::ListenerBuildContext| {
+      // Parse configuration
+      let listener_args = parse_config(args)?;
 
-    // Create listener
-    Socks5Listener::new(listener_args, svc)
-  })
+      // Create listener
+      Socks5Listener::new(listener_args, svc, ctx)
+    },
+  )
+}
+
+/// Record an access log entry for a SOCKS5 request.
+///
+/// Extracted from the connection handler to enable unit testing.
+fn record_access_log(
+  writer: &crate::access_log::AccessLogWriter,
+  client_addr: SocketAddr,
+  user: Option<String>,
+  auth_type: crate::access_log::AuthType,
+  method: String,
+  target: String,
+  status: u16,
+  duration: std::time::Duration,
+  service_name: String,
+  service_metrics: crate::access_log::ServiceMetrics,
+) {
+  let entry = crate::access_log::AccessLogEntry {
+    time: time::OffsetDateTime::now_local()
+      .unwrap_or_else(|_| time::OffsetDateTime::now_utc()),
+    client_ip: client_addr.ip().to_string(),
+    client_port: client_addr.port(),
+    user,
+    auth_type,
+    method,
+    target,
+    status,
+    duration_ms: duration.as_millis() as u64,
+    service: service_name,
+    service_metrics,
+  };
+  writer.write(&entry);
 }
 
 #[cfg(test)]
@@ -1515,5 +1612,78 @@ addresses: []
   fn test_listening_trait_implementation() {
     fn assert_listening<T: plugin::Listening>() {}
     assert_listening::<Socks5Listener>();
+  }
+
+  // ========== Access Log Tests ==========
+
+  #[test]
+  fn test_record_access_log_writes_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = crate::access_log::AccessLogConfig {
+      enabled: true,
+      path_prefix: "socks5test.log".to_string(),
+      format: crate::access_log::LogFormat::Text,
+      buffer: crate::access_log::HumanBytes(64),
+      flush: crate::access_log::HumanDuration(
+        std::time::Duration::from_millis(100),
+      ),
+      max_size: crate::access_log::HumanBytes(1024 * 1024),
+    };
+    let writer = crate::access_log::AccessLogWriter::new(
+      dir.path().to_str().unwrap(),
+      &config,
+    );
+
+    let client_addr: SocketAddr = "192.168.1.1:54321".parse().unwrap();
+    let mut metrics = crate::access_log::ServiceMetrics::new();
+    metrics.add("connect_ms", 42u64);
+
+    record_access_log(
+      &writer,
+      client_addr,
+      Some("testuser".to_string()),
+      crate::access_log::AuthType::Password,
+      "CONNECT".to_string(),
+      "example.com:443".to_string(),
+      200,
+      std::time::Duration::from_millis(50),
+      "tunnel".to_string(),
+      metrics,
+    );
+
+    writer.flush();
+
+    // Verify log file was created and contains expected fields
+    let mut found = false;
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+      let entry = entry.unwrap();
+      let name = entry.file_name().to_string_lossy().to_string();
+      if name.starts_with("socks5test.log") {
+        let content = std::fs::read_to_string(entry.path()).unwrap();
+        assert!(
+          content.contains("192.168.1.1:54321"),
+          "Should contain client addr"
+        );
+        assert!(
+          content.contains("CONNECT example.com:443"),
+          "Should contain request line"
+        );
+        assert!(content.contains("200"), "Should contain status code");
+        assert!(
+          content.contains("service=tunnel"),
+          "Should contain service name"
+        );
+        assert!(
+          content.contains("service.connect_ms=42"),
+          "Should contain service metrics"
+        );
+        assert!(
+          content.contains("auth=password"),
+          "Should contain auth type"
+        );
+        found = true;
+      }
+    }
+    assert!(found, "Access log file should exist");
   }
 }

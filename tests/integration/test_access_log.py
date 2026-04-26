@@ -65,11 +65,9 @@ def write_config(
                 "service": "tunnel",
                 "listeners": [
                     {
-                        "kind": "hyper.listener",
+                        "kind": "http",
                         "args": {
                             "addresses": [f"127.0.0.1:{proxy_port}"],
-                            "protocols": [],
-                            "hostnames": [],
                         },
                     }
                 ],
@@ -248,7 +246,7 @@ def test_env() -> Generator[dict, None, None]:
     """
     Provide a test environment with temp dir and unique port.
     """
-    from tests.integration.conftest import get_unique_port
+    from .conftest import get_unique_port
 
     temp_dir = tempfile.mkdtemp(prefix="neoproxy_accesslog_test_")
     proxy_port = get_unique_port()

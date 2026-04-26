@@ -1,10 +1,10 @@
-mod config;
+pub mod config;
 mod context;
 mod formatter;
 mod writer;
 
 pub use config::{
-  AccessLogConfig, AccessLogOverride, HumanBytes, HumanDuration, LogFormat,
+  AccessLogConfig, AccessLogOverride,
 };
 pub use context::{
   AccessLogEntry, AuthType, HttpAccessLogParams, ServiceMetrics,

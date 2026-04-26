@@ -26,6 +26,7 @@ mod shutdown;
 mod stream;
 mod h3_stream;
 mod access_log;
+mod tls;
 
 /// Thread check interval for detecting worker thread exit.
 const THREAD_CHECK_INTERVAL: Duration = Duration::from_millis(100);

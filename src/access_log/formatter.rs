@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 use crate::access_log::config::LogFormat;
 use crate::access_log::context::{
-  AccessLogEntry, AuthType, ServiceMetrics,
+  AccessLogEntry, AuthType,
 };
 
 /// Pre-parsed format description for text format (nginx-style timestamp)
@@ -180,6 +180,7 @@ fn format_json(entry: &AccessLogEntry) -> Vec<u8> {
 mod tests {
   use super::*;
   use time::OffsetDateTime;
+  use crate::access_log::ServiceMetrics;
 
   fn make_test_entry() -> AccessLogEntry {
     // Use a fixed time for deterministic tests

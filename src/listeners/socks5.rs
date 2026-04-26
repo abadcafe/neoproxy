@@ -434,7 +434,7 @@ impl Socks5Listener {
           _ = monitoring_interval.tick() => {
             // Log monitoring info
             tracing::info!(
-              "[fast_socks5.listener] active_connections={}",
+              "[socks5] active_connections={}",
               connection_tracker.active_count()
             );
           }
@@ -1308,7 +1308,7 @@ fn extract_host_port(
 
 /// Plugin listener name.
 pub fn listener_name() -> &'static str {
-  "fast_socks5.listener"
+  "socks5"
 }
 
 /// Creates a listener builder.
@@ -1331,7 +1331,7 @@ pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
 
 /// Record an access log entry for a SOCKS5 request.
 ///
-/// Extracted from the connection handler to enable unit testing.
+/// Delegates to the common implementation in `super::common::record_socks5_access_log`.
 fn record_access_log(
   writer: &crate::access_log::AccessLogWriter,
   client_addr: SocketAddr,
@@ -1344,21 +1344,18 @@ fn record_access_log(
   service_name: String,
   service_metrics: crate::access_log::ServiceMetrics,
 ) {
-  let entry = crate::access_log::AccessLogEntry {
-    time: time::OffsetDateTime::now_local()
-      .unwrap_or_else(|_| time::OffsetDateTime::now_utc()),
-    client_ip: client_addr.ip().to_string(),
-    client_port: client_addr.port(),
+  super::common::record_socks5_access_log(
+    writer,
+    client_addr,
     user,
     auth_type,
     method,
     target,
     status,
-    duration_ms: duration.as_millis() as u64,
-    service: service_name,
+    duration,
+    service_name,
     service_metrics,
-  };
-  writer.write(&entry);
+  );
 }
 
 #[cfg(test)]
@@ -1605,7 +1602,7 @@ addresses: []
 
   #[test]
   fn test_listener_name() {
-    assert_eq!(listener_name(), "fast_socks5.listener");
+    assert_eq!(listener_name(), "socks5");
   }
 
   #[test]
@@ -1622,12 +1619,12 @@ addresses: []
     let config = crate::access_log::AccessLogConfig {
       enabled: true,
       path_prefix: "socks5test.log".to_string(),
-      format: crate::access_log::LogFormat::Text,
-      buffer: crate::access_log::HumanBytes(64),
-      flush: crate::access_log::HumanDuration(
+      format: crate::access_log::config::LogFormat::Text,
+      buffer: crate::access_log::config::HumanBytes(64),
+      flush: crate::access_log::config::HumanDuration(
         std::time::Duration::from_millis(100),
       ),
-      max_size: crate::access_log::HumanBytes(1024 * 1024),
+      max_size: crate::access_log::config::HumanBytes(1024 * 1024),
     };
     let writer = crate::access_log::AccessLogWriter::new(
       dir.path().to_str().unwrap(),

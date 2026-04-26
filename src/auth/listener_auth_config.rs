@@ -8,7 +8,6 @@
 
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use crate::auth::AuthError;
 
@@ -102,10 +101,6 @@ impl ListenerAuthConfig {
     })
   }
 
-  /// Get client CA path as PathBuf.
-  pub fn client_ca_pathbuf(&self) -> Option<PathBuf> {
-    self.client_ca_path.as_ref().map(PathBuf::from)
-  }
 }
 
 #[cfg(test)]
@@ -304,27 +299,5 @@ client_ca_path: /path/to/ca.pem
       client_ca_path: Some("/path/to/ca.pem".to_string()),
     };
     assert!(config.users_map().is_none());
-  }
-
-  #[test]
-  fn test_client_ca_pathbuf() {
-    let config = ListenerAuthConfig {
-      users: None,
-      client_ca_path: Some("/path/to/ca.pem".to_string()),
-    };
-    let path = config.client_ca_pathbuf().expect("should return Some");
-    assert_eq!(path, PathBuf::from("/path/to/ca.pem"));
-  }
-
-  #[test]
-  fn test_client_ca_pathbuf_returns_none() {
-    let config = ListenerAuthConfig {
-      users: Some(vec![UserCredential {
-        username: "admin".to_string(),
-        password: "secret".to_string(),
-      }]),
-      client_ca_path: None,
-    };
-    assert!(config.client_ca_pathbuf().is_none());
   }
 }

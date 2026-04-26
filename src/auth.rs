@@ -1,13 +1,10 @@
 //! Unified authentication module for neoproxy.
 
-mod client_cert_auth;
 mod error;
 pub mod listener_auth_config;
 mod password;
-mod tls_cert;
 mod user_password_auth;
 
-pub use client_cert_auth::ClientCertAuth;
 pub use error::AuthError;
 pub use listener_auth_config::{ListenerAuthConfig, UserCredential};
 pub use password::verify_password;
@@ -20,6 +17,5 @@ mod module_structure_tests {
     let _: Option<super::ListenerAuthConfig> = None;
     let _: Option<super::UserCredential> = None;
     let _: Option<super::UserPasswordAuth> = None;
-    let _: Option<super::ClientCertAuth> = None;
   }
 }

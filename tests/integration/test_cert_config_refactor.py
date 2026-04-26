@@ -5,7 +5,7 @@ Test target: Verify new certificate config naming and per-proxy server_ca_path.
 Test nature: Black-box testing through external interface.
 
 Tests verify:
-1. http3.listener accepts server_cert_path / server_key_path (renamed from cert_path / key_path)
+1. http3 listener uses server-level TLS configuration
 2. http3_chain accepts server_ca_path inside credential and default_credential
 3. Deep merge of credential with default_credential works correctly
 """
@@ -39,7 +39,7 @@ from .conftest import get_unique_port
 
 
 # ==============================================================================
-# Config helpers using NEW field names
+# Config helpers using NEW architecture (server-level TLS)
 # ==============================================================================
 
 
@@ -51,11 +51,11 @@ def create_new_http3_listener_config(
     auth_config: Optional[str] = None,
     worker_threads: int = 1,
 ) -> str:
-    """Create HTTP/3 listener config with NEW field names (server_cert_path, server_key_path)."""
-    auth_section = ""
+    """Create HTTP/3 listener config with NEW architecture (server-level TLS)."""
+    users_section = ""
     if auth_config:
-        auth_section = f"""
-          auth:
+        users_section = f"""
+    users:
 {auth_config}"""
 
     config_content = f"""worker_threads: {worker_threads}
@@ -67,12 +67,14 @@ services:
 
 servers:
 - name: http3_server
+  tls:
+    certificates:
+    - cert_path: "{cert_path}"
+      key_path: "{key_path}"{users_section}
   listeners:
-  - kind: http3.listener
+  - kind: http3
     args:
-      address: "0.0.0.0:{proxy_port}"
-      server_cert_path: "{cert_path}"
-      server_key_path: "{key_path}"{auth_section}
+      addresses: ["0.0.0.0:{proxy_port}"]
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "new_http3_config.yaml")
@@ -148,12 +150,9 @@ services:
 servers:
 - name: http_proxy
   listeners:
-  - kind: hyper.listener
+  - kind: http
     args:
       addresses: [ "0.0.0.0:{http_port}" ]
-      protocols: [ http ]
-      hostnames: []
-      certificates: []
   service: http3_chain
 """
     config_path = os.path.join(temp_dir, "new_http3_chain_config.yaml")
@@ -163,18 +162,19 @@ servers:
 
 
 # ==============================================================================
-# Test: http3.listener new field names
+# Test: http3 listener with server-level TLS
 # ==============================================================================
 
 
 class TestHttp3ListenerNewFieldNames:
-    """Verify http3.listener accepts server_cert_path and server_key_path."""
+    """Verify http3 listener uses server-level TLS configuration."""
 
     def test_listener_starts_with_new_field_names(self) -> None:
         """
-        TC-CERT-REFACTOR-001: HTTP/3 listener starts with server_cert_path/server_key_path.
+        TC-CERT-REFACTOR-001: HTTP/3 listener starts with server-level TLS config.
 
-        Verifies the listener accepts the new field names and starts successfully.
+        Verifies the listener starts successfully with the new architecture
+        where TLS is configured at server level, not listener level.
         """
         temp_dir = tempfile.mkdtemp()
         h3_port = get_unique_port()
@@ -193,7 +193,7 @@ class TestHttp3ListenerNewFieldNames:
             proxy_proc = start_proxy(config_path)
 
             assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
-                "HTTP/3 listener with new field names failed to start"
+                "HTTP/3 listener with server-level TLS failed to start"
 
             assert proxy_proc.poll() is None, \
                 "HTTP/3 listener should be running"
@@ -327,7 +327,7 @@ class TestCredentialDeepMerge:
                 "127.0.0.1", target_port, http_echo_handler
             )
 
-            # Start HTTP/3 listener with NEW field names
+            # Start HTTP/3 listener with server-level TLS
             h3_config = create_new_http3_listener_config(
                 proxy_port=h3_port,
                 cert_path=cert_path,
@@ -409,7 +409,7 @@ class TestCredentialDeepMerge:
                 "127.0.0.1", target_port, http_echo_handler
             )
 
-            # Start HTTP/3 listener with NEW field names
+            # Start HTTP/3 listener with server-level TLS
             h3_config = create_new_http3_listener_config(
                 proxy_port=h3_port,
                 cert_path=cert_path,
@@ -553,12 +553,9 @@ services:
 servers:
 - name: http_proxy
   listeners:
-  - kind: hyper.listener
+  - kind: http
     args:
       addresses: [ "0.0.0.0:30589" ]
-      protocols: [ http ]
-      hostnames: []
-      certificates: []
   service: http3_chain
 """
             config_path = os.path.join(temp_dir, "old_format.yaml")

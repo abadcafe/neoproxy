@@ -1,92 +1,46 @@
 # =============================================================================
-# NeoProxy 配置文件示例
+# NeoProxy Configuration File Example
 # =============================================================================
-# 本文件展示 NeoProxy 的完整配置选项。
-# 启动时可通过 -c 参数指定配置文件路径，默认为 conf/server.yaml
+# This file demonstrates the new configuration architecture where:
+# - Listener kinds are renamed: http, https, http3, socks5
+# - TLS, auth, and hostnames are configured at server level
+# - Access log is enabled by default
 #
-# 示例: ./neoproxy -c conf/example.yaml
+# Usage: ./neoproxy -c conf/example.yaml
 
 # -----------------------------------------------------------------------------
-# 全局设置
+# Global Settings
 # -----------------------------------------------------------------------------
 
-# 工作线程数
-# 控制服务器的并发处理能力，建议设置为 CPU 核心数或更少
-# 默认值: 1
+# Worker threads - controls concurrent processing capacity
+# Default: 1
 worker_threads: 2
 
-# 日志目录
-# 日志文件将写入此目录
-# 默认值: "logs/"
+# Log directory - where application logs are written
+# Default: "logs/"
 log_directory: "logs/"
 
 # -----------------------------------------------------------------------------
-# 访问日志配置 (可选)
+# Services
 # -----------------------------------------------------------------------------
-# access_log:
-#   enabled: true              # 是否启用，默认 true
-#   path_prefix: "access.log"  # 日志文件前缀，实际文件: {path_prefix}.{timestamp}.log
-#   format: text               # 日志格式: text 或 json，默认 text
-#   buffer: 32kb               # 写入缓冲区大小，默认 32kb，支持单位: b/kb/mb/gb
-#   flush: 1s                  # 缓冲区刷新间隔，默认 1s，支持单位: ms/s/m
-#   max_size: 200mb            # 单文件最大大小，超过后轮转，默认 200mb
-#
-# 日志字段 (text 格式):
-#   client_ip:port user [time] "method target" status duration_ms auth=xxx service=xxx
-# 日志字段 (json 格式):
-#   time, client_ip, client_port, user, method, target, status, duration_ms, auth, service
-
-# -----------------------------------------------------------------------------
-# 服务配置
-# -----------------------------------------------------------------------------
-# services 定义了一系列可被服务器使用的服务插件。
-# 每个服务包含:
-#   - name: 服务名称，在 servers 中引用
-#   - kind: 服务类型，格式为 "插件名.服务名"
-#   - args: 服务参数
-#   - layers: 可选，服务中间件层
+# Services define request handlers. Each service has:
+#   - name: Service name (referenced by servers)
+#   - kind: Service type in "plugin.service" format
+#   - args: Service-specific parameters
 
 services:
-  # ---------------------------------------------------------------------------
-  # Echo 服务 (echo.echo)
-  # ---------------------------------------------------------------------------
-  # 最简单的测试服务，将收到的请求原样返回，用于测试neoproxy是否正常
+  # Echo service - simplest test service, echoes requests back
   - name: echo
     kind: echo.echo
     args: {}
 
-  # ---------------------------------------------------------------------------
-  # HTTP CONNECT TCP 隧道服务 (connect_tcp.connect_tcp)
-  # ---------------------------------------------------------------------------
-  # 处理 HTTP CONNECT 请求，建立 TCP 隧道
-  # 常用于 HTTP 代理场景，支持 CONNECT 方法代理 HTTPS 等协议
-  # 无额外配置参数
+  # HTTP CONNECT TCP tunnel service
+  # Handles HTTP CONNECT requests for HTTPS proxying
   - name: connect_tcp
     kind: connect_tcp.connect_tcp
 
-  # ---------------------------------------------------------------------------
-  # HTTP/3 链式代理服务 (http3_chain.http3_chain)
-  # ---------------------------------------------------------------------------
-  # 通过 HTTP/3 协议将请求转发到上游代理服务器组，支持加权轮询负载均衡
-  #
-  # 参数:
-  #   proxy_group: 代理服务器列表
-  #     - address: 上游代理地址 (IP:端口)
-  #     - weight: 权重，值越大被选中概率越高
-  #     - credential: 可选，认证凭据
-  #         user:                    # 用户名密码认证
-  #           username: "xxx"
-  #           password: "xxx"
-  #         client_cert_path: path   # 客户端证书 (PEM)
-  #         client_key_path: path    # 客户端私钥 (PEM)
-  #         server_ca_path: path     # CA 证书，验证上游代理 TLS
-  #   default_credential: 可选，默认凭据，未配置 credential 的代理继承此配置
-  #
-  # credential 深度合并规则:
-  #   - 若 proxy.credential 存在但为空({})，则不继承 user 和 client_cert
-  #   - server_ca_path 始终从 default_credential 继承
-  #
-  # 以下示例形成链式代理: 客户端 -> 8443 -> 9443 -> 目标服务器
+  # HTTP/3 chain proxy service
+  # Forwards requests to upstream proxy servers via HTTP/3
   - name: http3_chain
     kind: http3_chain.http3_chain
     args:
@@ -102,154 +56,189 @@ services:
             server_ca_path: conf/certs/server-ca.crt
 
 # -----------------------------------------------------------------------------
-# 代理配置
+# Servers
 # -----------------------------------------------------------------------------
-# servers 定义了监听端口和对应的服务。
-# 每个代理包含:
-#   - name: 代理名称，用于日志和监控
-#   - listeners: 监听器列表
-#   - service: 使用的服务名称
-#   - access_log: 可选，覆盖全局访问日志配置
+# Servers define listening endpoints and route to services.
+# Each server has:
+#   - name: Server identifier for logging
+#   - hostnames: Virtual hostnames for SNI/Host routing (optional)
+#   - tls: Server-level TLS configuration (for https/http3)
+#   - users: Server-level authentication (for http/https/socks5)
+#   - listeners: List of listener configurations
+#   - service: Service to route requests to
 
 servers:
-  # ---------------------------------------------------------------------------
-  # HTTP 链式代理
-  # ---------------------------------------------------------------------------
-  # 测试方法: curl -p -x http://admin:secret@127.0.0.1:8081 https://httpbin.org/ip
-  - name: http_chain_proxy
+  # HTTP proxy with server-level auth
+  - name: http_proxy
+    hostnames: ["proxy.example.com"]
+    users:
+      - username: "admin"
+        password: "secret"
     listeners:
-      - kind: hyper.listener
+      - kind: http
         args:
-          addresses: [ "127.0.0.1:8081" ]
-          protocols: [ "http" ]
-          hostnames: []
-          auth:
-            users:
-              - username: "admin"
-                password: "secret"
+          addresses: ["127.0.0.1:8081"]
     service: http3_chain
 
-  # ---------------------------------------------------------------------------
-  # SOCKS5 链式代理
-  # ---------------------------------------------------------------------------
-  # 测试方法: curl --socks5-basic --socks5-hostname 127.0.0.1:1081 \
-  #                -U socks_user:socks_pass http://httpbin.org/ip
-  - name: socks5_chain_proxy
+  # HTTPS + HTTP/3 proxy with server-level TLS
+  - name: https_proxy
+    hostnames: ["secure.example.com"]
+    tls:
+      certificates:
+        - cert_path: conf/certs/server.crt
+          key_path: conf/certs/server.key
+    users:
+      - username: "admin"
+        password: "secret"
     listeners:
-      - kind: fast_socks5.listener
+      - kind: https
         args:
-          addresses: [ "127.0.0.1:1081" ]
+          addresses: ["127.0.0.1:8444"]
+      - kind: http3
+        args:
+          addresses: ["127.0.0.1:8444"]
+    service: http3_chain
+
+  # SOCKS5 proxy
+  - name: socks5_proxy
+    users:
+      - username: "socks_user"
+        password: "socks_pass"
+    listeners:
+      - kind: socks5
+        args:
+          addresses: ["127.0.0.1:1081"]
           handshake_timeout: "10s"
-          auth:
-            users:
-              - username: "socks_user"
-                password: "socks_pass"
     service: http3_chain
 
-  # ---------------------------------------------------------------------------
-  # HTTP/3 链式代理
-  # ---------------------------------------------------------------------------
-  # 链式代理: 客户端 -> 8443 -> 9443 -> 目标服务器
-  # 测试方法: ss -ulnp | grep 8443
+  # HTTP/3 chain proxy with mTLS
   - name: http3_chain_proxy
+    hostnames: ["chain.example.com"]
+    tls:
+      certificates:
+        - cert_path: conf/certs/server.crt
+          key_path: conf/certs/server.key
+      client_ca_certs:
+        - conf/certs/client-ca.crt
+    users:
+      - username: "chain_user"
+        password: "chain_pass"
     listeners:
-      - kind: http3.listener
+      - kind: http3
         args:
-          address: "127.0.0.1:8443"
-          server_cert_path: conf/certs/server.crt
-          server_key_path: conf/certs/server.key
-          auth:
-            users:
-              - username: "chain_user"
-                password: "chain_pass"
-            client_ca_path: conf/certs/client-ca.crt
+          addresses: ["127.0.0.1:8443"]
     service: http3_chain
 
-  # ---------------------------------------------------------------------------
-  # HTTP/3 代理
-  # ---------------------------------------------------------------------------
-  # 测试方法: ss -ulnp | grep 9443  (curl 不支持 HTTP/3 代理模式)
+  # HTTP/3 proxy
   - name: http3_proxy
+    hostnames: ["h3.example.com"]
+    tls:
+      certificates:
+        - cert_path: conf/certs/server.crt
+          key_path: conf/certs/server.key
+      client_ca_certs:
+        - conf/certs/client-ca.crt
+    users:
+      - username: "h3_user"
+        password: "h3_pass"
     listeners:
-      - kind: http3.listener
+      - kind: http3
         args:
-          address: "127.0.0.1:9443"
-          server_cert_path: conf/certs/server.crt
-          server_key_path: conf/certs/server.key
-          auth:
-            users:
-              - username: "h3_user"
-                password: "h3_pass"
-            client_ca_path: conf/certs/client-ca.crt
+          addresses: ["127.0.0.1:9443"]
     service: connect_tcp
 
-  # ---------------------------------------------------------------------------
-  # Echo 测试服务 (所有监听器类型)
-  # ---------------------------------------------------------------------------
-  # 测试方法:
-  #   HTTP:    curl http://127.0.0.1:8082 -d "hello"
-  #   HTTP/3:  curl --http3 https://127.0.0.1:8442 -d "hello" -k
+  # Echo server (default - no hostnames)
   - name: echo_server
+    tls:
+      certificates:
+        - cert_path: conf/certs/server.crt
+          key_path: conf/certs/server.key
     listeners:
-      - kind: hyper.listener
+      - kind: http
         args:
-          addresses: [ "127.0.0.1:8082" ]
-          protocols: [ "http" ]
-          hostnames: []
-      - kind: fast_socks5.listener
+          addresses: ["127.0.0.1:8082"]
+      - kind: https
         args:
-          addresses: [ "127.0.0.1:1082" ]
+          addresses: ["127.0.0.1:8445"]
+      - kind: http3
+        args:
+          addresses: ["127.0.0.1:8442"]
+      - kind: socks5
+        args:
+          addresses: ["127.0.0.1:1082"]
           handshake_timeout: "10s"
-      - kind: http3.listener
+    service: echo
+
+  # Virtual host routing example - shares port 8080 with default_server
+  - name: api_server
+    hostnames: ["api.example.com"]
+    listeners:
+      - kind: http
         args:
-          address: "127.0.0.1:8442"
-          server_cert_path: conf/certs/server.crt
-          server_key_path: conf/certs/server.key
+          addresses: ["127.0.0.1:8080"]
+    service: echo
+
+  # Default server - matches all unmatched requests
+  - name: default_server
+    listeners:
+      - kind: http
+        args:
+          addresses: ["127.0.0.1:8080"]
     service: echo
 
 # =============================================================================
-# 认证配置说明
+# Migration Guide
 # =============================================================================
-# 所有监听器通过字段存在性决定认证类型:
 #
-# 1. 用户名密码认证:
-#    auth:
-#      users:
-#        - username: "admin"
-#          password: "secret123"
+# Listener Kind Names (Old -> New):
+#   hyper.listener -> http
+#   http3.listener -> http3
+#   fast_socks5.listener -> socks5
+#   (new) https
 #
-# 2. 客户端证书认证 (mTLS):
-#    auth:
-#      client_ca_path: conf/certs/client-ca.crt
+# Server-Level Configuration:
+#   TLS, auth, and hostnames are now configured at server level, not listener.
 #
-# 3. 双因素认证 (密码 + 证书):
-#    auth:
-#      users:
-#        - username: "admin"
-#          password: "secret123"
-#      client_ca_path: conf/certs/client-ca.crt
+# Before (old format):
+#   servers:
+#     - name: my_server
+#       listeners:
+#         - kind: hyper.listener
+#           args:
+#             addresses: ["127.0.0.1:8080"]
+#             auth:
+#               users:
+#                 - username: admin
+#                   password: secret
+#       service: echo
 #
-# 各监听器支持情况:
-#   hyper.listener:      仅支持 users
-#   fast_socks5.listener: 仅支持 users
-#   http3.listener:      支持 users 和 client_ca_path
-
+# After (new format):
+#   servers:
+#     - name: my_server
+#       users:
+#         - username: admin
+#           password: secret
+#       listeners:
+#         - kind: http
+#           args:
+#             addresses: ["127.0.0.1:8080"]
+#       service: echo
+#
+# HTTP/3 Listener Changes:
+#   - 'address' (singular) deprecated, use 'addresses' (plural)
+#   - 'server_cert_path', 'server_key_path' removed (use server-level tls)
+#   - 'auth' removed (use server-level users)
+#
+# Access Log:
+#   - Enabled by default (no config needed)
+#   - Default path_prefix: "access.log"
+#   - Default format: text
+#
 # =============================================================================
-# 证书生成说明
+# Certificate Generation
 # =============================================================================
-# 证书文件位于 conf/certs/ 目录，运行 ./generate_certs.sh 生成:
-#
-#   server-ca.crt/key  - 服务器 CA，签发服务器证书
-#   client-ca.crt/key  - 客户端 CA，签发客户端证书
-#   server.crt/key     - 服务器证书 (由 server-ca 签发)
-#   client.crt/key     - 客户端证书 (由 client-ca 签发)
-#
-# 证书用途:
-#   HTTP/3 监听器:
-#     server_cert_path: server.crt
-#     server_key_path:  server.key
-#     client_ca_path:   client-ca.crt (验证客户端)
-#   http3_chain 服务:
-#     client_cert_path: client.crt     (向上游认证)
-#     client_key_path:  client.key
-#     server_ca_path:   server-ca.crt  (验证上游服务器)
+# Run ./generate_certs.sh to generate test certificates:
+#   conf/certs/server-ca.crt/key - Server CA
+#   conf/certs/client-ca.crt/key - Client CA
+#   conf/certs/server.crt/key    - Server certificate
+#   conf/certs/client.crt/key    - Client certificate

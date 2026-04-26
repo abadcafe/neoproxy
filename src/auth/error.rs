@@ -11,8 +11,6 @@ pub enum AuthError {
   InvalidCredentials,
   /// Configuration error.
   ConfigError(String),
-  /// TLS client certificate verification failed.
-  TlsCertError(String),
 }
 
 impl fmt::Display for AuthError {
@@ -20,7 +18,6 @@ impl fmt::Display for AuthError {
     match self {
       Self::InvalidCredentials => write!(f, "invalid credentials"),
       Self::ConfigError(msg) => write!(f, "auth config error: {}", msg),
-      Self::TlsCertError(msg) => write!(f, "TLS cert error: {}", msg),
     }
   }
 }

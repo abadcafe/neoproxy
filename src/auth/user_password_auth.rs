@@ -40,30 +40,6 @@ impl UserPasswordAuth {
     }
   }
 
-  /// Verify the HTTP request's Proxy-Authorization header.
-  ///
-  /// Returns Ok(()) if authentication succeeds or no auth is configured.
-  pub fn verify(
-    &self,
-    req: &http::Request<()>,
-  ) -> Result<(), AuthError> {
-    match &self.users {
-      None => Ok(()),
-      Some(users) => {
-        let auth_header = req
-          .headers()
-          .get(http::header::PROXY_AUTHORIZATION)
-          .ok_or(AuthError::InvalidCredentials)?;
-        let (username, password) = Self::parse_basic_auth(auth_header)
-          .inspect_err(|e| {
-            debug!("Failed to parse Basic auth header: {}", e);
-          })
-          .map_err(|_| AuthError::InvalidCredentials)?;
-        verify_password(users, &username, &password)
-      }
-    }
-  }
-
   /// Verify credentials and return the username on success.
   ///
   /// Combines verification and username extraction in a single pass,
@@ -91,15 +67,6 @@ impl UserPasswordAuth {
         Ok(Some(username))
       }
     }
-  }
-
-  /// Check if authentication is required (i.e., users are configured).
-  ///
-  /// This method is kept for potential use by other listeners (SOCKS5, HTTP/3)
-  /// that may need to check auth requirements before processing.
-  #[allow(dead_code)]
-  pub fn is_auth_required(&self) -> bool {
-    self.users.is_some()
   }
 
   /// Verify username/password directly (for SOCKS5).
@@ -162,24 +129,6 @@ impl UserPasswordAuth {
 
     Ok((username, password))
   }
-
-  /// Extract username from Proxy-Authorization header.
-  ///
-  /// Returns `Some(username)` if a valid Basic auth header is present,
-  /// or `None` if the header is missing or malformed.
-  /// This is used for access logging to record the authenticated user.
-  ///
-  /// This method is kept for potential use by other listeners (SOCKS5, HTTP/3)
-  /// that may need to extract usernames for logging after separate auth verification.
-  #[allow(dead_code)]
-  pub fn extract_username(
-    req: &http::Request<()>,
-  ) -> Option<String> {
-    req.headers()
-      .get(http::header::PROXY_AUTHORIZATION)
-      .and_then(|h| Self::parse_basic_auth(h).ok())
-      .map(|(username, _)| username)
-  }
 }
 
 #[cfg(test)]
@@ -188,105 +137,6 @@ mod tests {
   use base64::{
     Engine, engine::general_purpose::STANDARD as BASE64_STANDARD,
   };
-
-  #[test]
-  fn test_user_password_auth_none_passes_any_request() {
-    let auth = UserPasswordAuth::none();
-    let req = http::Request::builder()
-      .method("CONNECT")
-      .uri("http://example.com:443")
-      .body(())
-      .unwrap();
-    assert!(auth.verify(&req).is_ok());
-  }
-
-  #[test]
-  fn test_user_password_auth_from_config_no_users() {
-    let config =
-      crate::auth::listener_auth_config::ListenerAuthConfig {
-        users: None,
-        client_ca_path: Some("/path/to/ca.pem".to_string()),
-      };
-    let auth = UserPasswordAuth::from_config(&config);
-    // No users → no password auth → verify always passes
-    let req = http::Request::builder()
-      .method("CONNECT")
-      .uri("http://example.com:443")
-      .body(())
-      .unwrap();
-    assert!(auth.verify(&req).is_ok());
-  }
-
-  #[test]
-  fn test_user_password_auth_from_config_with_users() {
-    let config =
-      crate::auth::listener_auth_config::ListenerAuthConfig {
-        users: Some(vec![
-          crate::auth::listener_auth_config::UserCredential {
-            username: "admin".to_string(),
-            password: "secret123".to_string(),
-          },
-        ]),
-        client_ca_path: None,
-      };
-    let auth = UserPasswordAuth::from_config(&config);
-
-    // Valid credentials
-    let credentials = BASE64_STANDARD.encode("admin:secret123");
-    let req = http::Request::builder()
-      .method("CONNECT")
-      .uri("http://example.com:443")
-      .header("Proxy-Authorization", format!("Basic {}", credentials))
-      .body(())
-      .unwrap();
-    assert!(auth.verify(&req).is_ok());
-  }
-
-  #[test]
-  fn test_user_password_auth_verify_invalid_credentials() {
-    let config =
-      crate::auth::listener_auth_config::ListenerAuthConfig {
-        users: Some(vec![
-          crate::auth::listener_auth_config::UserCredential {
-            username: "admin".to_string(),
-            password: "secret123".to_string(),
-          },
-        ]),
-        client_ca_path: None,
-      };
-    let auth = UserPasswordAuth::from_config(&config);
-
-    let credentials = BASE64_STANDARD.encode("admin:wrongpassword");
-    let req = http::Request::builder()
-      .method("CONNECT")
-      .uri("http://example.com:443")
-      .header("Proxy-Authorization", format!("Basic {}", credentials))
-      .body(())
-      .unwrap();
-    assert!(auth.verify(&req).is_err());
-  }
-
-  #[test]
-  fn test_user_password_auth_verify_missing_header() {
-    let config =
-      crate::auth::listener_auth_config::ListenerAuthConfig {
-        users: Some(vec![
-          crate::auth::listener_auth_config::UserCredential {
-            username: "admin".to_string(),
-            password: "secret123".to_string(),
-          },
-        ]),
-        client_ca_path: None,
-      };
-    let auth = UserPasswordAuth::from_config(&config);
-
-    let req = http::Request::builder()
-      .method("CONNECT")
-      .uri("http://example.com:443")
-      .body(())
-      .unwrap();
-    assert!(auth.verify(&req).is_err());
-  }
 
   // ============== verify_credentials tests (for SOCKS5) ==============
 
@@ -329,79 +179,6 @@ mod tests {
     let auth = UserPasswordAuth::none();
     // No users configured → verify_credentials always passes
     assert!(auth.verify_credentials("anyone", "anything").is_ok());
-  }
-
-  #[test]
-  fn test_is_auth_required_no_users() {
-    let auth = UserPasswordAuth::none();
-    assert!(!auth.is_auth_required());
-  }
-
-  #[test]
-  fn test_is_auth_required_with_users() {
-    let config =
-      crate::auth::listener_auth_config::ListenerAuthConfig {
-        users: Some(vec![
-          crate::auth::listener_auth_config::UserCredential {
-            username: "admin".to_string(),
-            password: "secret123".to_string(),
-          },
-        ]),
-        client_ca_path: None,
-      };
-    let auth = UserPasswordAuth::from_config(&config);
-    assert!(auth.is_auth_required());
-  }
-
-  // ============== extract_username tests ==============
-
-  #[test]
-  fn test_extract_username_valid_header() {
-    let credentials = BASE64_STANDARD.encode("testuser:testpass");
-    let req = http::Request::builder()
-      .method("GET")
-      .uri("http://example.com")
-      .header("Proxy-Authorization", format!("Basic {}", credentials))
-      .body(())
-      .unwrap();
-    let username = UserPasswordAuth::extract_username(&req);
-    assert_eq!(username, Some("testuser".to_string()));
-  }
-
-  #[test]
-  fn test_extract_username_missing_header() {
-    let req = http::Request::builder()
-      .method("GET")
-      .uri("http://example.com")
-      .body(())
-      .unwrap();
-    let username = UserPasswordAuth::extract_username(&req);
-    assert!(username.is_none());
-  }
-
-  #[test]
-  fn test_extract_username_invalid_base64() {
-    let req = http::Request::builder()
-      .method("GET")
-      .uri("http://example.com")
-      .header("Proxy-Authorization", "Basic !!!invalid!!!")
-      .body(())
-      .unwrap();
-    let username = UserPasswordAuth::extract_username(&req);
-    assert!(username.is_none());
-  }
-
-  #[test]
-  fn test_extract_username_no_colon() {
-    let credentials = BASE64_STANDARD.encode("usernocolon");
-    let req = http::Request::builder()
-      .method("GET")
-      .uri("http://example.com")
-      .header("Proxy-Authorization", format!("Basic {}", credentials))
-      .body(())
-      .unwrap();
-    let username = UserPasswordAuth::extract_username(&req);
-    assert!(username.is_none());
   }
 
   // ============== verify_and_extract_username tests ==============

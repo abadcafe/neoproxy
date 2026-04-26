@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use hyper::{body as hyper_body, service as hyper_svc};
 use hyper_util::rt as rt_util;
 use hyper_util::server::conn::auto as conn_util;
@@ -17,6 +17,7 @@ use tracing::{error, info, warn};
 
 use crate::auth::{ListenerAuthConfig, UserPasswordAuth};
 use crate::plugin;
+use crate::server::ServerRoutingEntry;
 use crate::shutdown::StreamTracker;
 
 /// Listener shutdown timeout in seconds.
@@ -26,28 +27,63 @@ const LISTENER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 /// Monitoring log interval in seconds.
 const MONITORING_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
+/// HTTP Listener with shared-address routing support.
+///
+/// This listener supports routing requests to different services based on
+/// the Host header. Multiple servers can share the same address with
+/// hostname-based routing.
 struct HyperServiceAdaptor {
-  s: plugin::Service,
+  /// Routing table for hostname-based routing
+  routing_table: Vec<ServerRoutingEntry>,
+  /// Compiled routing info for fast lookup
+  routing_info: Vec<neoproxy::routing::ServerMatchInfo>,
+  /// User password auth (from first routing entry for backward compatibility)
   user_password_auth: UserPasswordAuth,
+  /// Access log writer (from first routing entry)
   access_log_writer: Option<crate::access_log::AccessLogWriter>,
-  service_name: String,
+  /// Client address for logging
   client_addr: Option<SocketAddr>,
 }
 
 impl HyperServiceAdaptor {
   fn new(
-    s: plugin::Service,
+    routing_table: Vec<ServerRoutingEntry>,
+    routing_info: Vec<neoproxy::routing::ServerMatchInfo>,
     user_password_auth: UserPasswordAuth,
     access_log_writer: Option<crate::access_log::AccessLogWriter>,
-    service_name: String,
     client_addr: Option<SocketAddr>,
   ) -> Self {
     Self {
-      s,
+      routing_table,
+      routing_info,
       user_password_auth,
       access_log_writer,
-      service_name,
       client_addr,
+    }
+  }
+
+  /// Route a request to the correct service based on Host header.
+  fn route_request(&self, req: &plugin::Request) -> Option<&ServerRoutingEntry> {
+    // Get Host header
+    let host = req
+      .headers()
+      .get(http::header::HOST)
+      .and_then(|h| h.to_str().ok())
+      .map(|h| h.split(':').next().unwrap_or(h));
+
+    match host {
+      Some(hostname) => {
+        // Find matching server
+        let match_info =
+          neoproxy::routing::find_matching_server(&self.routing_info, hostname);
+        match_info.and_then(|info| {
+          self.routing_table.iter().find(|e| e.name == info.name)
+        })
+      }
+      None => {
+        // No Host header - route to default server
+        self.routing_table.iter().find(|e| e.hostnames.is_empty())
+      }
     }
   }
 }
@@ -65,7 +101,13 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
   ) -> Self::Future {
     let start_time = std::time::Instant::now();
 
-    // Build an http::Request<()> for auth verification, copying headers
+    // Step 1: Check HTTP version FIRST
+    // HTTP/1.0 is not supported - return 505 HTTP Version Not Supported
+    if let Err(_status) = check_http_version(req.version()) {
+      return Box::pin(async { Ok(build_505_response()) });
+    }
+
+    // Step 2: Build an http::Request<()> for auth verification, copying headers
     let mut auth_req_builder = http::Request::builder()
       .method(req.method().clone())
       .uri(req.uri().clone())
@@ -78,10 +120,13 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
 
     let auth_req = auth_req_builder.body(()).unwrap();
 
-    // Check authentication if configured and extract username in one pass
-    let verify_result = self.user_password_auth.verify_and_extract_username(&auth_req);
+    // Step 3: Check authentication if configured and extract username in one pass
+    let verify_result =
+      self.user_password_auth.verify_and_extract_username(&auth_req);
     let (user, auth_type) = match verify_result {
-      Ok(Some(username)) => (Some(username), crate::access_log::AuthType::Password),
+      Ok(Some(username)) => {
+        (Some(username), crate::access_log::AuthType::Password)
+      }
       Ok(None) => (None, crate::access_log::AuthType::None),
       Err(_) => return Box::pin(async { Ok(build_407_response()) }),
     };
@@ -92,14 +137,23 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(body)),
     );
 
+    // Step 4: Route request to correct service
+    let routing_entry = match self.route_request(&req) {
+      Some(entry) => entry,
+      None => {
+        // No matching server found - return 404
+        return Box::pin(async { Ok(build_404_response()) });
+      }
+    };
+
     // Capture values for the async block
     let access_log_writer = self.access_log_writer.clone();
-    let service_name = self.service_name.clone();
+    let service_name = routing_entry.service_name();
     let client_addr = self.client_addr;
     let method = req.method().to_string();
     let target = req.uri().to_string();
 
-    let s = self.s.clone();
+    let s = routing_entry.service.clone();
     Box::pin(async move {
       let resp = tower_util::Oneshot::new(s, req).await;
 
@@ -159,28 +213,37 @@ fn build_407_response() -> plugin::Response {
   resp
 }
 
+/// Build a 404 Not Found response.
+fn build_404_response() -> plugin::Response {
+  let empty = http_body_util::Empty::new();
+  let bytes_buf = plugin::BytesBufBodyWrapper::new(empty);
+  let body = plugin::ResponseBody::new(bytes_buf);
+  let mut resp = plugin::Response::new(body);
+  *resp.status_mut() = http::StatusCode::NOT_FOUND;
+  resp
+}
+
+/// Check HTTP version and return error if version is not supported.
+///
+/// HTTP/1.0 is NOT supported - returns 505 HTTP Version Not Supported.
+/// HTTP/1.1 and higher are supported.
+fn check_http_version(version: http::Version) -> Result<(), http::StatusCode> {
+  super::common::check_http_version(version)
+}
+
+/// Build a 505 HTTP Version Not Supported response.
+fn build_505_response() -> plugin::Response {
+  super::common::build_505_response()
+}
+
 /// Record an access log entry for an HTTP request.
 ///
-/// Extracted from HyperServiceAdaptor::call() to enable unit testing.
+/// Delegates to the common implementation in `super::common::record_http_access_log`.
 fn record_access_log(
   writer: &crate::access_log::AccessLogWriter,
   params: &crate::access_log::HttpAccessLogParams,
 ) {
-  let entry = crate::access_log::AccessLogEntry {
-    time: time::OffsetDateTime::now_local()
-      .unwrap_or_else(|_| time::OffsetDateTime::now_utc()),
-    client_ip: params.client_addr.ip().to_string(),
-    client_port: params.client_addr.port(),
-    user: params.user.clone(),
-    auth_type: params.auth_type,
-    method: params.method.clone(),
-    target: params.target.clone(),
-    status: params.status,
-    duration_ms: params.duration.as_millis() as u64,
-    service: params.service_name.clone(),
-    service_metrics: params.service_metrics.clone(),
-  };
-  writer.write(&entry);
+  super::common::record_http_access_log(writer, params);
 }
 
 #[derive(Clone)]
@@ -195,59 +258,69 @@ where
   }
 }
 
+/// HTTP Listener configuration arguments.
 #[derive(Deserialize, Default, Clone, Debug)]
-struct HyperListenerArgs {
+struct HttpListenerArgs {
+  /// Listening addresses
   addresses: Vec<String>,
-  protocols: Vec<String>,
-  hostnames: Vec<String>,
-  #[serde(default)]
-  auth: Option<serde_yaml::Value>,
 }
 
+/// HTTP Listener implementation with shared-address routing support.
 struct HyperListener {
+  /// Listening addresses
   addresses: Vec<SocketAddr>,
-  _protocols: Vec<String>,
-  _hostnames: Vec<String>,
+  /// Routing table for hostname-based routing
+  routing_table: Vec<ServerRoutingEntry>,
+  /// Compiled routing info for fast lookup
+  routing_info: Vec<neoproxy::routing::ServerMatchInfo>,
+  /// Stream tracker for connection management
   listening_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
+  /// Connection tracker for graceful shutdown
   connection_tracker: Rc<StreamTracker>,
-  service: plugin::Service,
+  /// Graceful shutdown timeout
   graceful_shutdown_timeout: Duration,
+  /// User password auth (from first routing entry)
   user_password_auth: UserPasswordAuth,
+  /// Access log writer (from first routing entry)
   access_log_writer: Option<crate::access_log::AccessLogWriter>,
-  service_name: String,
 }
 
 impl HyperListener {
   /// Create a HyperListener from parsed configuration.
   fn from_args(
-    args: HyperListenerArgs,
-    svc: plugin::Service,
+    args: HttpListenerArgs,
+    _svc: plugin::Service, // Ignored - service comes from routing_table
     ctx: plugin::ListenerBuildContext,
   ) -> Result<Self> {
-    // Parse auth config if present
-    let user_password_auth = match args.auth {
-      None => UserPasswordAuth::none(),
-      Some(yaml) => {
-        let auth_config: ListenerAuthConfig =
-          serde_yaml::from_value(yaml).map_err(|e| {
-            anyhow::anyhow!("failed to parse auth config: {e}")
-          })?;
+    // Build routing info from routing table
+    let routing_info: Vec<neoproxy::routing::ServerMatchInfo> = ctx
+      .routing_table
+      .iter()
+      .map(|entry| entry.into())
+      .collect();
 
-        // Validate the auth config
-        auth_config.validate().map_err(|e| {
-          anyhow::anyhow!("auth config validation failed: {e}")
-        })?;
-
-        // hyper.listener only supports password auth, reject client_ca_path
-        if auth_config.client_ca_path.is_some() {
-          bail!(
-            "client_ca_path is not supported on hyper.listener; only password authentication is supported"
-          );
+    // Get user password auth from first routing entry (for backward compatibility)
+    let user_password_auth =
+      ctx.routing_table.first().map_or_else(UserPasswordAuth::none, |entry| {
+        match &entry.users {
+          Some(users) if !users.is_empty() => {
+            let config = ListenerAuthConfig {
+              users: Some(
+                users
+                  .iter()
+                  .map(|u| crate::auth::listener_auth_config::UserCredential {
+                    username: u.username.clone(),
+                    password: u.password.clone(),
+                  })
+                  .collect(),
+              ),
+              client_ca_path: None,
+            };
+            UserPasswordAuth::from_config(&config)
+          }
+          _ => UserPasswordAuth::none(),
         }
-
-        UserPasswordAuth::from_config(&auth_config)
-      }
-    };
+      });
 
     // Parse addresses, filtering out invalid ones
     // Note: Config validator catches invalid addresses, but we also filter here for safety
@@ -263,15 +336,13 @@ impl HyperListener {
 
     Ok(Self {
       addresses,
-      _protocols: args.protocols,
-      _hostnames: args.hostnames,
+      routing_table: ctx.routing_table,
+      routing_info,
       listening_set: Rc::new(RefCell::new(task::JoinSet::new())),
       connection_tracker: Rc::new(StreamTracker::new()),
-      service: svc,
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
       user_password_auth,
       access_log_writer: ctx.access_log_writer,
-      service_name: ctx.service_name,
     })
   }
 
@@ -281,7 +352,7 @@ impl HyperListener {
     svc: plugin::Service,
     ctx: plugin::ListenerBuildContext,
   ) -> Result<plugin::Listener> {
-    let args: HyperListenerArgs = serde_yaml::from_value(sargs)?;
+    let args: HttpListenerArgs = serde_yaml::from_value(sargs)?;
     Ok(plugin::Listener::new(Self::from_args(args, svc, ctx)?))
   }
 
@@ -291,18 +362,27 @@ impl HyperListener {
     sargs: plugin::SerializedArgs,
     svc: plugin::Service,
   ) -> Result<Self> {
-    let args: HyperListenerArgs = serde_yaml::from_value(sargs)?;
+    let args: HttpListenerArgs = serde_yaml::from_value(sargs)?;
+    let entry = ServerRoutingEntry {
+      name: "test".to_string(),
+      hostnames: vec![],
+      service: svc,
+      service_name: "test_service".to_string(),
+      users: None,
+      tls: None,
+      access_log_writer: None,
+    };
     let ctx = plugin::ListenerBuildContext {
       access_log_writer: None,
       service_name: String::new(),
+      routing_table: vec![entry],
     };
-    Self::from_args(args, svc, ctx)
+    Self::from_args(args, plugin::Service::new(DummyServiceForTest), ctx)
   }
 
   fn serve_addr(
     &self,
     addr: SocketAddr,
-    svc: plugin::Service,
   ) -> Result<Pin<Box<dyn Future<Output = Result<()>>>>> {
     let socket = match addr {
       std::net::SocketAddr::V4(_) => net::TcpSocket::new_v4()?,
@@ -314,9 +394,10 @@ impl HyperListener {
     let listener = socket.listen(1024)?;
     let connection_tracker = self.connection_tracker.clone();
     let shutdown_handle = self.connection_tracker.shutdown_handle();
+    let routing_table = self.routing_table.clone();
+    let routing_info = self.routing_info.clone();
     let user_password_auth = self.user_password_auth.clone();
     let access_log_writer = self.access_log_writer.clone();
-    let service_name = self.service_name.clone();
     let accepting_fut = async move {
       // Log listener startup event
       info!("HTTP listener started on {}", addr);
@@ -335,10 +416,10 @@ impl HyperListener {
           Ok((stream, raddr)) => {
             let io = rt_util::TokioIo::new(stream);
             let svc = HyperServiceAdaptor::new(
-              svc.clone(),
+              routing_table.clone(),
+              routing_info.clone(),
               user_password_auth.clone(),
               access_log_writer.clone(),
-              service_name.clone(),
               Some(raddr),
             );
             let builder =
@@ -362,7 +443,7 @@ impl HyperListener {
           _ = monitoring_interval.tick() => {
             // Log monitoring info
             info!(
-              "[hyper.listener] active_connections={}",
+              "[http] active_connections={}",
               connection_tracker.active_count()
             );
           }
@@ -387,8 +468,7 @@ impl plugin::Listening for HyperListener {
     let listening_set = self.listening_set.clone();
     for addr in &self.addresses {
       let addr = *addr;
-      let service = self.service.clone();
-      let serve_addr_fut = match self.serve_addr(addr, service) {
+      let serve_addr_fut = match self.serve_addr(addr) {
         Err(e) => return Box::pin(future::ready(Err(e))),
         Ok(f) => f,
       };
@@ -443,11 +523,35 @@ impl plugin::Listening for HyperListener {
 }
 
 pub fn listener_name() -> &'static str {
-  "hyper.listener"
+  "http"
 }
 
 pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
   Box::new(HyperListener::new)
+}
+
+/// A dummy service for testing
+#[cfg(test)]
+#[derive(Clone)]
+struct DummyServiceForTest;
+
+#[cfg(test)]
+impl tower::Service<plugin::Request> for DummyServiceForTest {
+  type Error = anyhow::Error;
+  type Future =
+    Pin<Box<dyn Future<Output = Result<plugin::Response>>>>;
+  type Response = plugin::Response;
+
+  fn poll_ready(
+    &mut self,
+    _cx: &mut std::task::Context<'_>,
+  ) -> std::task::Poll<Result<()>> {
+    std::task::Poll::Ready(Ok(()))
+  }
+
+  fn call(&mut self, _req: plugin::Request) -> Self::Future {
+    Box::pin(async { anyhow::bail!("DummyServiceForTest not implemented") })
+  }
 }
 
 #[cfg(test)]
@@ -459,6 +563,31 @@ mod tests {
   use std::pin::Pin;
   use std::task::{Context, Poll};
   use tower::Service;
+
+  // ============== HttpListenerArgs Tests ==============
+
+  #[test]
+  fn test_http_listener_args_no_auth_field() {
+    // Auth should no longer be at listener level
+    let yaml = r#"
+addresses:
+  - "127.0.0.1:8080"
+"#;
+    let args: HttpListenerArgs = serde_yaml::from_str(yaml).unwrap();
+    assert!(args.addresses.len() == 1);
+    // Auth should not be part of listener args
+  }
+
+  #[test]
+  fn test_http_listener_args_protocols_removed() {
+    // The protocols field is no longer needed with new architecture
+    let yaml = r#"
+addresses:
+  - "127.0.0.1:8080"
+"#;
+    let args: HttpListenerArgs = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(args.addresses[0], "127.0.0.1:8080");
+  }
 
   /// A dummy service for testing
   #[derive(Clone)]
@@ -483,16 +612,13 @@ mod tests {
   }
 
   fn create_test_listener_args() -> plugin::SerializedArgs {
-    serde_yaml::from_str(
-      r#"{addresses: ["127.0.0.1:0"], protocols: [], hostnames: []}"#,
-    )
-    .unwrap()
+    serde_yaml::from_str(r#"{addresses: ["127.0.0.1:0"]}"#).unwrap()
   }
 
   fn create_test_listener_args_with_invalid() -> plugin::SerializedArgs
   {
     serde_yaml::from_str(
-      r#"{addresses: ["invalid", "127.0.0.1:0"], protocols: [], hostnames: []}"#,
+      r#"{addresses: ["invalid", "127.0.0.1:0"]}"#,
     )
     .unwrap()
   }
@@ -501,9 +627,29 @@ mod tests {
     plugin::Service::new(DummyService {})
   }
 
+  fn create_test_routing_entry() -> ServerRoutingEntry {
+    ServerRoutingEntry {
+      name: "test".to_string(),
+      hostnames: vec![],
+      service: create_test_service(),
+      service_name: "test_service".to_string(),
+      users: None,
+      tls: None,
+      access_log_writer: None,
+    }
+  }
+
+  fn create_test_context() -> plugin::ListenerBuildContext {
+    plugin::ListenerBuildContext {
+      access_log_writer: None,
+      service_name: String::new(),
+      routing_table: vec![create_test_routing_entry()],
+    }
+  }
+
   #[test]
   fn test_listener_name() {
-    assert_eq!(listener_name(), "hyper.listener");
+    assert_eq!(listener_name(), "http");
   }
 
   #[test]
@@ -511,10 +657,7 @@ mod tests {
     let builder = create_listener_builder();
     let args = create_test_listener_args();
     let svc = create_test_service();
-    let ctx = plugin::ListenerBuildContext {
-      access_log_writer: None,
-      service_name: String::new(),
-    };
+    let ctx = create_test_context();
     let result = builder(args, svc, ctx);
     assert!(result.is_ok());
   }
@@ -523,10 +666,7 @@ mod tests {
   fn test_hyper_listener_new_valid() {
     let args = create_test_listener_args();
     let svc = create_test_service();
-    let ctx = plugin::ListenerBuildContext {
-      access_log_writer: None,
-      service_name: String::new(),
-    };
+    let ctx = create_test_context();
     let result = HyperListener::new(args, svc, ctx);
     assert!(result.is_ok());
   }
@@ -535,10 +675,7 @@ mod tests {
   fn test_hyper_listener_new_invalid_address() {
     let args = create_test_listener_args_with_invalid();
     let svc = create_test_service();
-    let ctx = plugin::ListenerBuildContext {
-      access_log_writer: None,
-      service_name: String::new(),
-    };
+    let ctx = create_test_context();
     let result = HyperListener::new(args, svc, ctx);
     // Invalid addresses are filtered out, so it should still succeed
     assert!(result.is_ok());
@@ -550,10 +687,7 @@ mod tests {
       serde_yaml::from_str(r#"{protocols: [], hostnames: []}"#)
         .unwrap();
     let svc = create_test_service();
-    let ctx = plugin::ListenerBuildContext {
-      access_log_writer: None,
-      service_name: String::new(),
-    };
+    let ctx = create_test_context();
     let result = HyperListener::new(args, svc, ctx);
     // Missing required field should fail
     assert!(result.is_err());
@@ -582,39 +716,37 @@ mod tests {
 
   #[test]
   fn test_hyper_service_adaptor_creation() {
-    let svc = create_test_service();
+    let routing_table = vec![create_test_routing_entry()];
+    let routing_info = vec![neoproxy::routing::ServerMatchInfo {
+      name: "test".to_string(),
+      hostnames: vec![],
+    }];
     let _adaptor = HyperServiceAdaptor::new(
-      svc,
+      routing_table,
+      routing_info,
       UserPasswordAuth::none(),
       None,
-      String::new(),
       None,
     );
   }
 
   #[test]
-  fn test_hyper_listener_args_default() {
-    let args = HyperListenerArgs::default();
+  fn test_http_listener_args_default() {
+    let args = HttpListenerArgs::default();
     assert!(args.addresses.is_empty());
-    assert!(args.protocols.is_empty());
-    assert!(args.hostnames.is_empty());
   }
 
   #[test]
-  fn test_hyper_listener_args_deserialize() {
+  fn test_http_listener_args_deserialize() {
     let yaml = r#"
 addresses:
   - "127.0.0.1:8080"
   - "0.0.0.0:8081"
-protocols:
-  - "http1"
-hostnames:
-  - "localhost"
 "#;
-    let args: HyperListenerArgs = serde_yaml::from_str(yaml).unwrap();
+    let args: HttpListenerArgs = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(args.addresses.len(), 2);
-    assert_eq!(args.protocols.len(), 1);
-    assert_eq!(args.hostnames.len(), 1);
+    assert_eq!(args.addresses[0], "127.0.0.1:8080");
+    assert_eq!(args.addresses[1], "0.0.0.0:8081");
   }
 
   #[test]
@@ -644,10 +776,7 @@ hostnames:
     // Verify struct has all expected fields
     let args = create_test_listener_args();
     let svc = create_test_service();
-    let ctx = plugin::ListenerBuildContext {
-      access_log_writer: None,
-      service_name: String::new(),
-    };
+    let ctx = create_test_context();
     let listener = HyperListener::new(args, svc, ctx);
 
     // This test verifies the constructor succeeds
@@ -684,14 +813,14 @@ hostnames:
 
     // Simulate the monitoring log format string
     let expected_format = format!(
-      "[hyper.listener] active_connections={}",
+      "[http] active_connections={}",
       listener.connection_tracker.active_count()
     );
 
     // Verify format contains correct components
     assert!(
-      expected_format.contains("[hyper.listener]"),
-      "Log format should contain '[hyper.listener]'"
+      expected_format.contains("[http]"),
+      "Log format should contain '[http]'"
     );
     assert!(
       expected_format.contains("active_connections"),
@@ -704,20 +833,46 @@ hostnames:
   }
 
   #[test]
-  fn test_hyper_listener_args_with_auth() {
-    let yaml = r#"
-addresses:
-  - "127.0.0.1:8080"
-protocols: []
-hostnames: []
-auth:
-  users:
-    - username: "user1"
-      password: "pass1"
-"#;
-    let args: HyperListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(args.addresses.len(), 1);
-    assert!(args.auth.is_some());
+  fn test_http_listener_with_server_level_users() {
+    // Auth should come from server-level users via routing table
+    use crate::config::UserConfig;
+
+    let args: HttpListenerArgs =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:0"]}"#).unwrap();
+    let svc = create_test_service();
+    let entry = ServerRoutingEntry {
+      name: "test".to_string(),
+      hostnames: vec![],
+      service: svc,
+      service_name: "test_service".to_string(),
+      users: Some(vec![UserConfig {
+        username: "user1".to_string(),
+        password: "pass1".to_string(),
+      }]),
+      tls: None,
+      access_log_writer: None,
+    };
+    let ctx = plugin::ListenerBuildContext {
+      access_log_writer: None,
+      service_name: String::new(),
+      routing_table: vec![entry],
+    };
+    let listener =
+      HyperListener::from_args(args, create_test_service(), ctx).unwrap();
+    // Verify listener was created with auth from server-level config
+    assert!(
+      listener
+        .user_password_auth
+        .verify_and_extract_username(
+          &http::Request::builder()
+            .method("GET")
+            .uri("http://example.com")
+            .body(())
+            .unwrap()
+        )
+        .is_err(),
+      "Without credentials, verify should fail when users configured"
+    );
   }
 
   #[test]
@@ -728,6 +883,12 @@ auth:
       http::StatusCode::PROXY_AUTHENTICATION_REQUIRED
     );
     assert!(resp.headers().contains_key("Proxy-Authenticate"));
+  }
+
+  #[test]
+  fn test_build_404_response() {
+    let resp = build_404_response();
+    assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
   }
 
   #[test]
@@ -753,7 +914,7 @@ auth:
 
     // Should return 407 response requirement
     assert!(
-      auth.verify(&req).is_err(),
+      auth.verify_and_extract_username(&req).is_err(),
       "Missing auth header should fail verification"
     );
   }
@@ -782,7 +943,7 @@ auth:
 
     // Verify against config - should fail
     assert!(
-      auth.verify(&req).is_err(),
+      auth.verify_and_extract_username(&req).is_err(),
       "Wrong credentials should fail verification"
     );
   }
@@ -811,45 +972,8 @@ auth:
 
     // Verify against config - should pass
     assert!(
-      auth.verify(&req).is_ok(),
+      auth.verify_and_extract_username(&req).is_ok(),
       "Valid credentials should pass verification"
-    );
-  }
-
-  #[test]
-  fn test_adaptor_with_auth() {
-    use crate::auth::listener_auth_config::UserCredential;
-
-    let config = ListenerAuthConfig {
-      users: Some(vec![UserCredential {
-        username: "user1".to_string(),
-        password: "pass1".to_string(),
-      }]),
-      client_ca_path: None,
-    };
-    let auth = UserPasswordAuth::from_config(&config);
-    let svc = create_test_service();
-    let adaptor = HyperServiceAdaptor::new(
-      svc,
-      auth,
-      None,
-      String::new(),
-      None,
-    );
-
-    // Verify that auth was stored
-    assert!(
-      adaptor
-        .user_password_auth
-        .verify(
-          &http::Request::builder()
-            .method("GET")
-            .uri("http://example.com")
-            .body(())
-            .unwrap()
-        )
-        .is_err(),
-      "Without credentials, verify should fail"
     );
   }
 
@@ -859,12 +983,12 @@ auth:
     let config = crate::access_log::AccessLogConfig {
       enabled: true,
       path_prefix: "hypertest.log".to_string(),
-      format: crate::access_log::LogFormat::Text,
-      buffer: crate::access_log::HumanBytes(64),
-      flush: crate::access_log::HumanDuration(
+      format: crate::access_log::config::LogFormat::Text,
+      buffer: crate::access_log::config::HumanBytes(64),
+      flush: crate::access_log::config::HumanDuration(
         std::time::Duration::from_millis(100),
       ),
-      max_size: crate::access_log::HumanBytes(1024 * 1024),
+      max_size: crate::access_log::config::HumanBytes(1024 * 1024),
     };
     let writer = crate::access_log::AccessLogWriter::new(
       dir.path().to_str().unwrap(),
@@ -908,10 +1032,7 @@ auth:
           content.contains("CONNECT example.com:443"),
           "Should contain request line"
         );
-        assert!(
-          content.contains("200"),
-          "Should contain status code"
-        );
+        assert!(content.contains("200"), "Should contain status code");
         assert!(
           content.contains("service=tunnel"),
           "Should contain service name"
@@ -934,10 +1055,7 @@ auth:
   fn test_hyper_listener_stores_access_log_writer() {
     let args = create_test_listener_args();
     let svc = create_test_service();
-    let ctx = plugin::ListenerBuildContext {
-      access_log_writer: None,
-      service_name: "test_service".to_string(),
-    };
+    let ctx = create_test_context();
     let listener =
       HyperListener::new(args, svc, ctx).unwrap();
     // Should compile and create without error
@@ -950,12 +1068,12 @@ auth:
     let config = crate::access_log::AccessLogConfig {
       enabled: true,
       path_prefix: "test.log".to_string(),
-      format: crate::access_log::LogFormat::Text,
-      buffer: crate::access_log::HumanBytes(256),
-      flush: crate::access_log::HumanDuration(
+      format: crate::access_log::config::LogFormat::Text,
+      buffer: crate::access_log::config::HumanBytes(256),
+      flush: crate::access_log::config::HumanDuration(
         std::time::Duration::from_millis(100),
       ),
-      max_size: crate::access_log::HumanBytes(1024 * 1024),
+      max_size: crate::access_log::config::HumanBytes(1024 * 1024),
     };
     let writer = crate::access_log::AccessLogWriter::new(
       dir.path().to_str().unwrap(),
@@ -963,41 +1081,178 @@ auth:
     );
 
     let args = create_test_listener_args();
-    let svc = create_test_service();
-    let ctx = plugin::ListenerBuildContext {
-      access_log_writer: Some(writer),
+    let entry = ServerRoutingEntry {
+      name: "test".to_string(),
+      hostnames: vec![],
+      service: create_test_service(),
       service_name: "tunnel".to_string(),
+      users: None,
+      tls: None,
+      access_log_writer: Some(writer),
+    };
+    let ctx = plugin::ListenerBuildContext {
+      access_log_writer: None,
+      service_name: "tunnel".to_string(),
+      routing_table: vec![entry],
     };
     let listener =
-      HyperListener::new(args, svc, ctx).unwrap();
+      HyperListener::new(args, create_test_service(), ctx).unwrap();
     // Should compile and create without error
     drop(listener);
   }
 
+  // ============== HTTP Version Check Tests ==============
+
   #[test]
-  fn test_adaptor_no_credentials_without_auth() {
-    let svc = create_test_service();
+  fn test_check_http_version_http10_returns_505() {
+    // HTTP/1.0 should return 505
+    let version = http::Version::HTTP_10;
+    let result = check_http_version(version);
+    assert!(result.is_err());
+    assert_eq!(
+      result.unwrap_err(),
+      http::StatusCode::HTTP_VERSION_NOT_SUPPORTED
+    );
+  }
+
+  #[test]
+  fn test_check_http_version_http11_ok() {
+    // HTTP/1.1 should pass
+    let version = http::Version::HTTP_11;
+    let result = check_http_version(version);
+    assert!(result.is_ok());
+  }
+
+  #[test]
+  fn test_check_http_version_http2_ok() {
+    // HTTP/2 should pass (hyper handles this)
+    let version = http::Version::HTTP_2;
+    let result = check_http_version(version);
+    assert!(result.is_ok());
+  }
+
+  #[test]
+  fn test_build_505_response() {
+    let resp = build_505_response();
+    assert_eq!(
+      resp.status(),
+      http::StatusCode::HTTP_VERSION_NOT_SUPPORTED
+    );
+    assert!(
+      resp.headers().get(http::header::CONTENT_TYPE).is_some()
+    );
+  }
+
+  // ============== Routing Tests ==============
+
+  #[test]
+  fn test_route_request_no_host_header() {
+    let routing_table = vec![
+      ServerRoutingEntry {
+        name: "default".to_string(),
+        hostnames: vec![],
+        service: create_test_service(),
+        service_name: "test_service".to_string(),
+        users: None,
+        tls: None,
+        access_log_writer: None,
+      },
+      ServerRoutingEntry {
+        name: "api".to_string(),
+        hostnames: vec!["api.example.com".to_string()],
+        service: create_test_service(),
+        service_name: "test_service".to_string(),
+        users: None,
+        tls: None,
+        access_log_writer: None,
+      },
+    ];
+    let routing_info = vec![
+      neoproxy::routing::ServerMatchInfo {
+        name: "default".to_string(),
+        hostnames: vec![],
+      },
+      neoproxy::routing::ServerMatchInfo {
+        name: "api".to_string(),
+        hostnames: vec!["api.example.com".to_string()],
+      },
+    ];
+
     let adaptor = HyperServiceAdaptor::new(
-      svc,
+      routing_table,
+      routing_info,
       UserPasswordAuth::none(),
       None,
-      String::new(),
       None,
     );
 
-    // Verify that without auth, verify passes
-    assert!(
-      adaptor
-        .user_password_auth
-        .verify(
-          &http::Request::builder()
-            .method("GET")
-            .uri("http://example.com")
-            .body(())
-            .unwrap()
-        )
-        .is_ok(),
-      "Without auth configured, verify should pass"
+    // Request without Host header should route to default
+    let req = http::Request::builder()
+      .method("GET")
+      .uri("/test")
+      .body(plugin::RequestBody::new(
+        plugin::BytesBufBodyWrapper::new(http_body_util::Empty::new()),
+      ))
+      .unwrap();
+
+    let result = adaptor.route_request(&req);
+    assert!(result.is_some());
+    assert_eq!(result.unwrap().name, "default");
+  }
+
+  #[test]
+  fn test_route_request_with_host_header() {
+    let routing_table = vec![
+      ServerRoutingEntry {
+        name: "default".to_string(),
+        hostnames: vec![],
+        service: create_test_service(),
+        service_name: "test_service".to_string(),
+        users: None,
+        tls: None,
+        access_log_writer: None,
+      },
+      ServerRoutingEntry {
+        name: "api".to_string(),
+        hostnames: vec!["api.example.com".to_string()],
+        service: create_test_service(),
+        service_name: "test_service".to_string(),
+        users: None,
+        tls: None,
+        access_log_writer: None,
+      },
+    ];
+    let routing_info = vec![
+      neoproxy::routing::ServerMatchInfo {
+        name: "default".to_string(),
+        hostnames: vec![],
+      },
+      neoproxy::routing::ServerMatchInfo {
+        name: "api".to_string(),
+        hostnames: vec!["api.example.com".to_string()],
+      },
+    ];
+
+    let adaptor = HyperServiceAdaptor::new(
+      routing_table,
+      routing_info,
+      UserPasswordAuth::none(),
+      None,
+      None,
     );
+
+    // Request with Host header should route to matching server
+    let req = http::Request::builder()
+      .method("GET")
+      .uri("/test")
+      .header(http::header::HOST, "api.example.com")
+      .body(plugin::RequestBody::new(
+        plugin::BytesBufBodyWrapper::new(http_body_util::Empty::new()),
+      ))
+      .unwrap();
+
+    let result = adaptor.route_request(&req);
+    assert!(result.is_some());
+    assert_eq!(result.unwrap().name, "api");
   }
 }

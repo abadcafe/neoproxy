@@ -173,7 +173,6 @@ impl ClientCredentialConfig {
     Ok(())
   }
 
-  #[allow(dead_code)]
   fn is_empty(&self) -> bool {
     self.user.is_none()
       && self.client_cert_path.is_none()

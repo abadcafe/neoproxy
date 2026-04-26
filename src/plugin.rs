@@ -119,13 +119,18 @@ pub type SerializedArgs = serde_yaml::Value;
 /// Context passed to listener builders alongside args and service.
 ///
 /// This struct carries additional information needed by listeners,
-/// such as access log writer and service name for logging purposes.
+/// such as access log writer, service name, and routing table for
+/// shared-address listeners.
 #[derive(Clone)]
 pub struct ListenerBuildContext {
   /// Optional access log writer for logging request/response information.
   pub access_log_writer: Option<crate::access_log::AccessLogWriter>,
-  /// Service name for identification in logs.
+  /// Service name for identification in logs (single-server case).
   pub service_name: String,
+  /// Routing table for shared-address listeners.
+  /// Each entry contains server info and service for hostname-based routing.
+  /// Empty or single entry means no hostname routing needed.
+  pub routing_table: Vec<crate::server::ServerRoutingEntry>,
 }
 
 /// an alias for shorten complex trait definition.
@@ -425,9 +430,11 @@ mod tests {
     let ctx = ListenerBuildContext {
       access_log_writer: None,
       service_name: "test_service".to_string(),
+      routing_table: vec![],
     };
     assert!(ctx.access_log_writer.is_none());
     assert_eq!(ctx.service_name, "test_service");
+    assert!(ctx.routing_table.is_empty());
   }
 
   #[test]
@@ -435,6 +442,7 @@ mod tests {
     let ctx = ListenerBuildContext {
       access_log_writer: None,
       service_name: "test_service".to_string(),
+      routing_table: vec![],
     };
     let cloned = ctx.clone();
     assert_eq!(ctx.service_name, cloned.service_name);
@@ -445,8 +453,30 @@ mod tests {
     let ctx = ListenerBuildContext {
       access_log_writer: None,
       service_name: String::new(),
+      routing_table: vec![],
     };
     assert!(ctx.service_name.is_empty());
+  }
+
+  #[test]
+  fn test_listener_build_context_with_routing_table() {
+    // Create a simple routing entry for testing
+    let entry = crate::server::ServerRoutingEntry {
+      name: "test".to_string(),
+      hostnames: vec!["api.example.com".to_string()],
+      service: Service::new(DummyTestService),
+      service_name: "test_service".to_string(),
+      users: None,
+      tls: None,
+      access_log_writer: None,
+    };
+    let ctx = ListenerBuildContext {
+      access_log_writer: None,
+      service_name: "test".to_string(),
+      routing_table: vec![entry],
+    };
+    assert_eq!(ctx.routing_table.len(), 1);
+    assert_eq!(ctx.routing_table[0].name, "test");
   }
 
   /// A dummy service for testing BuildListener trait.
@@ -497,6 +527,7 @@ mod tests {
     let ctx = ListenerBuildContext {
       access_log_writer: None,
       service_name: "my_service".to_string(),
+      routing_table: vec![],
     };
     let dummy_service = Service::new(DummyTestService);
     let result = builder(SerializedArgs::Null, dummy_service, ctx);
@@ -524,6 +555,7 @@ mod tests {
     let ctx = ListenerBuildContext {
       access_log_writer: None,
       service_name: String::new(),
+      routing_table: vec![],
     };
     let dummy_service = Service::new(DummyTestService);
     let result = builder(SerializedArgs::Null, dummy_service, ctx);

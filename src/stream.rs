@@ -73,6 +73,13 @@ impl H3OnUpgrade {
   pub fn on(req: &mut http::Request<RequestBody>) -> Option<Self> {
     req.extensions_mut().remove::<Self>()
   }
+
+  /// Check if an H3 upgrade is available in the request.
+  /// Only available in test builds.
+  #[cfg(test)]
+  pub fn is_available(req: &http::Request<RequestBody>) -> bool {
+    req.extensions().get::<Self>().is_some()
+  }
 }
 
 impl Future for H3OnUpgrade {

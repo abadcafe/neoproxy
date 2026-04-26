@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::net::SocketAddr;
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
@@ -44,10 +45,46 @@ pub struct Listener {
   pub args: serde_yaml::Value,
 }
 
+/// Certificate configuration (cert + key pair)
+#[derive(Deserialize, Clone, Debug)]
+pub struct CertificateConfig {
+  /// Path to certificate file (PEM format)
+  pub cert_path: String,
+  /// Path to private key file (PEM format)
+  pub key_path: String,
+}
+
+/// Server-level TLS configuration
+#[derive(Deserialize, Clone, Debug)]
+pub struct ServerTlsConfig {
+  /// List of certificates (cert_path + key_path pairs)
+  pub certificates: Vec<CertificateConfig>,
+  /// Optional client CA certificates for mTLS
+  #[serde(default)]
+  pub client_ca_certs: Option<Vec<String>>,
+}
+
+/// User credential configuration
+#[derive(Deserialize, Clone, Debug)]
+pub struct UserConfig {
+  /// Username for authentication
+  pub username: String,
+  /// Password for authentication
+  pub password: String,
+}
+
 #[derive(Deserialize, Default, Clone, Debug)]
 #[serde(default)]
 pub struct Server {
   pub name: String,
+  /// Virtual hostnames for this server (for SNI/Host routing)
+  #[serde(default)]
+  pub hostnames: Vec<String>,
+  /// TLS configuration (for https and http3 listeners)
+  pub tls: Option<ServerTlsConfig>,
+  /// User authentication configuration
+  #[serde(default)]
+  pub users: Option<Vec<UserConfig>>,
   pub listeners: Vec<Listener>,
   pub service: String,
   #[serde(default)]
@@ -95,6 +132,51 @@ impl Default for Config {
   }
 }
 
+/// Transport layer type for address conflict detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TransportLayer {
+  Tcp,
+  Udp,
+}
+
+/// Listener kind category for conflict detection.
+/// Includes whether the listener supports hostname-based routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ListenerCategory {
+  Http,   // http listener - TCP, supports hostname routing
+  Https,  // https listener - TCP, supports hostname routing
+  Http3,  // http3 listener - UDP, supports hostname routing
+  Socks5, // socks5 listener - TCP, NO hostname routing
+}
+
+impl ListenerCategory {
+  fn from_kind(kind: &str) -> Option<Self> {
+    match kind {
+      "http" => Some(Self::Http),
+      "https" => Some(Self::Https),
+      "http3" => Some(Self::Http3),
+      "socks5" => Some(Self::Socks5),
+      _ => None,
+    }
+  }
+
+  fn transport_layer(&self) -> TransportLayer {
+    match self {
+      Self::Http | Self::Https | Self::Socks5 => TransportLayer::Tcp,
+      Self::Http3 => TransportLayer::Udp,
+    }
+  }
+}
+
+/// Address usage info for conflict detection.
+struct AddressUsage {
+  server_name: String,
+  listener_kind: String,
+  listener_category: ListenerCategory,
+  /// Hostnames for this server (empty = default server)
+  hostnames: Vec<String>,
+}
+
 impl Config {
   /// Parse config from a string
   pub fn parse_string(&mut self, s: &str) -> Result<()> {
@@ -136,6 +218,22 @@ impl Config {
     for (server_idx, server) in self.servers.iter().enumerate() {
       let server_location = format!("servers[{}]", server_idx);
 
+      // Validate hostnames
+      for (idx, hostname) in server.hostnames.iter().enumerate() {
+        let hostname_location = format!("{}.hostnames[{}]", server_location, idx);
+        self.validate_hostname(hostname, &hostname_location, collector);
+      }
+
+      // Validate users if present
+      if let Some(ref users) = server.users {
+        self.validate_users(users, &format!("{}.users", server_location), collector);
+      }
+
+      // Validate TLS if present
+      if let Some(ref tls) = server.tls {
+        self.validate_server_tls(tls, &format!("{}.tls", server_location), collector);
+      }
+
       // Validate service reference
       if !server.service.is_empty()
         && !service_names.contains(server.service.as_str())
@@ -153,9 +251,202 @@ impl Config {
       {
         let listener_location =
           format!("{}.listeners[{}]", server_location, listener_idx);
-        self.validate_listener(listener, &listener_location, collector);
+        self.validate_listener(
+          listener,
+          &listener_location,
+          server.tls.as_ref(),
+          server.users.as_ref(),
+          collector,
+        );
       }
     }
+
+    // Validate address conflicts across all servers
+    self.validate_address_conflicts(collector);
+  }
+
+  /// Validate address conflicts across all servers and listeners.
+  ///
+  /// Rules:
+  /// - Different transport layer (TCP vs UDP): NO CONFLICT
+  /// - Same transport layer, different kind: CONFLICT
+  /// - Same kind, supports hostname routing: ALLOWED (Task 020 handles routing)
+  /// - Same kind, NO hostname routing support (socks5): CONFLICT
+  /// - Multiple default servers (empty hostnames) on same address+kind: CONFLICT (CR-003)
+  fn validate_address_conflicts(&self, collector: &mut ConfigErrorCollector) {
+    let mut address_map: HashMap<SocketAddr, Vec<AddressUsage>> = HashMap::new();
+
+    for server in &self.servers {
+      for listener in &server.listeners {
+        let category = match ListenerCategory::from_kind(&listener.kind) {
+          Some(c) => c,
+          None => continue, // Unknown kind - already validated elsewhere
+        };
+
+        // Get addresses from listener args
+        let addresses = self.extract_addresses(&listener.args);
+
+        for addr_str in addresses {
+          if let Ok(addr) = addr_str.parse::<SocketAddr>() {
+            let usage = AddressUsage {
+              server_name: server.name.clone(),
+              listener_kind: listener.kind.clone(),
+              listener_category: category,
+              hostnames: server.hostnames.clone(),
+            };
+            address_map.entry(addr).or_default().push(usage);
+          }
+        }
+      }
+    }
+
+    // Check for conflicts
+    for (addr, usages) in address_map {
+      if usages.len() <= 1 {
+        continue; // No conflict possible
+      }
+
+      // Group by transport layer
+      let tcp_usages: Vec<_> = usages
+        .iter()
+        .filter(|u| u.listener_category.transport_layer() == TransportLayer::Tcp)
+        .collect();
+      let udp_usages: Vec<_> = usages
+        .iter()
+        .filter(|u| u.listener_category.transport_layer() == TransportLayer::Udp)
+        .collect();
+
+      // Check TCP conflicts: different kinds = conflict
+      if tcp_usages.len() > 1 {
+        let kinds: HashSet<_> = tcp_usages
+          .iter()
+          .map(|u| u.listener_kind.as_str())
+          .collect();
+
+        if kinds.len() > 1 {
+          // Different TCP kinds on same address = conflict
+          let details: Vec<_> = tcp_usages
+            .iter()
+            .map(|u| format!("{} (server: {})", u.listener_kind, u.server_name))
+            .collect();
+          collector.add(
+            format!("address conflict on {}", addr),
+            format!(
+              "TCP address conflict: different listener kinds ({}) on same address",
+              details.join(", ")
+            ),
+            ConfigErrorKind::AddressConflict,
+          );
+        } else {
+          // Same TCP kind - check for multiple default servers (CR-003)
+          self.check_multiple_default_servers(&tcp_usages, addr, collector);
+        }
+      }
+
+      // Check UDP conflicts: different kinds = conflict
+      if udp_usages.len() > 1 {
+        let kinds: HashSet<_> = udp_usages
+          .iter()
+          .map(|u| u.listener_kind.as_str())
+          .collect();
+
+        if kinds.len() > 1 {
+          // Different UDP kinds on same address = conflict
+          let details: Vec<_> = udp_usages
+            .iter()
+            .map(|u| format!("{} (server: {})", u.listener_kind, u.server_name))
+            .collect();
+          collector.add(
+            format!("address conflict on {}", addr),
+            format!(
+              "UDP address conflict: different listener kinds ({}) on same address",
+              details.join(", ")
+            ),
+            ConfigErrorKind::AddressConflict,
+          );
+        } else {
+          // Same UDP kind - check for multiple default servers (CR-003)
+          self.check_multiple_default_servers(&udp_usages, addr, collector);
+        }
+      }
+
+      // Check for socks5 conflicts (no hostname routing support)
+      let socks5_usages: Vec<_> = usages
+        .iter()
+        .filter(|u| u.listener_category == ListenerCategory::Socks5)
+        .collect();
+
+      if socks5_usages.len() > 1 {
+        // Multiple socks5 listeners on same address = conflict
+        let servers: Vec<_> = socks5_usages.iter().map(|u| u.server_name.as_str()).collect();
+        collector.add(
+          format!("address conflict on {}", addr),
+          format!(
+            "SOCKS5 address conflict: multiple servers ({}) on same address (SOCKS5 does not support hostname routing)",
+            servers.join(", ")
+          ),
+          ConfigErrorKind::AddressConflict,
+        );
+      }
+    }
+  }
+
+  /// Check for multiple default servers (empty hostnames) sharing the same address+kind.
+  ///
+  /// CR-003: Multiple default servers on same (address, kind) causes routing ambiguity.
+  fn check_multiple_default_servers(
+    &self,
+    usages: &[&AddressUsage],
+    addr: SocketAddr,
+    collector: &mut ConfigErrorCollector,
+  ) {
+    // Count default servers (empty hostnames)
+    let default_servers: Vec<_> = usages
+      .iter()
+      .filter(|u| u.hostnames.is_empty())
+      .collect();
+
+    if default_servers.len() > 1 {
+      let servers: Vec<_> = default_servers
+        .iter()
+        .map(|u| u.server_name.as_str())
+        .collect();
+      collector.add(
+        format!("address conflict on {}", addr),
+        format!(
+          "multiple default servers ({}) on same address (only one server per address can have empty hostnames)",
+          servers.join(", ")
+        ),
+        ConfigErrorKind::AddressConflict,
+      );
+    }
+  }
+
+  /// Extract addresses from listener args.
+  fn extract_addresses(&self, args: &serde_yaml::Value) -> Vec<String> {
+    let mut addresses = Vec::new();
+
+    // Try 'addresses' (plural) field first
+    if let Some(addrs) = args.get("addresses") {
+      if let Some(addr_list) = addrs.as_sequence() {
+        for addr in addr_list {
+          if let Some(addr_str) = addr.as_str() {
+            addresses.push(addr_str.to_string());
+          }
+        }
+      }
+    }
+
+    // Try 'address' (singular) field for backward compatibility
+    if addresses.is_empty() {
+      if let Some(addr) = args.get("address") {
+        if let Some(addr_str) = addr.as_str() {
+          addresses.push(addr_str.to_string());
+        }
+      }
+    }
+
+    addresses
   }
 
   /// Validate a single service configuration
@@ -220,6 +511,8 @@ impl Config {
     &self,
     listener: &Listener,
     location: &str,
+    server_tls: Option<&ServerTlsConfig>,
+    server_users: Option<&Vec<UserConfig>>,
     collector: &mut ConfigErrorCollector,
   ) {
     let kind_location = format!("{}.kind", location);
@@ -249,12 +542,23 @@ impl Config {
 
     // Validate args by calling the builder with a dummy service
     // This will catch args parsing errors
-    let dummy_service = plugin::Service::new(DummyService {});
+    // Pass server-level TLS and users config for listeners that need them
+    // Create a minimal routing entry for validation
+    let dummy_entry = crate::server::ServerRoutingEntry {
+      name: String::new(),
+      hostnames: vec![],
+      service: plugin::Service::new(DummyService {}),
+      service_name: String::new(),
+      users: server_users.cloned(),
+      tls: server_tls.cloned(),
+      access_log_writer: None,
+    };
     let dummy_context = plugin::ListenerBuildContext {
       access_log_writer: None,
       service_name: String::new(),
+      routing_table: vec![dummy_entry],
     };
-    if let Err(e) = builder(listener.args.clone(), dummy_service, dummy_context)
+    if let Err(e) = builder(listener.args.clone(), dummy_context.routing_table[0].service.clone(), dummy_context)
     {
       collector.add(
         args_location,
@@ -271,7 +575,7 @@ impl Config {
     );
 
     // Validate HTTP/3 listener specific configuration
-    if listener.kind == "http3.listener" {
+    if listener.kind == "http3" {
       self.validate_http3_listener_args(
         &listener.args,
         location,
@@ -305,18 +609,167 @@ impl Config {
     }
   }
 
+  /// Validate a single hostname pattern.
+  ///
+  /// Valid patterns:
+  /// - Exact hostname: "api.example.com"
+  /// - Wildcard pattern: "*.example.com" (must have at least one dot after *)
+  ///
+  /// Invalid patterns:
+  /// - Empty string
+  /// - Wildcard without domain: "*"
+  /// - Wildcard without dot: "*example.com"
+  fn validate_hostname(
+    &self,
+    hostname: &str,
+    location: &str,
+    collector: &mut ConfigErrorCollector,
+  ) {
+    if hostname.is_empty() {
+      collector.add(
+        location.to_string(),
+        "hostname cannot be empty".to_string(),
+        ConfigErrorKind::InvalidFormat,
+      );
+      return;
+    }
+
+    // Check for wildcard
+    if hostname.starts_with("*.") {
+      let suffix = &hostname[2..];
+      if suffix.is_empty() || !suffix.contains('.') {
+        collector.add(
+          location.to_string(),
+          format!("invalid wildcard hostname '{}'", hostname),
+          ConfigErrorKind::InvalidFormat,
+        );
+      }
+    }
+  }
+
+  /// Validate server-level users configuration
+  fn validate_users(
+    &self,
+    users: &[UserConfig],
+    location: &str,
+    collector: &mut ConfigErrorCollector,
+  ) {
+    if users.is_empty() {
+      collector.add(
+        location.to_string(),
+        "users cannot be an empty array".to_string(),
+        ConfigErrorKind::InvalidFormat,
+      );
+      return;
+    }
+
+    for (idx, user) in users.iter().enumerate() {
+      let user_location = format!("{}[{}]", location, idx);
+
+      if user.username.is_empty() {
+        collector.add(
+          format!("{}.username", user_location),
+          "username cannot be empty".to_string(),
+          ConfigErrorKind::InvalidFormat,
+        );
+      }
+
+      if user.password.is_empty() {
+        collector.add(
+          format!("{}.password", user_location),
+          "password cannot be empty".to_string(),
+          ConfigErrorKind::InvalidFormat,
+        );
+      }
+    }
+  }
+
+  /// Validate server-level TLS configuration
+  fn validate_server_tls(
+    &self,
+    tls: &ServerTlsConfig,
+    location: &str,
+    collector: &mut ConfigErrorCollector,
+  ) {
+    if tls.certificates.is_empty() {
+      collector.add(
+        format!("{}.certificates", location),
+        "at least one certificate is required".to_string(),
+        ConfigErrorKind::InvalidFormat,
+      );
+      return;
+    }
+
+    for (idx, cert) in tls.certificates.iter().enumerate() {
+      let cert_location = format!("{}.certificates[{}]", location, idx);
+
+      // Validate cert path exists and is readable
+      match fs::read_to_string(std::path::Path::new(&cert.cert_path)) {
+        Ok(content) => {
+          if !content.contains("-----BEGIN CERTIFICATE-----")
+            && !content.contains("-----BEGIN TRUSTED CERTIFICATE-----")
+          {
+            collector.add(
+              format!("{}.cert_path", cert_location),
+              format!(
+                "certificate file '{}' is not in PEM format",
+                cert.cert_path
+              ),
+              ConfigErrorKind::InvalidFormat,
+            );
+          }
+        }
+        Err(e) => {
+          collector.add(
+            format!("{}.cert_path", cert_location),
+            format!(
+              "certificate file '{}' cannot be read: {}",
+              cert.cert_path, e
+            ),
+            ConfigErrorKind::FileRead,
+          );
+        }
+      }
+
+      // Validate key path exists and is readable
+      match fs::read_to_string(std::path::Path::new(&cert.key_path)) {
+        Ok(content) => {
+          if !content.contains("-----BEGIN PRIVATE KEY-----")
+            && !content.contains("-----BEGIN RSA PRIVATE KEY-----")
+            && !content.contains("-----BEGIN EC PRIVATE KEY-----")
+            && !content.contains("-----BEGIN ENCRYPTED PRIVATE KEY-----")
+          {
+            collector.add(
+              format!("{}.key_path", cert_location),
+              format!(
+                "private key file '{}' is not in PEM format",
+                cert.key_path
+              ),
+              ConfigErrorKind::InvalidFormat,
+            );
+          }
+        }
+        Err(e) => {
+          collector.add(
+            format!("{}.key_path", cert_location),
+            format!(
+              "private key file '{}' cannot be read: {}",
+              cert.key_path, e
+            ),
+            ConfigErrorKind::FileRead,
+          );
+        }
+      }
+    }
+  }
+
   /// Validate HTTP/3 listener specific configuration
   ///
   /// Validates:
   /// - Address format
-  /// - Certificate file existence and readability
-  /// - Certificate format (PEM)
-  /// - Private key file existence and readability
-  /// - Private key format (PEM)
-  /// - Certificate and private key match
   /// - QUIC parameters validity
-  /// - Authentication configuration completeness
-  /// - Password field format for plaintext password authentication
+  ///
+  /// Note: TLS and auth are now at server level, not listener level.
   fn validate_http3_listener_args(
     &self,
     args: &serde_yaml::Value,
@@ -335,44 +788,21 @@ impl Config {
       );
     }
 
-    // Validate certificate path and get content for matching check
-    let cert_content = if let Some(cert_path) = args.get("server_cert_path") {
-      if let Some(cert_path_str) = cert_path.as_str() {
-        self.validate_certificate_file(
-          cert_path_str,
-          &format!("{}.args.server_cert_path", location),
-          collector,
-        )
-      } else {
-        None
+    // Validate addresses (plural) field
+    if let Some(addresses) = args.get("addresses")
+      && let Some(addrs) = addresses.as_sequence()
+    {
+      for (addr_idx, addr) in addrs.iter().enumerate() {
+        if let Some(addr_str) = addr.as_str()
+          && addr_str.parse::<std::net::SocketAddr>().is_err()
+        {
+          collector.add(
+            format!("{}.args.addresses[{}]", location, addr_idx),
+            format!("invalid address '{}'", addr_str),
+            ConfigErrorKind::InvalidAddress,
+          );
+        }
       }
-    } else {
-      None
-    };
-
-    // Validate private key path and get content for matching check
-    let key_content = if let Some(key_path) = args.get("server_key_path") {
-      if let Some(key_path_str) = key_path.as_str() {
-        self.validate_private_key_file(
-          key_path_str,
-          &format!("{}.args.server_key_path", location),
-          collector,
-        )
-      } else {
-        None
-      }
-    } else {
-      None
-    };
-
-    // Validate certificate and private key match
-    if let (Some(cert), Some(key)) = (&cert_content, &key_content) {
-      self.validate_cert_key_match(
-        cert,
-        key,
-        &format!("{}.args", location),
-        collector,
-      );
     }
 
     // Validate QUIC parameters
@@ -384,157 +814,8 @@ impl Config {
       );
     }
 
-    // Validate authentication configuration
-    if let Some(auth) = args.get("auth") {
-      self.validate_http3_auth_config(auth, location, collector);
-    }
-  }
-
-  /// Validate certificate file
-  /// Returns the file content if valid, None otherwise
-  fn validate_certificate_file(
-    &self,
-    cert_path: &str,
-    location: &str,
-    collector: &mut ConfigErrorCollector,
-  ) -> Option<String> {
-    // Check file exists and is readable
-    match fs::read_to_string(std::path::Path::new(cert_path)) {
-      Ok(content) => {
-        // Check PEM format
-        if !content.contains("-----BEGIN CERTIFICATE-----")
-          && !content.contains("-----BEGIN TRUSTED CERTIFICATE-----")
-        {
-          collector.add(
-            location.to_string(),
-            format!(
-              "certificate file '{}' is not in PEM format",
-              cert_path
-            ),
-            ConfigErrorKind::InvalidFormat,
-          );
-          None
-        } else {
-          Some(content)
-        }
-      }
-      Err(e) => {
-        collector.add(
-          location.to_string(),
-          format!(
-            "certificate file '{}' cannot be read: {}",
-            cert_path, e
-          ),
-          ConfigErrorKind::FileRead,
-        );
-        None
-      }
-    }
-  }
-
-  /// Validate private key file
-  /// Returns the file content if valid, None otherwise
-  fn validate_private_key_file(
-    &self,
-    key_path: &str,
-    location: &str,
-    collector: &mut ConfigErrorCollector,
-  ) -> Option<String> {
-    // Check file exists and is readable
-    match fs::read_to_string(std::path::Path::new(key_path)) {
-      Ok(content) => {
-        // Check PEM format
-        if !content.contains("-----BEGIN PRIVATE KEY-----")
-          && !content.contains("-----BEGIN RSA PRIVATE KEY-----")
-          && !content.contains("-----BEGIN EC PRIVATE KEY-----")
-          && !content.contains("-----BEGIN ENCRYPTED PRIVATE KEY-----")
-        {
-          collector.add(
-            location.to_string(),
-            format!(
-              "private key file '{}' is not in PEM format",
-              key_path
-            ),
-            ConfigErrorKind::InvalidFormat,
-          );
-          None
-        } else {
-          Some(content)
-        }
-      }
-      Err(e) => {
-        collector.add(
-          location.to_string(),
-          format!(
-            "private key file '{}' cannot be read: {}",
-            key_path, e
-          ),
-          ConfigErrorKind::FileRead,
-        );
-        None
-      }
-    }
-  }
-
-  /// Validate that certificate and private key match
-  ///
-  /// This method attempts to parse the certificate and private key
-  /// and verifies that they form a valid key pair.
-  fn validate_cert_key_match(
-    &self,
-    cert_content: &str,
-    key_content: &str,
-    location: &str,
-    collector: &mut ConfigErrorCollector,
-  ) {
-    // Try to parse the certificate chain
-    let cert_chain: Vec<rustls::pki_types::CertificateDer> =
-      rustls_pemfile::certs(&mut std::io::Cursor::new(cert_content))
-        .filter_map(|r| r.ok())
-        .collect();
-
-    if cert_chain.is_empty() {
-      collector.add(
-        format!("{}.cert_path", location),
-        "no valid certificates found in certificate file".to_string(),
-        ConfigErrorKind::InvalidFormat,
-      );
-      return;
-    }
-
-    // Try to parse the private key
-    let private_key = rustls_pemfile::private_key(
-      &mut std::io::Cursor::new(key_content),
-    )
-    .ok()
-    .flatten();
-
-    let Some(private_key) = private_key else {
-      collector.add(
-        format!("{}.key_path", location),
-        "no valid private key found in key file".to_string(),
-        ConfigErrorKind::InvalidFormat,
-      );
-      return;
-    };
-
-    // Try to build a ServerConfig with the cert and key
-    // This will fail if they don't match
-    match rustls::ServerConfig::builder()
-      .with_no_client_auth()
-      .with_single_cert(cert_chain, private_key)
-    {
-      Ok(_) => {
-        // Certificate and key match - validation passed
-      }
-      Err(e) => {
-        collector.add(
-          location.to_string(),
-          format!("certificate and private key do not match: {}", e),
-          ConfigErrorKind::InvalidFormat,
-        );
-      }
-    }
+    // Note: TLS and auth are no longer validated at listener level.
+    // They are now at server level and validated in validate_server_tls and validate_users.
   }
 
   /// Validate QUIC configuration parameters
@@ -605,196 +886,6 @@ impl Config {
         "invalid value 0, expected value > 0".to_string(),
         ConfigErrorKind::InvalidFormat,
       );
-    }
-  }
-
-  /// Validate HTTP/3 authentication configuration.
-  /// Auth must be a single object (not an array). Field presence determines auth type.
-  fn validate_http3_auth_config(
-    &self,
-    auth: &serde_yaml::Value,
-    location: &str,
-    collector: &mut ConfigErrorCollector,
-  ) {
-    if auth.is_sequence() {
-      collector.add(
-        format!("{}.args.auth", location),
-        "auth must be a single object, not an array".to_string(),
-        ConfigErrorKind::TypeMismatch,
-      );
-      return;
-    }
-    self.validate_single_http3_auth_config(
-      auth,
-      &format!("{}.args.auth", location),
-      collector,
-    );
-  }
-
-  /// Validate a single HTTP/3 authentication configuration entry.
-  /// Field presence determines auth type:
-  /// - `users` present → password authentication
-  /// - `client_ca_path` present → TLS client cert authentication
-  /// - Both present → dual-factor AND
-  /// - Neither present → error (empty auth object is invalid for listeners)
-  fn validate_single_http3_auth_config(
-    &self,
-    auth: &serde_yaml::Value,
-    location: &str,
-    collector: &mut ConfigErrorCollector,
-  ) {
-    let has_users = auth.get("users").is_some();
-    let has_client_ca = auth.get("client_ca_path").is_some();
-
-    if !has_users && !has_client_ca {
-      collector.add(
-        location.to_string(),
-        "auth must have at least 'users' or 'client_ca_path'"
-          .to_string(),
-        ConfigErrorKind::MissingField,
-      );
-      return;
-    }
-
-    // Validate users if present
-    if let Some(users) = auth.get("users") {
-      if let Some(users_seq) = users.as_sequence() {
-        if users_seq.is_empty() {
-          collector.add(
-            format!("{}.users", location),
-            "users cannot be empty for password authentication"
-              .to_string(),
-            ConfigErrorKind::InvalidFormat,
-          );
-        }
-        for (idx, user) in users_seq.iter().enumerate() {
-          if let Some(user_map) = user.as_mapping() {
-            // Check username
-            if !user_map.contains_key(&serde_yaml::Value::String(
-              "username".to_string(),
-            )) {
-              collector.add(
-                format!("{}.users[{}].username", location, idx),
-                "username is required".to_string(),
-                ConfigErrorKind::MissingField,
-              );
-            } else if let Some(username_value) = user_map
-              .get(&serde_yaml::Value::String("username".to_string()))
-            {
-              if let Some(username_str) = username_value.as_str() {
-                if username_str.is_empty() {
-                  collector.add(
-                    format!("{}.users[{}].username", location, idx),
-                    "username cannot be empty".to_string(),
-                    ConfigErrorKind::InvalidFormat,
-                  );
-                }
-                if username_str.len() > 255 {
-                  collector.add(
-                    format!("{}.users[{}].username", location, idx),
-                    format!(
-                      "username '{}' is too long (max 255 bytes)",
-                      username_str
-                    ),
-                    ConfigErrorKind::InvalidFormat,
-                  );
-                }
-              } else {
-                collector.add(
-                  format!("{}.users[{}].username", location, idx),
-                  "username must be a string".to_string(),
-                  ConfigErrorKind::TypeMismatch,
-                );
-              }
-            }
-            // Check password
-            if !user_map.contains_key(&serde_yaml::Value::String(
-              "password".to_string(),
-            )) {
-              collector.add(
-                format!("{}.users[{}].password", location, idx),
-                "password is required".to_string(),
-                ConfigErrorKind::MissingField,
-              );
-            } else if let Some(password_value) = user_map
-              .get(&serde_yaml::Value::String("password".to_string()))
-            {
-              if let Some(password_str) = password_value.as_str() {
-                if password_str.is_empty() {
-                  collector.add(
-                    format!("{}.users[{}].password", location, idx),
-                    "password cannot be empty".to_string(),
-                    ConfigErrorKind::InvalidFormat,
-                  );
-                }
-              } else {
-                collector.add(
-                  format!("{}.users[{}].password", location, idx),
-                  "password must be a string".to_string(),
-                  ConfigErrorKind::TypeMismatch,
-                );
-              }
-            }
-          } else {
-            collector.add(
-              format!("{}.users[{}]", location, idx),
-              "user entry must be a mapping".to_string(),
-              ConfigErrorKind::TypeMismatch,
-            );
-          }
-        }
-      } else {
-        collector.add(
-          format!("{}.users", location),
-          "users must be an array".to_string(),
-          ConfigErrorKind::TypeMismatch,
-        );
-      }
-    }
-
-    // Validate client_ca_path if present
-    if let Some(client_ca_path) = auth.get("client_ca_path") {
-      if let Some(ca_path_str) = client_ca_path.as_str() {
-        self.validate_client_ca_file(
-          ca_path_str,
-          &format!("{}.client_ca_path", location),
-          collector,
-        );
-      }
-    }
-  }
-
-  /// Validate client CA certificate file
-  fn validate_client_ca_file(
-    &self,
-    ca_path: &str,
-    location: &str,
-    collector: &mut ConfigErrorCollector,
-  ) {
-    // Check file exists and is readable
-    match fs::read_to_string(std::path::Path::new(ca_path)) {
-      Ok(content) => {
-        // Check PEM format
-        if !content.contains("-----BEGIN CERTIFICATE-----")
-          && !content.contains("-----BEGIN TRUSTED CERTIFICATE-----")
-        {
-          collector.add(
-            location.to_string(),
-            format!(
-              "client CA file '{}' is not in PEM format",
-              ca_path
-            ),
-            ConfigErrorKind::InvalidFormat,
-          );
-        }
-      }
-      Err(e) => {
-        collector.add(
-          location.to_string(),
-          format!("client CA file '{}' cannot be read: {}", ca_path, e),
-          ConfigErrorKind::FileRead,
-        );
-      }
     }
   }
 
@@ -877,17 +968,6 @@ impl tower::Service<plugin::Request> for DummyService {
 #[cfg(test)]
 mod tests {
   use super::*;
-
-  // Initialize CryptoProvider for tests that involve TLS/QUIC
-  static CRYPTO_PROVIDER_INIT: std::sync::Once = std::sync::Once::new();
-
-  fn ensure_crypto_provider() {
-    CRYPTO_PROVIDER_INIT.call_once(|| {
-      // Ignore error if provider is already installed by another test module
-      let _ =
-        rustls::crypto::ring::default_provider().install_default();
-    });
-  }
 
   /// Get the temporary directory for tests.
   /// Per constraint, we must use "tmp/" in the current directory instead of /tmp.
@@ -1075,14 +1155,14 @@ worker_threads: [
   #[test]
   fn test_validate_valid_listener() {
     let args = serde_yaml::from_str(
-      r#"{addresses: ["127.0.0.1:8080"], protocols: [], hostnames: []}"#,
+      r#"{addresses: ["127.0.0.1:8080"]}"#,
     )
     .unwrap();
     let config = Config {
       servers: vec![Server {
         name: "test_server".to_string(),
         listeners: vec![Listener {
-          kind: "hyper.listener".to_string(),
+          kind: "http".to_string(),
           args,
         }],
         service: "".to_string(),
@@ -1114,7 +1194,7 @@ worker_threads: [
     assert!(collector.has_errors());
     let errors = collector.errors();
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].kind, ConfigErrorKind::InvalidFormat);
+    assert_eq!(errors[0].kind, ConfigErrorKind::NotFound);
   }
 
   #[test]
@@ -1192,14 +1272,14 @@ worker_threads: [
   #[test]
   fn test_validate_valid_address() {
     let args = serde_yaml::from_str(
-      r#"{addresses: ["127.0.0.1:8080"], protocols: [], hostnames: []}"#,
+      r#"{addresses: ["127.0.0.1:8080"]}"#,
     )
     .unwrap();
     let config = Config {
       servers: vec![Server {
         name: "test".to_string(),
         listeners: vec![Listener {
-          kind: "hyper.listener".to_string(),
+          kind: "http".to_string(),
           args,
         }],
         service: "".to_string(),
@@ -1215,14 +1295,14 @@ worker_threads: [
   #[test]
   fn test_validate_invalid_address() {
     let args = serde_yaml::from_str(
-      r#"{addresses: ["invalid:address"], protocols: [], hostnames: []}"#,
+      r#"{addresses: ["invalid:address"]}"#,
     )
     .unwrap();
     let config = Config {
       servers: vec![Server {
         name: "test".to_string(),
         listeners: vec![Listener {
-          kind: "hyper.listener".to_string(),
+          kind: "http".to_string(),
           args,
         }],
         service: "".to_string(),
@@ -1241,14 +1321,14 @@ worker_threads: [
   #[test]
   fn test_validate_multiple_invalid_addresses() {
     let args = serde_yaml::from_str(
-      r#"{addresses: ["invalid1", "127.0.0.1:8080", "invalid2"], protocols: [], hostnames: []}"#,
+      r#"{addresses: ["invalid1", "127.0.0.1:8080", "invalid2"]}"#,
     )
     .unwrap();
     let config = Config {
       servers: vec![Server {
         name: "test".to_string(),
         listeners: vec![Listener {
-          kind: "hyper.listener".to_string(),
+          kind: "http".to_string(),
           args,
         }],
         service: "".to_string(),
@@ -1268,16 +1348,16 @@ worker_threads: [
   #[test]
   fn test_validate_addresses_non_string() {
     // Non-string items in addresses array cause args parsing error
-    // because HyperListenerArgs.addresses is Vec<String>
+    // because listener args expect Vec<String>
     let args = serde_yaml::from_str(
-      r#"{addresses: [123, 456], protocols: [], hostnames: []}"#,
+      r#"{addresses: [123, 456]}"#,
     )
     .unwrap();
     let config = Config {
       servers: vec![Server {
         name: "test".to_string(),
         listeners: vec![Listener {
-          kind: "hyper.listener".to_string(),
+          kind: "http".to_string(),
           args,
         }],
         service: "".to_string(),
@@ -1296,8 +1376,12 @@ worker_threads: [
 
   #[test]
   fn test_validate_multiple_services_and_listeners() {
-    let listener_args: serde_yaml::Value = serde_yaml::from_str(
-      r#"{addresses: ["127.0.0.1:8080"], protocols: [], hostnames: []}"#,
+    let listener_args1: serde_yaml::Value = serde_yaml::from_str(
+      r#"{addresses: ["127.0.0.1:8080"]}"#,
+    )
+    .unwrap();
+    let listener_args2: serde_yaml::Value = serde_yaml::from_str(
+      r#"{addresses: ["127.0.0.1:8081"]}"#,
     )
     .unwrap();
     let config = Config {
@@ -1319,8 +1403,8 @@ worker_threads: [
         Server {
           name: "server1".to_string(),
           listeners: vec![Listener {
-            kind: "hyper.listener".to_string(),
-            args: listener_args.clone(),
+            kind: "http".to_string(),
+            args: listener_args1,
           }],
           service: "echo".to_string(),
           ..Default::default()
@@ -1328,8 +1412,8 @@ worker_threads: [
         Server {
           name: "server2".to_string(),
           listeners: vec![Listener {
-            kind: "hyper.listener".to_string(),
-            args: listener_args,
+            kind: "http".to_string(),
+            args: listener_args2,
           }],
           service: "connect".to_string(),
           ..Default::default()
@@ -1470,14 +1554,14 @@ worker_threads: [
   fn test_validate_addresses_missing_field() {
     // Missing required field 'addresses' causes args parsing error
     let args = serde_yaml::from_str(
-      r#"{other_field: "value", protocols: [], hostnames: []}"#,
+      r#"{other_field: "value"}"#,
     )
     .unwrap();
     let config = Config {
       servers: vec![Server {
         name: "test".to_string(),
         listeners: vec![Listener {
-          kind: "hyper.listener".to_string(),
+          kind: "http".to_string(),
           args,
         }],
         service: "".to_string(),
@@ -1498,14 +1582,14 @@ worker_threads: [
   #[test]
   fn test_validate_addresses_empty_array() {
     let args = serde_yaml::from_str(
-      r#"{addresses: [], protocols: [], hostnames: []}"#,
+      r#"{addresses: []}"#,
     )
     .unwrap();
     let config = Config {
       servers: vec![Server {
         name: "test".to_string(),
         listeners: vec![Listener {
-          kind: "hyper.listener".to_string(),
+          kind: "http".to_string(),
           args,
         }],
         service: "".to_string(),
@@ -1515,6 +1599,7 @@ worker_threads: [
     };
     let mut collector = ConfigErrorCollector::new();
     config.validate(&mut collector);
+    // Empty addresses is allowed at parse time (validation happens at runtime)
     assert!(!collector.has_errors());
   }
 
@@ -1542,13 +1627,13 @@ worker_threads: [
 
   #[test]
   fn test_validate_listener_args_parsing_error() {
-    // Missing required field 'addresses' for hyper.listener
-    let args = serde_yaml::from_str(r#"{protocols: []}"#).unwrap();
+    // Missing required field 'addresses' for http listener
+    let args = serde_yaml::from_str(r#"{}"#).unwrap();
     let config = Config {
       servers: vec![Server {
         name: "test".to_string(),
         listeners: vec![Listener {
-          kind: "hyper.listener".to_string(),
+          kind: "http".to_string(),
           args,
         }],
         service: "".to_string(),
@@ -1599,11 +1684,9 @@ services:
 servers:
   - name: "server1"
     listeners:
-      - kind: "hyper.listener"
+      - kind: "http"
         args:
           addresses: ["127.0.0.1:8080"]
-          protocols: []
-          hostnames: []
     service: "echo_svc"
 "#;
     std::fs::write(&temp_path, config_content).unwrap();
@@ -1636,2541 +1719,6 @@ worker_threads: [
     let _opt = CmdOpt::global();
   }
 
-  // =========================================================================
-  // HTTP/3 Listener Configuration Validation Tests
-  // =========================================================================
-
-  /// Generate real test certificates for HTTP/3 listener tests
-  /// Uses rcgen to generate valid self-signed certificates.
-  /// Each test generates unique certificates to avoid race conditions.
-  fn generate_test_certificates()
-  -> (std::path::PathBuf, std::path::PathBuf) {
-    use std::collections::hash_map::DefaultHasher;
-    use std::fs::Permissions;
-    use std::hash::{Hash, Hasher};
-    use std::os::unix::fs::PermissionsExt;
-
-    let temp_dir = get_temp_dir();
-
-    // Generate unique filename based on process ID and thread ID
-    let mut hasher = DefaultHasher::new();
-    std::process::id().hash(&mut hasher);
-    std::thread::current().id().hash(&mut hasher);
-    let unique_id = hasher.finish();
-
-    let cert_path = temp_dir
-      .join(format!("neoproxy_http3_test_cert_{}.pem", unique_id));
-    let key_path = temp_dir
-      .join(format!("neoproxy_http3_test_key_{}.pem", unique_id));
-
-    // Generate real certificates using rcgen
-    let subject_alt_names =
-      vec!["localhost".to_string(), "127.0.0.1".to_string()];
-
-    let cert = rcgen::generate_simple_self_signed(subject_alt_names)
-      .expect("Failed to generate certificate");
-
-    let cert_pem = cert.cert.pem();
-    let key_pem = cert.key_pair.serialize_pem();
-
-    std::fs::write(&cert_path, cert_pem).expect("Failed to write cert");
-    std::fs::write(&key_path, key_pem).expect("Failed to write key");
-
-    // Set secure permissions for the private key (0o600 = rw-------)
-    std::fs::set_permissions(&key_path, Permissions::from_mode(0o600))
-      .expect("Failed to set key permissions");
-
-    (cert_path, key_path)
-  }
-
-  /// Generate a real client CA certificate for TLS client cert auth tests
-  /// Uses rcgen to generate a valid certificate.
-  /// Each test generates unique certificates to avoid race conditions.
-  fn generate_test_client_ca_certificate() -> std::path::PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let temp_dir = get_temp_dir();
-
-    // Generate unique filename based on process ID and thread ID
-    let mut hasher = DefaultHasher::new();
-    std::process::id().hash(&mut hasher);
-    std::thread::current().id().hash(&mut hasher);
-    let unique_id = hasher.finish();
-
-    let ca_path = temp_dir
-      .join(format!("neoproxy_http3_test_client_ca_{}.pem", unique_id));
-
-    // Generate a certificate using rcgen (same as server cert, just for testing)
-    // The config validation only checks if the file exists and is valid PEM format
-    let subject_alt_names =
-      vec!["localhost".to_string(), "127.0.0.1".to_string()];
-
-    let cert = rcgen::generate_simple_self_signed(subject_alt_names)
-      .expect("Failed to generate CA certificate");
-
-    let ca_pem = cert.cert.pem();
-
-    std::fs::write(&ca_path, ca_pem).expect("Failed to write CA cert");
-
-    ca_path
-  }
-
-  #[test]
-  fn test_validate_http3_listener_valid_config() {
-    ensure_crypto_provider();
-
-    // Use real certificates generated by openssl
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}"
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    // Cleanup
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // No address validation errors (address format is valid)
-    // Certificate and key format validation passed
-    assert!(!collector.has_errors());
-  }
-
-  #[test]
-  fn test_validate_http3_listener_invalid_address() {
-    let temp_dir = get_temp_dir();
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "invalid-address",
-  "server_cert_path": "{}",
-  "server_key_path": "{}"
-}}"#,
-      temp_dir.join("cert.pem").to_str().unwrap(),
-      temp_dir.join("key.pem").to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    let address_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| e.location.contains("address"))
-      .collect();
-    assert!(!address_errors.is_empty());
-    assert_eq!(address_errors[0].kind, ConfigErrorKind::InvalidAddress);
-  }
-
-  #[test]
-  fn test_validate_http3_listener_cert_not_found() {
-    let temp_dir = get_temp_dir();
-    let non_existent_cert =
-      temp_dir.join("non_existent_cert_12345.pem");
-    let _ = std::fs::remove_file(&non_existent_cert);
-
-    let key_path = temp_dir.join("neoproxy_test_key2.pem");
-    std::fs::write(
-      &key_path,
-      "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n",
-    )
-    .unwrap();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}"
-}}"#,
-      non_existent_cert.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&key_path);
-
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    let cert_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| e.location.contains("cert_path"))
-      .collect();
-    assert!(!cert_errors.is_empty());
-    assert_eq!(cert_errors[0].kind, ConfigErrorKind::FileRead);
-  }
-
-  #[test]
-  fn test_validate_http3_listener_cert_not_pem() {
-    ensure_crypto_provider();
-    let temp_dir = get_temp_dir();
-    let cert_path = temp_dir.join("neoproxy_test_invalid_cert.pem");
-    let key_path = temp_dir.join("neoproxy_test_key3.pem");
-
-    // Write invalid cert (not PEM format)
-    std::fs::write(&cert_path, "not a pem certificate").unwrap();
-    std::fs::write(
-      &key_path,
-      "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n",
-    )
-    .unwrap();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}"
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    let cert_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| e.location.contains("cert_path"))
-      .collect();
-    assert!(!cert_errors.is_empty());
-    assert_eq!(cert_errors[0].kind, ConfigErrorKind::InvalidFormat);
-    assert!(cert_errors[0].message.contains("not in PEM format"));
-  }
-
-  #[test]
-  fn test_validate_http3_listener_key_not_found() {
-    let temp_dir = get_temp_dir();
-    let cert_path = temp_dir.join("neoproxy_test_cert4.pem");
-    let non_existent_key = temp_dir.join("non_existent_key_12345.pem");
-
-    std::fs::write(
-      &cert_path,
-      "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
-    )
-    .unwrap();
-    let _ = std::fs::remove_file(&non_existent_key);
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}"
-}}"#,
-      cert_path.to_str().unwrap(),
-      non_existent_key.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    let key_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| e.location.contains("key_path"))
-      .collect();
-    assert!(!key_errors.is_empty());
-    assert_eq!(key_errors[0].kind, ConfigErrorKind::FileRead);
-  }
-
-  #[test]
-  fn test_validate_http3_listener_key_not_pem() {
-    let temp_dir = get_temp_dir();
-    let cert_path = temp_dir.join("neoproxy_test_cert5.pem");
-    let key_path = temp_dir.join("neoproxy_test_invalid_key.pem");
-
-    std::fs::write(
-      &cert_path,
-      "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
-    )
-    .unwrap();
-    std::fs::write(&key_path, "not a pem key").unwrap();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}"
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    let key_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| e.location.contains("key_path"))
-      .collect();
-    assert!(!key_errors.is_empty());
-    assert_eq!(key_errors[0].kind, ConfigErrorKind::InvalidFormat);
-    assert!(key_errors[0].message.contains("not in PEM format"));
-  }
-
-  #[test]
-  fn test_validate_http3_listener_rsa_private_key() {
-    let temp_dir = get_temp_dir();
-    let cert_path = temp_dir.join("neoproxy_test_cert_rsa.pem");
-    let key_path = temp_dir.join("neoproxy_test_key_rsa.pem");
-
-    std::fs::write(
-      &cert_path,
-      "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
-    )
-    .unwrap();
-    std::fs::write(
-      &key_path,
-      "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----\n",
-    )
-    .unwrap();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}"
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // RSA PRIVATE KEY format should be accepted
-    let key_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| e.location.contains("key_path"))
-      .collect();
-    assert!(key_errors.is_empty());
-  }
-
-  #[test]
-  fn test_validate_http3_listener_ec_private_key() {
-    ensure_crypto_provider();
-    let temp_dir = get_temp_dir();
-    let cert_path = temp_dir.join("neoproxy_test_cert_ec.pem");
-    let key_path = temp_dir.join("neoproxy_test_key_ec.pem");
-
-    std::fs::write(
-      &cert_path,
-      "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
-    )
-    .unwrap();
-    std::fs::write(
-      &key_path,
-      "-----BEGIN EC PRIVATE KEY-----\ntest\n-----END EC PRIVATE KEY-----\n",
-    )
-    .unwrap();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}"
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // EC PRIVATE KEY format should be accepted
-    let key_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| e.location.contains("key_path"))
-      .collect();
-    assert!(key_errors.is_empty());
-  }
-
-  #[test]
-  fn test_validate_http3_listener_encrypted_private_key() {
-    // This test verifies that ENCRYPTED PRIVATE KEY format is accepted
-    // The test uses dummy data, so cert/key matching will fail,
-    // but we only check that there's no key format error
-    let temp_dir = get_temp_dir();
-    let cert_path = temp_dir.join("neoproxy_test_cert_enc.pem");
-    let key_path = temp_dir.join("neoproxy_test_key_enc.pem");
-
-    std::fs::write(
-      &cert_path,
-      "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
-    )
-    .unwrap();
-    std::fs::write(
-      &key_path,
-      "-----BEGIN ENCRYPTED PRIVATE KEY-----\ntest\n-----END ENCRYPTED PRIVATE KEY-----\n",
-    )
-    .unwrap();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}"
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // ENCRYPTED PRIVATE KEY format should be accepted
-    // We check that there's no "not in PEM format" error for the key
-    let key_format_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| {
-        e.location.contains("key_path")
-          && e.message.contains("not in PEM format")
-      })
-      .collect();
-    assert!(key_format_errors.is_empty());
-  }
-
-  #[test]
-  fn test_validate_http3_listener_auth_password_valid() {
-    ensure_crypto_provider();
-
-    // Use real certificates for cert/key matching validation
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{
-    "users": [
-      {{
-        "username": "user1",
-        "password": "secret123"
-      }}
-    ]
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Password auth with valid users should pass
-    let auth_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| e.location.contains("auth"))
-      .collect();
-    assert!(auth_errors.is_empty());
-  }
-
-  #[test]
-  fn test_validate_http3_listener_auth_password_missing_users() {
-    ensure_crypto_provider();
-
-    // Use real certificates for cert/key matching validation
-    let (cert_path, key_path) = generate_test_certificates();
-
-    // New format: auth with users but users is missing
-    // This should pass validation since users is optional field with default None
-    // But to test "missing users" error, we need an auth object with no valid fields
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    // Empty auth object should fail - needs users or client_ca_path
-    let auth_errors: Vec<_> =
-      errors.iter().filter(|e| e.location.contains("auth")).collect();
-    assert!(!auth_errors.is_empty());
-  }
-
-  #[test]
-  fn test_validate_http3_listener_auth_password_empty_users() {
-    ensure_crypto_provider();
-
-    // Use real certificates for cert/key matching validation
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{
-    "users": []
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    let users_errors: Vec<_> =
-      errors.iter().filter(|e| e.location.contains("users")).collect();
-    assert!(!users_errors.is_empty());
-    assert_eq!(users_errors[0].kind, ConfigErrorKind::InvalidFormat);
-    assert!(users_errors[0].message.contains("cannot be empty"));
-  }
-
-  #[test]
-  fn test_validate_http3_listener_auth_password_missing_username() {
-    ensure_crypto_provider();
-
-    // Use real certificates for cert/key matching validation
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{
-    "users": [
-      {{
-        "password": "secret123"
-      }}
-    ]
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    let username_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| e.location.contains("username"))
-      .collect();
-    assert!(!username_errors.is_empty());
-    assert_eq!(username_errors[0].kind, ConfigErrorKind::MissingField);
-  }
-
-  #[test]
-  fn test_validate_http3_listener_auth_password_missing_password() {
-    ensure_crypto_provider();
-
-    // Use real certificates for cert/key matching validation
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{
-    "users": [
-      {{
-        "username": "user1"
-      }}
-    ]
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    let password_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| e.location.contains("password"))
-      .collect();
-    assert!(!password_errors.is_empty());
-    assert_eq!(password_errors[0].kind, ConfigErrorKind::MissingField);
-  }
-
-  #[test]
-  fn test_validate_http3_listener_auth_tls_client_cert_valid() {
-    ensure_crypto_provider();
-
-    // Use real certificates for proper validation
-    let (cert_path, key_path) = generate_test_certificates();
-    let ca_path = generate_test_client_ca_certificate();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{
-    "client_ca_path": "{}"
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      ca_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-    let _ = std::fs::remove_file(&ca_path);
-
-    // TLS client cert auth with valid CA should pass
-    let auth_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| e.location.contains("auth"))
-      .collect();
-    assert!(auth_errors.is_empty());
-  }
-
-  #[test]
-  fn test_validate_http3_listener_auth_tls_client_cert_missing_ca() {
-    let temp_dir = get_temp_dir();
-    let cert_path = temp_dir.join("neoproxy_test_cert_tls2.pem");
-    let key_path = temp_dir.join("neoproxy_test_key_tls2.pem");
-
-    std::fs::write(
-      &cert_path,
-      "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
-    )
-    .unwrap();
-    std::fs::write(
-      &key_path,
-      "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n",
-    )
-    .unwrap();
-
-    // New format: auth with client_ca_path pointing to non-existent file
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{
-    "client_ca_path": "/nonexistent/ca.pem"
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    let ca_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| e.location.contains("client_ca_path"))
-      .collect();
-    assert!(!ca_errors.is_empty());
-    assert_eq!(ca_errors[0].kind, ConfigErrorKind::FileRead);
-  }
-
-  #[test]
-  fn test_validate_http3_listener_auth_tls_client_cert_ca_not_found() {
-    let temp_dir = get_temp_dir();
-    let cert_path = temp_dir.join("neoproxy_test_cert_tls3.pem");
-    let key_path = temp_dir.join("neoproxy_test_key_tls3.pem");
-    let non_existent_ca = temp_dir.join("non_existent_ca_12345.pem");
-
-    std::fs::write(
-      &cert_path,
-      "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
-    )
-    .unwrap();
-    std::fs::write(
-      &key_path,
-      "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n",
-    )
-    .unwrap();
-    let _ = std::fs::remove_file(&non_existent_ca);
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{
-    "client_ca_path": "{}"
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      non_existent_ca.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    let ca_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| e.location.contains("client_ca_path"))
-      .collect();
-    assert!(!ca_errors.is_empty());
-    assert_eq!(ca_errors[0].kind, ConfigErrorKind::FileRead);
-  }
-
-  #[test]
-  fn test_validate_http3_listener_auth_tls_client_cert_ca_not_pem() {
-    ensure_crypto_provider();
-    let temp_dir = get_temp_dir();
-    let cert_path = temp_dir.join("neoproxy_test_cert_tls4.pem");
-    let key_path = temp_dir.join("neoproxy_test_key_tls4.pem");
-    let ca_path = temp_dir.join("neoproxy_test_invalid_ca.pem");
-
-    std::fs::write(
-      &cert_path,
-      "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
-    )
-    .unwrap();
-    std::fs::write(
-      &key_path,
-      "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n",
-    )
-    .unwrap();
-    std::fs::write(&ca_path, "not a pem certificate").unwrap();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{
-    "client_ca_path": "{}"
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      ca_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-    let _ = std::fs::remove_file(&ca_path);
-
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    let ca_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| e.location.contains("client_ca_path"))
-      .collect();
-    assert!(!ca_errors.is_empty());
-    assert_eq!(ca_errors[0].kind, ConfigErrorKind::InvalidFormat);
-    assert!(ca_errors[0].message.contains("not in PEM format"));
-  }
-
-  #[test]
-  fn test_validate_http3_listener_auth_invalid_type() {
-    ensure_crypto_provider();
-
-    // Use real certificates for cert/key matching validation
-    let (cert_path, key_path) = generate_test_certificates();
-
-    // New format: auth with users array containing invalid field
-    // Test that an unknown field doesn't cause errors (serde ignores unknown fields)
-    // Instead, test that empty auth object is rejected
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    let auth_errors: Vec<_> =
-      errors.iter().filter(|e| e.location.contains("auth")).collect();
-    assert!(!auth_errors.is_empty());
-    assert!(
-      auth_errors[0].message.contains("users")
-        || auth_errors[0].message.contains("client_ca_path")
-    );
-  }
-
-  #[test]
-  fn test_validate_http3_listener_auth_missing_type() {
-    ensure_crypto_provider();
-
-    // Use real certificates for cert/key matching validation
-    let (cert_path, key_path) = generate_test_certificates();
-
-    // New format: valid auth with users (no type field needed)
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{
-    "users": [
-      {{"username": "admin", "password": "secret"}}
-    ]
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // New format with users should be valid (no type field needed)
-    let auth_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| e.location.contains("auth"))
-      .collect();
-    assert!(
-      auth_errors.is_empty(),
-      "New auth format (no type field, users directly) should be accepted, but got errors: {:?}",
-      auth_errors
-    );
-  }
-
-  #[test]
-  fn test_validate_http3_listener_auth_users_not_array() {
-    ensure_crypto_provider();
-
-    // Use real certificates for cert/key matching validation
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{
-    "users": "not_an_array"
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    let users_errors: Vec<_> =
-      errors.iter().filter(|e| e.location.contains("users")).collect();
-    assert!(!users_errors.is_empty());
-    assert_eq!(users_errors[0].kind, ConfigErrorKind::TypeMismatch);
-  }
-
-  #[test]
-  fn test_validate_http3_listener_multiple_users() {
-    let temp_dir = get_temp_dir();
-    let cert_path = temp_dir.join("neoproxy_test_cert_multi.pem");
-    let key_path = temp_dir.join("neoproxy_test_key_multi.pem");
-
-    std::fs::write(
-      &cert_path,
-      "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
-    )
-    .unwrap();
-    std::fs::write(
-      &key_path,
-      "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n",
-    )
-    .unwrap();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{
-    "users": [
-      {{
-        "username": "user1",
-        "password": "secret123"
-      }},
-      {{
-        "username": "user2",
-        "password": "secret456"
-      }}
-    ]
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Multiple users should be valid
-    let auth_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| e.location.contains("auth"))
-      .collect();
-    assert!(auth_errors.is_empty());
-  }
-
-  #[test]
-  fn test_validate_http3_listener_trusted_certificate() {
-    // This test verifies that TRUSTED CERTIFICATE format is accepted
-    // The test uses dummy data, so cert/key matching will fail,
-    // but we only check that there's no cert format error
-    let temp_dir = get_temp_dir();
-    let cert_path = temp_dir.join("neoproxy_test_cert_trusted.pem");
-    let key_path = temp_dir.join("neoproxy_test_key_trusted.pem");
-
-    std::fs::write(
-      &cert_path,
-      "-----BEGIN TRUSTED CERTIFICATE-----\ntest\n-----END TRUSTED CERTIFICATE-----\n",
-    )
-    .unwrap();
-    std::fs::write(
-      &key_path,
-      "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n",
-    )
-    .unwrap();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}"
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // TRUSTED CERTIFICATE format should be accepted
-    // We check that there's no "not in PEM format" error for the cert
-    let cert_format_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| {
-        e.location.contains("cert_path")
-          && e.message.contains("not in PEM format")
-      })
-      .collect();
-    assert!(cert_format_errors.is_empty());
-  }
-
-  // =========================================================================
-  // Certificate and Private Key Matching Validation Tests
-  // =========================================================================
-
-  #[test]
-  fn test_validate_cert_key_match_valid() {
-    ensure_crypto_provider();
-
-    // Use real certificates for cert/key matching validation
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}"
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Valid cert/key pair should pass with no errors
-    assert!(!collector.has_errors());
-  }
-
-  #[test]
-  fn test_validate_cert_key_mismatch() {
-    ensure_crypto_provider();
-
-    // Generate two different cert/key pairs
-    let (cert_path1, key_path1) = generate_test_certificates();
-
-    // Create a different private key
-    let temp_dir = get_temp_dir();
-    let key_path2 = temp_dir.join("neoproxy_test_key_mismatch.pem");
-
-    // Generate a different key using openssl
-    let output = std::process::Command::new("openssl")
-      .args(["genrsa", "2048"])
-      .output();
-
-    if let Ok(output) = output {
-      std::fs::write(&key_path2, &output.stdout).unwrap();
-
-      let args = serde_yaml::from_str(&format!(
-        r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}"
-}}"#,
-        cert_path1.to_str().unwrap(),
-        key_path2.to_str().unwrap()
-      ))
-      .unwrap();
-
-      let config = Config {
-        servers: vec![Server {
-          name: "test".to_string(),
-          listeners: vec![Listener {
-            kind: "http3.listener".to_string(),
-            args,
-          }],
-          service: "".to_string(),
-        ..Default::default()
-        }],
-        ..Default::default()
-      };
-      let mut collector = ConfigErrorCollector::new();
-      config.validate(&mut collector);
-
-      let _ = std::fs::remove_file(&cert_path1);
-      let _ = std::fs::remove_file(&key_path1);
-      let _ = std::fs::remove_file(&key_path2);
-
-      // Mismatched cert/key should produce an error
-      assert!(collector.has_errors());
-      let errors = collector.errors();
-      let match_errors: Vec<_> = errors
-        .iter()
-        .filter(|e| {
-          e.message.contains("certificate and private key do not match")
-        })
-        .collect();
-      assert!(!match_errors.is_empty());
-    } else {
-      // openssl not available, skip the test
-      let _ = std::fs::remove_file(&cert_path1);
-      let _ = std::fs::remove_file(&key_path1);
-    }
-  }
-
-  #[test]
-  fn test_validate_cert_no_valid_certs() {
-    ensure_crypto_provider();
-    let temp_dir = get_temp_dir();
-    let cert_path = temp_dir.join("neoproxy_test_cert_no_valid.pem");
-    let key_path = temp_dir.join("neoproxy_test_key_no_valid.pem");
-
-    // Write invalid cert content (valid PEM markers but no actual certs)
-    std::fs::write(
-      &cert_path,
-      "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n",
-    )
-    .unwrap();
-    std::fs::write(
-      &key_path,
-      "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n",
-    )
-    .unwrap();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}"
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    assert!(collector.has_errors());
-    // The error message could be about no valid certs or cert/key mismatch
-    let errors = collector.errors();
-    let cert_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| {
-        e.message.contains("no valid certificates")
-          || e
-            .message
-            .contains("certificate and private key do not match")
-      })
-      .collect();
-    assert!(!cert_errors.is_empty());
-  }
-
-  #[test]
-  fn test_validate_key_no_valid_key() {
-    ensure_crypto_provider();
-    let temp_dir = get_temp_dir();
-    let cert_path = temp_dir.join("neoproxy_test_cert_no_key.pem");
-    let key_path = temp_dir.join("neoproxy_test_key_no_key.pem");
-
-    std::fs::write(
-      &cert_path,
-      "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
-    )
-    .unwrap();
-    // Write invalid key content (valid PEM markers but no actual key)
-    std::fs::write(
-      &key_path,
-      "-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----\n",
-    )
-    .unwrap();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}"
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    assert!(collector.has_errors());
-    // The error message could be about no valid key or cert/key mismatch
-    let errors = collector.errors();
-    let key_errors: Vec<_> = errors
-      .iter()
-      .filter(|e| {
-        e.message.contains("no valid private key")
-          || e
-            .message
-            .contains("certificate and private key do not match")
-      })
-      .collect();
-    assert!(!key_errors.is_empty());
-  }
-
-  // =========================================================================
-  // QUIC Parameter Validation Tests
-  // =========================================================================
-
-  #[test]
-  fn test_validate_quic_params_valid() {
-    ensure_crypto_provider();
-
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "quic": {{
-    "max_concurrent_bidi_streams": 100,
-    "max_idle_timeout_ms": 30000,
-    "initial_mtu": 1200,
-    "send_window": 10485760,
-    "receive_window": 10485760
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Valid QUIC params should not produce errors
-    let quic_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| e.location.contains("quic"))
-      .collect();
-    assert!(quic_errors.is_empty());
-  }
-
-  #[test]
-  fn test_validate_quic_params_invalid_max_concurrent_streams_low() {
-    ensure_crypto_provider();
-
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "quic": {{
-    "max_concurrent_bidi_streams": 0
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Invalid QUIC parameter should add error at config validation time
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    assert!(
-      errors
-        .iter()
-        .any(|e| e.location.contains("max_concurrent_bidi_streams"))
-    );
-  }
-
-  #[test]
-  fn test_validate_quic_params_invalid_max_concurrent_streams_high() {
-    ensure_crypto_provider();
-
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "quic": {{
-    "max_concurrent_bidi_streams": 20000
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Invalid QUIC parameter should add error at config validation time
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    assert!(
-      errors
-        .iter()
-        .any(|e| e.location.contains("max_concurrent_bidi_streams"))
-    );
-  }
-
-  #[test]
-  fn test_validate_quic_params_invalid_max_idle_timeout() {
-    ensure_crypto_provider();
-
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "quic": {{
-    "max_idle_timeout_ms": 0
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Invalid QUIC parameter should add error at config validation time
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    assert!(
-      errors.iter().any(|e| e.location.contains("max_idle_timeout_ms"))
-    );
-  }
-
-  #[test]
-  fn test_validate_quic_params_invalid_initial_mtu_low() {
-    ensure_crypto_provider();
-
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "quic": {{
-    "initial_mtu": 1000
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Invalid QUIC parameter should add error at config validation time
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    assert!(errors.iter().any(|e| e.location.contains("initial_mtu")));
-  }
-
-  #[test]
-  fn test_validate_quic_params_invalid_initial_mtu_high() {
-    ensure_crypto_provider();
-
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "quic": {{
-    "initial_mtu": 10000
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Invalid QUIC parameter should add error at config validation time
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    assert!(errors.iter().any(|e| e.location.contains("initial_mtu")));
-  }
-
-  #[test]
-  fn test_validate_quic_params_invalid_send_window() {
-    ensure_crypto_provider();
-
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "quic": {{
-    "send_window": 0
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Invalid QUIC parameter should add error at config validation time
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    assert!(errors.iter().any(|e| e.location.contains("send_window")));
-  }
-
-  #[test]
-  fn test_validate_quic_params_invalid_receive_window() {
-    ensure_crypto_provider();
-
-    let (cert_path, key_path) = generate_test_certificates();
-
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "quic": {{
-    "receive_window": 0
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Invalid QUIC parameter should add error at config validation time
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    assert!(
-      errors.iter().any(|e| e.location.contains("receive_window"))
-    );
-  }
-
-  // =========================================================================
-  // HTTP/3 Listener Missing/Invalid cert_path and key_path Tests
-  // =========================================================================
-
-  #[test]
-  fn test_validate_http3_listener_missing_cert_path() {
-    ensure_crypto_provider();
-
-    let (_, key_path) = generate_test_certificates();
-
-    // Config without cert_path
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_key_path": "{}"
-}}"#,
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&key_path);
-
-    // No cert_path validation error since cert_path is not present
-    // The listener builder will handle this
-    let cert_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| e.location.contains("cert_path"))
-      .collect();
-    assert!(cert_errors.is_empty());
-  }
-
-  #[test]
-  fn test_validate_http3_listener_missing_key_path() {
-    ensure_crypto_provider();
-
-    let (cert_path, _) = generate_test_certificates();
-
-    // Config without key_path
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}"
-}}"#,
-      cert_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-
-    // No key_path validation error since key_path is not present
-    // The listener builder will handle this
-    let key_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| e.location.contains("key_path"))
-      .collect();
-    assert!(key_errors.is_empty());
-  }
-
-  #[test]
-  fn test_validate_http3_listener_cert_path_not_string() {
-    ensure_crypto_provider();
-
-    let (_, key_path) = generate_test_certificates();
-
-    // Config with cert_path as a number
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": 123,
-  "server_key_path": "{}"
-}}"#,
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&key_path);
-
-    // No cert_path validation error since cert_path is not a string
-    // The listener builder will handle this
-    let cert_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| e.location.contains("cert_path"))
-      .collect();
-    assert!(cert_errors.is_empty());
-  }
-
-  #[test]
-  fn test_validate_http3_listener_key_path_not_string() {
-    ensure_crypto_provider();
-
-    let (cert_path, _) = generate_test_certificates();
-
-    // Config with key_path as a number
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": 456
-}}"#,
-      cert_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-
-    // No key_path validation error since key_path is not a string
-    // The listener builder will handle this
-    let key_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| e.location.contains("key_path"))
-      .collect();
-    assert!(key_errors.is_empty());
-  }
-
-  // =========================================================================
-  // NEW Auth Format Tests (plaintext password with users array)
-  // =========================================================================
-
-  #[test]
-  fn test_validate_http3_auth_new_password_format_with_users() {
-    ensure_crypto_provider();
-
-    let (cert_path, key_path) = generate_test_certificates();
-
-    // Config with NEW auth format: users array with plaintext password (no type field)
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{
-    "users": [
-      {{
-        "username": "admin",
-        "password": "secret123"
-      }}
-    ]
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // NEW format should be accepted - no auth-related errors
-    let auth_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| e.location.contains("auth"))
-      .collect();
-    assert!(
-      auth_errors.is_empty(),
-      "NEW auth format should be accepted"
-    );
-  }
-
-  #[test]
-  fn test_validate_http3_auth_new_format_tls_client_cert() {
-    ensure_crypto_provider();
-
-    let (cert_path, key_path) = generate_test_certificates();
-    let client_ca_path = cert_path.clone(); // Use the same cert for client CA (just for testing format)
-
-    // Config with NEW auth format: tls_client_cert type
-    let args = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{
-    "client_ca_path": "{}"
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap(),
-      client_ca_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // NEW tls_client_cert format should be accepted
-    let auth_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| {
-        e.location.contains("auth") && !e.message.contains("client_ca")
-      })
-      .collect();
-    assert!(
-      auth_errors.is_empty(),
-      "NEW tls_client_cert format should be accepted"
-    );
-  }
-
-  // =========================================================================
-  // NEW Auth Format Validation Tests (from task Step 23)
-  // =========================================================================
-
-  #[test]
-  fn test_validate_http3_auth_new_format_no_type_field_password() {
-    ensure_crypto_provider();
-    let temp_dir = get_temp_dir();
-
-    let cert_path = temp_dir.join("neoproxy_test_cert_new_auth.pem");
-    let key_path = temp_dir.join("neoproxy_test_key_new_auth.pem");
-    // Generate self-signed cert+key for validation to pass cert checks
-    let output = std::process::Command::new("openssl")
-      .args([
-        "req",
-        "-new",
-        "-x509",
-        "-nodes",
-        "-keyout",
-        key_path.to_str().unwrap(),
-        "-out",
-        cert_path.to_str().unwrap(),
-        "-days",
-        "1",
-        "-subj",
-        "/CN=test",
-      ])
-      .output()
-      .expect("openssl command failed");
-    assert!(output.status.success());
-
-    // New format: no 'type' field, just 'users' directly under 'auth'
-    let args: serde_yaml::Value = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{
-    "users": [
-      {{"username": "admin", "password": "secret123"}}
-    ]
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // New format with 'users' directly should be accepted (no errors about auth)
-    let auth_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| e.location.contains("auth"))
-      .collect();
-    assert!(
-      auth_errors.is_empty(),
-      "New auth format (no type field, users directly) should be accepted, but got errors: {:?}",
-      auth_errors
-    );
-  }
-
-  #[test]
-  fn test_validate_http3_auth_new_format_empty_object_rejected() {
-    ensure_crypto_provider();
-    let temp_dir = get_temp_dir();
-
-    let cert_path = temp_dir.join("neoproxy_test_cert_empty_auth.pem");
-    let key_path = temp_dir.join("neoproxy_test_key_empty_auth.pem");
-    let output = std::process::Command::new("openssl")
-      .args([
-        "req",
-        "-new",
-        "-x509",
-        "-nodes",
-        "-keyout",
-        key_path.to_str().unwrap(),
-        "-out",
-        cert_path.to_str().unwrap(),
-        "-days",
-        "1",
-        "-subj",
-        "/CN=test",
-      ])
-      .output()
-      .expect("openssl command failed");
-    assert!(output.status.success());
-
-    // Empty auth object: auth: {} — should be rejected for listeners
-    let args: serde_yaml::Value = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{}}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Empty auth object must be rejected
-    let auth_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| e.location.contains("auth"))
-      .collect();
-    assert!(
-      !auth_errors.is_empty(),
-      "Empty auth object should be rejected for listeners"
-    );
-    assert!(
-      auth_errors.iter().any(|e| e.message.contains("users")
-        || e.message.contains("client_ca_path")
-        || e.message.contains("at least")),
-      "Error should mention that users or client_ca_path is required, got: {:?}",
-      auth_errors
-    );
-  }
-
-  #[test]
-  fn test_validate_http3_auth_new_format_empty_users_rejected() {
-    ensure_crypto_provider();
-    let temp_dir = get_temp_dir();
-
-    let cert_path = temp_dir.join("neoproxy_test_cert_empty_users.pem");
-    let key_path = temp_dir.join("neoproxy_test_key_empty_users.pem");
-    let output = std::process::Command::new("openssl")
-      .args([
-        "req",
-        "-new",
-        "-x509",
-        "-nodes",
-        "-keyout",
-        key_path.to_str().unwrap(),
-        "-out",
-        cert_path.to_str().unwrap(),
-        "-days",
-        "1",
-        "-subj",
-        "/CN=test",
-      ])
-      .output()
-      .expect("openssl command failed");
-    assert!(output.status.success());
-
-    // auth with empty users array — should be rejected
-    let args: serde_yaml::Value = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": {{
-    "users": []
-  }}
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Empty users array must be rejected
-    let auth_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| {
-        e.location.contains("auth") || e.location.contains("users")
-      })
-      .collect();
-    assert!(
-      !auth_errors.is_empty(),
-      "Empty users array should be rejected"
-    );
-    assert!(
-      auth_errors.iter().any(|e| e.message.contains("empty")
-        || e.message.contains("cannot be empty")),
-      "Error should mention users cannot be empty, got: {:?}",
-      auth_errors
-    );
-  }
-
-  #[test]
-  fn test_validate_http3_auth_new_format_array_rejected() {
-    ensure_crypto_provider();
-    let temp_dir = get_temp_dir();
-
-    let cert_path = temp_dir.join("neoproxy_test_cert_array_auth.pem");
-    let key_path = temp_dir.join("neoproxy_test_key_array_auth.pem");
-    let output = std::process::Command::new("openssl")
-      .args([
-        "req",
-        "-new",
-        "-x509",
-        "-nodes",
-        "-keyout",
-        key_path.to_str().unwrap(),
-        "-out",
-        cert_path.to_str().unwrap(),
-        "-days",
-        "1",
-        "-subj",
-        "/CN=test",
-      ])
-      .output()
-      .expect("openssl command failed");
-    assert!(output.status.success());
-
-    // Old array format — should be rejected in new design
-    let args: serde_yaml::Value = serde_yaml::from_str(&format!(
-      r#"{{
-  "address": "127.0.0.1:8443",
-  "server_cert_path": "{}",
-  "server_key_path": "{}",
-  "auth": [
-    {{"users": [{{"username": "admin", "password": "secret"}}]}}
-  ]
-}}"#,
-      cert_path.to_str().unwrap(),
-      key_path.to_str().unwrap()
-    ))
-    .unwrap();
-
-    let config = Config {
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http3.listener".to_string(),
-          args,
-        }],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
-
-    let _ = std::fs::remove_file(&cert_path);
-    let _ = std::fs::remove_file(&key_path);
-
-    // Array auth format must be rejected
-    let auth_errors: Vec<_> = collector
-      .errors()
-      .iter()
-      .filter(|e| e.location.contains("auth"))
-      .collect();
-    assert!(
-      !auth_errors.is_empty(),
-      "Array auth format should be rejected in new design"
-    );
-    assert!(
-      auth_errors.iter().any(|e| e.message.contains("single object")
-        || e.message.contains("array")),
-      "Error should mention auth must be a single object, got: {:?}",
-      auth_errors
-    );
-  }
 
   // =========================================================================
   // Access Log Config Tests
@@ -4243,9 +1791,91 @@ services:
     // format is explicitly set
     assert!(matches!(
       server_al.format,
-      Some(crate::access_log::LogFormat::Json)
+      Some(crate::access_log::config::LogFormat::Json)
     ));
     // buffer is NOT set, should be None (inherited from top-level at merge time)
     assert!(server_al.buffer.is_none());
+  }
+
+  // =========================================================================
+  // TLS Configuration Tests
+  // =========================================================================
+
+  #[test]
+  fn test_certificate_config_deserialize() {
+    let yaml = r#"
+cert_path: "/path/to/cert.pem"
+key_path: "/path/to/key.pem"
+"#;
+    let cert: CertificateConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(cert.cert_path, "/path/to/cert.pem");
+    assert_eq!(cert.key_path, "/path/to/key.pem");
+  }
+
+  #[test]
+  fn test_server_tls_config_deserialize_single_cert() {
+    let yaml = r#"
+certificates:
+  - cert_path: "/path/to/cert.pem"
+    key_path: "/path/to/key.pem"
+"#;
+    let tls: ServerTlsConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(tls.certificates.len(), 1);
+    assert_eq!(tls.certificates[0].cert_path, "/path/to/cert.pem");
+    assert_eq!(tls.certificates[0].key_path, "/path/to/key.pem");
+    assert!(tls.client_ca_certs.is_none());
+  }
+
+  #[test]
+  fn test_server_tls_config_deserialize_multiple_certs() {
+    let yaml = r#"
+certificates:
+  - cert_path: "/path/to/cert1.pem"
+    key_path: "/path/to/key1.pem"
+  - cert_path: "/path/to/cert2.pem"
+    key_path: "/path/to/key2.pem"
+"#;
+    let tls: ServerTlsConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(tls.certificates.len(), 2);
+  }
+
+  #[test]
+  fn test_server_tls_config_deserialize_with_client_ca() {
+    let yaml = r#"
+certificates:
+  - cert_path: "/path/to/cert.pem"
+    key_path: "/path/to/key.pem"
+client_ca_certs:
+  - "/path/to/ca1.pem"
+  - "/path/to/ca2.pem"
+"#;
+    let tls: ServerTlsConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(tls.certificates.len(), 1);
+    assert!(tls.client_ca_certs.is_some());
+    let client_cas = tls.client_ca_certs.unwrap();
+    assert_eq!(client_cas.len(), 2);
+    assert_eq!(client_cas[0], "/path/to/ca1.pem");
+    assert_eq!(client_cas[1], "/path/to/ca2.pem");
+  }
+
+  #[test]
+  fn test_server_tls_config_missing_certificates() {
+    let yaml = r#"{}"#;
+    let result: Result<ServerTlsConfig, _> = serde_yaml::from_str(yaml);
+    // certificates field is required
+    assert!(result.is_err());
+  }
+
+  #[test]
+  fn test_certificate_config_missing_fields() {
+    // Missing cert_path
+    let yaml = r#"key_path: "/path/to/key.pem""#;
+    let result: Result<CertificateConfig, _> = serde_yaml::from_str(yaml);
+    assert!(result.is_err());
+
+    // Missing key_path
+    let yaml = r#"cert_path: "/path/to/cert.pem""#;
+    let result: Result<CertificateConfig, _> = serde_yaml::from_str(yaml);
+    assert!(result.is_err());
   }
 }

@@ -206,17 +206,19 @@ def create_http3_listener_config(
     Returns:
         str: Path to the configuration file
     """
-    auth_section = ""
-    if auth_config:
-        auth_section = f"""
-  auth:
-{auth_config}"""
-
+    # QUIC config goes in listener args
     quic_section = ""
     if quic_config:
         quic_section = f"""
-  quic:
+      quic:
 {quic_config}"""
+
+    # Users config goes at server level
+    users_section = ""
+    if auth_config:
+        users_section = f"""
+    users:
+{auth_config}"""
 
     config_content = f"""worker_threads: {worker_threads}
 log_directory: "{temp_dir}/logs"
@@ -227,12 +229,15 @@ services:
 
 servers:
 - name: http3_server
+  tls:
+    certificates:
+    - cert_path: "{cert_path}"
+      key_path: "{key_path}"
+{users_section}
   listeners:
-  - kind: http3.listener
+  - kind: http3
     args:
-      address: "0.0.0.0:{proxy_port}"
-      server_cert_path: "{cert_path}"
-      server_key_path: "{key_path}"{quic_section}{auth_section}
+      addresses: ["0.0.0.0:{proxy_port}"]{quic_section}
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "http3_config.yaml")
@@ -282,12 +287,9 @@ services:
 servers:
 - name: http_proxy
   listeners:
-  - kind: hyper.listener
+  - kind: http
     args:
       addresses: [ "0.0.0.0:{http_port}" ]
-      protocols: [ http ]
-      hostnames: []
-      certificates: []
   service: http3_chain
 """
     config_path = os.path.join(temp_dir, "http3_chain_config.yaml")
@@ -521,18 +523,26 @@ class TestHTTP3Authentication:
 
 
 class TestHTTP3ErrorHandling:
-    """Test 7.5: HTTP/3 error handling scenarios."""
+    """Test 7.5: HTTP/3 error handling scenarios.
+
+    These tests use the NEW config format with:
+    - kind: http3 (not http3.listener)
+    - Server-level tls configuration
+    - addresses (plural) field
+    """
 
     def test_cert_file_not_exist(self) -> None:
         """
-        TC-H3-ERR-001: Certificate file does not exist.
+        TC-H3-ERR-001: Certificate file does not exist (NEW config format).
 
         Target: Verify HTTP/3 listener fails to start with non-existent cert
+        using the new server-level TLS configuration format.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = 30450
 
         try:
+            # NEW config format: server-level TLS with non-existent cert
             config_content = f"""worker_threads: 1
 log_directory: "{temp_dir}/logs"
 
@@ -542,12 +552,14 @@ services:
 
 servers:
 - name: http3_server
+  tls:
+    certificates:
+    - cert_path: "/nonexistent/path/to/cert.pem"
+      key_path: "/nonexistent/path/to/key.pem"
   listeners:
-  - kind: http3.listener
+  - kind: http3
     args:
-      address: "0.0.0.0:{proxy_port}"
-      server_cert_path: "/nonexistent/path/to/cert.pem"
-      server_key_path: "/nonexistent/path/to/key.pem"
+      addresses: ["0.0.0.0:{proxy_port}"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "invalid_config.yaml")
@@ -577,9 +589,10 @@ servers:
 
     def test_key_file_not_exist(self) -> None:
         """
-        TC-H3-ERR-002: Private key file does not exist.
+        TC-H3-ERR-002: Private key file does not exist (NEW config format).
 
         Target: Verify HTTP/3 listener fails to start with non-existent key
+        using the new server-level TLS configuration format.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = 30451
@@ -587,6 +600,7 @@ servers:
         try:
             cert_path, _, _, _ = generate_test_certificates(temp_dir)
 
+            # NEW config format: server-level TLS with non-existent key
             config_content = f"""worker_threads: 1
 log_directory: "{temp_dir}/logs"
 
@@ -596,12 +610,14 @@ services:
 
 servers:
 - name: http3_server
+  tls:
+    certificates:
+    - cert_path: "{cert_path}"
+      key_path: "/nonexistent/path/to/key.pem"
   listeners:
-  - kind: http3.listener
+  - kind: http3
     args:
-      address: "0.0.0.0:{proxy_port}"
-      server_cert_path: "{cert_path}"
-      server_key_path: "/nonexistent/path/to/key.pem"
+      addresses: ["0.0.0.0:{proxy_port}"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "invalid_config.yaml")
@@ -630,9 +646,10 @@ servers:
 
     def test_cert_key_mismatch(self) -> None:
         """
-        TC-H3-ERR-003: Certificate and key do not match.
+        TC-H3-ERR-003: Certificate and key do not match (NEW config format).
 
         Target: Verify HTTP/3 listener fails to start with mismatched cert/key
+        using the new server-level TLS configuration format.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = 30452
@@ -649,6 +666,7 @@ servers:
                 capture_output=True
             )
 
+            # NEW config format: server-level TLS with mismatched cert/key
             config_content = f"""worker_threads: 1
 log_directory: "{temp_dir}/logs"
 
@@ -658,12 +676,14 @@ services:
 
 servers:
 - name: http3_server
+  tls:
+    certificates:
+    - cert_path: "{cert_path1}"
+      key_path: "{key_path2}"
   listeners:
-  - kind: http3.listener
+  - kind: http3
     args:
-      address: "0.0.0.0:{proxy_port}"
-      server_cert_path: "{cert_path1}"
-      server_key_path: "{key_path2}"
+      addresses: ["0.0.0.0:{proxy_port}"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "mismatch_config.yaml")
@@ -698,7 +718,13 @@ servers:
 
 
 class TestHTTP3ConfigValidation:
-    """Test 7.7: HTTP/3 configuration validation scenarios."""
+    """Test 7.7: HTTP/3 configuration validation scenarios.
+
+    These tests use the NEW config format with:
+    - kind: http3 (not http3.listener)
+    - Server-level tls configuration
+    - addresses (plural) field
+    """
 
     def test_invalid_quic_param_uses_default(self) -> None:
         """
@@ -741,15 +767,16 @@ class TestHTTP3ConfigValidation:
 
     def test_missing_required_fields(self) -> None:
         """
-        TC-H3-CFG-002: Missing required fields causes startup failure.
+        TC-H3-CFG-002: Missing required fields causes startup failure (NEW config format).
 
-        Target: Verify HTTP/3 listener fails without required fields
+        Target: Verify HTTP/3 listener fails without server-level TLS configuration
+        using the new config format.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = 30461
 
         try:
-            # Missing server_cert_path and server_key_path
+            # NEW config format: Missing server-level tls (required for http3)
             config_content = f"""worker_threads: 1
 log_directory: "{temp_dir}/logs"
 
@@ -760,9 +787,9 @@ services:
 servers:
 - name: http3_server
   listeners:
-  - kind: http3.listener
+  - kind: http3
     args:
-      address: "0.0.0.0:{proxy_port}"
+      addresses: ["0.0.0.0:{proxy_port}"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "missing_fields.yaml")
@@ -791,14 +818,16 @@ servers:
 
     def test_invalid_address_format(self) -> None:
         """
-        TC-H3-CFG-003: Invalid address format causes startup failure.
+        TC-H3-CFG-003: Invalid address format causes startup failure (NEW config format).
 
         Target: Verify HTTP/3 listener fails with invalid address
+        using the new config format with server-level TLS.
         """
         temp_dir = tempfile.mkdtemp()
         cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
 
         try:
+            # NEW config format: server-level TLS with invalid address format
             config_content = f"""worker_threads: 1
 log_directory: "{temp_dir}/logs"
 
@@ -808,12 +837,14 @@ services:
 
 servers:
 - name: http3_server
+  tls:
+    certificates:
+    - cert_path: "{cert_path}"
+      key_path: "{key_path}"
   listeners:
-  - kind: http3.listener
+  - kind: http3
     args:
-      address: "invalid_address_format"
-      server_cert_path: "{cert_path}"
-      server_key_path: "{key_path}"
+      addresses: ["invalid_address_format"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "invalid_addr.yaml")
@@ -1031,4 +1062,121 @@ class TestHTTP3ServiceDelegation:
             if proxy_proc:
                 proxy_proc.send_signal(signal.SIGTERM)
                 proxy_proc.wait(timeout=10)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+class TestHTTP3EchoService:
+    """Test HTTP/3 listener with echo service for non-CONNECT requests."""
+
+    def test_h3_get_to_echo_service_no_upgrade_error(self) -> None:
+        """
+        TC-H3-ECHO-001: GET request to echo service should not cause upgrade error.
+
+        This test verifies the fix for the bug where HTTP/3 listener creates
+        an upgrade pair for ALL requests, causing "Service dropped the receiver"
+        error for non-CONNECT requests.
+
+        The bug occurs because:
+        1. H3 listener creates (trigger, on_upgrade) pair for ALL requests
+        2. on_upgrade is inserted into request extensions
+        3. Echo service doesn't extract on_upgrade (it just echoes body)
+        4. When service returns 200, trigger.send_success() is called
+        5. But the stream was already consumed by H3UpgradeTrigger::pair()
+        6. For non-CONNECT, the stream should NOT be consumed by upgrade pair
+
+        Expected: GET request should return 200 with echoed body, no errors.
+        """
+        import asyncio
+        from .utils.http3_client import (
+            AIOQUIC_AVAILABLE,
+            H3Client,
+        )
+
+        if not AIOQUIC_AVAILABLE:
+            pytest.skip("aioquic library not available")
+
+        temp_dir = tempfile.mkdtemp()
+        proxy_port = 30490
+        proxy_proc: Optional[subprocess.Popen] = None
+
+        try:
+            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+
+            # Create config with echo service
+            config_content = f"""worker_threads: 1
+log_directory: "{temp_dir}/logs"
+
+services:
+- name: echo
+  kind: echo.echo
+
+servers:
+- name: http3_server
+  tls:
+    certificates:
+    - cert_path: "{cert_path}"
+      key_path: "{key_path}"
+  listeners:
+  - kind: http3
+    args:
+      addresses: ["0.0.0.0:{proxy_port}"]
+  service: echo
+"""
+            config_path = os.path.join(temp_dir, "echo_config.yaml")
+            with open(config_path, "w") as f:
+                f.write(config_content)
+
+            proxy_proc = subprocess.Popen(
+                [NEOPROXY_BINARY, "--config", config_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+                "HTTP/3 listener failed to start"
+
+            # Send a GET request using HTTP/3 client
+            async def do_get_request():
+                client = H3Client("127.0.0.1", proxy_port, ca_path=ca_path)
+                connected = await asyncio.wait_for(client.connect(), timeout=15.0)
+                if not connected:
+                    return False, 0, b"Connection failed"
+
+                response = await asyncio.wait_for(
+                    client.send_request("GET", "/test-echo"),
+                    timeout=15.0
+                )
+                await client.close()
+                return True, response.status_code, response.body
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                success, status_code, body = loop.run_until_complete(do_get_request())
+            finally:
+                loop.close()
+
+            # KEY ASSERTION: Request should succeed with 200
+            assert success, "HTTP/3 connection should succeed"
+            assert status_code == 200, (
+                f"Echo service should return 200, got {status_code}"
+            )
+
+        finally:
+            if proxy_proc:
+                proxy_proc.send_signal(signal.SIGTERM)
+                proxy_proc.wait(timeout=10)
+
+            # Check log files for errors
+            log_dir = os.path.join(temp_dir, "logs")
+            if os.path.exists(log_dir):
+                for log_file in os.listdir(log_dir):
+                    log_path = os.path.join(log_dir, log_file)
+                    with open(log_path, "r", errors="replace") as f:
+                        log_content = f.read()
+                        assert "Service dropped the receiver" not in log_content, (
+                            f"Should not have 'Service dropped the receiver' error in logs. "
+                            f"File: {log_file}, Content: {log_content}"
+                        )
+
             shutil.rmtree(temp_dir, ignore_errors=True)

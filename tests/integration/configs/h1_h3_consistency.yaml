@@ -1,0 +1,65 @@
+# H1/H3 Listener Consistency Test Configuration
+#
+# This configuration uses the new listener kinds (http, https, http3) and
+# server-level configuration for TLS, users, and hostnames.
+#
+# NOTE: This config will fail to load until the listener kinds are implemented.
+# The integration tests use dynamically generated configs with unique ports.
+# This file serves as documentation and for manual testing.
+
+worker_threads: 2
+log_directory: "logs/"
+
+services:
+  - name: echo
+    kind: echo.echo
+    args: {}
+
+servers:
+  # Server with new http listener kind
+  - name: http_server
+    hostnames: ["http.example.com"]
+    users:
+      - username: "admin"
+        password: "secret"
+    listeners:
+      - kind: http
+        args:
+          addresses: ["127.0.0.1:18080"]
+    service: echo
+
+  # Server with new https listener kind
+  - name: https_server
+    hostnames: ["https.example.com"]
+    tls:
+      certificates:
+        - cert_path: conf/certs/server.crt
+          key_path: conf/certs/server.key
+    listeners:
+      - kind: https
+        args:
+          addresses: ["127.0.0.1:18443"]
+    service: echo
+
+  # Server with http3 listener (multi-address)
+  - name: http3_server
+    hostnames: ["h3.example.com"]
+    tls:
+      certificates:
+        - cert_path: conf/certs/server.crt
+          key_path: conf/certs/server.key
+    listeners:
+      - kind: http3
+        args:
+          addresses: ["127.0.0.1:18444"]
+          quic:
+            max_concurrent_bidi_streams: 100
+    service: echo
+
+  # Default server (no hostnames)
+  - name: default_server
+    listeners:
+      - kind: http
+        args:
+          addresses: ["127.0.0.1:18081"]
+    service: echo

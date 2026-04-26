@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::access_log::config::{AccessLogConfig, LogFormat};
+use crate::access_log::{AccessLogConfig, LogFormat};
 use crate::access_log::context::AccessLogEntry;
 use crate::access_log::formatter;
 
@@ -37,14 +37,14 @@ struct AccessLogWriterInner {
 impl AccessLogWriter {
   /// Create a new AccessLogWriter.
   pub fn new(log_directory: &str, config: &AccessLogConfig) -> Self {
-    let buffer_capacity = config.buffer.0 as usize;
+    let buffer_capacity = config.buffer.as_u64() as usize;
     // Max buffer is 4x the configured buffer capacity to prevent unbounded growth
     let max_buffer_size = buffer_capacity.saturating_mul(4).max(1024);
     Self {
       inner: Arc::new(Mutex::new(AccessLogWriterInner {
         log_directory: log_directory.to_string(),
         path_prefix: config.path_prefix.clone(),
-        max_size: config.max_size.0,
+        max_size: config.max_size.as_u64(),
         buffer_capacity,
         max_buffer_size,
         flush_interval: config.flush.0,
@@ -204,8 +204,9 @@ impl AccessLogWriterInner {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::access_log::config::{HumanBytes, HumanDuration};
+  use crate::access_log::config::HumanDuration;
   use crate::access_log::context::{AuthType, ServiceMetrics};
+  use byte_unit::Byte;
   use std::time::Duration;
   use time::OffsetDateTime;
 
@@ -214,9 +215,9 @@ mod tests {
       enabled: true,
       path_prefix: prefix.to_string(),
       format: LogFormat::Text,
-      buffer: HumanBytes(256), // Small buffer for testing
+      buffer: Byte::from_u64(256), // Small buffer for testing
       flush: HumanDuration(Duration::from_millis(100)),
-      max_size: HumanBytes(1024), // 1KB for rotation testing
+      max_size: Byte::from_u64(1024), // 1KB for rotation testing
     }
   }
 
@@ -302,7 +303,7 @@ mod tests {
     let dir = tempfile::tempdir().unwrap();
     let mut config =
       make_test_config(dir.path().to_str().unwrap(), "test.log");
-    config.buffer = HumanBytes(1024 * 1024); // Large buffer
+    config.buffer = Byte::from_u64(1024 * 1024); // Large buffer
     config.flush = HumanDuration(Duration::from_secs(3600)); // Long interval
 
     let writer =
@@ -331,8 +332,8 @@ mod tests {
     let dir = tempfile::tempdir().unwrap();
     let mut config =
       make_test_config(dir.path().to_str().unwrap(), "test.log");
-    config.max_size = HumanBytes(200); // Very small max
-    config.buffer = HumanBytes(1); // Tiny buffer to force writes
+    config.max_size = Byte::from_u64(200); // Very small max
+    config.buffer = Byte::from_u64(1); // Tiny buffer to force writes
 
     let writer =
       AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
@@ -480,7 +481,7 @@ mod tests {
     let dir = tempfile::tempdir().unwrap();
     let mut config =
       make_test_config(dir.path().to_str().unwrap(), "test.log");
-    config.buffer = HumanBytes(1024 * 1024); // Large buffer so auto-flush doesn't trigger
+    config.buffer = Byte::from_u64(1024 * 1024); // Large buffer so auto-flush doesn't trigger
 
     let writer =
       AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
@@ -517,7 +518,7 @@ mod tests {
     let dir = tempfile::tempdir().unwrap();
     let mut config =
       make_test_config(dir.path().to_str().unwrap(), "test.log");
-    config.buffer = HumanBytes(100); // Very small buffer
+    config.buffer = Byte::from_u64(100); // Very small buffer
     config.flush = HumanDuration(Duration::from_secs(3600)); // Long interval to prevent auto-flush
 
     let writer =

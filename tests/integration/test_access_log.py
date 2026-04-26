@@ -570,7 +570,7 @@ class TestAccessLogGracefulShutdown:
             access_log_config={
                 "enabled": True,
                 "format": "text",
-                "buffer": "1mb",
+                "buffer": "1MiB",
                 "flush": "60s",  # Long flush interval
             },
         )

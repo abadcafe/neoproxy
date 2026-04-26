@@ -13,9 +13,9 @@ and stream metrics through logs. These tests verify:
 2. Logs contain specific monitoring information (active connection counts)
 3. Connection lifecycle events are properly logged
 4. Log format follows the design specification:
-   `[http3.listener] active_connections=X, active_streams=Y`
-   `[hyper.listener] active_connections=X`
-   `[fast_socks5.listener] active_connections=X`
+   `[http3] active_connections=X, active_streams=Y`
+   `[http] active_connections=X`
+   `[socks5] active_connections=X`
 """
 
 import subprocess
@@ -50,7 +50,7 @@ def parse_monitoring_log(log_content: str) -> List[dict]:
     """
     Parse monitoring log entries from log content.
 
-    Expected format: [http3.listener] active_connections=X, active_streams=Y
+    Expected format: [http3] active_connections=X, active_streams=Y
 
     Args:
         log_content: Raw log content
@@ -60,7 +60,7 @@ def parse_monitoring_log(log_content: str) -> List[dict]:
     """
     entries = []
     # Pattern to match monitoring log entries
-    # Format: [http3.listener] active_connections=X, active_streams=Y
+    # Format: [http3] active_connections=X, active_streams=Y
     pattern = r'\[http3\.listener\]\s+active_connections=(\d+),\s+active_streams=(\d+)'
 
     for match in re.finditer(pattern, log_content, re.IGNORECASE):
@@ -656,7 +656,7 @@ class TestMonitoringLogCycle:
         Per design doc section 2.5.3:
         - Log output period: every 60 seconds
         - Log level: INFO
-        - Log format: `[http3.listener] active_connections=X, active_streams=Y`
+        - Log format: `[http3] active_connections=X, active_streams=Y`
 
         Note: Due to 60-second interval, we verify that the log format
         appears at least once during server startup/shutdown rather than
@@ -700,7 +700,7 @@ class TestMonitoringLogCycle:
             # Verify log contains HTTP/3 related information
             log_lower = log_content.lower()
             # The periodic monitoring log format is:
-            # [http3.listener] active_connections=X, active_streams=Y
+            # [http3] active_connections=X, active_streams=Y
             # We verify that either the format is present or HTTP/3 related logs exist
             has_monitoring_format = bool(
                 re.search(
@@ -785,20 +785,20 @@ class TestMonitoringLogCycle:
 
 
 # ==============================================================================
-# Test cases - HyperListener Monitoring
+# Test cases - HttpListener Monitoring
 # ==============================================================================
 
 
-class TestHyperListenerMonitoring:
-    """Test HyperListener monitoring scenarios."""
+class TestHttpListenerMonitoring:
+    """Test HTTP listener monitoring scenarios."""
 
-    def test_hyper_listener_monitoring_log_format(self) -> None:
+    def test_http_listener_monitoring_log_format(self) -> None:
         """
-        TC-HYPER-MON-001: HyperListener monitoring log format.
+        TC-HYPER-MON-001: HTTP listener monitoring log format.
 
-        Target: Verify that hyper.listener outputs monitoring logs with correct format.
+        Target: Verify that http listener outputs monitoring logs with correct format.
         Per architecture doc section 2.5.2:
-        - Log format: `[hyper.listener] active_connections=X`
+        - Log format: `[http] active_connections=X`
         - Monitoring interval: 60 seconds
         """
         temp_dir = tempfile.mkdtemp()
@@ -827,10 +827,10 @@ class TestHyperListenerMonitoring:
                 with open(log_path, "r", errors="ignore") as f:
                     log_content += f.read()
 
-            # Verify log contains hyper.listener monitoring format
-            has_hyper_monitoring = bool(
+            # Verify log contains http listener monitoring format
+            has_http_monitoring = bool(
                 re.search(
-                    r'\[hyper\.listener\].*active_connections',
+                    r'\[http\].*active_connections',
                     log_content,
                     re.IGNORECASE
                 )
@@ -841,8 +841,8 @@ class TestHyperListenerMonitoring:
 
             # Note: The monitoring log appears every 60 seconds, so we verify
             # that the logging infrastructure is in place
-            assert has_hyper_monitoring or "hyper" in log_content.lower(), \
-                "Logs should contain hyper.listener monitoring information"
+            assert has_http_monitoring or "http" in log_content.lower(), \
+                "Logs should contain http listener monitoring information"
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
@@ -850,11 +850,11 @@ class TestHyperListenerMonitoring:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_hyper_listener_connection_count_accuracy(self) -> None:
+    def test_http_listener_connection_count_accuracy(self) -> None:
         """
-        TC-HYPER-MON-002: HyperListener connection count is accurate.
+        TC-HTTP-MON-002: HttpListener connection count is accurate.
 
-        Target: Verify that hyper.listener monitoring logs contain accurate
+        Target: Verify that http listener monitoring logs contain accurate
         connection counts.
         """
         temp_dir = tempfile.mkdtemp()
@@ -924,7 +924,7 @@ class TestHyperListenerMonitoring:
                 with open(log_path, "r", errors="ignore") as f:
                     log_content += f.read()
 
-            # Parse hyper.listener monitoring entries
+            # Parse http listener monitoring entries
             pattern = r'\[hyper\.listener\]\s+active_connections=(\d+)'
             matches = list(re.finditer(pattern, log_content, re.IGNORECASE))
 
@@ -963,9 +963,9 @@ class TestSocks5ListenerMonitoring:
         """
         TC-SOCKS5-MON-001: SOCKS5 listener monitoring log format.
 
-        Target: Verify that fast_socks5.listener outputs monitoring logs with correct format.
+        Target: Verify that socks5 listener outputs monitoring logs with correct format.
         Per architecture doc section 2.5.2:
-        - Log format: `[fast_socks5.listener] active_connections=X`
+        - Log format: `[socks5] active_connections=X`
         - Monitoring interval: 60 seconds
         """
         temp_dir = tempfile.mkdtemp()
@@ -999,10 +999,10 @@ class TestSocks5ListenerMonitoring:
                 with open(log_path, "r", errors="ignore") as f:
                     log_content += f.read()
 
-            # Verify log contains fast_socks5.listener monitoring format
+            # Verify log contains socks5 listener monitoring format
             has_socks5_monitoring = bool(
                 re.search(
-                    r'\[fast_socks5\.listener\].*active_connections',
+                    r'\[socks5\].*active_connections',
                     log_content,
                     re.IGNORECASE
                 )
@@ -1014,7 +1014,7 @@ class TestSocks5ListenerMonitoring:
             # Note: The monitoring log appears every 60 seconds, so we verify
             # that the logging infrastructure is in place
             assert has_socks5_monitoring or "socks5" in log_content.lower(), \
-                "Logs should contain fast_socks5.listener monitoring information"
+                "Logs should contain socks5 listener monitoring information"
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
@@ -1026,7 +1026,7 @@ class TestSocks5ListenerMonitoring:
         """
         TC-SOCKS5-MON-002: SOCKS5 listener connection count is accurate.
 
-        Target: Verify that fast_socks5.listener monitoring logs contain accurate
+        Target: Verify that socks5 listener monitoring logs contain accurate
         connection counts.
         """
         temp_dir = tempfile.mkdtemp()
@@ -1098,8 +1098,8 @@ class TestSocks5ListenerMonitoring:
                 with open(log_path, "r", errors="ignore") as f:
                     log_content += f.read()
 
-            # Parse fast_socks5.listener monitoring entries
-            pattern = r'\[fast_socks5\.listener\]\s+active_connections=(\d+)'
+            # Parse socks5 listener monitoring entries
+            pattern = r'\[socks5\]\s+active_connections=(\d+)'
             matches = list(re.finditer(pattern, log_content, re.IGNORECASE))
 
             # Verify log has content
@@ -1166,21 +1166,20 @@ services:
 
 servers:
 - name: multi_listener_server
+  tls:
+    certificates:
+      - cert_path: "{cert_path}"
+        key_path: "{key_path}"
   listeners:
-  - kind: hyper.listener
+  - kind: http
     args:
       addresses: [ "0.0.0.0:{http_port}" ]
-      protocols: [ http ]
-      hostnames: []
-      certificates: []
-  - kind: fast_socks5.listener
+  - kind: socks5
     args:
       addresses: [ "0.0.0.0:{socks5_port}" ]
-  - kind: http3.listener
+  - kind: http3
     args:
-      address: "0.0.0.0:{http3_port}"
-      server_cert_path: "{cert_path}"
-      server_key_path: "{key_path}"
+      addresses: [ "0.0.0.0:{http3_port}" ]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "multi_listener_config.yaml")
@@ -1214,7 +1213,7 @@ servers:
 
             # Verify each listener's monitoring format is present
             has_hyper = bool(re.search(r'\[hyper\.listener\]', log_content, re.IGNORECASE))
-            has_socks5 = bool(re.search(r'\[fast_socks5\.listener\]', log_content, re.IGNORECASE))
+            has_socks5 = bool(re.search(r'\[socks5\]', log_content, re.IGNORECASE))
             has_http3 = bool(re.search(r'\[http3\.listener\]', log_content, re.IGNORECASE))
 
             # At least one listener should have monitoring logs

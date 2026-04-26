@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use crate::access_log::config::LogFormat;
+use crate::access_log::LogFormat;
 use crate::access_log::context::{AccessLogEntry, AuthType};
 
 /// Pre-parsed format description for text format (nginx-style timestamp)
@@ -55,8 +55,6 @@ fn format_text(entry: &AccessLogEntry) -> Vec<u8> {
   match entry.auth_type {
     AuthType::None => {}
     AuthType::Password => write!(line, " auth=password").unwrap(),
-    AuthType::Cert => write!(line, " auth=cert").unwrap(),
-    AuthType::Both => write!(line, " auth=both").unwrap(),
   }
 
   write!(line, " service={}", entry.service).unwrap();
@@ -117,18 +115,6 @@ fn format_json(entry: &AccessLogEntry) -> Vec<u8> {
       map.insert(
         "auth".to_string(),
         serde_json::Value::String("password".to_string()),
-      );
-    }
-    AuthType::Cert => {
-      map.insert(
-        "auth".to_string(),
-        serde_json::Value::String("cert".to_string()),
-      );
-    }
-    AuthType::Both => {
-      map.insert(
-        "auth".to_string(),
-        serde_json::Value::String("both".to_string()),
       );
     }
   }

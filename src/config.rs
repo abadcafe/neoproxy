@@ -12,7 +12,7 @@ use crate::config_validator::{
   ConfigErrorCollector, ConfigErrorKind, parse_kind,
 };
 use crate::listeners::ListenerBuilderSet;
-use crate::plugin;
+use crate::plugin::SerializedArgs;
 use crate::plugins::PluginBuilderSet;
 
 #[derive(Parser, Debug)]
@@ -42,7 +42,7 @@ impl CmdOpt {
 #[serde(default)]
 pub struct Listener {
   pub kind: String,
-  pub args: serde_yaml::Value,
+  pub args: SerializedArgs,
 }
 
 /// Certificate configuration (cert + key pair)
@@ -96,7 +96,7 @@ pub struct Server {
 pub struct Layer {
   pub kind: String,
   // delegate the deserializition to layer factories
-  pub args: serde_yaml::Value,
+  pub args: SerializedArgs,
 }
 
 #[derive(Deserialize, Default, Clone, Debug)]
@@ -105,7 +105,7 @@ pub struct Service {
   pub name: String,
   pub kind: String,
   // delegate the deserializition to service factories.
-  pub args: serde_yaml::Value,
+  pub args: SerializedArgs,
   pub layers: Vec<Layer>,
 }
 
@@ -471,7 +471,7 @@ impl Config {
   }
 
   /// Extract addresses from listener args.
-  fn extract_addresses(&self, args: &serde_yaml::Value) -> Vec<String> {
+  fn extract_addresses(&self, args: &SerializedArgs) -> Vec<String> {
     let mut addresses = Vec::new();
 
     // Try 'addresses' (plural) field first
@@ -593,23 +593,16 @@ impl Config {
     // Pass server-level TLS and users config for listeners that need them
     // Create a minimal routing entry for validation
     let dummy_entry = crate::server::ServerRoutingEntry {
-      name: String::new(),
       hostnames: vec![],
-      service: plugin::Service::new(DummyService {}),
+      service: crate::server::placeholder_service(),
       service_name: String::new(),
       users: server_users.cloned(),
       tls: server_tls.cloned(),
       access_log_writer: None,
     };
-    let dummy_context = plugin::ListenerBuildContext {
-      access_log_writer: None,
-      service_name: String::new(),
-      routing_table: vec![dummy_entry],
-    };
     if let Err(e) = builder(
       listener.args.clone(),
-      dummy_context.routing_table[0].service.clone(),
-      dummy_context,
+      vec![dummy_entry],
     ) {
       collector.add(
         args_location,
@@ -638,7 +631,7 @@ impl Config {
   /// Validate addresses in listener args
   fn validate_listener_addresses(
     &self,
-    args: &serde_yaml::Value,
+    args: &SerializedArgs,
     location: &str,
     collector: &mut ConfigErrorCollector,
   ) {
@@ -824,7 +817,7 @@ impl Config {
   /// Note: TLS and auth are now at server level, not listener level.
   fn validate_http3_listener_args(
     &self,
-    args: &serde_yaml::Value,
+    args: &SerializedArgs,
     location: &str,
     collector: &mut ConfigErrorCollector,
   ) {
@@ -876,7 +869,7 @@ impl Config {
   /// Invalid parameters will cause startup to fail.
   fn validate_quic_config(
     &self,
-    quic: &serde_yaml::Value,
+    quic: &SerializedArgs,
     location: &str,
     collector: &mut ConfigErrorCollector,
   ) {
@@ -990,33 +983,6 @@ impl Config {
   }
 }
 
-/// A dummy service used for validating listener args
-/// This service does nothing and is only used to pass to
-/// listener builders during validation
-#[derive(Clone)]
-struct DummyService {}
-
-impl tower::Service<plugin::Request> for DummyService {
-  type Error = anyhow::Error;
-  type Future = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<plugin::Response>>>,
-  >;
-  type Response = plugin::Response;
-
-  fn poll_ready(
-    &mut self,
-    _cx: &mut std::task::Context<'_>,
-  ) -> std::task::Poll<Result<()>> {
-    std::task::Poll::Ready(Ok(()))
-  }
-
-  fn call(&mut self, _req: plugin::Request) -> Self::Future {
-    Box::pin(async {
-      anyhow::bail!("DummyService should not be called")
-    })
-  }
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -1060,7 +1026,7 @@ mod tests {
     let waker = unsafe { Waker::from_raw(no_op_raw_waker()) };
     let mut cx = Context::from_waker(&waker);
 
-    let mut service = DummyService {};
+    let mut service = crate::server::placeholder_service();
     match service.poll_ready(&mut cx) {
       Poll::Ready(Ok(())) => {}
       _ => panic!("Expected Poll::Ready(Ok(()))"),
@@ -1073,7 +1039,7 @@ mod tests {
     use http_body_util::combinators::UnsyncBoxBody;
     use tower::Service;
 
-    let mut service = DummyService {};
+    let mut service = crate::server::placeholder_service();
     let body: UnsyncBoxBody<bytes::Bytes, anyhow::Error> =
       http_body_util::Empty::<bytes::Bytes>::new()
         .map_err(|e: std::convert::Infallible| anyhow::anyhow!("{}", e))
@@ -1089,12 +1055,7 @@ mod tests {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result = rt.block_on(future);
     assert!(result.is_err());
-    assert!(
-      result
-        .unwrap_err()
-        .to_string()
-        .contains("DummyService should not be called")
-    );
+    assert!(result.unwrap_err().to_string().contains("placeholder"));
   }
 
   #[test]
@@ -1806,7 +1767,7 @@ services:
     // format is explicitly set
     assert!(matches!(
       server_al.format,
-      Some(crate::access_log::config::LogFormat::Json)
+      Some(crate::access_log::LogFormat::Json)
     ));
     // buffer is NOT set, should be None (inherited from top-level at merge time)
     assert!(server_al.buffer.is_none());

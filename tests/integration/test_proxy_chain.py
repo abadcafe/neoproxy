@@ -62,17 +62,18 @@ services:
 
 servers:
   - name: upstream_http3
-    service: tunnel
+    users:
+      - username: user1
+        password: pass1
+    tls:
+      certificates:
+        - cert_path: "{cert_path}"
+          key_path: "{key_path}"
     listeners:
-      - kind: http3.listener
+      - kind: http3
         args:
-          address: "0.0.0.0:{h3_port}"
-          server_cert_path: "{cert_path}"
-          server_key_path: "{key_path}"
-          auth:
-            users:
-              - username: user1
-                password: pass1
+          addresses: ["0.0.0.0:{h3_port}"]
+    service: tunnel
 """
     config_path = os.path.join(temp_dir, "upstream_password.yaml")
     with open(config_path, "w") as f:
@@ -97,15 +98,16 @@ services:
 
 servers:
   - name: upstream_http3_tls
-    service: tunnel
+    tls:
+      certificates:
+        - cert_path: "{cert_path}"
+          key_path: "{key_path}"
+      client_ca_path: "{client_ca_path}"
     listeners:
-      - kind: http3.listener
+      - kind: http3
         args:
-          address: "0.0.0.0:{h3_port}"
-          server_cert_path: "{cert_path}"
-          server_key_path: "{key_path}"
-          auth:
-            client_ca_path: "{client_ca_path}"
+          addresses: ["0.0.0.0:{h3_port}"]
+    service: tunnel
 """
     config_path = os.path.join(temp_dir, "upstream_tls_cert.yaml")
     with open(config_path, "w") as f:
@@ -138,18 +140,14 @@ services:
 
 servers:
   - name: entry_http
-    service: proxy_chain
+    users:
+      - username: user1
+        password: pass1
     listeners:
-      - kind: hyper.listener
+      - kind: http
         args:
-          addresses:
-            - "127.0.0.1:{http_port}"
-          protocols: []
-          hostnames: []
-          auth:
-            users:
-              - username: user1
-                password: pass1
+          addresses: ["127.0.0.1:{http_port}"]
+    service: proxy_chain
 """
     config_path = os.path.join(temp_dir, "entry_http_password.yaml")
     with open(config_path, "w") as f:
@@ -183,18 +181,14 @@ services:
 
 servers:
   - name: entry_http
-    service: proxy_chain
+    users:
+      - username: user1
+        password: pass1
     listeners:
-      - kind: hyper.listener
+      - kind: http
         args:
-          addresses:
-            - "127.0.0.1:{http_port}"
-          protocols: []
-          hostnames: []
-          auth:
-            users:
-              - username: user1
-                password: pass1
+          addresses: ["127.0.0.1:{http_port}"]
+    service: proxy_chain
 """
     config_path = os.path.join(temp_dir, "entry_http_tls_cert.yaml")
     with open(config_path, "w") as f:
@@ -227,16 +221,15 @@ services:
 
 servers:
   - name: entry_socks5
-    service: proxy_chain
     listeners:
-      - kind: fast_socks5.listener
+      - kind: socks5
         args:
-          addresses:
-            - "127.0.0.1:{socks5_port}"
+          addresses: ["127.0.0.1:{socks5_port}"]
           auth:
             users:
               - username: user1
                 password: pass1
+    service: proxy_chain
 """
     config_path = os.path.join(temp_dir, "entry_socks5_password.yaml")
     with open(config_path, "w") as f:
@@ -272,7 +265,7 @@ servers:
   - name: entry_socks5
     service: proxy_chain
     listeners:
-      - kind: fast_socks5.listener
+      - kind: socks5
         args:
           addresses:
             - "127.0.0.1:{socks5_port}"
@@ -616,18 +609,14 @@ services:
 
 servers:
   - name: entry_http
-    service: proxy_chain
+    users:
+      - username: user1
+        password: pass1
     listeners:
-      - kind: hyper.listener
+      - kind: http
         args:
-          addresses:
-            - "127.0.0.1:{http_port}"
-          protocols: []
-          hostnames: []
-          auth:
-            users:
-              - username: user1
-                password: pass1
+          addresses: ["127.0.0.1:{http_port}"]
+    service: proxy_chain
 """
     config_path = os.path.join(temp_dir, "entry_http_no_upstream_auth.yaml")
     with open(config_path, "w") as f:
@@ -659,7 +648,7 @@ servers:
   - name: entry_socks5
     service: proxy_chain
     listeners:
-      - kind: fast_socks5.listener
+      - kind: socks5
         args:
           addresses:
             - "127.0.0.1:{socks5_port}"
@@ -699,18 +688,14 @@ services:
 
 servers:
   - name: entry_http
-    service: proxy_chain
+    users:
+      - username: user1
+        password: pass1
     listeners:
-      - kind: hyper.listener
+      - kind: http
         args:
-          addresses:
-            - "127.0.0.1:{http_port}"
-          protocols: []
-          hostnames: []
-          auth:
-            users:
-              - username: user1
-                password: pass1
+          addresses: ["127.0.0.1:{http_port}"]
+    service: proxy_chain
 """
     config_path = os.path.join(temp_dir, "entry_http_wrong_upstream_auth.yaml")
     with open(config_path, "w") as f:
@@ -734,13 +719,15 @@ services:
 
 servers:
   - name: upstream_http3
-    service: tunnel
+    tls:
+      certificates:
+        - cert_path: "{cert_path}"
+          key_path: "{key_path}"
     listeners:
-      - kind: http3.listener
+      - kind: http3
         args:
-          address: "0.0.0.0:{h3_port}"
-          server_cert_path: "{cert_path}"
-          server_key_path: "{key_path}"
+          addresses: ["0.0.0.0:{h3_port}"]
+    service: tunnel
 """
     config_path = os.path.join(temp_dir, "upstream_no_auth.yaml")
     with open(config_path, "w") as f:

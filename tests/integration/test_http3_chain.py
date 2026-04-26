@@ -201,7 +201,7 @@ services:
 servers:
 - name: http_proxy
   listeners:
-  - kind: hyper.listener
+  - kind: http
     args:
       addresses: [ "0.0.0.0:{http_port}" ]
       protocols: [ http ]

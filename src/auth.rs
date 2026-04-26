@@ -1,7 +1,7 @@
 //! Unified authentication module for neoproxy.
 
 mod error;
-pub mod listener_auth_config;
+mod listener_auth_config;
 mod user_password_auth;
 
 pub use error::AuthError;

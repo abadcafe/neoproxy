@@ -26,8 +26,9 @@ use serde::Deserialize;
 use tracing::warn;
 
 use crate::auth::{ListenerAuthConfig, UserPasswordAuth};
+use crate::http_types::{BytesBufBodyWrapper, RequestBody};
 use crate::plugin;
-use crate::shutdown::StreamTracker;
+use crate::shutdown::{ShutdownHandle, StreamTracker};
 use crate::stream::{
   Socks5UpgradeTrigger, http_status_to_socks5_error,
 };
@@ -87,8 +88,8 @@ impl Socks5Listener {
   #[allow(clippy::new_ret_no_self)]
   pub fn new(
     args: Socks5ListenerArgs,
-    svc: plugin::Service,
-    ctx: plugin::ListenerBuildContext,
+    _svc: plugin::Service,
+    server_routing_table: Vec<crate::server::ServerRoutingEntry>,
   ) -> Result<plugin::Listener> {
     // Resolve addresses, skipping invalid ones
     let addresses = resolve_addresses(&args.addresses);
@@ -100,15 +101,31 @@ impl Socks5Listener {
       );
     }
 
+    // Get service from routing table (SOCKS5 doesn't support hostname routing,
+    // so we use the first entry's service)
+    let service = server_routing_table
+      .first()
+      .map(|e| e.service.clone())
+      .unwrap_or(_svc);
+
+    let access_log_writer = server_routing_table
+      .first()
+      .and_then(|e| e.access_log_writer.clone());
+
+    let service_name = server_routing_table
+      .first()
+      .map(|e| e.service_name())
+      .unwrap_or_default();
+
     Ok(plugin::Listener::new(Self {
       addresses,
       connection_tracker: Rc::new(StreamTracker::new()),
-      service: svc,
+      service,
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
       handshake_timeout: args.handshake_timeout,
       user_password_auth: args.user_password_auth,
-      access_log_writer: ctx.access_log_writer,
-      service_name: ctx.service_name,
+      access_log_writer,
+      service_name,
     }))
   }
 
@@ -133,7 +150,7 @@ impl Socks5Listener {
     addr: SocketAddr,
     service: plugin::Service,
     connection_tracker: Rc<StreamTracker>,
-    shutdown_handle: plugin::ShutdownHandle,
+    shutdown_handle: ShutdownHandle,
     handshake_timeout: Duration,
     user_password_auth: UserPasswordAuth,
     access_log_writer: Option<crate::access_log::AccessLogWriter>,
@@ -324,8 +341,8 @@ impl Socks5Listener {
                 .method(http::Method::CONNECT)
                 .uri(&uri)
                 .version(http::Version::HTTP_11)
-                .body(plugin::RequestBody::new(
-                  plugin::BytesBufBodyWrapper::new(
+                .body(RequestBody::new(
+                  BytesBufBodyWrapper::new(
                     http_body_util::Empty::<bytes::Bytes>::new(),
                   ),
                 ))
@@ -1320,13 +1337,16 @@ pub fn listener_name() -> &'static str {
 pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
   Box::new(
     |args: plugin::SerializedArgs,
-     svc: plugin::Service,
-     ctx: plugin::ListenerBuildContext| {
+     server_routing_table: Vec<crate::server::ServerRoutingEntry>| {
       // Parse configuration
       let listener_args = parse_config(args)?;
 
       // Create listener
-      Socks5Listener::new(listener_args, svc, ctx)
+      Socks5Listener::new(
+        listener_args,
+        crate::server::placeholder_service(),
+        server_routing_table,
+      )
     },
   )
 }
@@ -1621,12 +1641,12 @@ addresses: []
     let config = crate::access_log::AccessLogConfig {
       enabled: true,
       path_prefix: "socks5test.log".to_string(),
-      format: crate::access_log::config::LogFormat::Text,
-      buffer: crate::access_log::config::HumanBytes(64),
+      format: crate::access_log::LogFormat::Text,
+      buffer: byte_unit::Byte::from_u64(64),
       flush: crate::access_log::config::HumanDuration(
         std::time::Duration::from_millis(100),
       ),
-      max_size: crate::access_log::config::HumanBytes(1024 * 1024),
+      max_size: byte_unit::Byte::from_u64(1024 * 1024),
     };
     let writer = crate::access_log::AccessLogWriter::new(
       dir.path().to_str().unwrap(),

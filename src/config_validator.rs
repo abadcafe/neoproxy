@@ -343,16 +343,16 @@ mod tests {
   #[test]
   fn test_parse_kind_valid_listener_with_dot() {
     // With the new naming convention, listener kinds accept any non-empty string
-    // The old format "hyper.listener" would be treated as a simple name
+    // A legacy format like "hyper.listener" would be treated as a simple name
     // (The actual validation happens when checking if the builder exists)
     let result =
-      parse_kind("hyper.listener", "servers[0].listeners[0].kind");
-    // This now passes parse_kind (format validation) but will fail at builder lookup
+      parse_kind("legacy.old_name", "servers[0].listeners[0].kind");
+    // This passes parse_kind (format validation) but will fail at builder lookup
     assert!(result.is_ok());
 
     let (plugin, name) = result.unwrap();
-    assert_eq!(plugin, "hyper.listener");
-    assert_eq!(name, "hyper.listener");
+    assert_eq!(plugin, "legacy.old_name");
+    assert_eq!(name, "legacy.old_name");
   }
 
   #[test]

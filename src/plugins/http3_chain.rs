@@ -26,9 +26,11 @@ use tracing::{error, info, warn};
 use crate::auth::UserCredential;
 use crate::connect_utils::{self as utils, ConnectTargetError};
 use crate::h3_stream::H3ClientBidiStream;
+use crate::http_types::{Request, Response};
+use crate::listeners::common::{build_empty_response, build_error_response};
 use crate::plugin;
-use crate::plugin::ClientStream;
 use crate::shutdown::StreamTracker;
+use crate::stream::{ClientStream, H3OnUpgrade, Socks5OnUpgrade};
 
 /// Error indicating proxy authentication failure (HTTP 407)
 #[derive(Debug)]
@@ -481,40 +483,12 @@ impl ProxyGroup {
   }
 }
 
-fn build_empty_response(
-  status_code: http::StatusCode,
-) -> plugin::Response {
-  let empty = http_body_util::Empty::new();
-  let bytes_buf = plugin::BytesBufBodyWrapper::new(empty);
-  let body = plugin::ResponseBody::new(bytes_buf);
-  let mut resp = plugin::Response::new(body);
-  *resp.status_mut() = status_code;
-  resp
-}
-
-fn build_error_response(
-  status_code: http::StatusCode,
-  message: &str,
-) -> plugin::Response {
-  let full =
-    http_body_util::Full::new(bytes::Bytes::from(message.to_string()));
-  let bytes_buf = plugin::BytesBufBodyWrapper::new(full);
-  let body = plugin::ResponseBody::new(bytes_buf);
-  let mut resp = plugin::Response::new(body);
-  *resp.status_mut() = status_code;
-  resp.headers_mut().insert(
-    http::header::CONTENT_TYPE,
-    http::header::HeaderValue::from_static("text/plain"),
-  );
-  resp
-}
-
 /// Build a 200 OK tunnel response with ServiceMetrics attached.
 ///
 /// Extracted to enable unit testing of the metrics insertion logic.
 fn build_tunnel_response_with_metrics(
   connect_ms: u64,
-) -> plugin::Response {
+) -> Response {
   let mut resp = build_empty_response(http::StatusCode::OK);
   let mut metrics = crate::access_log::ServiceMetrics::new();
   metrics.add("connect_ms", connect_ms);
@@ -676,10 +650,10 @@ impl Http3ChainService {
   }
 }
 
-impl tower::Service<plugin::Request> for Http3ChainService {
+impl tower::Service<Request> for Http3ChainService {
   type Error = anyhow::Error;
-  type Future = Pin<Box<dyn Future<Output = Result<plugin::Response>>>>;
-  type Response = plugin::Response;
+  type Future = Pin<Box<dyn Future<Output = Result<Response>>>>;
+  type Response = Response;
 
   fn poll_ready(
     &mut self,
@@ -688,17 +662,17 @@ impl tower::Service<plugin::Request> for Http3ChainService {
     Poll::Ready(Ok(()))
   }
 
-  fn call(&mut self, mut req: plugin::Request) -> Self::Future {
+  fn call(&mut self, mut req: Request) -> Self::Future {
     let pg = self.proxy_group.clone();
     let st = self.stream_tracker.clone();
     let ct = self.conn_tracker.clone();
     let is_shutting_down = self.is_shutting_down();
 
     // Check for SOCKS5 upgrade
-    let socks5_upgrade = plugin::Socks5OnUpgrade::on(&mut req);
+    let socks5_upgrade = Socks5OnUpgrade::on(&mut req);
 
     // Check for H3 upgrade
-    let h3_upgrade = plugin::H3OnUpgrade::on(&mut req);
+    let h3_upgrade = H3OnUpgrade::on(&mut req);
 
     // Check for HTTP upgrade (only if no SOCKS5 and no H3)
     let http_upgrade =
@@ -781,10 +755,10 @@ async fn send_connect_and_tunnel_with_credential(
   port: u16,
   user_password_credential: &UserPasswordCredential,
   st: &Rc<StreamTracker>,
-  socks5_upgrade: Option<plugin::Socks5OnUpgrade>,
-  h3_upgrade: Option<plugin::H3OnUpgrade>,
+  socks5_upgrade: Option<Socks5OnUpgrade>,
+  h3_upgrade: Option<H3OnUpgrade>,
   http_upgrade: Option<hyper::upgrade::OnUpgrade>,
-) -> Result<plugin::Response> {
+) -> Result<Response> {
   // Build CONNECT request
   let mut proxy_req = http::Request::builder()
     .method(http::Method::CONNECT)
@@ -838,11 +812,11 @@ async fn complete_tunnel(
   >,
   receiving_stream: h3_cli::RequestStream<h3_quinn::RecvStream, Bytes>,
   st: &Rc<StreamTracker>,
-  socks5_upgrade: Option<plugin::Socks5OnUpgrade>,
-  h3_upgrade: Option<plugin::H3OnUpgrade>,
+  socks5_upgrade: Option<Socks5OnUpgrade>,
+  h3_upgrade: Option<H3OnUpgrade>,
   http_upgrade: Option<hyper::upgrade::OnUpgrade>,
   connect_ms: u64,
-) -> Result<plugin::Response> {
+) -> Result<Response> {
   let resp = build_tunnel_response_with_metrics(connect_ms);
   let shutdown_handle = st.shutdown_handle();
 

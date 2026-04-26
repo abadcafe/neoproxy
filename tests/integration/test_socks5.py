@@ -118,7 +118,7 @@ services:
 servers:
 - name: socks5_server
   listeners:
-  - kind: fast_socks5.listener
+  - kind: socks5
     args:
       addresses:
 {chr(10).join([f'        - "{a}"' for a in addresses])}{timeout_section}{auth_section}
@@ -1763,7 +1763,7 @@ services:
 servers:
 - name: socks5_server
   listeners:
-  - kind: fast_socks5.listener
+  - kind: socks5
     args:
       addresses: [
         - "0.0.0.0:{proxy_port}"
@@ -1804,7 +1804,7 @@ services:
 servers:
 - name: socks5_server
   listeners:
-  - kind: fast_socks5.listener
+  - kind: socks5
     args:
       auth:
         users:
@@ -1848,7 +1848,7 @@ services:
 servers:
 - name: socks5_server
   listeners:
-  - kind: fast_socks5.listener
+  - kind: socks5
     args:
       addresses: []
   service: connect_tcp
@@ -1890,7 +1890,7 @@ services:
 servers:
 - name: socks5_server
   listeners:
-  - kind: fast_socks5.listener
+  - kind: socks5
     args:
       addresses:
         - "0.0.0.0:{proxy_port}"
@@ -1936,7 +1936,7 @@ services:
 servers:
 - name: socks5_server
   listeners:
-  - kind: fast_socks5.listener
+  - kind: socks5
     args:
       addresses:
         - "0.0.0.0:{proxy_port}"
@@ -1981,7 +1981,7 @@ services:
 servers:
 - name: socks5_server
   listeners:
-  - kind: fast_socks5.listener
+  - kind: socks5
     args:
       addresses:
         - "0.0.0.0:{proxy_port}"
@@ -2304,7 +2304,7 @@ services:
 servers:
 - name: socks5_server
   listeners:
-  - kind: fast_socks5.listener
+  - kind: socks5
     args:
       addresses:
         - "0.0.0.0:{proxy_port}"

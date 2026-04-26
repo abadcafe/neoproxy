@@ -15,9 +15,12 @@ use serde::Deserialize;
 use tower::Service;
 use tracing::{info, warn};
 
-use crate::auth::UserPasswordAuth;
+use crate::http_types::{
+  BytesBufBodyWrapper, RequestBody, Response,
+};
+use crate::listeners::common::build_error_response;
 use crate::plugin;
-use crate::shutdown::StreamTracker;
+use crate::shutdown::{ShutdownHandle, StreamTracker};
 use crate::stream::H3UpgradeTrigger;
 use crate::tls::build_tls_server_config;
 
@@ -67,7 +70,7 @@ pub struct Http3ListenerArgs {
   /// QUIC protocol parameters (optional)
   #[serde(default)]
   pub quic: Option<QuicConfigArgs>,
-  // Note: TLS and auth are now at server level via ListenerBuildContext
+  // Note: TLS and auth are now at server level via routing table
 }
 
 impl Http3ListenerArgs {
@@ -196,24 +199,6 @@ impl Default for QuicConfig {
 // Error Response Helpers
 // ============================================================================
 
-/// Build an error response with the given status and message
-fn build_error_response(
-  status: http::StatusCode,
-  message: &str,
-) -> plugin::Response {
-  let full =
-    http_body_util::Full::new(Bytes::from(message.to_string()));
-  let bytes_buf = plugin::BytesBufBodyWrapper::new(full);
-  let body = plugin::ResponseBody::new(bytes_buf);
-  let mut resp = plugin::Response::new(body);
-  *resp.status_mut() = status;
-  resp.headers_mut().insert(
-    http::header::CONTENT_TYPE,
-    http::header::HeaderValue::from_static("text/plain"),
-  );
-  resp
-}
-
 /// Check for :authority vs Host header mismatch in HTTP/3 requests.
 ///
 /// In HTTP/3, the `:authority` pseudo-header serves as the equivalent of the
@@ -289,7 +274,7 @@ fn record_access_log(
 /// 2. Authentication check (fail -> send 407 directly)
 /// 3. Route request to correct service based on :authority
 /// 4. Create (trigger, on_upgrade) pair
-/// 5. Build plugin::Request with on_upgrade in extensions
+/// 5. Build Request with on_upgrade in extensions
 /// 6. Call service.call(request)
 /// 7. Based on response status, trigger.send_success() or trigger.send_error()
 ///
@@ -298,12 +283,8 @@ fn record_access_log(
 async fn handle_h3_stream(
   req: http::Request<()>,
   stream: server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
-  routing_table: Vec<crate::server::ServerRoutingEntry>,
-  routing_info: Vec<neoproxy::routing::ServerMatchInfo>,
-  user_password_auth: UserPasswordAuth,
-  _shutdown_handle: plugin::ShutdownHandle,
-  access_log_writer: Option<crate::access_log::AccessLogWriter>,
-  service_name: String,
+  server_routing_table: Vec<crate::server::ServerRoutingEntry>,
+  _shutdown_handle: ShutdownHandle,
   client_addr: SocketAddr,
 ) -> () {
   // Capture start time for access log
@@ -311,10 +292,7 @@ async fn handle_h3_stream(
   let method = req.method().clone();
   let target = req.uri().to_string();
 
-  // Phase 1: Check SNI vs Host for HTTP/3 FIRST (before auth)
-  // This matches the order in HTTPS listener and is more security-consistent
-  // as it validates the request origin before any application-level processing.
-  // In HTTP/3, :authority serves as SNI proxy
+  // Phase 1: Check SNI vs Host for HTTP/3 FIRST
   if check_h3_authority_host_mismatch(&req) {
     let resp = build_error_response(
       http::StatusCode::MISDIRECTED_REQUEST,
@@ -327,43 +305,16 @@ async fn handle_h3_stream(
     return;
   }
 
-  // Phase 2: Authentication - verify and extract username in one pass
-  // This avoids duplicated extraction logic (CR-001) and wasteful computation when auth fails (CR-002)
-  let auth_result =
-    user_password_auth.verify_and_extract_username(&req);
-  let (user, auth_type) = match auth_result {
-    Ok(Some(username)) => {
-      (Some(username), crate::access_log::AuthType::Password)
-    }
-    Ok(None) => (None, crate::access_log::AuthType::None),
-    Err(_) => {
-      // Auth failed: send 407 directly, do NOT call Service
-      let resp = build_error_response(
-        http::StatusCode::PROXY_AUTHENTICATION_REQUIRED,
-        "Proxy Authentication Required",
-      );
-      let mut stream = stream;
-      if let Err(e) = send_h3_response(&mut stream, resp, true).await {
-        warn!("Failed to send 407 response: {e}");
-      }
-      return;
-    }
-  };
-
-  // Phase 3: Route request to correct service based on :authority
+  // Phase 2: Route FIRST based on :authority
   let hostname = req.uri().authority().map(|a| a.host());
-
-  // Route request
   let routing_entry = super::common::route_request_by_hostname(
-    &routing_table,
-    &routing_info,
+    &server_routing_table,
     hostname,
   );
 
-  let mut service = match routing_entry {
-    Some(entry) => entry.service.clone(),
+  let routing_entry = match routing_entry {
+    Some(entry) => entry,
     None => {
-      // No matching server found - send 404
       let resp = build_error_response(
         http::StatusCode::NOT_FOUND,
         "Not Found: No matching server for this host",
@@ -376,44 +327,60 @@ async fn handle_h3_stream(
     }
   };
 
-  // Get service name from routing entry for access log
-  let service_name =
-    routing_entry.map(|e| e.service_name()).unwrap_or(service_name);
+  // Phase 3: Authentication using routing_entry's users
+  let user_password_auth = super::common::build_user_password_auth(&routing_entry.users);
+  let auth_result =
+    user_password_auth.verify_and_extract_username(&req);
+  let (user, auth_type) = match auth_result {
+    Ok(Some(username)) => {
+      (Some(username), crate::access_log::AuthType::Password)
+    }
+    Ok(None) => (None, crate::access_log::AuthType::None),
+    Err(_) => {
+      let resp = build_error_response(
+        http::StatusCode::PROXY_AUTHENTICATION_REQUIRED,
+        "Proxy Authentication Required",
+      );
+      let mut stream = stream;
+      if let Err(e) = send_h3_response(&mut stream, resp, true).await {
+        warn!("Failed to send 407 response: {e}");
+      }
+      return;
+    }
+  };
+
+  let mut service = routing_entry.service.clone();
+  let access_log_writer = routing_entry.access_log_writer.clone();
+  let service_name = routing_entry.service_name();
 
   // Phase 4: Create upgrade pair ONLY for CONNECT method
-  // This is the fix: non-CONNECT requests should NOT create upgrade pair
   let is_connect = method == http::Method::CONNECT;
 
-  // Phase 5: Build plugin::Request
+  // Phase 5: Build Request
   let mut request = http::Request::builder()
     .method(req.method().clone())
     .uri(req.uri().clone())
     .version(req.version())
-    .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+    .body(RequestBody::new(BytesBufBodyWrapper::new(
       http_body_util::Empty::<Bytes>::new(),
     )))
     .expect("failed to build request");
 
-  // Copy headers from original request
   for (name, value) in req.headers() {
     request.headers_mut().insert(name.clone(), value.clone());
   }
 
-  // For CONNECT: create upgrade pair and insert on_upgrade into extensions
-  // For non-CONNECT: keep stream ownership for direct response sending
   let (trigger, mut stream_holder) = if is_connect {
     let (trigger, on_upgrade) = H3UpgradeTrigger::pair(stream);
     request.extensions_mut().insert(on_upgrade);
     (Some(trigger), None)
   } else {
-    // Keep stream for non-CONNECT to send response directly
     (None, Some(stream))
   };
 
   // Phase 6: Call Service
   let result = service.call(request).await;
 
-  // Track status and service metrics for access log
   let mut final_status: u16 = 502;
   let mut service_metrics = crate::access_log::ServiceMetrics::new();
 
@@ -428,7 +395,6 @@ async fn handle_h3_stream(
         .unwrap_or_default();
 
       if is_connect {
-        // CONNECT: use trigger to send response
         if resp.status() == http::StatusCode::OK {
           if let Some(t) = trigger {
             if let Err(e) = t.send_success().await {
@@ -456,7 +422,6 @@ async fn handle_h3_stream(
           }
         }
       } else {
-        // Non-CONNECT: send response directly using the stream
         if let Some(ref mut stream) = stream_holder {
           if let Err(e) = send_h3_response(stream, resp, true).await {
             warn!("H3 failed to send response: {e}");
@@ -475,7 +440,6 @@ async fn handle_h3_stream(
           }
         }
       } else {
-        // Non-CONNECT: send error response directly
         if let Some(ref mut stream) = stream_holder {
           let resp = build_error_response(
             http::StatusCode::BAD_GATEWAY,
@@ -489,10 +453,8 @@ async fn handle_h3_stream(
     }
   }
 
-  // Record access log by calling the tested helper
   if let Some(ref writer) = access_log_writer {
     let duration = start_time.elapsed();
-
     record_access_log(
       writer,
       client_addr,
@@ -521,7 +483,7 @@ async fn send_h3_response(
     h3_quinn::BidiStream<Bytes>,
     Bytes,
   >,
-  resp: plugin::Response,
+  resp: Response,
   finish_stream: bool,
 ) -> Result<()> {
   let (parts, body) = resp.into_parts();
@@ -552,15 +514,10 @@ async fn send_h3_response(
 /// Handle a single HTTP/3 connection
 async fn handle_h3_connection(
   conn: quinn::Connection,
-  routing_table: Vec<crate::server::ServerRoutingEntry>,
-  routing_info: Vec<neoproxy::routing::ServerMatchInfo>,
-  user_password_auth: UserPasswordAuth,
+  server_routing_table: Vec<crate::server::ServerRoutingEntry>,
   stream_tracker: Rc<StreamTracker>,
-  shutdown_handle: plugin::ShutdownHandle,
-  access_log_writer: Option<crate::access_log::AccessLogWriter>,
-  service_name: String,
+  shutdown_handle: ShutdownHandle,
 ) {
-  // Get client address from connection for access log
   let client_addr = conn.remote_address();
 
   // Create H3 connection
@@ -587,24 +544,16 @@ async fn handle_h3_connection(
 
     match accept_result {
       Ok(Some(resolver)) => {
-        let routing_table = routing_table.clone();
-        let routing_info = routing_info.clone();
-        let user_password_auth = user_password_auth.clone();
+        let server_routing_table = server_routing_table.clone();
         let stream_shutdown = stream_tracker.shutdown_handle();
-        let access_log_writer = access_log_writer.clone();
-        let service_name = service_name.clone();
         stream_tracker.register(async move {
           match resolver.resolve_request().await {
             Ok((req, stream)) => {
               handle_h3_stream(
                 req,
                 stream,
-                routing_table,
-                routing_info,
-                user_password_auth,
+                server_routing_table,
                 stream_shutdown,
-                access_log_writer,
-                service_name,
                 client_addr,
               )
               .await;
@@ -649,19 +598,11 @@ pub struct Http3Listener {
   /// QUIC configuration
   quic_config: QuicConfig,
   /// Routing table for hostname-based routing
-  routing_table: Vec<crate::server::ServerRoutingEntry>,
-  /// Compiled routing info for fast lookup
-  routing_info: Vec<neoproxy::routing::ServerMatchInfo>,
-  /// Application-layer authentication (password)
-  user_password_auth: UserPasswordAuth,
+  server_routing_table: Vec<crate::server::ServerRoutingEntry>,
   /// Stream tracker
   stream_tracker: Rc<StreamTracker>,
   /// Shutdown handle
-  shutdown_handle: plugin::ShutdownHandle,
-  /// Access log writer for logging request/response information.
-  access_log_writer: Option<crate::access_log::AccessLogWriter>,
-  /// Service name for identification in logs.
-  service_name: String,
+  shutdown_handle: ShutdownHandle,
 }
 
 impl Http3Listener {
@@ -669,8 +610,7 @@ impl Http3Listener {
   #[allow(clippy::new_ret_no_self)]
   pub fn new(
     sargs: plugin::SerializedArgs,
-    _svc: plugin::Service, // Ignored - service comes from routing_table
-    ctx: plugin::ListenerBuildContext,
+    server_routing_table: Vec<crate::server::ServerRoutingEntry>,
   ) -> Result<plugin::Listener> {
     let args: Http3ListenerArgs = serde_yaml::from_value(sargs)?;
 
@@ -692,8 +632,7 @@ impl Http3Listener {
     };
 
     // TLS config is required for HTTP/3 listener - get from first routing entry
-    let server_tls = ctx
-      .routing_table
+    let server_tls = server_routing_table
       .first()
       .and_then(|e| e.tls.as_ref())
       .ok_or_else(|| {
@@ -701,17 +640,6 @@ impl Http3Listener {
           "http3 listener requires server-level tls configuration"
         )
       })?;
-
-    // Build routing info from routing table
-    let routing_info: Vec<neoproxy::routing::ServerMatchInfo> =
-      ctx.routing_table.iter().map(|entry| entry.into()).collect();
-
-    // Build UserPasswordAuth from first routing entry
-    let user_password_auth = ctx
-      .routing_table
-      .first()
-      .map(|e| super::common::build_user_password_auth(&e.users))
-      .unwrap_or_else(UserPasswordAuth::none);
 
     // Build TLS config with SNI support and HTTP/3 ALPN
     let tls_config =
@@ -721,13 +649,9 @@ impl Http3Listener {
       addresses,
       tls_config,
       quic_config,
-      routing_table: ctx.routing_table,
-      routing_info,
-      user_password_auth,
+      server_routing_table,
       stream_tracker: Rc::new(StreamTracker::new()),
-      shutdown_handle: plugin::ShutdownHandle::new(),
-      access_log_writer: ctx.access_log_writer,
-      service_name: ctx.service_name,
+      shutdown_handle: ShutdownHandle::new(),
     }))
   }
 }
@@ -737,13 +661,9 @@ impl plugin::Listening for Http3Listener {
     let addresses = self.addresses.clone();
     let tls_config = self.tls_config.clone();
     let quic_config = self.quic_config.clone();
-    let user_password_auth = self.user_password_auth.clone();
     let stream_tracker = self.stream_tracker.clone();
     let shutdown_handle = self.shutdown_handle.clone();
-    let routing_table = self.routing_table.clone();
-    let routing_info = self.routing_info.clone();
-    let access_log_writer = self.access_log_writer.clone();
-    let service_name = self.service_name.clone();
+    let server_routing_table = self.server_routing_table.clone();
 
     Box::pin(async move {
       // Create Quinn server config
@@ -852,28 +772,19 @@ impl plugin::Listening for Http3Listener {
 
         match accept_result {
           Some(conn) => {
-            let routing_table = routing_table.clone();
-            let routing_info = routing_info.clone();
-            let user_password_auth_for_conn =
-              user_password_auth.clone();
+            let server_routing_table = server_routing_table.clone();
             let tracker_for_register = stream_tracker.clone();
             let tracker_for_handler = stream_tracker.clone();
             let stream_shutdown = tracker_for_handler.shutdown_handle();
-            let access_log_writer = access_log_writer.clone();
-            let service_name = service_name.clone();
 
             tracker_for_register.register_connection(async move {
               match conn.await {
                 Ok(quinn_conn) => {
                   handle_h3_connection(
                     quinn_conn,
-                    routing_table,
-                    routing_info,
-                    user_password_auth_for_conn,
+                    server_routing_table,
                     tracker_for_handler,
                     stream_shutdown,
-                    access_log_writer,
-                    service_name,
                   )
                   .await;
                 }
@@ -965,7 +876,8 @@ pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
 mod tests {
   use super::*;
   use crate::auth::ListenerAuthConfig;
-  use crate::auth::listener_auth_config::UserCredential;
+  use crate::auth::UserCredential;
+  use crate::auth::UserPasswordAuth;
   use base64::{
     Engine, engine::general_purpose::STANDARD as BASE64_STANDARD,
   };
@@ -1150,7 +1062,7 @@ users:
     let config: ListenerAuthConfig =
       serde_yaml::from_value(yaml_value).unwrap();
     config.validate().unwrap();
-    assert!(config.users.is_some());
+    assert!(!config.users.is_empty());
     let users = config.users_map().expect("users should exist");
     assert_eq!(
       users.get("admin"),
@@ -1189,7 +1101,7 @@ client_ca_path: /path/to/ca.pem
     let config: ListenerAuthConfig =
       serde_yaml::from_value(yaml_value).unwrap();
     config.validate().unwrap();
-    assert!(config.users.is_some());
+    assert!(!config.users.is_empty());
     assert!(config.client_ca_path.is_some());
   }
 
@@ -1459,10 +1371,10 @@ quic:
     // Case 1: Auth required, valid credentials - should return username
     let user_password_auth =
       UserPasswordAuth::from_config(&ListenerAuthConfig {
-        users: Some(vec![UserCredential {
+        users: vec![UserCredential {
           username: "testuser".to_string(),
           password: "testpass".to_string(),
-        }]),
+        }],
         client_ca_path: None,
       });
     let req = http::Request::builder()
@@ -1518,12 +1430,12 @@ quic:
     let config = crate::access_log::AccessLogConfig {
       enabled: true,
       path_prefix: "h3test.log".to_string(),
-      format: crate::access_log::config::LogFormat::Text,
-      buffer: crate::access_log::config::HumanBytes(64),
+      format: crate::access_log::LogFormat::Text,
+      buffer: byte_unit::Byte::from_u64(64),
       flush: crate::access_log::config::HumanDuration(
         std::time::Duration::from_millis(100),
       ),
-      max_size: crate::access_log::config::HumanBytes(1024 * 1024),
+      max_size: byte_unit::Byte::from_u64(1024 * 1024),
     };
     let writer = crate::access_log::AccessLogWriter::new(
       dir.path().to_str().unwrap(),
@@ -1699,7 +1611,7 @@ quic:
     let mut request = http::Request::builder()
       .method(Method::CONNECT)
       .uri("example.com:443")
-      .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+      .body(RequestBody::new(BytesBufBodyWrapper::new(
         http_body_util::Empty::<Bytes>::new(),
       )))
       .expect("failed to build request");

@@ -44,22 +44,21 @@ def write_config(temp_dir: str, config_content: str) -> str:
 
 
 # ==============================================================================
-# Test: hyper.listener with new auth format (no 'type' field)
+# Test: http listener with new auth format (no 'type' field)
 # ==============================================================================
 
 
-class TestHyperListenerNewAuthFormat:
-    """Test hyper.listener with new auth format: auth.users directly, no type field."""
+class TestHttpListenerNewAuthFormat:
+    """Test http listener with new auth format: auth.users directly, no type field."""
 
-    def test_hyper_password_auth_new_format(self, temp_dir: str) -> None:
+    def test_http_password_auth_new_format(self, temp_dir: str) -> None:
         """
-        TC-NEW-AUTH-001: hyper.listener accepts new auth format without 'type' field.
+        TC-NEW-AUTH-001: http listener with server-level users config.
 
         Config:
-          auth:
-            users:
-              - username: testuser
-                password: testpass
+          users:
+            - username: testuser
+              password: testpass
 
         Expected: proxy starts, rejects unauthenticated requests (407),
                   accepts authenticated requests.
@@ -75,16 +74,13 @@ services:
 
 servers:
   - name: test
+    users:
+      - username: testuser
+        password: testpass
     listeners:
-      - kind: hyper.listener
+      - kind: http
         args:
           addresses: ["127.0.0.1:{port}"]
-          protocols: [http]
-          hostnames: []
-          auth:
-            users:
-              - username: testuser
-                password: testpass
     service: connect_tcp
 """
         config_path = write_config(temp_dir, config)
@@ -117,16 +113,16 @@ servers:
 
 
 # ==============================================================================
-# Test: fast_socks5.listener with new auth format
+# Test: socks5 listener with new auth format
 # ==============================================================================
 
 
 class TestSocks5ListenerNewAuthFormat:
-    """Test fast_socks5.listener with new auth format."""
+    """Test socks5 listener with new auth format."""
 
     def test_socks5_password_auth_new_format(self, temp_dir: str) -> None:
         """
-        TC-NEW-AUTH-002: fast_socks5.listener accepts new auth format without 'type' field.
+        TC-NEW-AUTH-002: socks5 listener accepts new auth format without 'type' field.
 
         Config:
           auth:
@@ -148,7 +144,7 @@ services:
 servers:
   - name: test
     listeners:
-      - kind: fast_socks5.listener
+      - kind: socks5
         args:
           addresses: ["127.0.0.1:{port}"]
           auth:
@@ -184,15 +180,14 @@ servers:
 
 
 class TestNewAuthFormatValidation:
-    """Test that invalid new auth format configs are rejected at startup."""
+    """Test that invalid auth configs are rejected at startup."""
 
     def test_empty_auth_object_rejected_for_listener(self, temp_dir: str) -> None:
         """
-        TC-NEW-AUTH-003: Listener rejects 'auth: {}' (empty object).
+        TC-NEW-AUTH-003: HTTP listener with invalid users config is rejected.
 
-        Unlike http3_chain where 'credential: {}' means no-credential override,
-        'auth: {}' on a listener is invalid because at least one auth method
-        must be specified.
+        Server-level users must have both username and password.
+        Missing password should be rejected.
         """
         port = get_unique_port()
         config = f"""
@@ -205,13 +200,12 @@ services:
 
 servers:
   - name: test
+    users:
+      - username: testuser
     listeners:
-      - kind: hyper.listener
+      - kind: http
         args:
           addresses: ["127.0.0.1:{port}"]
-          protocols: [http]
-          hostnames: []
-          auth: {{}}
     service: connect_tcp
 """
         config_path = write_config(temp_dir, config)
@@ -220,13 +214,15 @@ servers:
             time.sleep(2)
             started = wait_for_proxy("127.0.0.1", port, timeout=3.0)
             assert not started, \
-                "Proxy should NOT start with empty auth object on listener"
+                "Proxy should NOT start with users missing password field"
         finally:
             terminate_process(proc)
 
     def test_auth_without_users_or_ca_rejected(self, temp_dir: str) -> None:
         """
-        TC-NEW-AUTH-004: Auth config with neither 'users' nor 'client_ca_path' is rejected.
+        TC-NEW-AUTH-004: HTTP listener with empty users array is rejected.
+
+        Server-level users array cannot be empty if specified.
         """
         port = get_unique_port()
         config = f"""
@@ -239,14 +235,11 @@ services:
 
 servers:
   - name: test
+    users: []
     listeners:
-      - kind: hyper.listener
+      - kind: http
         args:
           addresses: ["127.0.0.1:{port}"]
-          protocols: [http]
-          hostnames: []
-          auth:
-            some_unknown_field: true
     service: connect_tcp
 """
         config_path = write_config(temp_dir, config)
@@ -255,16 +248,20 @@ servers:
             time.sleep(2)
             started = wait_for_proxy("127.0.0.1", port, timeout=3.0)
             assert not started, \
-                "Proxy should NOT start with auth missing users and client_ca_path"
+                "Proxy should NOT start with empty users array"
         finally:
             terminate_process(proc)
 
-    def test_client_ca_path_rejected_on_hyper_listener(self, temp_dir: str) -> None:
+    def test_http_listener_ignores_server_level_tls(self, temp_dir: str) -> None:
         """
-        TC-NEW-AUTH-005: hyper.listener rejects 'client_ca_path' in auth config.
+        TC-NEW-AUTH-005: HTTP listener ignores server-level TLS config.
 
-        Only http3.listener supports TLS client cert auth.
+        HTTP is a plaintext protocol and doesn't use TLS. When server-level TLS config
+        is present, HTTP listener should simply ignore it and start normally.
         """
+        # Generate valid certificates for the test
+        cert_path, key_path, ca_path, _ca_key_path = generate_test_certificates(temp_dir)
+
         port = get_unique_port()
         config = f"""
 worker_threads: 1
@@ -276,32 +273,34 @@ services:
 
 servers:
   - name: test
+    tls:
+      certificates:
+        - cert_path: "{cert_path}"
+          key_path: "{key_path}"
+      client_ca_certs:
+        - "{ca_path}"
     listeners:
-      - kind: hyper.listener
+      - kind: http
         args:
           addresses: ["127.0.0.1:{port}"]
-          protocols: [http]
-          hostnames: []
-          auth:
-            client_ca_path: /some/ca.pem
     service: connect_tcp
 """
         config_path = write_config(temp_dir, config)
         proc = start_proxy(config_path)
         try:
-            time.sleep(2)
-            started = wait_for_proxy("127.0.0.1", port, timeout=3.0)
-            assert not started, \
-                "Proxy should NOT start with client_ca_path on hyper.listener"
+            # HTTP listener should start and ignore the server-level TLS config
+            started = wait_for_proxy("127.0.0.1", port, timeout=5.0)
+            assert started, \
+                "HTTP listener should start and ignore server-level TLS config"
         finally:
             terminate_process(proc)
 
     def test_client_ca_path_rejected_on_socks5_listener(self, temp_dir: str) -> None:
         """
-        TC-NEW-AUTH-006: fast_socks5.listener rejects 'client_ca_path' in auth config.
+        TC-NEW-AUTH-006: socks5 listener rejects 'client_ca_path' in auth config.
 
-        Only http3.listener supports TLS client cert auth. SOCKS5 must reject it
-        the same way hyper does.
+        Only http3 listener supports TLS client cert auth. SOCKS5 must reject it
+        the same way http does.
         """
         port = get_unique_port()
         config = f"""
@@ -315,7 +314,7 @@ services:
 servers:
   - name: test
     listeners:
-      - kind: fast_socks5.listener
+      - kind: socks5
         args:
           addresses: ["127.0.0.1:{port}"]
           auth:
@@ -328,7 +327,7 @@ servers:
             time.sleep(2)
             started = wait_for_proxy("127.0.0.1", port, timeout=3.0)
             assert not started, \
-                "Proxy should NOT start with client_ca_path on fast_socks5.listener"
+                "Proxy should NOT start with client_ca_path on socks5 listener"
         finally:
             terminate_process(proc)
 
@@ -350,16 +349,15 @@ class TestHttp3ChainNewCredentialFormat:
         auth_users: Optional[List[dict[str, str]]] = None,
     ) -> str:
         """Create an HTTP/3 upstream proxy config (the target proxy in the chain)."""
-        auth_block = ""
+        users_block = ""
         if auth_users:
             users_yaml = "\n".join(
-                f'              - username: "{u["username"]}"\n'
-                f'                password: "{u["password"]}"'
+                f'      - username: "{u["username"]}"\n'
+                f'        password: "{u["password"]}"'
                 for u in auth_users
             )
-            auth_block = f"""
-          auth:
-            users:
+            users_block = f"""
+    users:
 {users_yaml}"""
 
         config = f"""
@@ -371,13 +369,15 @@ services:
     kind: connect_tcp.connect_tcp
 
 servers:
-  - name: upstream
+  - name: upstream{users_block}
+    tls:
+      certificates:
+        - cert_path: "{cert_path}"
+          key_path: "{key_path}"
     listeners:
-      - kind: http3.listener
+      - kind: http3
         args:
-          address: "127.0.0.1:{udp_port}"
-          server_cert_path: "{cert_path}"
-          server_key_path: "{key_path}"{auth_block}
+          addresses: ["127.0.0.1:{udp_port}"]
     service: connect_tcp
 """
         return write_config(temp_dir, config)
@@ -437,7 +437,7 @@ services:
 servers:
   - name: chain
     listeners:
-      - kind: hyper.listener
+      - kind: http
         args:
           addresses: ["127.0.0.1:{http_port}"]
           protocols: [http]
@@ -539,7 +539,7 @@ services:
 servers:
   - name: chain
     listeners:
-      - kind: hyper.listener
+      - kind: http
         args:
           addresses: ["127.0.0.1:{http_port}"]
           protocols: [http]
@@ -651,7 +651,7 @@ services:
 servers:
   - name: chain
     listeners:
-      - kind: hyper.listener
+      - kind: http
         args:
           addresses: ["127.0.0.1:{http_port}"]
           protocols: [http]
@@ -752,7 +752,7 @@ services:
 servers:
   - name: chain
     listeners:
-      - kind: hyper.listener
+      - kind: http
         args:
           addresses: ["127.0.0.1:{http_port}"]
           protocols: [http]
@@ -864,7 +864,7 @@ services:
 servers:
   - name: chain
     listeners:
-      - kind: hyper.listener
+      - kind: http
         args:
           addresses: ["127.0.0.1:{http_port}"]
           protocols: [http]

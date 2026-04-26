@@ -5,8 +5,10 @@ use std::task::{Context, Poll};
 
 use anyhow::Result;
 use http_body_util::{BodyExt, Full};
-use hyper::Response;
 
+use crate::http_types::{
+  BytesBufBodyWrapper, Request,  Response, ResponseBody,
+};
 use crate::plugin;
 
 #[derive(Clone)]
@@ -19,10 +21,10 @@ impl EchoService {
   }
 }
 
-impl tower::Service<plugin::Request> for EchoService {
+impl tower::Service<Request> for EchoService {
   type Error = anyhow::Error;
-  type Future = Pin<Box<dyn Future<Output = Result<plugin::Response>>>>;
-  type Response = plugin::Response;
+  type Future = Pin<Box<dyn Future<Output = Result<Response>>>>;
+  type Response = Response;
 
   fn poll_ready(
     &mut self,
@@ -32,14 +34,14 @@ impl tower::Service<plugin::Request> for EchoService {
     Poll::Ready(Ok(()))
   }
 
-  fn call(&mut self, req: plugin::Request) -> Self::Future {
+  fn call(&mut self, req: Request) -> Self::Future {
     let fut = async {
       let req_body = req.collect().await?.to_bytes();
       let full = Full::new(req_body);
-      let bytes_buf = plugin::BytesBufBodyWrapper::new(full);
-      let resp_body = plugin::ResponseBody::new(bytes_buf);
-      let resp =
-        Response::builder().status(200).body(resp_body).unwrap();
+      let bytes_buf = BytesBufBodyWrapper::new(full);
+      let resp_body = ResponseBody::new(bytes_buf);
+      let mut resp = Response::new(resp_body);
+      *resp.status_mut() = http::StatusCode::OK;
       Ok(resp)
     };
     Box::pin(fut)
@@ -80,26 +82,13 @@ pub fn create_plugin() -> Box<dyn plugin::Plugin> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::http_types::RequestBody;
   use crate::plugin::Plugin;
   use bytes::Bytes;
+  use futures::task::noop_waker;
   use http_body_util::BodyExt;
-  use std::task::{Context, Poll, RawWaker, RawWakerVTable};
+  use std::task::{Context, Poll};
   use tower::Service;
-
-  fn dummy_waker() -> std::task::Waker {
-    fn dummy_clone(_: *const ()) -> RawWaker {
-      RawWaker::new(std::ptr::null(), &VTABLE)
-    }
-    fn dummy(_: *const ()) {}
-    static VTABLE: RawWakerVTable =
-      RawWakerVTable::new(dummy_clone, dummy, dummy, dummy);
-    unsafe {
-      std::task::Waker::from_raw(RawWaker::new(
-        std::ptr::null(),
-        &VTABLE,
-      ))
-    }
-  }
 
   // ============== EchoService Tests ==============
 
@@ -113,16 +102,16 @@ mod tests {
   fn test_echo_service_poll_ready() {
     let mut service =
       EchoService::new(serde_yaml::Value::Null).unwrap();
-    let waker = dummy_waker();
+    let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
     let result = Service::poll_ready(&mut service, &mut cx);
     assert!(matches!(result, Poll::Ready(Ok(()))));
   }
 
-  fn make_echo_request(body: &[u8]) -> plugin::Request {
+  fn make_echo_request(body: &[u8]) -> Request {
     let full = Full::new(Bytes::from(body.to_vec()));
-    let bytes_buf = plugin::BytesBufBodyWrapper::new(full);
-    let body = plugin::RequestBody::new(bytes_buf);
+    let bytes_buf = BytesBufBodyWrapper::new(full);
+    let body = RequestBody::new(bytes_buf);
     http::Request::builder()
       .method(http::Method::POST)
       .uri("/echo")

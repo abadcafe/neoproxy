@@ -22,7 +22,10 @@ use tokio::{net, task, time::timeout};
 use tower::util as tower_util;
 use tracing::{error, info, warn};
 
-use crate::auth::UserPasswordAuth;
+use crate::http_types::{
+  BytesBufBodyWrapper, Request, RequestBody, Response,
+};
+use crate::listeners::common::TokioLocalExecutor;
 use crate::plugin;
 use crate::server::ServerRoutingEntry;
 use crate::shutdown::StreamTracker;
@@ -52,13 +55,7 @@ fn load_tls_config_from_server(
 /// HTTPS Service Adaptor with routing support.
 struct HttpsServiceAdaptor {
   /// Routing table for hostname-based routing
-  routing_table: Vec<ServerRoutingEntry>,
-  /// Compiled routing info for fast lookup
-  routing_info: Vec<neoproxy::routing::ServerMatchInfo>,
-  /// User password auth (from first routing entry)
-  user_password_auth: UserPasswordAuth,
-  /// Access log writer (from first routing entry)
-  access_log_writer: Option<crate::access_log::AccessLogWriter>,
+  server_routing_table: Vec<ServerRoutingEntry>,
   /// Client address for logging
   client_addr: Option<SocketAddr>,
   /// SNI from TLS handshake
@@ -67,18 +64,12 @@ struct HttpsServiceAdaptor {
 
 impl HttpsServiceAdaptor {
   fn new(
-    routing_table: Vec<ServerRoutingEntry>,
-    routing_info: Vec<neoproxy::routing::ServerMatchInfo>,
-    user_password_auth: UserPasswordAuth,
-    access_log_writer: Option<crate::access_log::AccessLogWriter>,
+    server_routing_table: Vec<ServerRoutingEntry>,
     client_addr: Option<SocketAddr>,
     sni: Option<String>,
   ) -> Self {
     Self {
-      routing_table,
-      routing_info,
-      user_password_auth,
-      access_log_writer,
+      server_routing_table,
       client_addr,
       sni,
     }
@@ -87,7 +78,7 @@ impl HttpsServiceAdaptor {
   /// Route a request to the correct service based on Host header.
   fn route_request(
     &self,
-    req: &plugin::Request,
+    req: &Request,
   ) -> Option<&ServerRoutingEntry> {
     // Get Host header and strip port if present
     let host = req
@@ -97,8 +88,7 @@ impl HttpsServiceAdaptor {
       .map(|h| h.split(':').next().unwrap_or(h));
 
     super::common::route_request_by_hostname(
-      &self.routing_table,
-      &self.routing_info,
+      &self.server_routing_table,
       host,
     )
   }
@@ -108,8 +98,8 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
   for HttpsServiceAdaptor
 {
   type Error = anyhow::Error;
-  type Future = Pin<Box<dyn Future<Output = Result<plugin::Response>>>>;
-  type Response = plugin::Response;
+  type Future = Pin<Box<dyn Future<Output = Result<Response>>>>;
+  type Response = Response;
 
   fn call(
     &self,
@@ -119,8 +109,8 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
 
     // Step 1: Check HTTP version FIRST
     // HTTP/1.0 is not supported - return 505 HTTP Version Not Supported
-    if let Err(_status) = check_http_version(req.version()) {
-      return Box::pin(async { Ok(build_505_response()) });
+    if let Err(_status) = super::common::check_http_version(req.version()) {
+      return Box::pin(async { Ok(super::common::build_505_response()) });
     }
 
     // Step 2: Check SNI vs Host header mismatch
@@ -137,7 +127,7 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       }
     }
 
-    // Step 3: Build an http::Request<()> for auth verification
+    // Step 3: Build an http::Request<()> for routing and auth verification
     let mut auth_req_builder = http::Request::builder()
       .method(req.method().clone())
       .uri(req.uri().clone())
@@ -149,9 +139,27 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
 
     let auth_req = auth_req_builder.body(()).unwrap();
 
-    // Step 4: Check authentication
+    // Step 4: Route FIRST (route first, then auth)
+    let (parts, body) = req.into_parts();
+    let req = Request::from_parts(
+      parts,
+      RequestBody::new(BytesBufBodyWrapper::new(body)),
+    );
+
+    let routing_entry = match self.route_request(&req) {
+      Some(entry) => entry,
+      None => {
+        // No matching server found - return 404
+        return Box::pin(async {
+          Ok(super::common::build_404_response())
+        });
+      }
+    };
+
+    // Step 5: Check authentication using routing_entry's users
+    let user_password_auth = super::common::build_user_password_auth(&routing_entry.users);
     let verify_result =
-      self.user_password_auth.verify_and_extract_username(&auth_req);
+      user_password_auth.verify_and_extract_username(&auth_req);
     let (user, auth_type) = match verify_result {
       Ok(Some(username)) => {
         (Some(username), crate::access_log::AuthType::Password)
@@ -164,24 +172,8 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       }
     };
 
-    let (parts, body) = req.into_parts();
-    let req = plugin::Request::from_parts(
-      parts,
-      plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(body)),
-    );
-
-    // Step 5: Route request to correct service
-    let routing_entry = match self.route_request(&req) {
-      Some(entry) => entry,
-      None => {
-        // No matching server found - return 404
-        return Box::pin(async {
-          Ok(super::common::build_404_response())
-        });
-      }
-    };
-
-    let access_log_writer = self.access_log_writer.clone();
+    // Step 6: Get access_log_writer from routing entry
+    let access_log_writer = routing_entry.access_log_writer.clone();
     let service_name = routing_entry.service_name();
     let client_addr = self.client_addr;
     let method = req.method().to_string();
@@ -223,27 +215,12 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
           service_metrics,
         };
 
-        record_access_log(writer, &params);
+        super::common::record_http_access_log(writer, &params);
       }
 
       resp
     })
   }
-}
-
-/// Check HTTP version and return error if version is not supported.
-///
-/// HTTP/1.0 is NOT supported - returns 505 HTTP Version Not Supported.
-/// HTTP/1.1 and higher are supported.
-fn check_http_version(
-  version: http::Version,
-) -> Result<(), http::StatusCode> {
-  super::common::check_http_version(version)
-}
-
-/// Build a 505 HTTP Version Not Supported response.
-fn build_505_response() -> plugin::Response {
-  super::common::build_505_response()
 }
 
 /// Extract SNI from TLS connection.
@@ -257,28 +234,6 @@ fn get_sni_from_tls_connection(
   session.server_name().map(|s| s.to_string())
 }
 
-/// Record an access log entry for an HTTPS request.
-///
-/// Delegates to the common implementation in `super::common::record_http_access_log`.
-fn record_access_log(
-  writer: &crate::access_log::AccessLogWriter,
-  params: &crate::access_log::HttpAccessLogParams,
-) {
-  super::common::record_http_access_log(writer, params);
-}
-
-#[derive(Clone)]
-pub struct TokioLocalExecutor {}
-
-impl<F> hyper::rt::Executor<F> for TokioLocalExecutor
-where
-  F: Future + 'static,
-{
-  fn execute(&self, fut: F) {
-    task::spawn_local(fut);
-  }
-}
-
 /// HTTPS Listener with shared-address routing support.
 pub struct HttpsListener {
   /// Listening addresses
@@ -286,33 +241,25 @@ pub struct HttpsListener {
   /// TLS configuration
   tls_config: Arc<rustls::ServerConfig>,
   /// Routing table for hostname-based routing
-  routing_table: Vec<ServerRoutingEntry>,
-  /// Compiled routing info for fast lookup
-  routing_info: Vec<neoproxy::routing::ServerMatchInfo>,
+  server_routing_table: Vec<ServerRoutingEntry>,
   /// Listening set for managing accept tasks
   listening_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
   /// Connection tracker for graceful shutdown
   connection_tracker: Rc<StreamTracker>,
   /// Graceful shutdown timeout
   graceful_shutdown_timeout: Duration,
-  /// User password auth (from first routing entry)
-  user_password_auth: UserPasswordAuth,
-  /// Access log writer (from first routing entry)
-  access_log_writer: Option<crate::access_log::AccessLogWriter>,
 }
 
 impl HttpsListener {
   #[allow(clippy::new_ret_no_self)]
   pub fn new(
     sargs: plugin::SerializedArgs,
-    _svc: plugin::Service, // Ignored - service comes from routing_table
-    ctx: plugin::ListenerBuildContext,
+    server_routing_table: Vec<ServerRoutingEntry>,
   ) -> Result<plugin::Listener> {
     let args: HttpsListenerArgs = serde_yaml::from_value(sargs)?;
 
     // TLS config is required for https listener - get from first routing entry
-    let tls_config = ctx
-      .routing_table
+    let tls_config = server_routing_table
       .first()
       .and_then(|e| e.tls.as_ref())
       .map(load_tls_config_from_server)
@@ -322,17 +269,6 @@ impl HttpsListener {
           "https listener requires server-level tls configuration"
         )
       })?;
-
-    // Build routing info from routing table
-    let routing_info: Vec<neoproxy::routing::ServerMatchInfo> =
-      ctx.routing_table.iter().map(|entry| entry.into()).collect();
-
-    // Get user password auth from first routing entry
-    let user_password_auth = ctx
-      .routing_table
-      .first()
-      .map(|e| super::common::build_user_password_auth(&e.users))
-      .unwrap_or_else(UserPasswordAuth::none);
 
     // Parse addresses
     let addresses: Vec<SocketAddr> = args
@@ -348,13 +284,10 @@ impl HttpsListener {
     Ok(plugin::Listener::new(Self {
       addresses,
       tls_config,
-      routing_table: ctx.routing_table,
-      routing_info,
+      server_routing_table,
       listening_set: Rc::new(RefCell::new(task::JoinSet::new())),
       connection_tracker: Rc::new(StreamTracker::new()),
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
-      user_password_auth,
-      access_log_writer: ctx.access_log_writer,
     }))
   }
 
@@ -374,10 +307,7 @@ impl HttpsListener {
     let tls_config = self.tls_config.clone();
     let connection_tracker = self.connection_tracker.clone();
     let shutdown_handle = self.connection_tracker.shutdown_handle();
-    let routing_table = self.routing_table.clone();
-    let routing_info = self.routing_info.clone();
-    let user_password_auth = self.user_password_auth.clone();
-    let access_log_writer = self.access_log_writer.clone();
+    let server_routing_table = self.server_routing_table.clone();
 
     let accepting_fut = async move {
       info!("HTTPS listener started on {}", addr);
@@ -404,15 +334,12 @@ impl HttpsListener {
 
                 let io = rt_util::TokioIo::new(tls_stream);
                 let svc = HttpsServiceAdaptor::new(
-                  routing_table.clone(),
-                  routing_info.clone(),
-                  user_password_auth.clone(),
-                  access_log_writer.clone(),
+                  server_routing_table.clone(),
                   Some(raddr),
                   sni,
                 );
                 let builder =
-                  conn_util::Builder::new(TokioLocalExecutor {});
+                  conn_util::Builder::new(TokioLocalExecutor);
                 connection_tracker.register(async move {
                   let conn =
                     builder.serve_connection_with_upgrades(io, svc);
@@ -520,6 +447,9 @@ pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
 mod tests {
   use super::*;
   use crate::config::{CertificateConfig, ServerTlsConfig};
+  use crate::listeners::common::{
+    TokioLocalExecutor, build_505_response, check_http_version,
+  };
   use std::sync::OnceLock;
 
   static CRYPTO_PROVIDER_INSTALLED: OnceLock<bool> = OnceLock::new();
@@ -574,33 +504,6 @@ mod tests {
     )
   }
 
-  fn create_test_service() -> plugin::Service {
-    #[derive(Clone)]
-    struct DummyService;
-
-    impl tower::Service<plugin::Request> for DummyService {
-      type Error = anyhow::Error;
-      type Future =
-        Pin<Box<dyn Future<Output = Result<plugin::Response>>>>;
-      type Response = plugin::Response;
-
-      fn poll_ready(
-        &mut self,
-        _cx: &mut std::task::Context<'_>,
-      ) -> std::task::Poll<Result<()>> {
-        std::task::Poll::Ready(Ok(()))
-      }
-
-      fn call(&mut self, _req: plugin::Request) -> Self::Future {
-        Box::pin(async {
-          anyhow::bail!("DummyService not implemented")
-        })
-      }
-    }
-
-    plugin::Service::new(DummyService)
-  }
-
   #[test]
   fn test_https_listener_args_deserialize() {
     let yaml = r#"
@@ -641,23 +544,16 @@ addresses:
       serde_yaml::from_str(args_yaml).unwrap();
 
     let entry = ServerRoutingEntry {
-      name: "test".to_string(),
       hostnames: vec![],
-      service: create_test_service(),
+      service: crate::server::placeholder_service(),
       service_name: "test_service".to_string(),
       users: None,
       tls: None, // No TLS config - should cause error
       access_log_writer: None,
     };
 
-    let ctx = plugin::ListenerBuildContext {
-      access_log_writer: None,
-      service_name: "test".to_string(),
-      routing_table: vec![entry],
-    };
-
     // This should return an error because tls is required for https
-    let result = HttpsListener::new(args, create_test_service(), ctx);
+    let result = HttpsListener::new(args, vec![entry]);
     assert!(
       result.is_err(),
       "HTTPS listener should fail without TLS config"
@@ -689,7 +585,7 @@ addresses:
 
   #[test]
   fn test_tokio_local_executor() {
-    let executor = TokioLocalExecutor {};
+    let executor = TokioLocalExecutor;
     let _cloned = executor.clone();
   }
 

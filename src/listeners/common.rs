@@ -3,12 +3,52 @@
 //! This module provides shared functionality for HTTP/HTTPS listeners
 //! to avoid code duplication.
 
+use std::future::Future;
 use std::net::SocketAddr;
 
 use crate::auth::{ListenerAuthConfig, UserPasswordAuth};
 use crate::config::UserConfig;
-use crate::plugin;
+use crate::http_types::{
+  BytesBufBodyWrapper, Response, ResponseBody,
+};
 use crate::server::ServerRoutingEntry;
+
+/// Executor for spawning tasks on the current tokio LocalSet.
+#[derive(Clone)]
+pub struct TokioLocalExecutor;
+
+impl<F> hyper::rt::Executor<F> for TokioLocalExecutor
+where
+  F: Future + 'static,
+{
+  fn execute(&self, fut: F) {
+    tokio::task::spawn_local(fut);
+  }
+}
+
+/// Build an empty response with the given status code.
+pub fn build_empty_response(status: http::StatusCode) -> Response {
+  let empty = http_body_util::Empty::new();
+  let bytes_buf = BytesBufBodyWrapper::new(empty);
+  let body = ResponseBody::new(bytes_buf);
+  let mut resp = Response::new(body);
+  *resp.status_mut() = status;
+  resp
+}
+
+/// Build an error response with the given status code and message.
+pub fn build_error_response(status: http::StatusCode, message: &str) -> Response {
+  let full = http_body_util::Full::new(bytes::Bytes::from(message.to_string()));
+  let bytes_buf = BytesBufBodyWrapper::new(full);
+  let body = ResponseBody::new(bytes_buf);
+  let mut resp = Response::new(body);
+  *resp.status_mut() = status;
+  resp.headers_mut().insert(
+    http::header::CONTENT_TYPE,
+    http::HeaderValue::from_static("text/plain"),
+  );
+  resp
+}
 
 /// Route a request to the correct service based on hostname.
 ///
@@ -18,26 +58,40 @@ use crate::server::ServerRoutingEntry;
 ///
 /// # Arguments
 ///
-/// * `routing_table` - The table of server routing entries
-/// * `routing_info` - Compiled routing info for fast lookup
+/// * `server_routing_table` - The table of server routing entries
 /// * `hostname` - Optional hostname to match (None routes to default)
 pub fn route_request_by_hostname<'a>(
-  routing_table: &'a [ServerRoutingEntry],
-  routing_info: &[neoproxy::routing::ServerMatchInfo],
+  server_routing_table: &'a [ServerRoutingEntry],
   hostname: Option<&str>,
 ) -> Option<&'a ServerRoutingEntry> {
   match hostname {
-    Some(hostname) => {
-      let match_info =
-        neoproxy::routing::find_matching_server(routing_info, hostname);
-      match_info.and_then(|info| {
-        routing_table.iter().find(|e| e.name == info.name)
-      })
+    Some(h) => {
+      let mut wildcard_match: Option<&ServerRoutingEntry> = None;
+      let mut default_server: Option<&ServerRoutingEntry> = None;
+
+      for entry in server_routing_table {
+        if entry.hostnames.is_empty() {
+          if default_server.is_none() {
+            default_server = Some(entry);
+          }
+          continue;
+        }
+
+        for pattern in &entry.hostnames {
+          if crate::routing::matches_hostname(pattern, h) {
+            if pattern.starts_with("*.") {
+              if wildcard_match.is_none() {
+                wildcard_match = Some(entry);
+              }
+            } else {
+              return Some(entry); // Exact match
+            }
+          }
+        }
+      }
+      wildcard_match.or(default_server)
     }
-    None => {
-      // No hostname - route to default server
-      routing_table.iter().find(|e| e.hostnames.is_empty())
-    }
+    None => server_routing_table.iter().find(|e| e.hostnames.is_empty()),
   }
 }
 
@@ -140,13 +194,13 @@ pub fn check_http_version(
 }
 
 /// Build a 505 HTTP Version Not Supported response.
-pub fn build_505_response() -> plugin::Response {
+pub fn build_505_response() -> Response {
   let body = http_body_util::Full::new(bytes::Bytes::from(
     "HTTP Version Not Supported",
   ));
-  let bytes_buf = plugin::BytesBufBodyWrapper::new(body);
-  let body = plugin::ResponseBody::new(bytes_buf);
-  let mut resp = plugin::Response::new(body);
+  let bytes_buf = BytesBufBodyWrapper::new(body);
+  let body = ResponseBody::new(bytes_buf);
+  let mut resp = Response::new(body);
   *resp.status_mut() = http::StatusCode::HTTP_VERSION_NOT_SUPPORTED;
   resp.headers_mut().insert(
     http::header::CONTENT_TYPE,
@@ -199,13 +253,13 @@ pub fn sni_matches_host(sni: &str, host_header: &str) -> bool {
 /// This response is sent when the SNI from TLS handshake does not match
 /// the Host header in the HTTP request, indicating a potential
 /// cross-protocol attack or misconfiguration.
-pub fn build_421_misdirected_response() -> plugin::Response {
+pub fn build_421_misdirected_response() -> Response {
   let body = http_body_util::Full::new(bytes::Bytes::from(
     "Misdirected Request: SNI does not match Host header",
   ));
-  let bytes_buf = plugin::BytesBufBodyWrapper::new(body);
-  let body = plugin::ResponseBody::new(bytes_buf);
-  let mut resp = plugin::Response::new(body);
+  let bytes_buf = BytesBufBodyWrapper::new(body);
+  let body = ResponseBody::new(bytes_buf);
+  let mut resp = Response::new(body);
   *resp.status_mut() = http::StatusCode::MISDIRECTED_REQUEST;
   resp.headers_mut().insert(
     http::header::CONTENT_TYPE,
@@ -218,11 +272,11 @@ pub fn build_421_misdirected_response() -> plugin::Response {
 ///
 /// This response is sent when a request requires proxy authentication.
 /// It includes a `Proxy-Authenticate` header with `Basic realm="proxy"`.
-pub fn build_407_response() -> plugin::Response {
+pub fn build_407_response() -> Response {
   let empty = http_body_util::Empty::new();
-  let bytes_buf = plugin::BytesBufBodyWrapper::new(empty);
-  let body = plugin::ResponseBody::new(bytes_buf);
-  let mut resp = plugin::Response::new(body);
+  let bytes_buf = BytesBufBodyWrapper::new(empty);
+  let body = ResponseBody::new(bytes_buf);
+  let mut resp = Response::new(body);
   *resp.status_mut() = http::StatusCode::PROXY_AUTHENTICATION_REQUIRED;
   resp.headers_mut().insert(
     http::header::PROXY_AUTHENTICATE,
@@ -232,11 +286,11 @@ pub fn build_407_response() -> plugin::Response {
 }
 
 /// Build a 404 Not Found response.
-pub fn build_404_response() -> plugin::Response {
+pub fn build_404_response() -> Response {
   let empty = http_body_util::Empty::new();
-  let bytes_buf = plugin::BytesBufBodyWrapper::new(empty);
-  let body = plugin::ResponseBody::new(bytes_buf);
-  let mut resp = plugin::Response::new(body);
+  let bytes_buf = BytesBufBodyWrapper::new(empty);
+  let body = ResponseBody::new(bytes_buf);
+  let mut resp = Response::new(body);
   *resp.status_mut() = http::StatusCode::NOT_FOUND;
   resp
 }
@@ -260,17 +314,13 @@ pub fn build_user_password_auth(
   match users {
     Some(users) if !users.is_empty() => {
       let config = ListenerAuthConfig {
-        users: Some(
-          users
-            .iter()
-            .map(|u| {
-              crate::auth::listener_auth_config::UserCredential {
-                username: u.username.clone(),
-                password: u.password.clone(),
-              }
-            })
-            .collect(),
-        ),
+        users: users
+          .iter()
+          .map(|u| crate::auth::UserCredential {
+            username: u.username.clone(),
+            password: u.password.clone(),
+          })
+          .collect(),
         client_ca_path: None,
       };
       UserPasswordAuth::from_config(&config)
@@ -282,242 +332,135 @@ pub fn build_user_password_auth(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::future::Future;
-  use std::pin::Pin;
 
   // ============== route_request_by_hostname Tests ==============
 
-  /// Helper to create a dummy service for tests
-  fn create_dummy_service() -> crate::plugin::Service {
-    #[derive(Clone)]
-    struct DummyService;
-
-    impl tower::Service<crate::plugin::Request> for DummyService {
-      type Error = anyhow::Error;
-      type Future = Pin<
-        Box<
-          dyn Future<Output = anyhow::Result<crate::plugin::Response>>,
-        >,
-      >;
-      type Response = crate::plugin::Response;
-
-      fn poll_ready(
-        &mut self,
-        _cx: &mut std::task::Context<'_>,
-      ) -> std::task::Poll<anyhow::Result<()>> {
-        std::task::Poll::Ready(Ok(()))
-      }
-
-      fn call(&mut self, _req: crate::plugin::Request) -> Self::Future {
-        Box::pin(async {
-          anyhow::bail!("DummyService not implemented")
-        })
-      }
-    }
-
-    crate::plugin::Service::new(DummyService)
-  }
-
   #[test]
   fn test_route_request_by_hostname_exact_match() {
-    let routing_table = vec![
+    let server_routing_table = vec![
       crate::server::ServerRoutingEntry {
-        name: "default".to_string(),
         hostnames: vec![],
-        service: create_dummy_service(),
+        service: crate::server::placeholder_service(),
         service_name: "default_service".to_string(),
         users: None,
         tls: None,
         access_log_writer: None,
       },
       crate::server::ServerRoutingEntry {
-        name: "api".to_string(),
         hostnames: vec!["api.example.com".to_string()],
-        service: create_dummy_service(),
+        service: crate::server::placeholder_service(),
         service_name: "api_service".to_string(),
         users: None,
         tls: None,
         access_log_writer: None,
       },
     ];
-    let routing_info = vec![
-      neoproxy::routing::ServerMatchInfo {
-        name: "default".to_string(),
-        hostnames: vec![],
-      },
-      neoproxy::routing::ServerMatchInfo {
-        name: "api".to_string(),
-        hostnames: vec!["api.example.com".to_string()],
-      },
-    ];
 
-    let result = route_request_by_hostname(
-      &routing_table,
-      &routing_info,
-      Some("api.example.com"),
-    );
+    let result = route_request_by_hostname(&server_routing_table, Some("api.example.com"));
     assert!(result.is_some());
-    assert_eq!(result.unwrap().name, "api");
+    assert_eq!(result.unwrap().service_name, "api_service");
   }
 
   #[test]
   fn test_route_request_by_hostname_default() {
-    let routing_table = vec![
+    let server_routing_table = vec![
       crate::server::ServerRoutingEntry {
-        name: "default".to_string(),
         hostnames: vec![],
-        service: create_dummy_service(),
+        service: crate::server::placeholder_service(),
         service_name: "default_service".to_string(),
         users: None,
         tls: None,
         access_log_writer: None,
       },
       crate::server::ServerRoutingEntry {
-        name: "api".to_string(),
         hostnames: vec!["api.example.com".to_string()],
-        service: create_dummy_service(),
+        service: crate::server::placeholder_service(),
         service_name: "api_service".to_string(),
         users: None,
         tls: None,
         access_log_writer: None,
       },
     ];
-    let routing_info = vec![
-      neoproxy::routing::ServerMatchInfo {
-        name: "default".to_string(),
-        hostnames: vec![],
-      },
-      neoproxy::routing::ServerMatchInfo {
-        name: "api".to_string(),
-        hostnames: vec!["api.example.com".to_string()],
-      },
-    ];
 
     // No hostname = route to default
-    let result =
-      route_request_by_hostname(&routing_table, &routing_info, None);
+    let result = route_request_by_hostname(&server_routing_table, None);
     assert!(result.is_some());
-    assert_eq!(result.unwrap().name, "default");
+    assert_eq!(result.unwrap().service_name, "default_service");
   }
 
   #[test]
   fn test_route_request_by_hostname_no_match() {
-    let routing_table = vec![crate::server::ServerRoutingEntry {
-      name: "api".to_string(),
+    let server_routing_table = vec![crate::server::ServerRoutingEntry {
       hostnames: vec!["api.example.com".to_string()],
-      service: create_dummy_service(),
+      service: crate::server::placeholder_service(),
       service_name: "api_service".to_string(),
       users: None,
       tls: None,
       access_log_writer: None,
     }];
-    let routing_info = vec![neoproxy::routing::ServerMatchInfo {
-      name: "api".to_string(),
-      hostnames: vec!["api.example.com".to_string()],
-    }];
 
     // Unknown hostname = no match
-    let result = route_request_by_hostname(
-      &routing_table,
-      &routing_info,
-      Some("unknown.example.com"),
-    );
+    let result = route_request_by_hostname(&server_routing_table, Some("unknown.example.com"));
     assert!(result.is_none());
   }
 
   #[test]
   fn test_route_request_by_hostname_wildcard_match() {
-    let routing_table = vec![
+    let server_routing_table = vec![
       crate::server::ServerRoutingEntry {
-        name: "default".to_string(),
         hostnames: vec![],
-        service: create_dummy_service(),
+        service: crate::server::placeholder_service(),
         service_name: "default_service".to_string(),
         users: None,
         tls: None,
         access_log_writer: None,
       },
       crate::server::ServerRoutingEntry {
-        name: "wildcard".to_string(),
         hostnames: vec!["*.example.com".to_string()],
-        service: create_dummy_service(),
+        service: crate::server::placeholder_service(),
         service_name: "wildcard_service".to_string(),
         users: None,
         tls: None,
         access_log_writer: None,
-      },
-    ];
-    let routing_info = vec![
-      neoproxy::routing::ServerMatchInfo {
-        name: "default".to_string(),
-        hostnames: vec![],
-      },
-      neoproxy::routing::ServerMatchInfo {
-        name: "wildcard".to_string(),
-        hostnames: vec!["*.example.com".to_string()],
       },
     ];
 
     // Wildcard match - foo.example.com matches *.example.com
-    let result = route_request_by_hostname(
-      &routing_table,
-      &routing_info,
-      Some("foo.example.com"),
-    );
+    let result = route_request_by_hostname(&server_routing_table, Some("foo.example.com"));
     assert!(result.is_some());
-    assert_eq!(result.unwrap().name, "wildcard");
+    assert_eq!(result.unwrap().service_name, "wildcard_service");
   }
 
   #[test]
   fn test_route_request_by_hostname_wildcard_vs_exact_priority() {
-    let routing_table = vec![
+    let server_routing_table = vec![
       crate::server::ServerRoutingEntry {
-        name: "wildcard".to_string(),
         hostnames: vec!["*.example.com".to_string()],
-        service: create_dummy_service(),
+        service: crate::server::placeholder_service(),
         service_name: "wildcard_service".to_string(),
         users: None,
         tls: None,
         access_log_writer: None,
       },
       crate::server::ServerRoutingEntry {
-        name: "api".to_string(),
         hostnames: vec!["api.example.com".to_string()],
-        service: create_dummy_service(),
+        service: crate::server::placeholder_service(),
         service_name: "api_service".to_string(),
         users: None,
         tls: None,
         access_log_writer: None,
       },
     ];
-    let routing_info = vec![
-      neoproxy::routing::ServerMatchInfo {
-        name: "wildcard".to_string(),
-        hostnames: vec!["*.example.com".to_string()],
-      },
-      neoproxy::routing::ServerMatchInfo {
-        name: "api".to_string(),
-        hostnames: vec!["api.example.com".to_string()],
-      },
-    ];
 
     // Exact match takes priority over wildcard
-    let result = route_request_by_hostname(
-      &routing_table,
-      &routing_info,
-      Some("api.example.com"),
-    );
+    let result = route_request_by_hostname(&server_routing_table, Some("api.example.com"));
     assert!(result.is_some());
-    assert_eq!(result.unwrap().name, "api");
+    assert_eq!(result.unwrap().service_name, "api_service");
 
     // Wildcard match for non-exact hostname
-    let result = route_request_by_hostname(
-      &routing_table,
-      &routing_info,
-      Some("other.example.com"),
-    );
+    let result = route_request_by_hostname(&server_routing_table, Some("other.example.com"));
     assert!(result.is_some());
-    assert_eq!(result.unwrap().name, "wildcard");
+    assert_eq!(result.unwrap().service_name, "wildcard_service");
   }
 
   // ============== Access Log Tests ==============
@@ -528,12 +471,12 @@ mod tests {
     let config = crate::access_log::AccessLogConfig {
       enabled: true,
       path_prefix: "commonhtest.log".to_string(),
-      format: crate::access_log::config::LogFormat::Text,
-      buffer: crate::access_log::config::HumanBytes(64),
+      format: crate::access_log::LogFormat::Text,
+      buffer: byte_unit::Byte::from_u64(64),
       flush: crate::access_log::config::HumanDuration(
         std::time::Duration::from_millis(100),
       ),
-      max_size: crate::access_log::config::HumanBytes(1024 * 1024),
+      max_size: byte_unit::Byte::from_u64(1024 * 1024),
     };
     let writer = crate::access_log::AccessLogWriter::new(
       dir.path().to_str().unwrap(),

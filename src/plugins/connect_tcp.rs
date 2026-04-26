@@ -8,41 +8,17 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use anyhow::Result;
-use bytes::Bytes;
-use http_body_util::Full;
 use hyper_util::rt::TokioIo;
 use tokio::task::JoinSet;
 use tokio::{self, net};
 use tracing::{error, warn};
 
 use crate::connect_utils::{self as utils, ConnectTargetError};
+use crate::http_types::{Request, Response};
+use crate::listeners::common::{build_empty_response, build_error_response};
 use crate::plugin;
-use crate::plugin::ClientStream;
-
-fn build_empty_response(status: http::StatusCode) -> plugin::Response {
-  let empty = http_body_util::Empty::new();
-  let bytes_buf = plugin::BytesBufBodyWrapper::new(empty);
-  let body = plugin::ResponseBody::new(bytes_buf);
-  let mut resp = plugin::Response::new(body);
-  *resp.status_mut() = status;
-  resp
-}
-
-fn build_error_response(
-  status: http::StatusCode,
-  message: &str,
-) -> plugin::Response {
-  let full = Full::new(Bytes::from(message.to_string()));
-  let bytes_buf = plugin::BytesBufBodyWrapper::new(full);
-  let body = plugin::ResponseBody::new(bytes_buf);
-  let mut resp = plugin::Response::new(body);
-  *resp.status_mut() = status;
-  resp.headers_mut().insert(
-    http::header::CONTENT_TYPE,
-    http::header::HeaderValue::from_static("text/plain"),
-  );
-  resp
-}
+use crate::shutdown::ShutdownHandle;
+use crate::stream::{ClientStream, H3OnUpgrade, Socks5OnUpgrade};
 
 /// Tunnel 任务追踪器
 ///
@@ -79,8 +55,8 @@ fn build_error_response(
 pub struct TunnelTracker {
   /// 活跃的 tunnel 任务
   tunnels: Rc<RefCell<JoinSet<()>>>,
-  /// 关闭通知（复用现有 plugin::ShutdownHandle）
-  shutdown_handle: plugin::ShutdownHandle,
+  /// 关闭通知（复用现有 ShutdownHandle）
+  shutdown_handle: ShutdownHandle,
 }
 
 impl TunnelTracker {
@@ -88,7 +64,7 @@ impl TunnelTracker {
   pub fn new() -> Self {
     Self {
       tunnels: Rc::new(RefCell::new(JoinSet::new())),
-      shutdown_handle: plugin::ShutdownHandle::new(),
+      shutdown_handle: ShutdownHandle::new(),
     }
   }
 
@@ -156,7 +132,7 @@ impl TunnelTracker {
   ///
   /// 返回的 ShutdownHandle 可用于在 tunnel 任务内部
   /// 监听关闭通知。
-  pub fn shutdown_handle(&self) -> plugin::ShutdownHandle {
+  pub fn shutdown_handle(&self) -> ShutdownHandle {
     self.shutdown_handle.clone()
   }
 
@@ -199,23 +175,23 @@ impl ConnectTcpService {
   }
 }
 
-impl tower::Service<plugin::Request> for ConnectTcpService {
+impl tower::Service<Request> for ConnectTcpService {
   type Error = anyhow::Error;
   type Future = Pin<Box<dyn Future<Output = Result<Self::Response>>>>;
-  type Response = plugin::Response;
+  type Response = Response;
 
   fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<()>> {
     Poll::Ready(Ok(()))
   }
 
-  fn call(&mut self, mut req: plugin::Request) -> Self::Future {
+  fn call(&mut self, mut req: Request) -> Self::Future {
     let tunnel_tracker = self.tunnel_tracker.clone();
 
     // Check for SOCKS5 upgrade
-    let socks5_upgrade = plugin::Socks5OnUpgrade::on(&mut req);
+    let socks5_upgrade = Socks5OnUpgrade::on(&mut req);
 
     // Check for H3 upgrade
-    let h3_upgrade = plugin::H3OnUpgrade::on(&mut req);
+    let h3_upgrade = H3OnUpgrade::on(&mut req);
 
     // Check for HTTP upgrade (only if no SOCKS5 and no H3)
     let http_upgrade =
@@ -434,25 +410,13 @@ pub fn create_plugin() -> Box<dyn plugin::Plugin> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::http_types::{BytesBufBodyWrapper, RequestBody, ResponseBody};
   use crate::plugin::Plugin;
+  use bytes::Bytes;
+  use futures::task::noop_waker;
   use http_body_util::BodyExt;
-  use std::task::{Context, Poll, RawWaker, RawWakerVTable};
+  use std::task::{Context, Poll};
   use tower::Service;
-
-  fn dummy_waker() -> std::task::Waker {
-    fn dummy_clone(_: *const ()) -> RawWaker {
-      RawWaker::new(std::ptr::null(), &VTABLE)
-    }
-    fn dummy(_: *const ()) {}
-    static VTABLE: RawWakerVTable =
-      RawWakerVTable::new(dummy_clone, dummy, dummy, dummy);
-    unsafe {
-      std::task::Waker::from_raw(RawWaker::new(
-        std::ptr::null(),
-        &VTABLE,
-      ))
-    }
-  }
 
   // ============== TunnelTracker Tests ==============
 
@@ -657,7 +621,7 @@ mod tests {
   fn test_connect_tcp_service_poll_ready() {
     let service = ConnectTcpService::new_for_test();
     let mut service = plugin::Service::new(service);
-    let waker = dummy_waker();
+    let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
     let result = Service::poll_ready(&mut service, &mut cx);
     assert!(matches!(result, Poll::Ready(Ok(()))));
@@ -732,17 +696,17 @@ mod tests {
   fn make_connect_request(
     method: http::Method,
     uri: &str,
-  ) -> plugin::Request {
+  ) -> Request {
     http::Request::builder()
       .method(method)
       .uri(uri)
-      .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+      .body(RequestBody::new(BytesBufBodyWrapper::new(
         http_body_util::Empty::new(),
       )))
       .unwrap()
   }
 
-  async fn collect_body(body: plugin::ResponseBody) -> Bytes {
+  async fn collect_body(body: ResponseBody) -> Bytes {
     body.collect().await.unwrap().to_bytes()
   }
 
@@ -1264,7 +1228,7 @@ mod tests {
 
   #[tokio::test]
   async fn test_service_call_socks5_upgrade_mode_returns_200() {
-    use crate::plugin::Socks5OnUpgrade;
+    use crate::stream::Socks5OnUpgrade;
 
     let local_set = tokio::task::LocalSet::new();
     local_set
@@ -1297,7 +1261,7 @@ mod tests {
   #[tokio::test]
   async fn test_service_call_socks5_upgrade_refused_returns_bad_gateway()
    {
-    use crate::plugin::Socks5OnUpgrade;
+    use crate::stream::Socks5OnUpgrade;
 
     let local_set = tokio::task::LocalSet::new();
     local_set
@@ -1331,7 +1295,7 @@ mod tests {
 
   #[tokio::test]
   async fn test_service_call_with_h3_upgrade_extracts_upgrade() {
-    use crate::plugin::H3OnUpgrade;
+    use crate::stream::H3OnUpgrade;
 
     let local_set = tokio::task::LocalSet::new();
     local_set
@@ -1398,7 +1362,7 @@ mod tests {
 
   #[tokio::test]
   async fn test_service_call_h3_upgrade_refused_returns_bad_gateway() {
-    use crate::plugin::H3OnUpgrade;
+    use crate::stream::H3OnUpgrade;
 
     let local_set = tokio::task::LocalSet::new();
     local_set

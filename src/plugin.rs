@@ -5,12 +5,7 @@ use std::task::{Context, Poll};
 
 use anyhow::Result;
 
-// Re-exports: only types that are part of the plugin framework's public API
-pub use crate::http_types::{
-  BytesBufBodyWrapper, Request, RequestBody, Response, ResponseBody,
-};
-pub use crate::shutdown::ShutdownHandle;
-pub use crate::stream::{ClientStream, H3OnUpgrade, Socks5OnUpgrade};
+use crate::http_types::{Request, Response};
 
 /// To add `clone()` function to the `Service`. The `Clone` trait can
 /// not be added into the type definition of the `Service` directly, in
@@ -116,23 +111,6 @@ impl Listener {
 
 pub type SerializedArgs = serde_yaml::Value;
 
-/// Context passed to listener builders alongside args and service.
-///
-/// This struct carries additional information needed by listeners,
-/// such as access log writer, service name, and routing table for
-/// shared-address listeners.
-#[derive(Clone)]
-pub struct ListenerBuildContext {
-  /// Optional access log writer for logging request/response information.
-  pub access_log_writer: Option<crate::access_log::AccessLogWriter>,
-  /// Service name for identification in logs (single-server case).
-  pub service_name: String,
-  /// Routing table for shared-address listeners.
-  /// Each entry contains server info and service for hostname-based routing.
-  /// Empty or single entry means no hostname routing needed.
-  pub routing_table: Vec<crate::server::ServerRoutingEntry>,
-}
-
 /// an alias for shorten complex trait definition.
 pub trait BuildService: Fn(SerializedArgs) -> Result<Service> {}
 
@@ -141,7 +119,7 @@ impl<F> BuildService for F where F: Fn(SerializedArgs) -> Result<Service>
 
 /// an alias for shorten complex trait definition.
 pub trait BuildListener:
-  Fn(SerializedArgs, Service, ListenerBuildContext) -> Result<Listener>
+  Fn(SerializedArgs, Vec<crate::server::ServerRoutingEntry>) -> Result<Listener>
   + Sync
   + Send
 {
@@ -150,8 +128,7 @@ pub trait BuildListener:
 impl<F> BuildListener for F where
   F: Fn(
       SerializedArgs,
-      Service,
-      ListenerBuildContext,
+      Vec<crate::server::ServerRoutingEntry>,
     ) -> Result<Listener>
     + Sync
     + Send
@@ -428,96 +405,12 @@ mod tests {
     );
   }
 
-  // ============== ListenerBuildContext Tests ==============
+  // ============== BuildListener Tests ==============
 
-  #[test]
-  fn test_listener_build_context_new() {
-    let ctx = ListenerBuildContext {
-      access_log_writer: None,
-      service_name: "test_service".to_string(),
-      routing_table: vec![],
-    };
-    assert!(ctx.access_log_writer.is_none());
-    assert_eq!(ctx.service_name, "test_service");
-    assert!(ctx.routing_table.is_empty());
-  }
-
-  #[test]
-  fn test_listener_build_context_clone() {
-    let ctx = ListenerBuildContext {
-      access_log_writer: None,
-      service_name: "test_service".to_string(),
-      routing_table: vec![],
-    };
-    let cloned = ctx.clone();
-    assert_eq!(ctx.service_name, cloned.service_name);
-  }
-
-  #[test]
-  fn test_listener_build_context_empty_service_name() {
-    let ctx = ListenerBuildContext {
-      access_log_writer: None,
-      service_name: String::new(),
-      routing_table: vec![],
-    };
-    assert!(ctx.service_name.is_empty());
-  }
-
-  #[test]
-  fn test_listener_build_context_with_routing_table() {
-    // Create a simple routing entry for testing
-    let entry = crate::server::ServerRoutingEntry {
-      name: "test".to_string(),
-      hostnames: vec!["api.example.com".to_string()],
-      service: Service::new(DummyTestService),
-      service_name: "test_service".to_string(),
-      users: None,
-      tls: None,
-      access_log_writer: None,
-    };
-    let ctx = ListenerBuildContext {
-      access_log_writer: None,
-      service_name: "test".to_string(),
-      routing_table: vec![entry],
-    };
-    assert_eq!(ctx.routing_table.len(), 1);
-    assert_eq!(ctx.routing_table[0].name, "test");
-  }
-
-  /// A dummy service for testing BuildListener trait.
-  #[derive(Clone)]
-  struct DummyTestService;
-
-  impl tower::Service<Request> for DummyTestService {
-    type Error = anyhow::Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Response>>>>;
-    type Response = Response;
-
-    fn poll_ready(
-      &mut self,
-      _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<()>> {
-      std::task::Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, _req: Request) -> Self::Future {
-      Box::pin(async {
-        anyhow::bail!("DummyTestService not implemented")
-      })
-    }
-  }
-
-  /// A test listener builder that accepts ListenerBuildContext.
   fn test_listener_builder(
     _args: SerializedArgs,
-    _svc: Service,
-    ctx: ListenerBuildContext,
+    _server_routing_table: Vec<crate::server::ServerRoutingEntry>,
   ) -> Result<Listener> {
-    // Verify that we received the context
-    assert!(
-      !ctx.service_name.is_empty() || ctx.access_log_writer.is_none()
-    );
-    // Return a dummy listener
     struct DummyListener;
     impl Listening for DummyListener {
       fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
@@ -530,17 +423,9 @@ mod tests {
 
   #[test]
   fn test_build_listener_trait_with_context() {
-    // Verify that the BuildListener trait accepts a function with
-    // ListenerBuildContext parameter
     let builder: Box<dyn BuildListener> =
       Box::new(test_listener_builder);
-    let ctx = ListenerBuildContext {
-      access_log_writer: None,
-      service_name: "my_service".to_string(),
-      routing_table: vec![],
-    };
-    let dummy_service = Service::new(DummyTestService);
-    let result = builder(SerializedArgs::Null, dummy_service, ctx);
+    let result = builder(SerializedArgs::Null, vec![]);
     assert!(result.is_ok());
   }
 
@@ -548,8 +433,7 @@ mod tests {
   fn test_build_listener_with_empty_context() {
     fn builder(
       _args: SerializedArgs,
-      _svc: Service,
-      _ctx: ListenerBuildContext,
+      _server_routing_table: Vec<crate::server::ServerRoutingEntry>,
     ) -> Result<Listener> {
       struct DummyListener;
       impl Listening for DummyListener {
@@ -562,13 +446,7 @@ mod tests {
     }
 
     let builder: Box<dyn BuildListener> = Box::new(builder);
-    let ctx = ListenerBuildContext {
-      access_log_writer: None,
-      service_name: String::new(),
-      routing_table: vec![],
-    };
-    let dummy_service = Service::new(DummyTestService);
-    let result = builder(SerializedArgs::Null, dummy_service, ctx);
+    let result = builder(SerializedArgs::Null, vec![]);
     assert!(result.is_ok());
   }
 }

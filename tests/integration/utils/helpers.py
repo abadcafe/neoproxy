@@ -93,12 +93,9 @@ services:
 servers:
 - name: http_connect
   listeners:
-  - kind: hyper.listener
+  - kind: http
     args:
       addresses: [ "0.0.0.0:{proxy_port}" ]
-      protocols: [ http ]
-      hostnames: []
-      certificates: []
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "test_config.yaml")
@@ -133,12 +130,9 @@ services:
 servers:
 - name: echo_server
   listeners:
-  - kind: hyper.listener
+  - kind: http
     args:
       addresses: [ "0.0.0.0:{proxy_port}" ]
-      protocols: [ http ]
-      hostnames: []
-      certificates: []
   service: echo
 """
     config_path = os.path.join(temp_dir, "echo_config.yaml")

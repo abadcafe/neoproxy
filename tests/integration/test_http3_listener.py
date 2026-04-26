@@ -526,7 +526,7 @@ class TestHTTP3ErrorHandling:
     """Test 7.5: HTTP/3 error handling scenarios.
 
     These tests use the NEW config format with:
-    - kind: http3 (not http3.listener)
+    - kind: http3
     - Server-level tls configuration
     - addresses (plural) field
     """
@@ -721,7 +721,7 @@ class TestHTTP3ConfigValidation:
     """Test 7.7: HTTP/3 configuration validation scenarios.
 
     These tests use the NEW config format with:
-    - kind: http3 (not http3.listener)
+    - kind: http3
     - Server-level tls configuration
     - addresses (plural) field
     """

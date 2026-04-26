@@ -36,7 +36,10 @@ base64 = "0.22"
 fast-socks5 = "1.0.0"
 subtle = "2"
 x509-parser = "0.16"
+humantime = "2.1"
+byte-unit = { version = "5.1", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3"
 rcgen = "0.13"
+futures = "0.3"

@@ -9,8 +9,6 @@ pub enum AuthType {
   #[default]
   None,
   Password,
-  Cert,
-  Both,
 }
 
 /// Service-provided metrics (key-value pairs).
@@ -30,10 +28,6 @@ impl ServiceMetrics {
 
   pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
     self.metrics.iter()
-  }
-
-  pub fn is_empty(&self) -> bool {
-    self.metrics.is_empty()
   }
 }
 
@@ -86,8 +80,6 @@ mod tests {
   fn test_auth_type_variants() {
     assert_eq!(AuthType::None, AuthType::None);
     assert_eq!(AuthType::Password, AuthType::Password);
-    assert_eq!(AuthType::Cert, AuthType::Cert);
-    assert_eq!(AuthType::Both, AuthType::Both);
     assert_ne!(AuthType::None, AuthType::Password);
   }
 
@@ -103,7 +95,7 @@ mod tests {
   #[test]
   fn test_service_metrics_new_is_empty() {
     let sm = ServiceMetrics::new();
-    assert!(sm.is_empty());
+    assert!(sm.iter().next().is_none());
   }
 
   #[test]
@@ -111,7 +103,7 @@ mod tests {
     let mut sm = ServiceMetrics::new();
     sm.add("dns_ms", 5u64);
     sm.add("connect_ms", 10u64);
-    assert!(!sm.is_empty());
+    assert!(sm.iter().next().is_some());
 
     let collected: HashMap<&String, &String> = sm.iter().collect();
     assert_eq!(collected.len(), 2);
@@ -128,7 +120,7 @@ mod tests {
   #[test]
   fn test_service_metrics_default() {
     let sm = ServiceMetrics::default();
-    assert!(sm.is_empty());
+    assert!(sm.iter().next().is_none());
   }
 
   #[test]
@@ -136,7 +128,7 @@ mod tests {
     let mut sm = ServiceMetrics::new();
     sm.add("key", "value");
     let cloned = sm.clone();
-    assert!(!cloned.is_empty());
+    assert!(cloned.iter().next().is_some());
   }
 
   // ============== AccessLogEntry Tests ==============

@@ -79,7 +79,7 @@ services:
 servers:
 - name: default
   listeners:
-  - kind: hyper.listener
+  - kind: http
     args:
       addresses: [ "127.0.0.1:{proxy_port}" ]
       protocols: [ http ]
@@ -273,7 +273,7 @@ services:
 servers:
 - name: test_server
   listeners:
-  - kind: hyper.listener
+  - kind: http
     args:
       addresses: ["127.0.0.1:18080"]
       protocols: []
@@ -306,7 +306,7 @@ services:
 servers:
 - name: test_server
   listeners:
-  - kind: hyper.listener
+  - kind: http
     args:
       addresses: ["invalid:address:format"]
       protocols: []

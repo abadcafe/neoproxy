@@ -23,6 +23,7 @@ mod http_types;
 mod listeners;
 mod plugin;
 mod plugins;
+mod routing;
 mod server;
 mod shutdown;
 mod stream;

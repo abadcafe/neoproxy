@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use byte_unit::Byte;
 use serde::{Deserialize, de};
 
 /// Log output format.
@@ -11,83 +12,9 @@ pub enum LogFormat {
   Json,
 }
 
-/// Human-readable byte size (e.g., "32kb", "200mb").
-#[derive(Debug, Clone, Copy)]
-pub struct HumanBytes(pub u64);
-
-/// Human-readable duration (e.g., "1s", "5m").
+/// Human-readable duration (e.g., "1s", "5m", "1h30m").
 #[derive(Debug, Clone, Copy)]
 pub struct HumanDuration(pub Duration);
-
-fn parse_human_bytes(s: &str) -> Result<u64, String> {
-  let s = s.trim().to_lowercase();
-  if s.is_empty() {
-    return Err("empty string".to_string());
-  }
-
-  // Find where digits end and unit begins
-  let num_end =
-    s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
-
-  if num_end == 0 {
-    return Err(format!("no number found in '{s}'"));
-  }
-
-  let num: u64 =
-    s[..num_end].parse().map_err(|e| format!("invalid number: {e}"))?;
-
-  let unit = &s[num_end..];
-  let multiplier: u64 = match unit {
-    "" | "b" => 1,
-    "kb" => 1024,
-    "mb" => 1024 * 1024,
-    "gb" => 1024 * 1024 * 1024,
-    _ => return Err(format!("unknown unit '{unit}'")),
-  };
-
-  num
-    .checked_mul(multiplier)
-    .ok_or_else(|| "value overflow".to_string())
-}
-
-impl<'de> Deserialize<'de> for HumanBytes {
-  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-  where
-    D: serde::Deserializer<'de>,
-  {
-    let s = String::deserialize(deserializer)?;
-    let bytes = parse_human_bytes(&s).map_err(de::Error::custom)?;
-    Ok(HumanBytes(bytes))
-  }
-}
-
-fn parse_human_duration(s: &str) -> Result<Duration, String> {
-  let s = s.trim().to_lowercase();
-  if s.is_empty() {
-    return Err("empty string".to_string());
-  }
-
-  let num_end =
-    s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
-
-  if num_end == 0 {
-    return Err(format!("no number found in '{s}'"));
-  }
-
-  let num: u64 =
-    s[..num_end].parse().map_err(|e| format!("invalid number: {e}"))?;
-
-  let unit = &s[num_end..];
-  match unit {
-    "ms" => Ok(Duration::from_millis(num)),
-    "s" => Ok(Duration::from_secs(num)),
-    "m" => num
-      .checked_mul(60)
-      .map(Duration::from_secs)
-      .ok_or_else(|| "value overflow".to_string()),
-    _ => Err(format!("unknown unit '{unit}'")),
-  }
-}
 
 impl<'de> Deserialize<'de> for HumanDuration {
   fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -95,8 +22,8 @@ impl<'de> Deserialize<'de> for HumanDuration {
     D: serde::Deserializer<'de>,
   {
     let s = String::deserialize(deserializer)?;
-    let duration =
-      parse_human_duration(&s).map_err(de::Error::custom)?;
+    let duration = humantime::parse_duration(s.trim())
+      .map_err(|e| de::Error::custom(e.to_string()))?;
     Ok(HumanDuration(duration))
   }
 }
@@ -115,16 +42,16 @@ fn default_format() -> LogFormat {
   LogFormat::default()
 }
 
-fn default_buffer_size() -> HumanBytes {
-  HumanBytes(32 * 1024)
+fn default_buffer_size() -> Byte {
+  Byte::from_u64(32 * 1024)
 }
 
 fn default_flush_interval() -> HumanDuration {
   HumanDuration(Duration::from_secs(1))
 }
 
-fn default_max_size() -> HumanBytes {
-  HumanBytes(200 * 1024 * 1024)
+fn default_max_size() -> Byte {
+  Byte::from_u64(200 * 1024 * 1024)
 }
 
 /// Full access log config with all fields resolved (used as top-level config).
@@ -140,13 +67,13 @@ pub struct AccessLogConfig {
   pub format: LogFormat,
 
   #[serde(default = "default_buffer_size")]
-  pub buffer: HumanBytes,
+  pub buffer: Byte,
 
   #[serde(default = "default_flush_interval")]
   pub flush: HumanDuration,
 
   #[serde(default = "default_max_size")]
-  pub max_size: HumanBytes,
+  pub max_size: Byte,
 }
 
 impl Default for AccessLogConfig {
@@ -189,70 +116,14 @@ pub struct AccessLogOverride {
   pub enabled: Option<bool>,
   pub path_prefix: Option<String>,
   pub format: Option<LogFormat>,
-  pub buffer: Option<HumanBytes>,
+  pub buffer: Option<Byte>,
   pub flush: Option<HumanDuration>,
-  pub max_size: Option<HumanBytes>,
+  pub max_size: Option<Byte>,
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-
-  // ============== HumanBytes Tests ==============
-
-  #[test]
-  fn test_parse_human_bytes_plain_number() {
-    let hb: HumanBytes = serde_yaml::from_str("1024").unwrap();
-    assert_eq!(hb.0, 1024);
-  }
-
-  #[test]
-  fn test_parse_human_bytes_b_suffix() {
-    let hb: HumanBytes = serde_yaml::from_str("512b").unwrap();
-    assert_eq!(hb.0, 512);
-  }
-
-  #[test]
-  fn test_parse_human_bytes_kb() {
-    let hb: HumanBytes = serde_yaml::from_str("32kb").unwrap();
-    assert_eq!(hb.0, 32 * 1024);
-  }
-
-  #[test]
-  fn test_parse_human_bytes_mb() {
-    let hb: HumanBytes = serde_yaml::from_str("200mb").unwrap();
-    assert_eq!(hb.0, 200 * 1024 * 1024);
-  }
-
-  #[test]
-  fn test_parse_human_bytes_gb() {
-    let hb: HumanBytes = serde_yaml::from_str("1gb").unwrap();
-    assert_eq!(hb.0, 1024 * 1024 * 1024);
-  }
-
-  #[test]
-  fn test_parse_human_bytes_case_insensitive() {
-    let hb: HumanBytes = serde_yaml::from_str("32KB").unwrap();
-    assert_eq!(hb.0, 32 * 1024);
-  }
-
-  #[test]
-  fn test_parse_human_bytes_with_spaces() {
-    let hb: HumanBytes = serde_yaml::from_str("\" 32kb \"").unwrap();
-    assert_eq!(hb.0, 32 * 1024);
-  }
-
-  #[test]
-  fn test_parse_human_bytes_invalid_unit() {
-    let result: Result<HumanBytes, _> = serde_yaml::from_str("32tb");
-    assert!(result.is_err());
-  }
-
-  #[test]
-  fn test_parse_human_bytes_no_number() {
-    let result: Result<HumanBytes, _> = serde_yaml::from_str("kb");
-    assert!(result.is_err());
-  }
 
   // ============== HumanDuration Tests ==============
 
@@ -275,14 +146,28 @@ mod tests {
   }
 
   #[test]
-  fn test_parse_human_duration_case_insensitive() {
-    let hd: HumanDuration = serde_yaml::from_str("1S").unwrap();
+  fn test_parse_human_duration_h() {
+    let hd: HumanDuration = serde_yaml::from_str("1h").unwrap();
+    assert_eq!(hd.0, Duration::from_secs(3600));
+  }
+
+  #[test]
+  fn test_parse_human_duration_composite() {
+    let hd: HumanDuration = serde_yaml::from_str("1h30m").unwrap();
+    assert_eq!(hd.0, Duration::from_secs(3600 + 30 * 60));
+  }
+
+  #[test]
+  fn test_parse_human_duration_lowercase_only() {
+    let hd: HumanDuration = serde_yaml::from_str("1s").unwrap();
     assert_eq!(hd.0, Duration::from_secs(1));
+    let result: Result<HumanDuration, _> = serde_yaml::from_str("1S");
+    assert!(result.is_err(), "Uppercase units should not be supported");
   }
 
   #[test]
   fn test_parse_human_duration_invalid_unit() {
-    let result: Result<HumanDuration, _> = serde_yaml::from_str("1h");
+    let result: Result<HumanDuration, _> = serde_yaml::from_str("1x");
     assert!(result.is_err());
   }
 
@@ -290,18 +175,6 @@ mod tests {
   fn test_parse_human_duration_no_number() {
     let result: Result<HumanDuration, _> = serde_yaml::from_str("ms");
     assert!(result.is_err());
-  }
-
-  #[test]
-  fn test_parse_human_duration_minute_overflow() {
-    // Test that large minute values that would overflow are rejected
-    // u64::MAX / 60 = 307445734561825860, so anything larger should overflow
-    let result: Result<HumanDuration, _> =
-      serde_yaml::from_str("307445734561825861m");
-    assert!(
-      result.is_err(),
-      "expected overflow error for large minute value"
-    );
   }
 
   // ============== LogFormat Tests ==============
@@ -332,9 +205,9 @@ mod tests {
     assert!(config.enabled);
     assert_eq!(config.path_prefix, "access.log");
     assert!(matches!(config.format, LogFormat::Text));
-    assert_eq!(config.buffer.0, 32 * 1024);
+    assert_eq!(config.buffer.as_u64(), 32 * 1024);
     assert_eq!(config.flush.0, Duration::from_secs(1));
-    assert_eq!(config.max_size.0, 200 * 1024 * 1024);
+    assert_eq!(config.max_size.as_u64(), 200 * 1024 * 1024);
   }
 
   #[test]
@@ -343,17 +216,17 @@ mod tests {
 enabled: true
 path_prefix: "http_access.log"
 format: json
-buffer: 64kb
+buffer: 64KiB
 flush: 3s
-max_size: 100mb
+max_size: 100MiB
 "#;
     let config: AccessLogConfig = serde_yaml::from_str(yaml).unwrap();
     assert!(config.enabled);
     assert_eq!(config.path_prefix, "http_access.log");
     assert!(matches!(config.format, LogFormat::Json));
-    assert_eq!(config.buffer.0, 64 * 1024);
+    assert_eq!(config.buffer.as_u64(), 64 * 1024);
     assert_eq!(config.flush.0, Duration::from_secs(3));
-    assert_eq!(config.max_size.0, 100 * 1024 * 1024);
+    assert_eq!(config.max_size.as_u64(), 100 * 1024 * 1024);
   }
 
   #[test]
@@ -363,11 +236,10 @@ path_prefix: "custom.log"
 format: json
 "#;
     let config: AccessLogConfig = serde_yaml::from_str(yaml).unwrap();
-    // Unspecified fields should use defaults
     assert!(config.enabled);
     assert_eq!(config.path_prefix, "custom.log");
     assert!(matches!(config.format, LogFormat::Json));
-    assert_eq!(config.buffer.0, 32 * 1024);
+    assert_eq!(config.buffer.as_u64(), 32 * 1024);
   }
 
   #[test]
@@ -385,17 +257,17 @@ format: json
       enabled: Some(false),
       path_prefix: Some("override.log".to_string()),
       format: Some(LogFormat::Json),
-      buffer: Some(HumanBytes(64 * 1024)),
+      buffer: Some(Byte::from_u64(64 * 1024)),
       flush: Some(HumanDuration(Duration::from_secs(5))),
-      max_size: Some(HumanBytes(500 * 1024 * 1024)),
+      max_size: Some(Byte::from_u64(500 * 1024 * 1024)),
     };
     let merged = base.merge(&override_config);
     assert!(!merged.enabled);
     assert_eq!(merged.path_prefix, "override.log");
     assert!(matches!(merged.format, LogFormat::Json));
-    assert_eq!(merged.buffer.0, 64 * 1024);
+    assert_eq!(merged.buffer.as_u64(), 64 * 1024);
     assert_eq!(merged.flush.0, Duration::from_secs(5));
-    assert_eq!(merged.max_size.0, 500 * 1024 * 1024);
+    assert_eq!(merged.max_size.as_u64(), 500 * 1024 * 1024);
   }
 
   #[test]
@@ -404,11 +276,10 @@ format: json
       enabled: true,
       path_prefix: "base.log".to_string(),
       format: LogFormat::Text,
-      buffer: HumanBytes(64 * 1024),
+      buffer: Byte::from_u64(64 * 1024),
       flush: HumanDuration(Duration::from_secs(3)),
-      max_size: HumanBytes(100 * 1024 * 1024),
+      max_size: Byte::from_u64(100 * 1024 * 1024),
     };
-    // Server-level only overrides path_prefix
     let override_config = AccessLogOverride {
       enabled: None,
       path_prefix: Some("http_access.log".to_string()),
@@ -418,14 +289,12 @@ format: json
       max_size: None,
     };
     let merged = base.merge(&override_config);
-    // Overridden field
     assert_eq!(merged.path_prefix, "http_access.log");
-    // Inherited from base
     assert!(merged.enabled);
     assert!(matches!(merged.format, LogFormat::Text));
-    assert_eq!(merged.buffer.0, 64 * 1024);
+    assert_eq!(merged.buffer.as_u64(), 64 * 1024);
     assert_eq!(merged.flush.0, Duration::from_secs(3));
-    assert_eq!(merged.max_size.0, 100 * 1024 * 1024);
+    assert_eq!(merged.max_size.as_u64(), 100 * 1024 * 1024);
   }
 
   #[test]
@@ -434,9 +303,9 @@ format: json
       enabled: true,
       path_prefix: "base.log".to_string(),
       format: LogFormat::Json,
-      buffer: HumanBytes(64 * 1024),
+      buffer: Byte::from_u64(64 * 1024),
       flush: HumanDuration(Duration::from_secs(5)),
-      max_size: HumanBytes(500 * 1024 * 1024),
+      max_size: Byte::from_u64(500 * 1024 * 1024),
     };
     let override_config = AccessLogOverride {
       enabled: None,
@@ -447,13 +316,12 @@ format: json
       max_size: None,
     };
     let merged = base.merge(&override_config);
-    // All fields inherited from base
     assert!(merged.enabled);
     assert_eq!(merged.path_prefix, "base.log");
     assert!(matches!(merged.format, LogFormat::Json));
-    assert_eq!(merged.buffer.0, 64 * 1024);
+    assert_eq!(merged.buffer.as_u64(), 64 * 1024);
     assert_eq!(merged.flush.0, Duration::from_secs(5));
-    assert_eq!(merged.max_size.0, 500 * 1024 * 1024);
+    assert_eq!(merged.max_size.as_u64(), 500 * 1024 * 1024);
   }
 
   // ============== AccessLogOverride Deserialization Tests ==============
@@ -471,7 +339,6 @@ format: json
       Some("http_access.log".to_string())
     );
     assert!(matches!(override_config.format, Some(LogFormat::Json)));
-    // Unspecified fields should be None
     assert!(override_config.enabled.is_none());
     assert!(override_config.buffer.is_none());
     assert!(override_config.flush.is_none());

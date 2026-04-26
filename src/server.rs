@@ -9,39 +9,25 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio::{runtime, sync, task, time::timeout};
+use tower::service_fn;
 use tracing::{info, warn};
 
 use crate::access_log::{AccessLogConfig, AccessLogWriter};
 use crate::config::Config;
 use crate::config_validator::parse_kind;
+use crate::http_types::Response;
 use crate::listeners::ListenerBuilderSet;
 use crate::plugin;
+use crate::plugin::SerializedArgs;
 use crate::plugins::PluginBuilderSet;
 
-/// A dummy service used when creating listeners with routing tables.
-/// The actual service is determined at request time from the routing table.
-#[derive(Clone)]
-struct DummyServiceForRouting;
-
-impl tower::Service<plugin::Request> for DummyServiceForRouting {
-  type Error = anyhow::Error;
-  type Future = Pin<Box<dyn Future<Output = Result<plugin::Response>>>>;
-  type Response = plugin::Response;
-
-  fn poll_ready(
-    &mut self,
-    _cx: &mut std::task::Context<'_>,
-  ) -> std::task::Poll<Result<()>> {
-    std::task::Poll::Ready(Ok(()))
-  }
-
-  fn call(&mut self, _req: plugin::Request) -> Self::Future {
-    Box::pin(async {
-      anyhow::bail!(
-        "DummyServiceForRouting should not be called - routing should select actual service"
-      )
-    })
-  }
+/// Create a placeholder service for routing table initialization.
+/// The actual service is selected at request time from the routing table.
+pub fn placeholder_service() -> plugin::Service {
+  plugin::Service::new(service_fn(|_req| {
+    Box::pin(async { Err::<Response, _>(anyhow::anyhow!("placeholder")) })
+      as Pin<Box<dyn Future<Output = Result<Response>>>>
+  }))
 }
 
 /// Timeout for Phase 1: Listener shutdown.
@@ -276,29 +262,11 @@ async fn server_thread_main(shutdown: Arc<sync::Notify>) -> Result<()> {
       .listener_builder(&group.kind)
       .expect("listener builder should exist (validated)");
 
-    // Build routing table
-    let routing_table = group.servers;
+    // Server routing table
+    let server_routing_table = group.servers;
 
-    // Primary service name for logging (first server in group)
-    let primary_service_name = routing_table
-      .first()
-      .map(|s| s.service_name())
-      .unwrap_or_default();
-
-    let build_ctx = plugin::ListenerBuildContext {
-      access_log_writer: routing_table
-        .first()
-        .and_then(|s| s.access_log_writer.clone()),
-      service_name: primary_service_name,
-      routing_table,
-    };
-
-    let l: plugin::Listener = builder(
-      group.listener_args,
-      // Service is now part of routing_table, pass dummy
-      plugin::Service::new(DummyServiceForRouting),
-      build_ctx,
-    )?;
+    let l: plugin::Listener =
+      builder(group.listener_args, server_routing_table)?;
     let l = Rc::new(l);
     ctx.listeners.push(Rc::clone(&l));
     ctx.listener_join_set.spawn_local(l.start());
@@ -333,6 +301,7 @@ pub fn server_thread(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::shutdown::ShutdownHandle;
   use std::cell::Cell;
   use std::future::Future;
   use std::pin::Pin;
@@ -456,12 +425,12 @@ mod tests {
   /// A mock listener for testing that completes immediately after stop.
   struct MockListener {
     stopped: Rc<Cell<bool>>,
-    shutdown_handle: plugin::ShutdownHandle,
+    shutdown_handle: ShutdownHandle,
   }
 
   impl MockListener {
     fn new(stopped: Rc<Cell<bool>>) -> Self {
-      Self { stopped, shutdown_handle: plugin::ShutdownHandle::new() }
+      Self { stopped, shutdown_handle: ShutdownHandle::new() }
     }
   }
 
@@ -510,12 +479,12 @@ mod tests {
 
   /// A mock listener that never completes (for timeout testing).
   struct HangingListener {
-    shutdown_handle: plugin::ShutdownHandle,
+    shutdown_handle: ShutdownHandle,
   }
 
   impl HangingListener {
     fn new() -> Self {
-      Self { shutdown_handle: plugin::ShutdownHandle::new() }
+      Self { shutdown_handle: ShutdownHandle::new() }
     }
   }
 
@@ -1068,13 +1037,9 @@ mod tests {
 // Shared-Address Listener Architecture (Task 020)
 // ============================================================================
 
-use neoproxy::routing::ServerMatchInfo;
-
 /// A server's routing info and its associated service.
 #[derive(Clone)]
 pub struct ServerRoutingEntry {
-  /// Server name for logging
-  pub name: String,
   /// Hostnames this server responds to
   pub hostnames: Vec<String>,
   /// The service to route requests to
@@ -1096,15 +1061,6 @@ impl ServerRoutingEntry {
   }
 }
 
-impl From<&ServerRoutingEntry> for ServerMatchInfo {
-  fn from(entry: &ServerRoutingEntry) -> Self {
-    Self {
-      name: entry.name.clone(),
-      hostnames: entry.hostnames.clone(),
-    }
-  }
-}
-
 /// A group of servers sharing the same address and listener kind.
 pub struct SharedListenerGroup {
   /// The listener kind (http, https, http3, socks5)
@@ -1112,11 +1068,11 @@ pub struct SharedListenerGroup {
   /// Server entries that share this address+kind
   pub servers: Vec<ServerRoutingEntry>,
   /// Listener args (protocol-specific)
-  pub listener_args: serde_yaml::Value,
+  pub listener_args: SerializedArgs,
 }
 
 /// Extract address strings from listener args.
-fn extract_addresses(args: &serde_yaml::Value) -> Vec<String> {
+fn extract_addresses(args: &SerializedArgs) -> Vec<String> {
   let mut addresses = Vec::new();
 
   // Try 'addresses' (plural) field first
@@ -1171,7 +1127,6 @@ fn group_servers_by_address_kind(
         let key = (addr_str.clone(), listener.kind.clone());
 
         let entry = ServerRoutingEntry {
-          name: server.name.clone(),
           hostnames: server.hostnames.clone(),
           service: service.clone(),
           service_name: server.service.clone(),
@@ -1240,35 +1195,6 @@ mod shared_address_tests {
     assert!(addresses.is_empty());
   }
 
-  /// A dummy service for testing
-  #[derive(Clone)]
-  struct DummyTestService;
-
-  impl tower::Service<plugin::Request> for DummyTestService {
-    type Error = anyhow::Error;
-    type Future = std::pin::Pin<
-      Box<dyn std::future::Future<Output = Result<plugin::Response>>>,
-    >;
-    type Response = plugin::Response;
-
-    fn poll_ready(
-      &mut self,
-      _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<()>> {
-      std::task::Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, _req: plugin::Request) -> Self::Future {
-      Box::pin(async {
-        anyhow::bail!("DummyTestService not implemented")
-      })
-    }
-  }
-
-  fn create_test_service() -> plugin::Service {
-    plugin::Service::new(DummyTestService)
-  }
-
   #[test]
   fn test_group_servers_by_address_kind_single_server() {
     let servers = vec![crate::config::Server {
@@ -1288,7 +1214,7 @@ mod shared_address_tests {
     }];
 
     let mut services = HashMap::new();
-    services.insert("echo", create_test_service());
+    services.insert("echo", crate::server::placeholder_service());
 
     let access_log_writers: HashMap<
       &str,
@@ -1344,8 +1270,8 @@ mod shared_address_tests {
     ];
 
     let mut services = HashMap::new();
-    services.insert("echo", create_test_service());
-    services.insert("api_service", create_test_service());
+    services.insert("echo", crate::server::placeholder_service());
+    services.insert("api_service", crate::server::placeholder_service());
 
     let access_log_writers: HashMap<
       &str,
@@ -1361,8 +1287,8 @@ mod shared_address_tests {
     // Both servers should be in the same group (same address+kind)
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].servers.len(), 2);
-    assert_eq!(groups[0].servers[0].name, "default");
-    assert_eq!(groups[0].servers[1].name, "api");
+    assert_eq!(groups[0].servers[0].service_name, "echo");
+    assert_eq!(groups[0].servers[1].service_name, "api_service");
   }
 
   #[test]
@@ -1405,7 +1331,7 @@ mod shared_address_tests {
     ];
 
     let mut services = HashMap::new();
-    services.insert("echo", create_test_service());
+    services.insert("echo", crate::server::placeholder_service());
 
     let access_log_writers: HashMap<
       &str,
@@ -1423,47 +1349,38 @@ mod shared_address_tests {
   }
 
   #[test]
-  fn test_routing_info_from_entry() {
-    let entry = ServerRoutingEntry {
-      name: "api".to_string(),
-      hostnames: vec!["api.example.com".to_string()],
-      service: create_test_service(),
-      service_name: "test_service".to_string(),
-      users: None,
-      tls: None,
-      access_log_writer: None,
-    };
-
-    let info: ServerMatchInfo = (&entry).into();
-    assert_eq!(info.name, "api");
-    assert_eq!(info.hostnames, vec!["api.example.com"]);
-  }
-
-  #[test]
-  fn test_find_matching_server_with_routing_info() {
-    let routing_info = vec![
-      ServerMatchInfo {
-        name: "default".to_string(),
+  fn test_routing_with_route_request_by_hostname() {
+    let entries = vec![
+      ServerRoutingEntry {
         hostnames: vec![],
+        service: crate::server::placeholder_service(),
+        service_name: "default_service".to_string(),
+        users: None,
+        tls: None,
+        access_log_writer: None,
       },
-      ServerMatchInfo {
-        name: "api".to_string(),
+      ServerRoutingEntry {
         hostnames: vec!["api.example.com".to_string()],
+        service: crate::server::placeholder_service(),
+        service_name: "api_service".to_string(),
+        users: None,
+        tls: None,
+        access_log_writer: None,
       },
     ];
 
     // Test exact match
-    let result = neoproxy::routing::find_matching_server(
-      &routing_info,
-      "api.example.com",
+    let result = crate::listeners::common::route_request_by_hostname(
+      &entries,
+      Some("api.example.com"),
     );
-    assert_eq!(result.unwrap().name, "api");
+    assert_eq!(result.unwrap().service_name, "api_service");
 
     // Test fallback to default
-    let result = neoproxy::routing::find_matching_server(
-      &routing_info,
-      "other.example.com",
+    let result = crate::listeners::common::route_request_by_hostname(
+      &entries,
+      Some("other.example.com"),
     );
-    assert_eq!(result.unwrap().name, "default");
+    assert_eq!(result.unwrap().service_name, "default_service");
   }
 }

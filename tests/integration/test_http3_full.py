@@ -787,7 +787,7 @@ services:
 servers:
 - name: http3_server
   listeners:
-  - kind: http3.listener
+  - kind: http3
     args:
       address: "0.0.0.0:{proxy_port}"
       server_cert_path: "{cert_path}"
@@ -848,16 +848,17 @@ services:
 
 servers:
 - name: http3_server
+  users:
+  - username: "testuser"
+    password: "plaintext_secret"
+  tls:
+    certificates:
+    - cert_path: "{cert_path}"
+      key_path: "{key_path}"
   listeners:
-  - kind: http3.listener
+  - kind: http3
     args:
-      address: "0.0.0.0:{proxy_port}"
-      server_cert_path: "{cert_path}"
-      server_key_path: "{key_path}"
-      auth:
-        users:
-        - username: "testuser"
-          password: "plaintext_secret"
+      addresses: ["0.0.0.0:{proxy_port}"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "valid_password.yaml")

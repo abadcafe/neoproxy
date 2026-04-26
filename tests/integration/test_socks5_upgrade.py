@@ -50,7 +50,7 @@ services:
 servers:
 - name: socks5_server
   listeners:
-  - kind: fast_socks5.listener
+  - kind: socks5
     args:
       addresses:
         - "127.0.0.1:{proxy_port}"

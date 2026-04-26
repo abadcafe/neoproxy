@@ -2,7 +2,7 @@
 //!
 //! This module defines the unified authentication configuration for all listeners.
 //! Field presence determines auth type — no `type` YAML field needed:
-//! - `users` present → password authentication
+//! - `users` non-empty → password authentication
 //! - `client_ca_path` present → TLS client certificate authentication
 //! - Both present → dual-factor AND authentication
 
@@ -23,17 +23,18 @@ pub struct UserCredential {
 /// Listener authentication configuration.
 ///
 /// Field presence determines auth type:
-/// - `users` present → password authentication (UserPasswordAuth)
+/// - `users` non-empty → password authentication (UserPasswordAuth)
 /// - `client_ca_path` present → TLS client cert authentication (ClientCertAuth)
 /// - Both present → dual-factor AND authentication
 ///
-/// At least one field must be present. `auth: {}` (both None) is invalid for listeners.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+/// At least one field must be configured. `auth: {}` (both empty) is invalid.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
 pub struct ListenerAuthConfig {
   /// User credentials for password authentication.
-  /// Present → password auth enabled.
+  /// Non-empty → password auth enabled.
+  /// Empty or missing → no password auth.
   #[serde(default)]
-  pub users: Option<Vec<UserCredential>>,
+  pub users: Vec<UserCredential>,
   /// Client CA certificate path for TLS client cert authentication.
   /// Present → cert auth enabled.
   #[serde(default)]
@@ -44,61 +45,58 @@ impl ListenerAuthConfig {
   /// Validate the configuration.
   ///
   /// Rules:
-  /// - `users` and `client_ca_path` at least one must be present
-  /// - `users` cannot be empty array
+  /// - `users` and `client_ca_path` at least one must be configured
   /// - Each username must be non-empty, <= 255 bytes, and unique
   pub fn validate(&self) -> Result<(), AuthError> {
     // At least one auth method must be configured
-    if self.users.is_none() && self.client_ca_path.is_none() {
+    if self.users.is_empty() && self.client_ca_path.is_none() {
       return Err(AuthError::ConfigError(
         "auth config must have at least 'users' or 'client_ca_path'"
           .to_string(),
       ));
     }
 
-    // Validate users if present
-    if let Some(ref users) = self.users {
-      if users.is_empty() {
+    // Validate users
+    let mut seen_users = std::collections::HashSet::new();
+    for user in &self.users {
+      if user.username.is_empty() {
         return Err(AuthError::ConfigError(
-          "users cannot be empty for password authentication"
-            .to_string(),
+          "username cannot be empty".to_string(),
         ));
       }
-
-      let mut seen_users = std::collections::HashSet::new();
-      for user in users {
-        if user.username.is_empty() {
-          return Err(AuthError::ConfigError(
-            "username cannot be empty".to_string(),
-          ));
-        }
-        if user.username.len() > 255 {
-          return Err(AuthError::ConfigError(format!(
-            "username '{}' is too long (max 255 bytes)",
-            user.username
-          )));
-        }
-        if seen_users.contains(&user.username) {
-          return Err(AuthError::ConfigError(format!(
-            "duplicate username '{}' found in users list",
-            user.username
-          )));
-        }
-        seen_users.insert(user.username.clone());
+      if user.username.len() > 255 {
+        return Err(AuthError::ConfigError(format!(
+          "username '{}' is too long (max 255 bytes)",
+          user.username
+        )));
       }
+      if seen_users.contains(&user.username) {
+        return Err(AuthError::ConfigError(format!(
+          "duplicate username '{}' found in users list",
+          user.username
+        )));
+      }
+      seen_users.insert(user.username.clone());
     }
 
     Ok(())
   }
 
   /// Get users as a HashMap for password lookup.
+  ///
+  /// Returns `None` if no users are configured (empty array).
   pub fn users_map(&self) -> Option<HashMap<String, String>> {
-    self.users.as_ref().map(|users| {
-      users
-        .iter()
-        .map(|u| (u.username.clone(), u.password.clone()))
-        .collect()
-    })
+    if self.users.is_empty() {
+      None
+    } else {
+      Some(
+        self
+          .users
+          .iter()
+          .map(|u| (u.username.clone(), u.password.clone()))
+          .collect(),
+      )
+    }
   }
 }
 
@@ -144,11 +142,9 @@ users:
 "#;
     let config: ListenerAuthConfig =
       serde_yaml::from_str(yaml).expect("parse failed");
-    assert!(config.users.is_some());
+    assert!(!config.users.is_empty());
     assert!(config.client_ca_path.is_none());
-    let users = config.users.unwrap();
-    assert_eq!(users.len(), 1);
-    assert_eq!(users[0].username, "admin");
+    assert_eq!(config.users[0].username, "admin");
   }
 
   #[test]
@@ -158,7 +154,7 @@ client_ca_path: /path/to/ca.pem
 "#;
     let config: ListenerAuthConfig =
       serde_yaml::from_str(yaml).expect("parse failed");
-    assert!(config.users.is_none());
+    assert!(config.users.is_empty());
     assert!(config.client_ca_path.is_some());
     assert_eq!(config.client_ca_path.unwrap(), "/path/to/ca.pem");
   }
@@ -173,30 +169,35 @@ client_ca_path: /path/to/ca.pem
 "#;
     let config: ListenerAuthConfig =
       serde_yaml::from_str(yaml).expect("parse failed");
-    assert!(config.users.is_some());
+    assert!(!config.users.is_empty());
     assert!(config.client_ca_path.is_some());
   }
 
   #[test]
+  fn test_listener_auth_config_empty_users_with_tls_is_valid() {
+    // users: [] + client_ca_path should be valid (TLS-only auth)
+    let yaml = r#"
+users: []
+client_ca_path: /path/to/ca.pem
+"#;
+    let config: ListenerAuthConfig =
+      serde_yaml::from_str(yaml).expect("parse failed");
+    assert!(config.users.is_empty());
+    assert!(config.client_ca_path.is_some());
+    assert!(config.validate().is_ok(), "Empty users with TLS should be valid");
+  }
+
+  #[test]
   fn test_listener_auth_config_validate_empty_is_error() {
-    let config =
-      ListenerAuthConfig { users: None, client_ca_path: None };
+    let config = ListenerAuthConfig::default();
     let result = config.validate();
     assert!(result.is_err(), "Empty auth config should be invalid");
   }
 
   #[test]
-  fn test_listener_auth_config_validate_empty_users_is_error() {
-    let config =
-      ListenerAuthConfig { users: Some(vec![]), client_ca_path: None };
-    let result = config.validate();
-    assert!(result.is_err(), "Empty users array should be invalid");
-  }
-
-  #[test]
   fn test_listener_auth_config_validate_duplicate_username_is_error() {
     let config = ListenerAuthConfig {
-      users: Some(vec![
+      users: vec![
         UserCredential {
           username: "admin".to_string(),
           password: "pass1".to_string(),
@@ -205,7 +206,7 @@ client_ca_path: /path/to/ca.pem
           username: "admin".to_string(),
           password: "pass2".to_string(),
         },
-      ]),
+      ],
       client_ca_path: None,
     };
     let result = config.validate();
@@ -215,10 +216,10 @@ client_ca_path: /path/to/ca.pem
   #[test]
   fn test_listener_auth_config_validate_empty_username_is_error() {
     let config = ListenerAuthConfig {
-      users: Some(vec![UserCredential {
+      users: vec![UserCredential {
         username: "".to_string(),
         password: "pass".to_string(),
-      }]),
+      }],
       client_ca_path: None,
     };
     let result = config.validate();
@@ -228,10 +229,10 @@ client_ca_path: /path/to/ca.pem
   #[test]
   fn test_listener_auth_config_validate_long_username_is_error() {
     let config = ListenerAuthConfig {
-      users: Some(vec![UserCredential {
+      users: vec![UserCredential {
         username: "a".repeat(256),
         password: "pass".to_string(),
-      }]),
+      }],
       client_ca_path: None,
     };
     let result = config.validate();
@@ -241,10 +242,10 @@ client_ca_path: /path/to/ca.pem
   #[test]
   fn test_listener_auth_config_validate_password_only_ok() {
     let config = ListenerAuthConfig {
-      users: Some(vec![UserCredential {
+      users: vec![UserCredential {
         username: "admin".to_string(),
         password: "secret".to_string(),
-      }]),
+      }],
       client_ca_path: None,
     };
     assert!(config.validate().is_ok());
@@ -253,7 +254,7 @@ client_ca_path: /path/to/ca.pem
   #[test]
   fn test_listener_auth_config_validate_tls_only_ok() {
     let config = ListenerAuthConfig {
-      users: None,
+      users: vec![],
       client_ca_path: Some("/path/to/ca.pem".to_string()),
     };
     assert!(config.validate().is_ok());
@@ -262,10 +263,10 @@ client_ca_path: /path/to/ca.pem
   #[test]
   fn test_listener_auth_config_validate_dual_factor_ok() {
     let config = ListenerAuthConfig {
-      users: Some(vec![UserCredential {
+      users: vec![UserCredential {
         username: "admin".to_string(),
         password: "secret".to_string(),
-      }]),
+      }],
       client_ca_path: Some("/path/to/ca.pem".to_string()),
     };
     assert!(config.validate().is_ok());
@@ -274,7 +275,7 @@ client_ca_path: /path/to/ca.pem
   #[test]
   fn test_users_map_returns_hashmap() {
     let config = ListenerAuthConfig {
-      users: Some(vec![
+      users: vec![
         UserCredential {
           username: "admin".to_string(),
           password: "secret123".to_string(),
@@ -283,7 +284,7 @@ client_ca_path: /path/to/ca.pem
           username: "user2".to_string(),
           password: "pass456".to_string(),
         },
-      ]),
+      ],
       client_ca_path: None,
     };
     let map = config.users_map().expect("should return Some");
@@ -294,7 +295,7 @@ client_ca_path: /path/to/ca.pem
   #[test]
   fn test_users_map_returns_none_when_no_users() {
     let config = ListenerAuthConfig {
-      users: None,
+      users: vec![],
       client_ca_path: Some("/path/to/ca.pem".to_string()),
     };
     assert!(config.users_map().is_none());

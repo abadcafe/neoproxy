@@ -2,12 +2,10 @@
 
 mod error;
 pub mod listener_auth_config;
-mod password;
 mod user_password_auth;
 
 pub use error::AuthError;
 pub use listener_auth_config::{ListenerAuthConfig, UserCredential};
-pub use password::verify_password;
 pub use user_password_auth::UserPasswordAuth;
 
 #[cfg(test)]

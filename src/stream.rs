@@ -85,7 +85,10 @@ impl H3OnUpgrade {
 impl Future for H3OnUpgrade {
   type Output = Result<H3ServerBidiStream, H3UpgradeError>;
 
-  fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+  fn poll(
+    self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Self::Output> {
     match self.receiver {
       Some(ref rx) => {
         let mut guard = rx.lock().unwrap();
@@ -112,8 +115,15 @@ impl Future for H3OnUpgrade {
 /// 1. Send the H3 protocol response on the stream
 /// 2. Transfer stream ownership to the Service via the upgrade channel
 pub struct H3UpgradeTrigger {
-  sender: tokio::sync::oneshot::Sender<Result<H3ServerBidiStream, H3UpgradeError>>,
-  stream: Option<h3::server::RequestStream<h3_quinn::BidiStream<bytes::Bytes>, bytes::Bytes>>,
+  sender: tokio::sync::oneshot::Sender<
+    Result<H3ServerBidiStream, H3UpgradeError>,
+  >,
+  stream: Option<
+    h3::server::RequestStream<
+      h3_quinn::BidiStream<bytes::Bytes>,
+      bytes::Bytes,
+    >,
+  >,
 }
 
 impl std::fmt::Debug for H3UpgradeTrigger {
@@ -125,7 +135,10 @@ impl std::fmt::Debug for H3UpgradeTrigger {
 impl H3UpgradeTrigger {
   /// Create a linked (trigger, on_upgrade) pair.
   pub fn pair(
-    stream: h3::server::RequestStream<h3_quinn::BidiStream<bytes::Bytes>, bytes::Bytes>,
+    stream: h3::server::RequestStream<
+      h3_quinn::BidiStream<bytes::Bytes>,
+      bytes::Bytes,
+    >,
   ) -> (Self, H3OnUpgrade) {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let trigger = Self { sender, stream: Some(stream) };
@@ -142,7 +155,8 @@ impl H3UpgradeTrigger {
   /// 3. Wraps in H3ServerBidiStream
   /// 4. Sends Ok(stream) via oneshot channel
   pub async fn send_success(mut self) -> anyhow::Result<()> {
-    let mut stream = self.stream.take().expect("stream already consumed");
+    let mut stream =
+      self.stream.take().expect("stream already consumed");
 
     // Send 200 OK response on the H3 stream
     let resp = http::Response::builder()
@@ -169,16 +183,25 @@ impl H3UpgradeTrigger {
   /// 1. Sends error response on the H3 stream
   /// 2. Finishes the stream
   /// 3. Sends Err(ErrorResponse(status)) via oneshot channel
-  pub async fn send_error(mut self, status: http::StatusCode) -> anyhow::Result<()> {
-    let mut stream = self.stream.take().expect("stream already consumed");
+  pub async fn send_error(
+    mut self,
+    status: http::StatusCode,
+  ) -> anyhow::Result<()> {
+    let mut stream =
+      self.stream.take().expect("stream already consumed");
 
     // Send error response on the H3 stream
-    let resp = http::Response::builder().status(status).body(()).unwrap();
+    let resp =
+      http::Response::builder().status(status).body(()).unwrap();
     stream.send_response(resp).await?;
     stream.finish().await?;
 
     // Deliver error to Service
-    if self.sender.send(Err(H3UpgradeError::ErrorResponse(status))).is_err() {
+    if self
+      .sender
+      .send(Err(H3UpgradeError::ErrorResponse(status)))
+      .is_err()
+    {
       return Err(anyhow::anyhow!(
         "H3 upgrade: Service dropped the receiver before error was delivered"
       ));
@@ -196,10 +219,12 @@ impl H3UpgradeTrigger {
     status: http::StatusCode,
     body: bytes::Bytes,
   ) -> anyhow::Result<()> {
-    let mut stream = self.stream.take().expect("stream already consumed");
+    let mut stream =
+      self.stream.take().expect("stream already consumed");
 
     // Send error response on the H3 stream
-    let resp = http::Response::builder().status(status).body(()).unwrap();
+    let resp =
+      http::Response::builder().status(status).body(()).unwrap();
     stream.send_response(resp).await?;
 
     // Send body if not empty
@@ -210,7 +235,11 @@ impl H3UpgradeTrigger {
     stream.finish().await?;
 
     // Deliver error to Service
-    if self.sender.send(Err(H3UpgradeError::ErrorResponse(status))).is_err() {
+    if self
+      .sender
+      .send(Err(H3UpgradeError::ErrorResponse(status)))
+      .is_err()
+    {
       return Err(anyhow::anyhow!(
         "H3 upgrade: Service dropped the receiver before error was delivered"
       ));
@@ -761,7 +790,8 @@ mod tests {
   #[test]
   fn test_http_status_to_socks5_error_mappings() {
     assert_eq!(
-      http_status_to_socks5_error(http::StatusCode::BAD_GATEWAY).as_u8(),
+      http_status_to_socks5_error(http::StatusCode::BAD_GATEWAY)
+        .as_u8(),
       fast_socks5::consts::SOCKS5_REPLY_CONNECTION_REFUSED
     );
     assert_eq!(
@@ -770,8 +800,10 @@ mod tests {
       fast_socks5::consts::SOCKS5_REPLY_TTL_EXPIRED
     );
     assert_eq!(
-      http_status_to_socks5_error(http::StatusCode::SERVICE_UNAVAILABLE)
-        .as_u8(),
+      http_status_to_socks5_error(
+        http::StatusCode::SERVICE_UNAVAILABLE
+      )
+      .as_u8(),
       fast_socks5::consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED
     );
     assert_eq!(
@@ -779,8 +811,10 @@ mod tests {
       fast_socks5::consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED
     );
     assert_eq!(
-      http_status_to_socks5_error(http::StatusCode::INTERNAL_SERVER_ERROR)
-        .as_u8(),
+      http_status_to_socks5_error(
+        http::StatusCode::INTERNAL_SERVER_ERROR
+      )
+      .as_u8(),
       fast_socks5::consts::SOCKS5_REPLY_GENERAL_FAILURE
     );
   }
@@ -1035,7 +1069,9 @@ mod tests {
 
   #[test]
   fn test_h3_upgrade_error_display() {
-    let err = super::H3UpgradeError::ErrorResponse(http::StatusCode::BAD_GATEWAY);
+    let err = super::H3UpgradeError::ErrorResponse(
+      http::StatusCode::BAD_GATEWAY,
+    );
     assert!(format!("{}", err).contains("502"));
 
     let err = super::H3UpgradeError::Canceled;
@@ -1044,8 +1080,9 @@ mod tests {
 
   #[tokio::test]
   async fn test_h3_on_upgrade_extracts_from_extensions() {
-    let (_tx, rx) =
-      tokio::sync::oneshot::channel::<Result<H3ServerBidiStream, H3UpgradeError>>();
+    let (_tx, rx) = tokio::sync::oneshot::channel::<
+      Result<H3ServerBidiStream, H3UpgradeError>,
+    >();
     let upgrade = super::H3OnUpgrade {
       receiver: Some(Arc::new(Mutex::new(Some(rx)))),
     };
@@ -1074,8 +1111,9 @@ mod tests {
 
   #[tokio::test]
   async fn test_h3_on_upgrade_resolves_with_error_on_cancel() {
-    let (tx, rx) =
-      tokio::sync::oneshot::channel::<Result<H3ServerBidiStream, H3UpgradeError>>();
+    let (tx, rx) = tokio::sync::oneshot::channel::<
+      Result<H3ServerBidiStream, H3UpgradeError>,
+    >();
     let upgrade = super::H3OnUpgrade {
       receiver: Some(Arc::new(Mutex::new(Some(rx)))),
     };
@@ -1092,8 +1130,9 @@ mod tests {
 
   #[tokio::test]
   async fn test_h3_on_upgrade_resolves_with_error_response() {
-    let (tx, rx) =
-      tokio::sync::oneshot::channel::<Result<H3ServerBidiStream, H3UpgradeError>>();
+    let (tx, rx) = tokio::sync::oneshot::channel::<
+      Result<H3ServerBidiStream, H3UpgradeError>,
+    >();
     let upgrade = super::H3OnUpgrade {
       receiver: Some(Arc::new(Mutex::new(Some(rx)))),
     };
@@ -1112,8 +1151,9 @@ mod tests {
 
   #[tokio::test]
   async fn test_h3_on_upgrade_second_clone_returns_canceled() {
-    let (tx, rx) =
-      tokio::sync::oneshot::channel::<Result<H3ServerBidiStream, H3UpgradeError>>();
+    let (tx, rx) = tokio::sync::oneshot::channel::<
+      Result<H3ServerBidiStream, H3UpgradeError>,
+    >();
     let upgrade1 = super::H3OnUpgrade {
       receiver: Some(Arc::new(Mutex::new(Some(rx)))),
     };
@@ -1140,9 +1180,7 @@ mod tests {
         Result<H3ServerBidiStream, H3UpgradeError>,
       >,
     ) -> Self {
-      Self {
-        receiver: Some(Arc::new(Mutex::new(Some(receiver)))),
-      }
+      Self { receiver: Some(Arc::new(Mutex::new(Some(receiver)))) }
     }
   }
 
@@ -1164,8 +1202,9 @@ mod tests {
 
   #[test]
   fn test_h3_on_upgrade_debug_impl() {
-    let (_tx, rx) =
-      tokio::sync::oneshot::channel::<Result<H3ServerBidiStream, H3UpgradeError>>();
+    let (_tx, rx) = tokio::sync::oneshot::channel::<
+      Result<H3ServerBidiStream, H3UpgradeError>,
+    >();
     let upgrade = super::H3OnUpgrade {
       receiver: Some(Arc::new(Mutex::new(Some(rx)))),
     };

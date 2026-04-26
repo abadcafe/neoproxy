@@ -100,7 +100,6 @@ impl ListenerAuthConfig {
         .collect()
     })
   }
-
 }
 
 #[cfg(test)]

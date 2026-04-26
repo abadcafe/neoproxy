@@ -12,12 +12,10 @@ use h3::server;
 use http_body_util::BodyExt;
 use quinn::crypto::rustls::QuicServerConfig;
 use serde::Deserialize;
-use tracing::{info, warn};
 use tower::Service;
+use tracing::{info, warn};
 
-use crate::auth::{
-  ListenerAuthConfig, UserPasswordAuth,
-};
+use crate::auth::UserPasswordAuth;
 use crate::plugin;
 use crate::shutdown::StreamTracker;
 use crate::stream::H3UpgradeTrigger;
@@ -331,9 +329,12 @@ async fn handle_h3_stream(
 
   // Phase 2: Authentication - verify and extract username in one pass
   // This avoids duplicated extraction logic (CR-001) and wasteful computation when auth fails (CR-002)
-  let auth_result = user_password_auth.verify_and_extract_username(&req);
+  let auth_result =
+    user_password_auth.verify_and_extract_username(&req);
   let (user, auth_type) = match auth_result {
-    Ok(Some(username)) => (Some(username), crate::access_log::AuthType::Password),
+    Ok(Some(username)) => {
+      (Some(username), crate::access_log::AuthType::Password)
+    }
     Ok(None) => (None, crate::access_log::AuthType::None),
     Err(_) => {
       // Auth failed: send 407 directly, do NOT call Service
@@ -350,20 +351,14 @@ async fn handle_h3_stream(
   };
 
   // Phase 3: Route request to correct service based on :authority
-  let authority = req.uri().authority().map(|a| a.host());
-  let routing_entry = match authority {
-    Some(hostname) => {
-      let match_info =
-        neoproxy::routing::find_matching_server(&routing_info, hostname);
-      match_info.and_then(|info| {
-        routing_table.iter().find(|e| e.name == info.name)
-      })
-    }
-    None => {
-      // No :authority - route to default server
-      routing_table.iter().find(|e| e.hostnames.is_empty())
-    }
-  };
+  let hostname = req.uri().authority().map(|a| a.host());
+
+  // Route request
+  let routing_entry = super::common::route_request_by_hostname(
+    &routing_table,
+    &routing_info,
+    hostname,
+  );
 
   let mut service = match routing_entry {
     Some(entry) => entry.service.clone(),
@@ -382,7 +377,8 @@ async fn handle_h3_stream(
   };
 
   // Get service name from routing entry for access log
-  let service_name = routing_entry.map(|e| e.service_name()).unwrap_or(service_name);
+  let service_name =
+    routing_entry.map(|e| e.service_name()).unwrap_or(service_name);
 
   // Phase 4: Create upgrade pair ONLY for CONNECT method
   // This is the fix: non-CONNECT requests should NOT create upgrade pair
@@ -393,11 +389,9 @@ async fn handle_h3_stream(
     .method(req.method().clone())
     .uri(req.uri().clone())
     .version(req.version())
-    .body(plugin::RequestBody::new(
-      plugin::BytesBufBodyWrapper::new(
-        http_body_util::Empty::<Bytes>::new(),
-      ),
-    ))
+    .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+      http_body_util::Empty::<Bytes>::new(),
+    )))
     .expect("failed to build request");
 
   // Copy headers from original request
@@ -443,15 +437,20 @@ async fn handle_h3_stream(
           }
         } else {
           let status = resp.status();
-          let body_bytes = match http_body_util::BodyExt::collect(resp.into_body()).await {
-            Ok(collected) => collected.to_bytes(),
-            Err(e) => {
-              warn!("H3 failed to collect response body: {e}");
-              Bytes::new()
-            }
-          };
+          let body_bytes =
+            match http_body_util::BodyExt::collect(resp.into_body())
+              .await
+            {
+              Ok(collected) => collected.to_bytes(),
+              Err(e) => {
+                warn!("H3 failed to collect response body: {e}");
+                Bytes::new()
+              }
+            };
           if let Some(t) = trigger {
-            if let Err(e) = t.send_error_with_body(status, body_bytes).await {
+            if let Err(e) =
+              t.send_error_with_body(status, body_bytes).await
+            {
               warn!("H3 failed to send error: {e}");
             }
           }
@@ -469,7 +468,9 @@ async fn handle_h3_stream(
       warn!("H3 service error: {e}");
       if is_connect {
         if let Some(t) = trigger {
-          if let Err(e) = t.send_error(http::StatusCode::BAD_GATEWAY).await {
+          if let Err(e) =
+            t.send_error(http::StatusCode::BAD_GATEWAY).await
+          {
             warn!("H3 failed to send error: {e}");
           }
         }
@@ -516,7 +517,10 @@ async fn handle_h3_stream(
 ///   Should be false for CONNECT success response to allow bidirectional
 ///   data transfer.
 async fn send_h3_response(
-  stream: &mut server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+  stream: &mut server::RequestStream<
+    h3_quinn::BidiStream<Bytes>,
+    Bytes,
+  >,
   resp: plugin::Response,
   finish_stream: bool,
 ) -> Result<()> {
@@ -688,43 +692,30 @@ impl Http3Listener {
     };
 
     // TLS config is required for HTTP/3 listener - get from first routing entry
-    let server_tls = ctx.routing_table.first()
+    let server_tls = ctx
+      .routing_table
+      .first()
       .and_then(|e| e.tls.as_ref())
       .ok_or_else(|| {
-        anyhow!("http3 listener requires server-level tls configuration")
+        anyhow!(
+          "http3 listener requires server-level tls configuration"
+        )
       })?;
 
     // Build routing info from routing table
-    let routing_info: Vec<neoproxy::routing::ServerMatchInfo> = ctx
-      .routing_table
-      .iter()
-      .map(|entry| entry.into())
-      .collect();
+    let routing_info: Vec<neoproxy::routing::ServerMatchInfo> =
+      ctx.routing_table.iter().map(|entry| entry.into()).collect();
 
     // Build UserPasswordAuth from first routing entry
-    let user_password_auth = ctx.routing_table.first()
-      .map(|e| match &e.users {
-        Some(users) if !users.is_empty() => {
-          let config = ListenerAuthConfig {
-            users: Some(
-              users
-                .iter()
-                .map(|u| crate::auth::listener_auth_config::UserCredential {
-                  username: u.username.clone(),
-                  password: u.password.clone(),
-                })
-                .collect(),
-            ),
-            client_ca_path: None,
-          };
-          UserPasswordAuth::from_config(&config)
-        }
-        _ => UserPasswordAuth::none(),
-      })
+    let user_password_auth = ctx
+      .routing_table
+      .first()
+      .map(|e| super::common::build_user_password_auth(&e.users))
       .unwrap_or_else(UserPasswordAuth::none);
 
     // Build TLS config with SNI support and HTTP/3 ALPN
-    let tls_config = build_tls_server_config(server_tls, vec![H3_ALPN.to_vec()])?;
+    let tls_config =
+      build_tls_server_config(server_tls, vec![H3_ALPN.to_vec()])?;
 
     Ok(plugin::Listener::new(Self {
       addresses,
@@ -973,6 +964,7 @@ pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::auth::ListenerAuthConfig;
   use crate::auth::listener_auth_config::UserCredential;
   use base64::{
     Engine, engine::general_purpose::STANDARD as BASE64_STANDARD,
@@ -1397,7 +1389,8 @@ quic:
     // No required fields anymore - addresses/address are optional at parse time
     // The validation happens in effective_addresses() call
     let yaml = r#"{}"#;
-    let result: Result<Http3ListenerArgs, _> = serde_yaml::from_str(yaml);
+    let result: Result<Http3ListenerArgs, _> =
+      serde_yaml::from_str(yaml);
     // Parsing should succeed (no required fields)
     assert!(result.is_ok());
     let args = result.unwrap();
@@ -1464,13 +1457,14 @@ quic:
     // This verifies CR-001 and CR-002 fixes: no duplicated logic, no wasteful computation
 
     // Case 1: Auth required, valid credentials - should return username
-    let user_password_auth = UserPasswordAuth::from_config(&ListenerAuthConfig {
-      users: Some(vec![UserCredential {
-        username: "testuser".to_string(),
-        password: "testpass".to_string(),
-      }]),
-      client_ca_path: None,
-    });
+    let user_password_auth =
+      UserPasswordAuth::from_config(&ListenerAuthConfig {
+        users: Some(vec![UserCredential {
+          username: "testuser".to_string(),
+          password: "testpass".to_string(),
+        }]),
+        client_ca_path: None,
+      });
     let req = http::Request::builder()
       .method(http::Method::CONNECT)
       .uri("http://example.com:80")
@@ -1500,7 +1494,8 @@ quic:
       )
       .body(())
       .unwrap();
-    let result = user_password_auth.verify_and_extract_username(&req_invalid);
+    let result =
+      user_password_auth.verify_and_extract_username(&req_invalid);
     assert!(result.is_err());
 
     // Case 3: No auth required - should return Ok(None)
@@ -1704,11 +1699,9 @@ quic:
     let mut request = http::Request::builder()
       .method(Method::CONNECT)
       .uri("example.com:443")
-      .body(plugin::RequestBody::new(
-        plugin::BytesBufBodyWrapper::new(
-          http_body_util::Empty::<Bytes>::new(),
-        ),
-      ))
+      .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+        http_body_util::Empty::<Bytes>::new(),
+      )))
       .expect("failed to build request");
 
     // Verify H3OnUpgrade is NOT in extensions initially
@@ -1719,7 +1712,10 @@ quic:
 
     // Simulate insertion (what handle_h3_stream does for CONNECT)
     let (_tx, rx) = tokio::sync::oneshot::channel::<
-      Result<crate::h3_stream::H3ServerBidiStream, crate::stream::H3UpgradeError>,
+      Result<
+        crate::h3_stream::H3ServerBidiStream,
+        crate::stream::H3UpgradeError,
+      >,
     >();
     let upgrade = H3OnUpgrade::new_for_test(rx);
     request.extensions_mut().insert(upgrade);
@@ -1846,6 +1842,9 @@ quic:
 "#;
     let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
     assert!(args.quic.is_some());
-    assert_eq!(args.quic.as_ref().unwrap().max_concurrent_bidi_streams, Some(200));
+    assert_eq!(
+      args.quic.as_ref().unwrap().max_concurrent_bidi_streams,
+      Some(200)
+    );
   }
 }

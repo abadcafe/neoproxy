@@ -6,10 +6,10 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::Mutex;
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 use std::{fs, path};
+use tokio::sync::Mutex;
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
@@ -182,7 +182,10 @@ impl ClientCredentialConfig {
 
   /// Deep merge with a default credential.
   /// Fields in `self` take priority; missing fields are inherited from `default`.
-  fn deep_merge(&self, default: &ClientCredentialConfig) -> ClientCredentialConfig {
+  fn deep_merge(
+    &self,
+    default: &ClientCredentialConfig,
+  ) -> ClientCredentialConfig {
     ClientCredentialConfig {
       user: self.user.clone().or_else(|| default.user.clone()),
       client_cert_path: self
@@ -362,7 +365,9 @@ impl ProxyGroup {
     }
 
     // Load custom CA certificate if provided (per-proxy)
-    if let Some(ref ca_path_str) = self.proxies[proxy_idx].server_ca_path {
+    if let Some(ref ca_path_str) =
+      self.proxies[proxy_idx].server_ca_path
+    {
       let ca_path = path::Path::new(ca_path_str);
       info!("Loading CA certificate from: {:?}", ca_path);
       let ca_file = fs::File::open(ca_path)?;
@@ -491,7 +496,8 @@ fn build_error_response(
   status_code: http::StatusCode,
   message: &str,
 ) -> plugin::Response {
-  let full = http_body_util::Full::new(bytes::Bytes::from(message.to_string()));
+  let full =
+    http_body_util::Full::new(bytes::Bytes::from(message.to_string()));
   let bytes_buf = plugin::BytesBufBodyWrapper::new(full);
   let body = plugin::ResponseBody::new(bytes_buf);
   let mut resp = plugin::Response::new(body);
@@ -562,7 +568,8 @@ impl Http3ChainServiceArgs {
   fn resolve_credential(
     &self,
     proxy_credential: &Option<ClientCredentialConfig>,
-  ) -> (UserPasswordCredential, ClientCertCredential, Option<String>) {
+  ) -> (UserPasswordCredential, ClientCertCredential, Option<String>)
+  {
     let effective = match (proxy_credential, &self.default_credential) {
       // If proxy credential is explicitly set but empty, it means "no auth credential"
       // - user and client_cert are NOT inherited from default_credential
@@ -584,9 +591,11 @@ impl Http3ChainServiceArgs {
     };
 
     match effective {
-      None => {
-        (UserPasswordCredential::none(), ClientCertCredential::none(), None)
-      }
+      None => (
+        UserPasswordCredential::none(),
+        ClientCertCredential::none(),
+        None,
+      ),
       Some(config) => {
         let upc = match &config.user {
           Some(user) => {
@@ -710,7 +719,8 @@ impl tower::Service<plugin::Request> for Http3ChainService {
         ));
       }
 
-      let (host, port) = match utils::parse_connect_target(&req_headers) {
+      let (host, port) = match utils::parse_connect_target(&req_headers)
+      {
         Ok(result) => result,
         Err(ConnectTargetError::NotConnectMethod) => {
           return Ok(build_error_response(
@@ -1079,8 +1089,7 @@ server_ca_path: "/tmp/ca.pem"
     );
     let err = result.unwrap_err().to_string();
     assert!(
-      err.contains("unknown field")
-        || err.contains("server_ca_path"),
+      err.contains("unknown field") || err.contains("server_ca_path"),
       "Error should mention unknown field, got: {}",
       err
     );
@@ -1201,7 +1210,10 @@ server_ca_path: /path/to/ca.pem
     };
     let merged = proxy_cred.deep_merge(&default_cred);
     // proxy's server_ca_path overrides default
-    assert_eq!(merged.server_ca_path, Some("/proxy/ca.pem".to_string()));
+    assert_eq!(
+      merged.server_ca_path,
+      Some("/proxy/ca.pem".to_string())
+    );
     // user inherited from default
     assert!(merged.user.is_some());
     assert_eq!(merged.user.as_ref().unwrap().username, "default_user");
@@ -1226,9 +1238,18 @@ server_ca_path: /path/to/ca.pem
     };
     let merged = proxy_cred.deep_merge(&default_cred);
     assert_eq!(merged.user.as_ref().unwrap().username, "default_user");
-    assert_eq!(merged.client_cert_path, Some("/default/cert.pem".to_string()));
-    assert_eq!(merged.client_key_path, Some("/default/key.pem".to_string()));
-    assert_eq!(merged.server_ca_path, Some("/default/ca.pem".to_string()));
+    assert_eq!(
+      merged.client_cert_path,
+      Some("/default/cert.pem".to_string())
+    );
+    assert_eq!(
+      merged.client_key_path,
+      Some("/default/key.pem".to_string())
+    );
+    assert_eq!(
+      merged.server_ca_path,
+      Some("/default/ca.pem".to_string())
+    );
   }
 
   #[test]
@@ -1253,9 +1274,18 @@ server_ca_path: /path/to/ca.pem
     };
     let merged = proxy_cred.deep_merge(&default_cred);
     assert_eq!(merged.user.as_ref().unwrap().username, "proxy_user");
-    assert_eq!(merged.client_cert_path, Some("/proxy/cert.pem".to_string()));
-    assert_eq!(merged.client_key_path, Some("/proxy/key.pem".to_string()));
-    assert_eq!(merged.server_ca_path, Some("/proxy/ca.pem".to_string()));
+    assert_eq!(
+      merged.client_cert_path,
+      Some("/proxy/cert.pem".to_string())
+    );
+    assert_eq!(
+      merged.client_key_path,
+      Some("/proxy/key.pem".to_string())
+    );
+    assert_eq!(
+      merged.server_ca_path,
+      Some("/proxy/ca.pem".to_string())
+    );
   }
 
   // ============== resolve_credential Tests ==============
@@ -1315,10 +1345,7 @@ server_ca_path: /path/to/ca.pem
       upc.user.is_some(),
       "Should inherit password credential from default"
     );
-    assert!(
-      ccc.cert_path.is_none(),
-      "Default has no cert credential"
-    );
+    assert!(ccc.cert_path.is_none(), "Default has no cert credential");
   }
 
   #[test]
@@ -1383,7 +1410,10 @@ server_ca_path: /path/to/ca.pem
       server_ca_path: None,
     });
     let (upc, ccc, _server_ca) = args.resolve_credential(&explicit);
-    assert!(upc.user.is_some(), "Should use explicit password credential");
+    assert!(
+      upc.user.is_some(),
+      "Should use explicit password credential"
+    );
     assert!(ccc.cert_path.is_none(), "Explicit has no cert credential");
   }
 
@@ -1395,8 +1425,14 @@ server_ca_path: /path/to/ca.pem
     };
     // None means inherit, but no default → no credential
     let (upc, ccc, _server_ca) = args.resolve_credential(&None);
-    assert!(upc.user.is_none(), "No default means no password credential");
-    assert!(ccc.cert_path.is_none(), "No default means no cert credential");
+    assert!(
+      upc.user.is_none(),
+      "No default means no password credential"
+    );
+    assert!(
+      ccc.cert_path.is_none(),
+      "No default means no cert credential"
+    );
   }
 
   #[test]
@@ -1755,7 +1791,10 @@ default_credential:
 
     // Simulate the match logic from call()
     let result = utils::parse_connect_target(&parts);
-    assert!(matches!(result, Err(ConnectTargetError::NotConnectMethod)));
+    assert!(matches!(
+      result,
+      Err(ConnectTargetError::NotConnectMethod)
+    ));
 
     // Verify the response that would be built
     let resp = build_error_response(
@@ -1821,20 +1860,15 @@ default_credential:
 
     assert_eq!(resp.status(), http::StatusCode::OK);
 
-    let metrics = resp
-      .extensions()
-      .get::<crate::access_log::ServiceMetrics>();
+    let metrics =
+      resp.extensions().get::<crate::access_log::ServiceMetrics>();
     assert!(
       metrics.is_some(),
       "Response should contain ServiceMetrics"
     );
     let metrics = metrics.unwrap();
-    let has_connect = metrics
-      .iter()
-      .any(|(k, v)| k == "connect_ms" && v == "42");
-    assert!(
-      has_connect,
-      "ServiceMetrics should contain connect_ms=42"
-    );
+    let has_connect =
+      metrics.iter().any(|(k, v)| k == "connect_ms" && v == "42");
+    assert!(has_connect, "ServiceMetrics should contain connect_ms=42");
   }
 }

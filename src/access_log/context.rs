@@ -24,17 +24,11 @@ impl ServiceMetrics {
     Self::default()
   }
 
-  pub fn add(
-    &mut self,
-    key: impl Into<String>,
-    value: impl ToString,
-  ) {
+  pub fn add(&mut self, key: impl Into<String>, value: impl ToString) {
     self.metrics.insert(key.into(), value.to_string());
   }
 
-  pub fn iter(
-    &self,
-  ) -> impl Iterator<Item = (&String, &String)> {
+  pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
     self.metrics.iter()
   }
 
@@ -119,8 +113,7 @@ mod tests {
     sm.add("connect_ms", 10u64);
     assert!(!sm.is_empty());
 
-    let collected: HashMap<&String, &String> =
-      sm.iter().collect();
+    let collected: HashMap<&String, &String> = sm.iter().collect();
     assert_eq!(collected.len(), 2);
     assert_eq!(
       collected.get(&"dns_ms".to_string()),

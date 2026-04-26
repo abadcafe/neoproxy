@@ -6,8 +6,8 @@ use crate::plugin;
 
 pub mod common;
 pub mod http;
-pub mod https;
 pub mod http3;
+pub mod https;
 pub mod socks5;
 
 pub struct ListenerBuilderSet {

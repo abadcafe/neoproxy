@@ -15,7 +15,7 @@ use tokio::{net, task, time::timeout};
 use tower::util as tower_util;
 use tracing::{error, info, warn};
 
-use crate::auth::{ListenerAuthConfig, UserPasswordAuth};
+use crate::auth::UserPasswordAuth;
 use crate::plugin;
 use crate::server::ServerRoutingEntry;
 use crate::shutdown::StreamTracker;
@@ -63,28 +63,22 @@ impl HyperServiceAdaptor {
   }
 
   /// Route a request to the correct service based on Host header.
-  fn route_request(&self, req: &plugin::Request) -> Option<&ServerRoutingEntry> {
-    // Get Host header
+  fn route_request(
+    &self,
+    req: &plugin::Request,
+  ) -> Option<&ServerRoutingEntry> {
+    // Get Host header and strip port if present
     let host = req
       .headers()
       .get(http::header::HOST)
       .and_then(|h| h.to_str().ok())
       .map(|h| h.split(':').next().unwrap_or(h));
 
-    match host {
-      Some(hostname) => {
-        // Find matching server
-        let match_info =
-          neoproxy::routing::find_matching_server(&self.routing_info, hostname);
-        match_info.and_then(|info| {
-          self.routing_table.iter().find(|e| e.name == info.name)
-        })
-      }
-      None => {
-        // No Host header - route to default server
-        self.routing_table.iter().find(|e| e.hostnames.is_empty())
-      }
-    }
+    super::common::route_request_by_hostname(
+      &self.routing_table,
+      &self.routing_info,
+      host,
+    )
   }
 }
 
@@ -128,7 +122,11 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
         (Some(username), crate::access_log::AuthType::Password)
       }
       Ok(None) => (None, crate::access_log::AuthType::None),
-      Err(_) => return Box::pin(async { Ok(build_407_response()) }),
+      Err(_) => {
+        return Box::pin(async {
+          Ok(super::common::build_407_response())
+        });
+      }
     };
 
     let (parts, body) = req.into_parts();
@@ -142,7 +140,9 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       Some(entry) => entry,
       None => {
         // No matching server found - return 404
-        return Box::pin(async { Ok(build_404_response()) });
+        return Box::pin(async {
+          Ok(super::common::build_404_response())
+        });
       }
     };
 
@@ -165,8 +165,8 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
           Err(_) => 500,
         };
 
-        let addr = client_addr
-          .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+        let addr =
+          client_addr.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
 
         // Extract ServiceMetrics from response extensions
         let service_metrics = resp
@@ -199,35 +199,13 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
   }
 }
 
-/// Build a 407 Proxy Authentication Required response.
-fn build_407_response() -> plugin::Response {
-  let empty = http_body_util::Empty::new();
-  let bytes_buf = plugin::BytesBufBodyWrapper::new(empty);
-  let body = plugin::ResponseBody::new(bytes_buf);
-  let mut resp = plugin::Response::new(body);
-  *resp.status_mut() = http::StatusCode::PROXY_AUTHENTICATION_REQUIRED;
-  resp.headers_mut().insert(
-    http::header::PROXY_AUTHENTICATE,
-    http::HeaderValue::from_static("Basic realm=\"proxy\""),
-  );
-  resp
-}
-
-/// Build a 404 Not Found response.
-fn build_404_response() -> plugin::Response {
-  let empty = http_body_util::Empty::new();
-  let bytes_buf = plugin::BytesBufBodyWrapper::new(empty);
-  let body = plugin::ResponseBody::new(bytes_buf);
-  let mut resp = plugin::Response::new(body);
-  *resp.status_mut() = http::StatusCode::NOT_FOUND;
-  resp
-}
-
 /// Check HTTP version and return error if version is not supported.
 ///
 /// HTTP/1.0 is NOT supported - returns 505 HTTP Version Not Supported.
 /// HTTP/1.1 and higher are supported.
-fn check_http_version(version: http::Version) -> Result<(), http::StatusCode> {
+fn check_http_version(
+  version: http::Version,
+) -> Result<(), http::StatusCode> {
   super::common::check_http_version(version)
 }
 
@@ -293,34 +271,15 @@ impl HyperListener {
     ctx: plugin::ListenerBuildContext,
   ) -> Result<Self> {
     // Build routing info from routing table
-    let routing_info: Vec<neoproxy::routing::ServerMatchInfo> = ctx
-      .routing_table
-      .iter()
-      .map(|entry| entry.into())
-      .collect();
+    let routing_info: Vec<neoproxy::routing::ServerMatchInfo> =
+      ctx.routing_table.iter().map(|entry| entry.into()).collect();
 
-    // Get user password auth from first routing entry (for backward compatibility)
-    let user_password_auth =
-      ctx.routing_table.first().map_or_else(UserPasswordAuth::none, |entry| {
-        match &entry.users {
-          Some(users) if !users.is_empty() => {
-            let config = ListenerAuthConfig {
-              users: Some(
-                users
-                  .iter()
-                  .map(|u| crate::auth::listener_auth_config::UserCredential {
-                    username: u.username.clone(),
-                    password: u.password.clone(),
-                  })
-                  .collect(),
-              ),
-              client_ca_path: None,
-            };
-            UserPasswordAuth::from_config(&config)
-          }
-          _ => UserPasswordAuth::none(),
-        }
-      });
+    // Get user password auth from first routing entry
+    let user_password_auth = ctx
+      .routing_table
+      .first()
+      .map(|e| super::common::build_user_password_auth(&e.users))
+      .unwrap_or_else(UserPasswordAuth::none);
 
     // Parse addresses, filtering out invalid ones
     // Note: Config validator catches invalid addresses, but we also filter here for safety
@@ -377,7 +336,11 @@ impl HyperListener {
       service_name: String::new(),
       routing_table: vec![entry],
     };
-    Self::from_args(args, plugin::Service::new(DummyServiceForTest), ctx)
+    Self::from_args(
+      args,
+      plugin::Service::new(DummyServiceForTest),
+      ctx,
+    )
   }
 
   fn serve_addr(
@@ -538,8 +501,7 @@ struct DummyServiceForTest;
 #[cfg(test)]
 impl tower::Service<plugin::Request> for DummyServiceForTest {
   type Error = anyhow::Error;
-  type Future =
-    Pin<Box<dyn Future<Output = Result<plugin::Response>>>>;
+  type Future = Pin<Box<dyn Future<Output = Result<plugin::Response>>>>;
   type Response = plugin::Response;
 
   fn poll_ready(
@@ -550,13 +512,16 @@ impl tower::Service<plugin::Request> for DummyServiceForTest {
   }
 
   fn call(&mut self, _req: plugin::Request) -> Self::Future {
-    Box::pin(async { anyhow::bail!("DummyServiceForTest not implemented") })
+    Box::pin(async {
+      anyhow::bail!("DummyServiceForTest not implemented")
+    })
   }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::auth::ListenerAuthConfig;
   use crate::plugin::Listening;
   use base64::{Engine, engine::general_purpose::STANDARD};
   use std::future::Future;
@@ -617,10 +582,8 @@ addresses:
 
   fn create_test_listener_args_with_invalid() -> plugin::SerializedArgs
   {
-    serde_yaml::from_str(
-      r#"{addresses: ["invalid", "127.0.0.1:0"]}"#,
-    )
-    .unwrap()
+    serde_yaml::from_str(r#"{addresses: ["invalid", "127.0.0.1:0"]}"#)
+      .unwrap()
   }
 
   fn create_test_service() -> plugin::Service {
@@ -858,7 +821,8 @@ addresses:
       routing_table: vec![entry],
     };
     let listener =
-      HyperListener::from_args(args, create_test_service(), ctx).unwrap();
+      HyperListener::from_args(args, create_test_service(), ctx)
+        .unwrap();
     // Verify listener was created with auth from server-level config
     assert!(
       listener
@@ -877,7 +841,7 @@ addresses:
 
   #[test]
   fn test_build_407_response() {
-    let resp = build_407_response();
+    let resp = super::super::common::build_407_response();
     assert_eq!(
       resp.status(),
       http::StatusCode::PROXY_AUTHENTICATION_REQUIRED
@@ -887,7 +851,7 @@ addresses:
 
   #[test]
   fn test_build_404_response() {
-    let resp = build_404_response();
+    let resp = super::super::common::build_404_response();
     assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
   }
 
@@ -995,8 +959,7 @@ addresses:
       &config,
     );
 
-    let client_addr: SocketAddr =
-      "192.168.1.1:54321".parse().unwrap();
+    let client_addr: SocketAddr = "192.168.1.1:54321".parse().unwrap();
     let mut metrics = crate::access_log::ServiceMetrics::new();
     metrics.add("connect_ms", 42u64);
 
@@ -1022,8 +985,7 @@ addresses:
       let entry = entry.unwrap();
       let name = entry.file_name().to_string_lossy().to_string();
       if name.starts_with("hypertest.log") {
-        let content =
-          std::fs::read_to_string(entry.path()).unwrap();
+        let content = std::fs::read_to_string(entry.path()).unwrap();
         assert!(
           content.contains("192.168.1.1:54321"),
           "Should contain client addr"
@@ -1056,8 +1018,7 @@ addresses:
     let args = create_test_listener_args();
     let svc = create_test_service();
     let ctx = create_test_context();
-    let listener =
-      HyperListener::new(args, svc, ctx).unwrap();
+    let listener = HyperListener::new(args, svc, ctx).unwrap();
     // Should compile and create without error
     drop(listener);
   }
@@ -1138,9 +1099,7 @@ addresses:
       resp.status(),
       http::StatusCode::HTTP_VERSION_NOT_SUPPORTED
     );
-    assert!(
-      resp.headers().get(http::header::CONTENT_TYPE).is_some()
-    );
+    assert!(resp.headers().get(http::header::CONTENT_TYPE).is_some());
   }
 
   // ============== Routing Tests ==============
@@ -1190,9 +1149,9 @@ addresses:
     let req = http::Request::builder()
       .method("GET")
       .uri("/test")
-      .body(plugin::RequestBody::new(
-        plugin::BytesBufBodyWrapper::new(http_body_util::Empty::new()),
-      ))
+      .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+        http_body_util::Empty::new(),
+      )))
       .unwrap();
 
     let result = adaptor.route_request(&req);
@@ -1246,9 +1205,9 @@ addresses:
       .method("GET")
       .uri("/test")
       .header(http::header::HOST, "api.example.com")
-      .body(plugin::RequestBody::new(
-        plugin::BytesBufBodyWrapper::new(http_body_util::Empty::new()),
-      ))
+      .body(plugin::RequestBody::new(plugin::BytesBufBodyWrapper::new(
+        http_body_util::Empty::new(),
+      )))
       .unwrap();
 
     let result = adaptor.route_request(&req);

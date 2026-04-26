@@ -26,17 +26,15 @@ fn parse_human_bytes(s: &str) -> Result<u64, String> {
   }
 
   // Find where digits end and unit begins
-  let num_end = s
-    .find(|c: char| !c.is_ascii_digit())
-    .unwrap_or(s.len());
+  let num_end =
+    s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
 
   if num_end == 0 {
     return Err(format!("no number found in '{s}'"));
   }
 
-  let num: u64 = s[..num_end]
-    .parse()
-    .map_err(|e| format!("invalid number: {e}"))?;
+  let num: u64 =
+    s[..num_end].parse().map_err(|e| format!("invalid number: {e}"))?;
 
   let unit = &s[num_end..];
   let multiplier: u64 = match unit {
@@ -69,17 +67,15 @@ fn parse_human_duration(s: &str) -> Result<Duration, String> {
     return Err("empty string".to_string());
   }
 
-  let num_end = s
-    .find(|c: char| !c.is_ascii_digit())
-    .unwrap_or(s.len());
+  let num_end =
+    s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
 
   if num_end == 0 {
     return Err(format!("no number found in '{s}'"));
   }
 
-  let num: u64 = s[..num_end]
-    .parse()
-    .map_err(|e| format!("invalid number: {e}"))?;
+  let num: u64 =
+    s[..num_end].parse().map_err(|e| format!("invalid number: {e}"))?;
 
   let unit = &s[num_end..];
   match unit {
@@ -99,7 +95,8 @@ impl<'de> Deserialize<'de> for HumanDuration {
     D: serde::Deserializer<'de>,
   {
     let s = String::deserialize(deserializer)?;
-    let duration = parse_human_duration(&s).map_err(de::Error::custom)?;
+    let duration =
+      parse_human_duration(&s).map_err(de::Error::custom)?;
     Ok(HumanDuration(duration))
   }
 }
@@ -301,7 +298,10 @@ mod tests {
     // u64::MAX / 60 = 307445734561825860, so anything larger should overflow
     let result: Result<HumanDuration, _> =
       serde_yaml::from_str("307445734561825861m");
-    assert!(result.is_err(), "expected overflow error for large minute value");
+    assert!(
+      result.is_err(),
+      "expected overflow error for large minute value"
+    );
   }
 
   // ============== LogFormat Tests ==============
@@ -464,7 +464,8 @@ format: json
 path_prefix: "http_access.log"
 format: json
 "#;
-    let override_config: AccessLogOverride = serde_yaml::from_str(yaml).unwrap();
+    let override_config: AccessLogOverride =
+      serde_yaml::from_str(yaml).unwrap();
     assert_eq!(
       override_config.path_prefix,
       Some("http_access.log".to_string())
@@ -480,7 +481,8 @@ format: json
   #[test]
   fn test_access_log_override_deserialize_empty() {
     let yaml = "{}";
-    let override_config: AccessLogOverride = serde_yaml::from_str(yaml).unwrap();
+    let override_config: AccessLogOverride =
+      serde_yaml::from_str(yaml).unwrap();
     assert!(override_config.enabled.is_none());
     assert!(override_config.path_prefix.is_none());
     assert!(override_config.format.is_none());

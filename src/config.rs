@@ -220,18 +220,27 @@ impl Config {
 
       // Validate hostnames
       for (idx, hostname) in server.hostnames.iter().enumerate() {
-        let hostname_location = format!("{}.hostnames[{}]", server_location, idx);
+        let hostname_location =
+          format!("{}.hostnames[{}]", server_location, idx);
         self.validate_hostname(hostname, &hostname_location, collector);
       }
 
       // Validate users if present
       if let Some(ref users) = server.users {
-        self.validate_users(users, &format!("{}.users", server_location), collector);
+        self.validate_users(
+          users,
+          &format!("{}.users", server_location),
+          collector,
+        );
       }
 
       // Validate TLS if present
       if let Some(ref tls) = server.tls {
-        self.validate_server_tls(tls, &format!("{}.tls", server_location), collector);
+        self.validate_server_tls(
+          tls,
+          &format!("{}.tls", server_location),
+          collector,
+        );
       }
 
       // Validate service reference
@@ -261,6 +270,22 @@ impl Config {
       }
     }
 
+    // Validate SOCKS5 + hostnames semantic
+    for (server_idx, server) in self.servers.iter().enumerate() {
+      if !server.hostnames.is_empty() {
+        // Check if any listener is SOCKS5 (report error once per server)
+        let has_socks5 =
+          server.listeners.iter().any(|l| l.kind == "socks5");
+        if has_socks5 {
+          collector.add(
+            format!("servers[{}]", server_idx),
+            "hostnames cannot be configured with SOCKS5 listener (SOCKS5 does not support hostname routing)".to_string(),
+            ConfigErrorKind::InvalidFormat,
+          );
+        }
+      }
+    }
+
     // Validate address conflicts across all servers
     self.validate_address_conflicts(collector);
   }
@@ -273,12 +298,17 @@ impl Config {
   /// - Same kind, supports hostname routing: ALLOWED (Task 020 handles routing)
   /// - Same kind, NO hostname routing support (socks5): CONFLICT
   /// - Multiple default servers (empty hostnames) on same address+kind: CONFLICT (CR-003)
-  fn validate_address_conflicts(&self, collector: &mut ConfigErrorCollector) {
-    let mut address_map: HashMap<SocketAddr, Vec<AddressUsage>> = HashMap::new();
+  fn validate_address_conflicts(
+    &self,
+    collector: &mut ConfigErrorCollector,
+  ) {
+    let mut address_map: HashMap<SocketAddr, Vec<AddressUsage>> =
+      HashMap::new();
 
     for server in &self.servers {
       for listener in &server.listeners {
-        let category = match ListenerCategory::from_kind(&listener.kind) {
+        let category = match ListenerCategory::from_kind(&listener.kind)
+        {
           Some(c) => c,
           None => continue, // Unknown kind - already validated elsewhere
         };
@@ -309,25 +339,29 @@ impl Config {
       // Group by transport layer
       let tcp_usages: Vec<_> = usages
         .iter()
-        .filter(|u| u.listener_category.transport_layer() == TransportLayer::Tcp)
+        .filter(|u| {
+          u.listener_category.transport_layer() == TransportLayer::Tcp
+        })
         .collect();
       let udp_usages: Vec<_> = usages
         .iter()
-        .filter(|u| u.listener_category.transport_layer() == TransportLayer::Udp)
+        .filter(|u| {
+          u.listener_category.transport_layer() == TransportLayer::Udp
+        })
         .collect();
 
       // Check TCP conflicts: different kinds = conflict
       if tcp_usages.len() > 1 {
-        let kinds: HashSet<_> = tcp_usages
-          .iter()
-          .map(|u| u.listener_kind.as_str())
-          .collect();
+        let kinds: HashSet<_> =
+          tcp_usages.iter().map(|u| u.listener_kind.as_str()).collect();
 
         if kinds.len() > 1 {
           // Different TCP kinds on same address = conflict
           let details: Vec<_> = tcp_usages
             .iter()
-            .map(|u| format!("{} (server: {})", u.listener_kind, u.server_name))
+            .map(|u| {
+              format!("{} (server: {})", u.listener_kind, u.server_name)
+            })
             .collect();
           collector.add(
             format!("address conflict on {}", addr),
@@ -339,22 +373,26 @@ impl Config {
           );
         } else {
           // Same TCP kind - check for multiple default servers (CR-003)
-          self.check_multiple_default_servers(&tcp_usages, addr, collector);
+          self.check_hostname_routing_conflicts(
+            &tcp_usages,
+            addr,
+            collector,
+          );
         }
       }
 
       // Check UDP conflicts: different kinds = conflict
       if udp_usages.len() > 1 {
-        let kinds: HashSet<_> = udp_usages
-          .iter()
-          .map(|u| u.listener_kind.as_str())
-          .collect();
+        let kinds: HashSet<_> =
+          udp_usages.iter().map(|u| u.listener_kind.as_str()).collect();
 
         if kinds.len() > 1 {
           // Different UDP kinds on same address = conflict
           let details: Vec<_> = udp_usages
             .iter()
-            .map(|u| format!("{} (server: {})", u.listener_kind, u.server_name))
+            .map(|u| {
+              format!("{} (server: {})", u.listener_kind, u.server_name)
+            })
             .collect();
           collector.add(
             format!("address conflict on {}", addr),
@@ -366,59 +404,69 @@ impl Config {
           );
         } else {
           // Same UDP kind - check for multiple default servers (CR-003)
-          self.check_multiple_default_servers(&udp_usages, addr, collector);
+          self.check_hostname_routing_conflicts(
+            &udp_usages,
+            addr,
+            collector,
+          );
         }
-      }
-
-      // Check for socks5 conflicts (no hostname routing support)
-      let socks5_usages: Vec<_> = usages
-        .iter()
-        .filter(|u| u.listener_category == ListenerCategory::Socks5)
-        .collect();
-
-      if socks5_usages.len() > 1 {
-        // Multiple socks5 listeners on same address = conflict
-        let servers: Vec<_> = socks5_usages.iter().map(|u| u.server_name.as_str()).collect();
-        collector.add(
-          format!("address conflict on {}", addr),
-          format!(
-            "SOCKS5 address conflict: multiple servers ({}) on same address (SOCKS5 does not support hostname routing)",
-            servers.join(", ")
-          ),
-          ConfigErrorKind::AddressConflict,
-        );
       }
     }
   }
 
-  /// Check for multiple default servers (empty hostnames) sharing the same address+kind.
+  /// Check for hostname routing conflicts sharing the same address+kind.
   ///
   /// CR-003: Multiple default servers on same (address, kind) causes routing ambiguity.
-  fn check_multiple_default_servers(
+  /// Also detects exact hostname duplicates (case-insensitive, DNS rules).
+  fn check_hostname_routing_conflicts(
     &self,
     usages: &[&AddressUsage],
     addr: SocketAddr,
     collector: &mut ConfigErrorCollector,
   ) {
-    // Count default servers (empty hostnames)
-    let default_servers: Vec<_> = usages
-      .iter()
-      .filter(|u| u.hostnames.is_empty())
-      .collect();
+    let mut default_servers: Vec<&str> = Vec::new();
+    let mut hostname_map: HashMap<String, Vec<&str>> = HashMap::new();
 
+    // Single pass to collect both conflict types
+    for usage in usages {
+      if usage.hostnames.is_empty() {
+        default_servers.push(&usage.server_name);
+      } else {
+        for hostname in &usage.hostnames {
+          let normalized = hostname.to_lowercase(); // DNS is case-insensitive
+          hostname_map
+            .entry(normalized)
+            .or_default()
+            .push(&usage.server_name);
+        }
+      }
+    }
+
+    // Check multiple default servers
     if default_servers.len() > 1 {
-      let servers: Vec<_> = default_servers
-        .iter()
-        .map(|u| u.server_name.as_str())
-        .collect();
       collector.add(
         format!("address conflict on {}", addr),
         format!(
           "multiple default servers ({}) on same address (only one server per address can have empty hostnames)",
-          servers.join(", ")
+          default_servers.join(", ")
         ),
         ConfigErrorKind::AddressConflict,
       );
+    }
+
+    // Check hostname duplicates
+    for (hostname, servers) in hostname_map {
+      if servers.len() > 1 {
+        collector.add(
+          format!("hostname conflict on {}", addr),
+          format!(
+            "'{}' defined in multiple servers ({})",
+            hostname,
+            servers.join(", ")
+          ),
+          ConfigErrorKind::AddressConflict,
+        );
+      }
     }
   }
 
@@ -558,8 +606,11 @@ impl Config {
       service_name: String::new(),
       routing_table: vec![dummy_entry],
     };
-    if let Err(e) = builder(listener.args.clone(), dummy_context.routing_table[0].service.clone(), dummy_context)
-    {
+    if let Err(e) = builder(
+      listener.args.clone(),
+      dummy_context.routing_table[0].service.clone(),
+      dummy_context,
+    ) {
       collector.add(
         args_location,
         e.to_string(),
@@ -737,7 +788,8 @@ impl Config {
           if !content.contains("-----BEGIN PRIVATE KEY-----")
             && !content.contains("-----BEGIN RSA PRIVATE KEY-----")
             && !content.contains("-----BEGIN EC PRIVATE KEY-----")
-            && !content.contains("-----BEGIN ENCRYPTED PRIVATE KEY-----")
+            && !content
+              .contains("-----BEGIN ENCRYPTED PRIVATE KEY-----")
           {
             collector.add(
               format!("{}.key_path", cert_location),
@@ -1154,17 +1206,13 @@ worker_threads: [
 
   #[test]
   fn test_validate_valid_listener() {
-    let args = serde_yaml::from_str(
-      r#"{addresses: ["127.0.0.1:8080"]}"#,
-    )
-    .unwrap();
+    let args =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
     let config = Config {
       servers: vec![Server {
         name: "test_server".to_string(),
-        listeners: vec![Listener {
-          kind: "http".to_string(),
-          args,
-        }],
+        listeners: vec![Listener { kind: "http".to_string(), args }],
         service: "".to_string(),
         ..Default::default()
       }],
@@ -1271,17 +1319,13 @@ worker_threads: [
 
   #[test]
   fn test_validate_valid_address() {
-    let args = serde_yaml::from_str(
-      r#"{addresses: ["127.0.0.1:8080"]}"#,
-    )
-    .unwrap();
+    let args =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
     let config = Config {
       servers: vec![Server {
         name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http".to_string(),
-          args,
-        }],
+        listeners: vec![Listener { kind: "http".to_string(), args }],
         service: "".to_string(),
         ..Default::default()
       }],
@@ -1294,17 +1338,13 @@ worker_threads: [
 
   #[test]
   fn test_validate_invalid_address() {
-    let args = serde_yaml::from_str(
-      r#"{addresses: ["invalid:address"]}"#,
-    )
-    .unwrap();
+    let args =
+      serde_yaml::from_str(r#"{addresses: ["invalid:address"]}"#)
+        .unwrap();
     let config = Config {
       servers: vec![Server {
         name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http".to_string(),
-          args,
-        }],
+        listeners: vec![Listener { kind: "http".to_string(), args }],
         service: "".to_string(),
         ..Default::default()
       }],
@@ -1327,10 +1367,7 @@ worker_threads: [
     let config = Config {
       servers: vec![Server {
         name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http".to_string(),
-          args,
-        }],
+        listeners: vec![Listener { kind: "http".to_string(), args }],
         service: "".to_string(),
         ..Default::default()
       }],
@@ -1349,17 +1386,12 @@ worker_threads: [
   fn test_validate_addresses_non_string() {
     // Non-string items in addresses array cause args parsing error
     // because listener args expect Vec<String>
-    let args = serde_yaml::from_str(
-      r#"{addresses: [123, 456]}"#,
-    )
-    .unwrap();
+    let args =
+      serde_yaml::from_str(r#"{addresses: [123, 456]}"#).unwrap();
     let config = Config {
       servers: vec![Server {
         name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http".to_string(),
-          args,
-        }],
+        listeners: vec![Listener { kind: "http".to_string(), args }],
         service: "".to_string(),
         ..Default::default()
       }],
@@ -1376,14 +1408,12 @@ worker_threads: [
 
   #[test]
   fn test_validate_multiple_services_and_listeners() {
-    let listener_args1: serde_yaml::Value = serde_yaml::from_str(
-      r#"{addresses: ["127.0.0.1:8080"]}"#,
-    )
-    .unwrap();
-    let listener_args2: serde_yaml::Value = serde_yaml::from_str(
-      r#"{addresses: ["127.0.0.1:8081"]}"#,
-    )
-    .unwrap();
+    let listener_args1: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let listener_args2: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8081"]}"#)
+        .unwrap();
     let config = Config {
       services: vec![
         Service {
@@ -1553,17 +1583,12 @@ worker_threads: [
   #[test]
   fn test_validate_addresses_missing_field() {
     // Missing required field 'addresses' causes args parsing error
-    let args = serde_yaml::from_str(
-      r#"{other_field: "value"}"#,
-    )
-    .unwrap();
+    let args =
+      serde_yaml::from_str(r#"{other_field: "value"}"#).unwrap();
     let config = Config {
       servers: vec![Server {
         name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http".to_string(),
-          args,
-        }],
+        listeners: vec![Listener { kind: "http".to_string(), args }],
         service: "".to_string(),
         ..Default::default()
       }],
@@ -1581,17 +1606,11 @@ worker_threads: [
 
   #[test]
   fn test_validate_addresses_empty_array() {
-    let args = serde_yaml::from_str(
-      r#"{addresses: []}"#,
-    )
-    .unwrap();
+    let args = serde_yaml::from_str(r#"{addresses: []}"#).unwrap();
     let config = Config {
       servers: vec![Server {
         name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http".to_string(),
-          args,
-        }],
+        listeners: vec![Listener { kind: "http".to_string(), args }],
         service: "".to_string(),
         ..Default::default()
       }],
@@ -1632,10 +1651,7 @@ worker_threads: [
     let config = Config {
       servers: vec![Server {
         name: "test".to_string(),
-        listeners: vec![Listener {
-          kind: "http".to_string(),
-          args,
-        }],
+        listeners: vec![Listener { kind: "http".to_string(), args }],
         service: "".to_string(),
         ..Default::default()
       }],
@@ -1718,7 +1734,6 @@ worker_threads: [
     // But we can verify the function exists and returns something
     let _opt = CmdOpt::global();
   }
-
 
   // =========================================================================
   // Access Log Config Tests
@@ -1870,12 +1885,450 @@ client_ca_certs:
   fn test_certificate_config_missing_fields() {
     // Missing cert_path
     let yaml = r#"key_path: "/path/to/key.pem""#;
-    let result: Result<CertificateConfig, _> = serde_yaml::from_str(yaml);
+    let result: Result<CertificateConfig, _> =
+      serde_yaml::from_str(yaml);
     assert!(result.is_err());
 
     // Missing key_path
     let yaml = r#"cert_path: "/path/to/cert.pem""#;
-    let result: Result<CertificateConfig, _> = serde_yaml::from_str(yaml);
+    let result: Result<CertificateConfig, _> =
+      serde_yaml::from_str(yaml);
     assert!(result.is_err());
+  }
+
+  // =========================================================================
+  // SOCKS5 Hostname Validation Tests
+  // =========================================================================
+
+  #[test]
+  fn test_validate_socks5_with_hostnames_error() {
+    // SOCKS5 + hostnames should be a semantic error
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "socks_server".to_string(),
+        hostnames: vec!["api.example.com".to_string()], // Invalid with SOCKS5
+        listeners: vec![Listener { kind: "socks5".to_string(), args }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    assert!(!errors.is_empty());
+    // Should have error about hostnames with SOCKS5
+    let found = errors.iter().any(|e| {
+      e.message.contains("hostnames cannot be configured with SOCKS5")
+    });
+    assert!(found, "Should have SOCKS5 hostname error");
+  }
+
+  #[test]
+  fn test_validate_socks5_without_hostnames_ok() {
+    // SOCKS5 without hostnames should be OK
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "socks_server".to_string(),
+        hostnames: vec![], // Empty is OK
+        listeners: vec![Listener { kind: "socks5".to_string(), args }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    // Should NOT have errors about SOCKS5 hostnames
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.message.contains("hostnames cannot be configured with SOCKS5")
+    });
+    assert!(!found, "Should not have SOCKS5 hostname error");
+  }
+
+  #[test]
+  fn test_validate_http_with_hostnames_ok() {
+    // HTTP with hostnames should be OK
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "http_server".to_string(),
+        hostnames: vec!["api.example.com".to_string()],
+        listeners: vec![Listener { kind: "http".to_string(), args }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    assert!(!collector.has_errors());
+  }
+
+  #[test]
+  fn test_validate_socks5_hostname_error_location_uses_index() {
+    // CR-001: Error location should use index format, not server name
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "socks_server".to_string(),
+        hostnames: vec!["api.example.com".to_string()],
+        listeners: vec![Listener { kind: "socks5".to_string(), args }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    let errors = collector.errors();
+    assert!(!errors.is_empty());
+    // Location should use index format "servers[0]" not name format "servers[socks_server]"
+    let error = errors
+      .iter()
+      .find(|e| {
+        e.message.contains("hostnames cannot be configured with SOCKS5")
+      })
+      .expect("Should have SOCKS5 hostname error");
+    assert_eq!(
+      error.location, "servers[0]",
+      "Location should use index format, not name format"
+    );
+  }
+
+  #[test]
+  fn test_validate_socks5_multiple_listeners_single_error() {
+    // CR-002: Multiple SOCKS5 listeners should produce only one error
+    let args1: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#)
+        .unwrap();
+    let args2: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1081"]}"#)
+        .unwrap();
+    let args3: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1082"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "socks_server".to_string(),
+        hostnames: vec!["api.example.com".to_string()],
+        listeners: vec![
+          Listener { kind: "socks5".to_string(), args: args1 },
+          Listener { kind: "socks5".to_string(), args: args2 },
+          Listener { kind: "socks5".to_string(), args: args3 },
+        ],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    let errors = collector.errors();
+    // Count SOCKS5 hostname errors - should be exactly 1, not 3
+    let socks5_hostname_errors: Vec<_> = errors
+      .iter()
+      .filter(|e| {
+        e.message.contains("hostnames cannot be configured with SOCKS5")
+      })
+      .collect();
+    assert_eq!(
+      socks5_hostname_errors.len(),
+      1,
+      "Should have exactly one SOCKS5 hostname error, not one per listener"
+    );
+  }
+
+  // =========================================================================
+  // Hostname Duplicate Detection Tests (Task 002)
+  // =========================================================================
+
+  #[test]
+  fn test_validate_exact_hostname_duplicate_conflict() {
+    // Two servers with same hostname on same address = conflict
+    let args1: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let args2: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![
+        Server {
+          name: "server_a".to_string(),
+          hostnames: vec!["api.example.com".to_string()],
+          listeners: vec![Listener {
+            kind: "http".to_string(),
+            args: args1,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+        Server {
+          name: "server_b".to_string(),
+          hostnames: vec!["api.example.com".to_string()], // Duplicate!
+          listeners: vec![Listener {
+            kind: "http".to_string(),
+            args: args2,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+      ],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.message
+        .contains("'api.example.com' defined in multiple servers")
+    });
+    assert!(found, "Should have hostname conflict error");
+  }
+
+  #[test]
+  fn test_validate_hostname_case_insensitive_conflict() {
+    // Same hostname different case = conflict (DNS is case-insensitive)
+    let args1: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let args2: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![
+        Server {
+          name: "server_a".to_string(),
+          hostnames: vec!["API.EXAMPLE.COM".to_string()],
+          listeners: vec![Listener {
+            kind: "http".to_string(),
+            args: args1,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+        Server {
+          name: "server_b".to_string(),
+          hostnames: vec!["api.example.com".to_string()],
+          listeners: vec![Listener {
+            kind: "http".to_string(),
+            args: args2,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+      ],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.message
+        .contains("'api.example.com' defined in multiple servers")
+    });
+    assert!(
+      found,
+      "Should have case-insensitive hostname conflict error"
+    );
+  }
+
+  #[test]
+  fn test_validate_wildcard_duplicate_conflict() {
+    // Two servers with same wildcard on same address = conflict
+    let args1: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let args2: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![
+        Server {
+          name: "server_a".to_string(),
+          hostnames: vec!["*.example.com".to_string()],
+          listeners: vec![Listener {
+            kind: "http".to_string(),
+            args: args1,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+        Server {
+          name: "server_b".to_string(),
+          hostnames: vec!["*.example.com".to_string()], // Duplicate wildcard!
+          listeners: vec![Listener {
+            kind: "http".to_string(),
+            args: args2,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+      ],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.message.contains("'*.example.com' defined in multiple servers")
+    });
+    assert!(found, "Should have wildcard conflict error");
+  }
+
+  #[test]
+  fn test_validate_wildcard_and_exact_no_conflict() {
+    // Wildcard + exact hostname = NO conflict (exact match takes precedence)
+    let args1: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let args2: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![
+        Server {
+          name: "wildcard".to_string(),
+          hostnames: vec!["*.example.com".to_string()],
+          listeners: vec![Listener {
+            kind: "http".to_string(),
+            args: args1,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+        Server {
+          name: "specific".to_string(),
+          hostnames: vec!["api.example.com".to_string()], // Exact match, OK
+          listeners: vec![Listener {
+            kind: "http".to_string(),
+            args: args2,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+      ],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    // Should NOT have hostname conflict errors
+    let errors = collector.errors();
+    let found = errors
+      .iter()
+      .any(|e| e.message.contains("defined in multiple servers"));
+    assert!(!found, "Wildcard + exact should not be a conflict");
+  }
+
+  #[test]
+  fn test_validate_different_hostnames_no_conflict() {
+    // Multiple servers with different hostnames = OK
+    let args1: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let args2: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![
+        Server {
+          name: "server_a".to_string(),
+          hostnames: vec!["api.example.com".to_string()],
+          listeners: vec![Listener {
+            kind: "http".to_string(),
+            args: args1,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+        Server {
+          name: "server_b".to_string(),
+          hostnames: vec!["web.example.com".to_string()],
+          listeners: vec![Listener {
+            kind: "http".to_string(),
+            args: args2,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+      ],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    // Should NOT have hostname conflict errors
+    let errors = collector.errors();
+    let found = errors
+      .iter()
+      .any(|e| e.message.contains("defined in multiple servers"));
+    assert!(!found, "Different hostnames should not be a conflict");
+  }
+
+  // =========================================================================
+  // SOCKS5 Conflict via Default Server Check Tests (Task 003)
+  // =========================================================================
+
+  #[test]
+  fn test_validate_multiple_socks5_same_address_conflict() {
+    // Multiple SOCKS5 on same address = conflict (via default server check)
+    let args1: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#)
+        .unwrap();
+    let args2: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![
+        Server {
+          name: "socks_a".to_string(),
+          hostnames: vec![], // SOCKS5 has no hostnames
+          listeners: vec![Listener {
+            kind: "socks5".to_string(),
+            args: args1,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+        Server {
+          name: "socks_b".to_string(),
+          hostnames: vec![], // SOCKS5 has no hostnames
+          listeners: vec![Listener {
+            kind: "socks5".to_string(),
+            args: args2,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+      ],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    // Should have "multiple default servers" error (SOCKS5 treated as default)
+    let found = errors
+      .iter()
+      .any(|e| e.message.contains("multiple default servers"));
+    assert!(
+      found,
+      "Should have multiple default servers error for SOCKS5"
+    );
   }
 }

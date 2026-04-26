@@ -19,11 +19,19 @@ use tokio::io;
 enum SendState<S> {
   Idle,
   Sending {
-    fut: Pin<Box<dyn Future<Output = (S, Result<(), StreamError>)> + Send + Sync>>,
+    fut: Pin<
+      Box<
+        dyn Future<Output = (S, Result<(), StreamError>)> + Send + Sync,
+      >,
+    >,
     len: usize,
   },
   Finishing {
-    fut: Pin<Box<dyn Future<Output = (S, Result<(), StreamError>)> + Send + Sync>>,
+    fut: Pin<
+      Box<
+        dyn Future<Output = (S, Result<(), StreamError>)> + Send + Sync,
+      >,
+    >,
   },
 }
 
@@ -168,7 +176,9 @@ macro_rules! impl_h3_async_write {
 /// recv stream type.
 macro_rules! impl_h3_async_read {
   ($send_type:ty, $recv_type:ty) => {
-    impl io::AsyncRead for H3BidirectionalStream<$send_type, $recv_type> {
+    impl io::AsyncRead
+      for H3BidirectionalStream<$send_type, $recv_type>
+    {
       fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut TaskContext<'_>,

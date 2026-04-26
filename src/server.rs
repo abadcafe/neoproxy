@@ -25,8 +25,7 @@ struct DummyServiceForRouting;
 
 impl tower::Service<plugin::Request> for DummyServiceForRouting {
   type Error = anyhow::Error;
-  type Future =
-    Pin<Box<dyn Future<Output = Result<plugin::Response>>>>;
+  type Future = Pin<Box<dyn Future<Output = Result<plugin::Response>>>>;
   type Response = plugin::Response;
 
   fn poll_ready(
@@ -36,12 +35,11 @@ impl tower::Service<plugin::Request> for DummyServiceForRouting {
     std::task::Poll::Ready(Ok(()))
   }
 
-  fn call(
-    &mut self,
-    _req: plugin::Request,
-  ) -> Self::Future {
+  fn call(&mut self, _req: plugin::Request) -> Self::Future {
     Box::pin(async {
-      anyhow::bail!("DummyServiceForRouting should not be called - routing should select actual service")
+      anyhow::bail!(
+        "DummyServiceForRouting should not be called - routing should select actual service"
+      )
     })
   }
 }
@@ -215,7 +213,8 @@ impl PluginSet {
 async fn server_thread_main(shutdown: Arc<sync::Notify>) -> Result<()> {
   let mut ctx = ShutdownContext::new();
   let mut services = HashMap::new();
-  let mut access_log_writers: HashMap<&str, AccessLogWriter> = HashMap::new();
+  let mut access_log_writers: HashMap<&str, AccessLogWriter> =
+    HashMap::new();
 
   // Build all services
   // Note: Config validation ensures all plugins and builders exist
@@ -240,17 +239,15 @@ async fn server_thread_main(shutdown: Arc<sync::Notify>) -> Result<()> {
   // Access log is enabled by default - use AccessLogConfig::default() if not specified
   let default_access_log = AccessLogConfig::default();
   for sc in &Config::global().servers {
-    let effective_access_log = match (
-      &Config::global().access_log,
-      &sc.access_log,
-    ) {
-      (Some(base), Some(override_cfg)) => base.merge(override_cfg),
-      (Some(base), None) => base.clone(),
-      (None, Some(override_cfg)) => {
-        default_access_log.merge(override_cfg)
-      }
-      (None, None) => default_access_log.clone(),
-    };
+    let effective_access_log =
+      match (&Config::global().access_log, &sc.access_log) {
+        (Some(base), Some(override_cfg)) => base.merge(override_cfg),
+        (Some(base), None) => base.clone(),
+        (None, Some(override_cfg)) => {
+          default_access_log.merge(override_cfg)
+        }
+        (None, None) => default_access_log.clone(),
+      };
 
     let access_log_writer = if effective_access_log.enabled {
       Some(AccessLogWriter::new(
@@ -1065,7 +1062,6 @@ mod tests {
       ListenerBuilderSet::global().listener_builder("nonexistent");
     assert!(listener_builder.is_none());
   }
-
 }
 
 // ============================================================================
@@ -1150,7 +1146,10 @@ fn extract_addresses(args: &serde_yaml::Value) -> Vec<String> {
 fn group_servers_by_address_kind(
   servers: &[crate::config::Server],
   services: &HashMap<&str, plugin::Service>,
-  access_log_writers: &HashMap<&str, crate::access_log::AccessLogWriter>,
+  access_log_writers: &HashMap<
+    &str,
+    crate::access_log::AccessLogWriter,
+  >,
 ) -> Vec<SharedListenerGroup> {
   use std::collections::HashMap as StdHashMap;
 
@@ -1247,8 +1246,9 @@ mod shared_address_tests {
 
   impl tower::Service<plugin::Request> for DummyTestService {
     type Error = anyhow::Error;
-    type Future =
-      std::pin::Pin<Box<dyn std::future::Future<Output = Result<plugin::Response>>>>;
+    type Future = std::pin::Pin<
+      Box<dyn std::future::Future<Output = Result<plugin::Response>>>,
+    >;
     type Response = plugin::Response;
 
     fn poll_ready(
@@ -1258,11 +1258,10 @@ mod shared_address_tests {
       std::task::Poll::Ready(Ok(()))
     }
 
-    fn call(
-      &mut self,
-      _req: plugin::Request,
-    ) -> Self::Future {
-      Box::pin(async { anyhow::bail!("DummyTestService not implemented") })
+    fn call(&mut self, _req: plugin::Request) -> Self::Future {
+      Box::pin(async {
+        anyhow::bail!("DummyTestService not implemented")
+      })
     }
   }
 
@@ -1277,8 +1276,10 @@ mod shared_address_tests {
       hostnames: vec![],
       listeners: vec![crate::config::Listener {
         kind: "http".to_string(),
-        args: serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-          .unwrap(),
+        args: serde_yaml::from_str(
+          r#"{addresses: ["127.0.0.1:8080"]}"#,
+        )
+        .unwrap(),
       }],
       service: "echo".to_string(),
       tls: None,
@@ -1289,10 +1290,16 @@ mod shared_address_tests {
     let mut services = HashMap::new();
     services.insert("echo", create_test_service());
 
-    let access_log_writers: HashMap<&str, crate::access_log::AccessLogWriter> =
-      HashMap::new();
+    let access_log_writers: HashMap<
+      &str,
+      crate::access_log::AccessLogWriter,
+    > = HashMap::new();
 
-    let groups = group_servers_by_address_kind(&servers, &services, &access_log_writers);
+    let groups = group_servers_by_address_kind(
+      &servers,
+      &services,
+      &access_log_writers,
+    );
 
     // Should have exactly one group
     assert_eq!(groups.len(), 1);
@@ -1309,8 +1316,10 @@ mod shared_address_tests {
         hostnames: vec![],
         listeners: vec![crate::config::Listener {
           kind: "http".to_string(),
-          args: serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-            .unwrap(),
+          args: serde_yaml::from_str(
+            r#"{addresses: ["127.0.0.1:8080"]}"#,
+          )
+          .unwrap(),
         }],
         service: "echo".to_string(),
         tls: None,
@@ -1322,8 +1331,10 @@ mod shared_address_tests {
         hostnames: vec!["api.example.com".to_string()],
         listeners: vec![crate::config::Listener {
           kind: "http".to_string(),
-          args: serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-            .unwrap(),
+          args: serde_yaml::from_str(
+            r#"{addresses: ["127.0.0.1:8080"]}"#,
+          )
+          .unwrap(),
         }],
         service: "api_service".to_string(),
         tls: None,
@@ -1336,10 +1347,16 @@ mod shared_address_tests {
     services.insert("echo", create_test_service());
     services.insert("api_service", create_test_service());
 
-    let access_log_writers: HashMap<&str, crate::access_log::AccessLogWriter> =
-      HashMap::new();
+    let access_log_writers: HashMap<
+      &str,
+      crate::access_log::AccessLogWriter,
+    > = HashMap::new();
 
-    let groups = group_servers_by_address_kind(&servers, &services, &access_log_writers);
+    let groups = group_servers_by_address_kind(
+      &servers,
+      &services,
+      &access_log_writers,
+    );
 
     // Both servers should be in the same group (same address+kind)
     assert_eq!(groups.len(), 1);
@@ -1357,8 +1374,10 @@ mod shared_address_tests {
         hostnames: vec![],
         listeners: vec![crate::config::Listener {
           kind: "http".to_string(),
-          args: serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-            .unwrap(),
+          args: serde_yaml::from_str(
+            r#"{addresses: ["127.0.0.1:8080"]}"#,
+          )
+          .unwrap(),
         }],
         service: "echo".to_string(),
         tls: None,
@@ -1370,8 +1389,10 @@ mod shared_address_tests {
         hostnames: vec![],
         listeners: vec![crate::config::Listener {
           kind: "https".to_string(),
-          args: serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-            .unwrap(),
+          args: serde_yaml::from_str(
+            r#"{addresses: ["127.0.0.1:8080"]}"#,
+          )
+          .unwrap(),
         }],
         service: "echo".to_string(),
         tls: Some(crate::config::ServerTlsConfig {
@@ -1386,10 +1407,16 @@ mod shared_address_tests {
     let mut services = HashMap::new();
     services.insert("echo", create_test_service());
 
-    let access_log_writers: HashMap<&str, crate::access_log::AccessLogWriter> =
-      HashMap::new();
+    let access_log_writers: HashMap<
+      &str,
+      crate::access_log::AccessLogWriter,
+    > = HashMap::new();
 
-    let groups = group_servers_by_address_kind(&servers, &services, &access_log_writers);
+    let groups = group_servers_by_address_kind(
+      &servers,
+      &services,
+      &access_log_writers,
+    );
 
     // Should have two different groups (different kinds)
     assert_eq!(groups.len(), 2);
@@ -1426,13 +1453,17 @@ mod shared_address_tests {
     ];
 
     // Test exact match
-    let result =
-      neoproxy::routing::find_matching_server(&routing_info, "api.example.com");
+    let result = neoproxy::routing::find_matching_server(
+      &routing_info,
+      "api.example.com",
+    );
     assert_eq!(result.unwrap().name, "api");
 
     // Test fallback to default
-    let result =
-      neoproxy::routing::find_matching_server(&routing_info, "other.example.com");
+    let result = neoproxy::routing::find_matching_server(
+      &routing_info,
+      "other.example.com",
+    );
     assert_eq!(result.unwrap().name, "default");
   }
 }

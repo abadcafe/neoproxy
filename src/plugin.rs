@@ -136,7 +136,8 @@ pub struct ListenerBuildContext {
 /// an alias for shorten complex trait definition.
 pub trait BuildService: Fn(SerializedArgs) -> Result<Service> {}
 
-impl<F> BuildService for F where F: Fn(SerializedArgs) -> Result<Service> {}
+impl<F> BuildService for F where F: Fn(SerializedArgs) -> Result<Service>
+{}
 
 /// an alias for shorten complex trait definition.
 pub trait BuildListener:
@@ -147,7 +148,11 @@ pub trait BuildListener:
 }
 
 impl<F> BuildListener for F where
-  F: Fn(SerializedArgs, Service, ListenerBuildContext) -> Result<Listener>
+  F: Fn(
+      SerializedArgs,
+      Service,
+      ListenerBuildContext,
+    ) -> Result<Listener>
     + Sync
     + Send
 {
@@ -496,7 +501,9 @@ mod tests {
     }
 
     fn call(&mut self, _req: Request) -> Self::Future {
-      Box::pin(async { anyhow::bail!("DummyTestService not implemented") })
+      Box::pin(async {
+        anyhow::bail!("DummyTestService not implemented")
+      })
     }
   }
 
@@ -507,7 +514,9 @@ mod tests {
     ctx: ListenerBuildContext,
   ) -> Result<Listener> {
     // Verify that we received the context
-    assert!(!ctx.service_name.is_empty() || ctx.access_log_writer.is_none());
+    assert!(
+      !ctx.service_name.is_empty() || ctx.access_log_writer.is_none()
+    );
     // Return a dummy listener
     struct DummyListener;
     impl Listening for DummyListener {
@@ -523,7 +532,8 @@ mod tests {
   fn test_build_listener_trait_with_context() {
     // Verify that the BuildListener trait accepts a function with
     // ListenerBuildContext parameter
-    let builder: Box<dyn BuildListener> = Box::new(test_listener_builder);
+    let builder: Box<dyn BuildListener> =
+      Box::new(test_listener_builder);
     let ctx = ListenerBuildContext {
       access_log_writer: None,
       service_name: "my_service".to_string(),

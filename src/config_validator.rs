@@ -404,8 +404,7 @@ mod tests {
   fn test_parse_kind_multiple_dots_listener_context() {
     // Listener kinds now accept simple names without dots
     // Multiple dots should fail for services but pass for listeners (just returns the name)
-    let result =
-      parse_kind("http", "servers[0].listeners[0].kind");
+    let result = parse_kind("http", "servers[0].listeners[0].kind");
     assert!(result.is_ok());
 
     let (plugin, name) = result.unwrap();
@@ -617,17 +616,24 @@ mod tests {
   // =========================================================================
 
   /// Helper function to check if error message contains a substring
-  fn has_error_containing(collector: &ConfigErrorCollector, substring: &str) -> bool {
+  fn has_error_containing(
+    collector: &ConfigErrorCollector,
+    substring: &str,
+  ) -> bool {
     collector.errors().iter().any(|e| e.message.contains(substring))
   }
 
   #[test]
   fn test_address_conflict_tcp_vs_tcp_different_kind() {
     // Two listeners of different TCP kinds on same address should conflict
-    use crate::config::{Config, Server, Listener, Service};
+    use crate::config::{Config, Listener, Server, Service};
 
-    let args1 = serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#).unwrap();
-    let args2 = serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#).unwrap();
+    let args1 =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let args2 =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
 
     let config = Config {
       worker_threads: 1,
@@ -676,12 +682,17 @@ mod tests {
   #[test]
   fn test_address_no_conflict_tcp_vs_udp() {
     // HTTP (TCP) and HTTP/3 (UDP) on same address should NOT conflict
-    use crate::config::{Config, Server, Listener, Service, ServerTlsConfig, CertificateConfig};
+    use crate::config::{
+      CertificateConfig, Config, Listener, Server, ServerTlsConfig,
+      Service,
+    };
 
     // Install CryptoProvider for TLS validation
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let args: serde_yaml::Value = serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8443"]}"#).unwrap();
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8443"]}"#)
+        .unwrap();
 
     let config = Config {
       worker_threads: 1,
@@ -705,14 +716,8 @@ mod tests {
         }),
         users: None,
         listeners: vec![
-          Listener {
-            kind: "http".to_string(),
-            args: args.clone(),
-          },
-          Listener {
-            kind: "http3".to_string(),
-            args: args,
-          },
+          Listener { kind: "http".to_string(), args: args.clone() },
+          Listener { kind: "http3".to_string(), args: args },
         ],
         service: "echo".to_string(),
         access_log: None,
@@ -722,16 +727,22 @@ mod tests {
     let mut collector = ConfigErrorCollector::new();
     config.validate(&mut collector);
     // Should NOT have address conflict errors (may have other errors like missing cert files)
-    let has_address_conflict = has_error_containing(&collector, "address conflict");
-    assert!(!has_address_conflict, "Expected no address conflict, but found one");
+    let has_address_conflict =
+      has_error_containing(&collector, "address conflict");
+    assert!(
+      !has_address_conflict,
+      "Expected no address conflict, but found one"
+    );
   }
 
   #[test]
   fn test_address_same_kind_can_share_with_hostnames() {
     // Same kind (http) CAN share address when they support hostname routing
-    use crate::config::{Config, Server, Listener, Service};
+    use crate::config::{Config, Listener, Server, Service};
 
-    let args: serde_yaml::Value = serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#).unwrap();
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
 
     let config = Config {
       worker_threads: 1,
@@ -774,16 +785,26 @@ mod tests {
     let mut collector = ConfigErrorCollector::new();
     config.validate(&mut collector);
     // Should be VALID - same kind with hostname routing can share address
-    assert!(!collector.has_errors(), "Expected no errors but found: {:?}", collector.errors());
+    assert!(
+      !collector.has_errors(),
+      "Expected no errors but found: {:?}",
+      collector.errors()
+    );
   }
 
   #[test]
   fn test_address_socks5_cannot_share() {
     // socks5 does NOT support hostname routing, so multiple socks5 on same address = CONFLICT
-    use crate::config::{Config, Server, Listener, Service};
+    // This is now caught by the "multiple default servers" check (Task 003)
+    // since SOCKS5 servers have empty hostnames and are treated as default servers
+    use crate::config::{Config, Listener, Server, Service};
 
-    let args1 = serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#).unwrap();
-    let args2 = serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#).unwrap();
+    let args1 =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#)
+        .unwrap();
+    let args2 =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#)
+        .unwrap();
 
     let config = Config {
       worker_threads: 1,
@@ -826,17 +847,25 @@ mod tests {
     let mut collector = ConfigErrorCollector::new();
     config.validate(&mut collector);
     assert!(collector.has_errors());
-    assert!(has_error_containing(&collector, "address conflict"));
+    // SOCKS5 conflict is now caught by "multiple default servers" check
+    assert!(has_error_containing(
+      &collector,
+      "multiple default servers"
+    ));
   }
 
   #[test]
   fn test_address_multiple_http_no_hostnames_conflict() {
     // CR-003: Multiple default servers (empty hostnames) on same address+kind should cause error
     // This causes routing ambiguity - when no Host header matches, which default server handles the request?
-    use crate::config::{Config, Server, Listener, Service};
+    use crate::config::{Config, Listener, Server, Service};
 
-    let args1 = serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#).unwrap();
-    let args2 = serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#).unwrap();
+    let args1 =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let args2 =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
 
     let config = Config {
       worker_threads: 1,
@@ -879,21 +908,34 @@ mod tests {
     let mut collector = ConfigErrorCollector::new();
     config.validate(&mut collector);
     // CR-003: This should be an error - multiple default servers on same address
-    assert!(collector.has_errors(), "Expected error for multiple default servers on same address");
-    assert!(has_error_containing(&collector, "multiple default servers"), "Error should mention multiple default servers");
+    assert!(
+      collector.has_errors(),
+      "Expected error for multiple default servers on same address"
+    );
+    assert!(
+      has_error_containing(&collector, "multiple default servers"),
+      "Error should mention multiple default servers"
+    );
   }
 
   #[test]
   fn test_address_udp_vs_udp_conflict() {
     // Two HTTP/3 listeners on same address should NOT conflict if they support hostname routing
     // (similar to TCP case - same kind can share with hostname routing)
-    use crate::config::{Config, Server, Listener, Service, ServerTlsConfig, CertificateConfig};
+    use crate::config::{
+      CertificateConfig, Config, Listener, Server, ServerTlsConfig,
+      Service,
+    };
 
     // Install CryptoProvider for TLS validation
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let args1 = serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8443"]}"#).unwrap();
-    let args2 = serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8443"]}"#).unwrap();
+    let args1 =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8443"]}"#)
+        .unwrap();
+    let args2 =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8443"]}"#)
+        .unwrap();
 
     let config = Config {
       worker_threads: 1,
@@ -949,7 +991,11 @@ mod tests {
     config.validate(&mut collector);
     // Same UDP kind with hostname routing support is allowed
     // (may have cert file errors but should not have address conflict)
-    let has_address_conflict = has_error_containing(&collector, "address conflict");
-    assert!(!has_address_conflict, "Expected no address conflict for same UDP kind with hostname routing");
+    let has_address_conflict =
+      has_error_containing(&collector, "address conflict");
+    assert!(
+      !has_address_conflict,
+      "Expected no address conflict for same UDP kind with hostname routing"
+    );
   }
 }

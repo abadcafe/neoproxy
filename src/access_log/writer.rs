@@ -239,8 +239,10 @@ mod tests {
   #[test]
   fn test_writer_creation() {
     let dir = tempfile::tempdir().unwrap();
-    let config = make_test_config(dir.path().to_str().unwrap(), "test.log");
-    let writer = AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
+    let config =
+      make_test_config(dir.path().to_str().unwrap(), "test.log");
+    let writer =
+      AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
     // Writer should be created without error
     drop(writer);
   }
@@ -248,8 +250,10 @@ mod tests {
   #[test]
   fn test_writer_write_creates_file() {
     let dir = tempfile::tempdir().unwrap();
-    let config = make_test_config(dir.path().to_str().unwrap(), "test.log");
-    let writer = AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
+    let config =
+      make_test_config(dir.path().to_str().unwrap(), "test.log");
+    let writer =
+      AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
     let entry = make_test_entry();
     writer.write(&entry);
     writer.flush();
@@ -259,10 +263,7 @@ mod tests {
       .unwrap()
       .filter_map(|e| e.ok())
       .filter(|e| {
-        e.file_name()
-          .to_str()
-          .unwrap()
-          .starts_with("test.log")
+        e.file_name().to_str().unwrap().starts_with("test.log")
       })
       .collect();
     assert!(!files.is_empty(), "Should create at least one log file");
@@ -271,8 +272,10 @@ mod tests {
   #[test]
   fn test_writer_write_content() {
     let dir = tempfile::tempdir().unwrap();
-    let config = make_test_config(dir.path().to_str().unwrap(), "test.log");
-    let writer = AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
+    let config =
+      make_test_config(dir.path().to_str().unwrap(), "test.log");
+    let writer =
+      AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
     let entry = make_test_entry();
     writer.write(&entry);
     writer.flush();
@@ -282,10 +285,7 @@ mod tests {
       .unwrap()
       .filter_map(|e| e.ok())
       .filter(|e| {
-        e.file_name()
-          .to_str()
-          .unwrap()
-          .starts_with("test.log")
+        e.file_name().to_str().unwrap().starts_with("test.log")
       })
       .collect();
     assert!(!files.is_empty());
@@ -305,7 +305,8 @@ mod tests {
     config.buffer = HumanBytes(1024 * 1024); // Large buffer
     config.flush = HumanDuration(Duration::from_secs(3600)); // Long interval
 
-    let writer = AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
+    let writer =
+      AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
     let entry = make_test_entry();
     writer.write(&entry);
 
@@ -317,10 +318,7 @@ mod tests {
       .unwrap()
       .filter_map(|e| e.ok())
       .filter(|e| {
-        e.file_name()
-          .to_str()
-          .unwrap()
-          .starts_with("test.log")
+        e.file_name().to_str().unwrap().starts_with("test.log")
       })
       .collect();
     assert!(!files.is_empty());
@@ -336,7 +334,8 @@ mod tests {
     config.max_size = HumanBytes(200); // Very small max
     config.buffer = HumanBytes(1); // Tiny buffer to force writes
 
-    let writer = AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
+    let writer =
+      AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
 
     // Write enough entries to trigger rotation
     for _ in 0..20 {
@@ -350,10 +349,7 @@ mod tests {
       .unwrap()
       .filter_map(|e| e.ok())
       .filter(|e| {
-        e.file_name()
-          .to_str()
-          .unwrap()
-          .starts_with("test.log")
+        e.file_name().to_str().unwrap().starts_with("test.log")
       })
       .collect();
     assert!(
@@ -368,7 +364,8 @@ mod tests {
     let dir = tempfile::tempdir().unwrap();
     let config =
       make_test_config(dir.path().to_str().unwrap(), "access.log");
-    let writer = AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
+    let writer =
+      AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
     let entry = make_test_entry();
     writer.write(&entry);
     writer.flush();
@@ -398,8 +395,10 @@ mod tests {
   #[test]
   fn test_writer_clone_shares_state() {
     let dir = tempfile::tempdir().unwrap();
-    let config = make_test_config(dir.path().to_str().unwrap(), "test.log");
-    let writer1 = AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
+    let config =
+      make_test_config(dir.path().to_str().unwrap(), "test.log");
+    let writer1 =
+      AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
     let writer2 = writer1.clone();
 
     let entry = make_test_entry();
@@ -410,10 +409,7 @@ mod tests {
       .unwrap()
       .filter_map(|e| e.ok())
       .filter(|e| {
-        e.file_name()
-          .to_str()
-          .unwrap()
-          .starts_with("test.log")
+        e.file_name().to_str().unwrap().starts_with("test.log")
       })
       .collect();
     assert!(!files.is_empty());
@@ -426,7 +422,8 @@ mod tests {
       make_test_config(dir.path().to_str().unwrap(), "test.log");
     config.format = LogFormat::Json;
 
-    let writer = AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
+    let writer =
+      AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
     let entry = make_test_entry();
     writer.write(&entry);
     writer.flush();
@@ -435,10 +432,7 @@ mod tests {
       .unwrap()
       .filter_map(|e| e.ok())
       .filter(|e| {
-        e.file_name()
-          .to_str()
-          .unwrap()
-          .starts_with("test.log")
+        e.file_name().to_str().unwrap().starts_with("test.log")
       })
       .collect();
     assert!(!files.is_empty());
@@ -460,7 +454,8 @@ mod tests {
     let config =
       make_test_config(dir.path().to_str().unwrap(), "test.log");
 
-    let writer = AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
+    let writer =
+      AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
     let entry = make_test_entry();
     writer.write(&entry);
 
@@ -469,8 +464,10 @@ mod tests {
     fs::remove_dir_all(dir.path()).ok();
 
     // Create new writer with invalid directory
-    let writer2 =
-      AccessLogWriter::new("/nonexistent/path/that/does/not/exist", &config);
+    let writer2 = AccessLogWriter::new(
+      "/nonexistent/path/that/does/not/exist",
+      &config,
+    );
     writer2.write(&entry);
     // Should not panic, and buffer should be preserved internally
     // (we can't easily test buffer state directly, but this verifies no panic)
@@ -485,7 +482,8 @@ mod tests {
       make_test_config(dir.path().to_str().unwrap(), "test.log");
     config.buffer = HumanBytes(1024 * 1024); // Large buffer so auto-flush doesn't trigger
 
-    let writer = AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
+    let writer =
+      AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
     let entry = make_test_entry();
     writer.write(&entry);
     writer.flush();
@@ -495,17 +493,17 @@ mod tests {
       .unwrap()
       .filter_map(|e| e.ok())
       .filter(|e| {
-        e.file_name()
-          .to_str()
-          .unwrap()
-          .starts_with("test.log")
+        e.file_name().to_str().unwrap().starts_with("test.log")
       })
       .collect();
     assert!(!files.is_empty());
 
     // Re-open file and verify content is there
     let content = fs::read_to_string(files[0].path()).unwrap();
-    assert!(!content.is_empty(), "Content should be persisted after flush");
+    assert!(
+      !content.is_empty(),
+      "Content should be persisted after flush"
+    );
     assert!(
       content.contains("CONNECT example.com:443"),
       "Log content should be persisted, got: {content}"
@@ -522,7 +520,8 @@ mod tests {
     config.buffer = HumanBytes(100); // Very small buffer
     config.flush = HumanDuration(Duration::from_secs(3600)); // Long interval to prevent auto-flush
 
-    let writer = AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
+    let writer =
+      AccessLogWriter::new(dir.path().to_str().unwrap(), &config);
 
     // Write many entries - buffer should not grow beyond reasonable limit
     let entry = make_test_entry();
@@ -539,10 +538,7 @@ mod tests {
       .unwrap()
       .filter_map(|e| e.ok())
       .filter(|e| {
-        e.file_name()
-          .to_str()
-          .unwrap()
-          .starts_with("test.log")
+        e.file_name().to_str().unwrap().starts_with("test.log")
       })
       .collect();
 

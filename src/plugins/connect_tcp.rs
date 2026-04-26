@@ -1456,18 +1456,16 @@ mod tests {
         );
 
         // Response should have ServiceMetrics in extensions
-        let metrics = resp
-          .extensions()
-          .get::<crate::access_log::ServiceMetrics>();
+        let metrics =
+          resp.extensions().get::<crate::access_log::ServiceMetrics>();
         assert!(
           metrics.is_some(),
           "Response should contain ServiceMetrics"
         );
         let metrics = metrics.unwrap();
         // Should have connect_ms at minimum
-        let has_connect = metrics
-          .iter()
-          .any(|(k, _)| k == "connect_ms");
+        let has_connect =
+          metrics.iter().any(|(k, _)| k == "connect_ms");
         assert!(
           has_connect,
           "ServiceMetrics should contain connect_ms"

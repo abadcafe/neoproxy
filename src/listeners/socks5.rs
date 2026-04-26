@@ -28,7 +28,9 @@ use tracing::warn;
 use crate::auth::{ListenerAuthConfig, UserPasswordAuth};
 use crate::plugin;
 use crate::shutdown::StreamTracker;
-use crate::stream::{Socks5UpgradeTrigger, http_status_to_socks5_error};
+use crate::stream::{
+  Socks5UpgradeTrigger, http_status_to_socks5_error,
+};
 use tower::Service;
 
 /// Listener shutdown timeout in seconds.

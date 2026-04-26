@@ -13,10 +13,12 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 
+mod access_log;
 mod auth;
 mod config;
 mod config_validator;
 mod connect_utils;
+mod h3_stream;
 mod http_types;
 mod listeners;
 mod plugin;
@@ -24,8 +26,6 @@ mod plugins;
 mod server;
 mod shutdown;
 mod stream;
-mod h3_stream;
-mod access_log;
 mod tls;
 
 /// Thread check interval for detecting worker thread exit.
@@ -45,9 +45,7 @@ struct LogWriterConfig {
 
 impl Default for LogWriterConfig {
   fn default() -> Self {
-    Self {
-      buffered_lines_limit: 1,
-    }
+    Self { buffered_lines_limit: 1 }
   }
 }
 

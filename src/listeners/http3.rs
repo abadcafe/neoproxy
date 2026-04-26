@@ -61,29 +61,21 @@ const H3_NO_ERROR_CODE: u32 = 0x100;
 /// HTTP/3 Listener configuration arguments
 #[derive(Deserialize, Clone, Debug)]
 pub struct Http3ListenerArgs {
-  /// Listening addresses in "host:port" format (plural for consistency)
+  /// Listening addresses in "host:port" format
   #[serde(default)]
   pub addresses: Vec<String>,
-  /// Single address field (deprecated, for backward compatibility)
-  #[serde(default)]
-  pub address: Option<String>,
   /// QUIC protocol parameters (optional)
   #[serde(default)]
   pub quic: Option<QuicConfigArgs>,
-  // Note: TLS and auth are now at server level via routing table
 }
 
 impl Http3ListenerArgs {
-  /// Get effective addresses, handling backward compatibility
-  pub fn effective_addresses(&self) -> Result<Vec<String>> {
-    if !self.addresses.is_empty() {
-      return Ok(self.addresses.clone());
+  /// Get addresses, returns error if empty.
+  pub fn get_addresses(&self) -> Result<&[String]> {
+    if self.addresses.is_empty() {
+      bail!("'addresses' must be specified and non-empty");
     }
-    if let Some(ref addr) = self.address {
-      // Single address field for backward compatibility
-      return Ok(vec![addr.clone()]);
-    }
-    bail!("either 'addresses' or 'address' must be specified");
+    Ok(&self.addresses)
   }
 }
 
@@ -616,7 +608,7 @@ impl Http3Listener {
 
     // Parse addresses
     let addresses: Vec<SocketAddr> = args
-      .effective_addresses()?
+      .get_addresses()?
       .iter()
       .map(|addr| {
         addr
@@ -631,19 +623,16 @@ impl Http3Listener {
       None => QuicConfig::default(),
     };
 
-    // TLS config is required for HTTP/3 listener - get from first routing entry
-    let server_tls = server_routing_table
-      .first()
-      .and_then(|e| e.tls.as_ref())
-      .ok_or_else(|| {
-        anyhow!(
-          "http3 listener requires server-level tls configuration"
-        )
-      })?;
+    // TLS config is required for HTTP/3 listener
+    // Check that at least one server has TLS configured
+    let has_tls = server_routing_table.iter().any(|e| e.tls.is_some());
+    if !has_tls {
+      bail!("http3 listener requires server-level tls configuration");
+    }
 
-    // Build TLS config with SNI support and HTTP/3 ALPN
+    // Build TLS config from all servers' certificates (SNI-based selection)
     let tls_config =
-      build_tls_server_config(server_tls, vec![H3_ALPN.to_vec()])?;
+      build_tls_server_config(&server_routing_table, vec![H3_ALPN.to_vec()])?;
 
     Ok(plugin::Listener::new(Self {
       addresses,
@@ -1042,7 +1031,6 @@ mod tests {
     // No auth at listener level - it's now at server level
     let args = Http3ListenerArgs {
       addresses: vec!["0.0.0.0:443".to_string()],
-      address: None,
       quic: None,
     };
     // ListenerArgs no longer has auth field - auth is at server level
@@ -1266,12 +1254,13 @@ client_ca_path: /path/to/ca.pem
 
   #[test]
   fn test_http3_listener_args_deserialize_minimal() {
-    // TLS is no longer at listener level
     let yaml = r#"
-address: "0.0.0.0:443"
+addresses:
+  - "0.0.0.0:443"
 "#;
     let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(args.address.as_ref().unwrap(), "0.0.0.0:443");
+    assert_eq!(args.addresses.len(), 1);
+    assert_eq!(args.addresses[0], "0.0.0.0:443");
     assert!(args.quic.is_none());
   }
 
@@ -1280,7 +1269,8 @@ address: "0.0.0.0:443"
     // TLS and auth are no longer at listener level
     // Only QUIC config remains as listener-specific
     let yaml = r#"
-address: "0.0.0.0:443"
+addresses:
+  - "0.0.0.0:443"
 quic:
   max_concurrent_bidi_streams: 200
   max_idle_timeout_ms: 60000
@@ -1289,7 +1279,8 @@ quic:
   receive_window: 20971520
 "#;
     let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(args.address.as_ref().unwrap(), "0.0.0.0:443");
+    assert_eq!(args.addresses.len(), 1);
+    assert_eq!(args.addresses[0], "0.0.0.0:443");
     assert!(args.quic.is_some());
     let quic = args.quic.unwrap();
     assert_eq!(quic.max_concurrent_bidi_streams, Some(200));
@@ -1298,16 +1289,15 @@ quic:
 
   #[test]
   fn test_http3_listener_args_no_required_fields() {
-    // No required fields anymore - addresses/address are optional at parse time
-    // The validation happens in effective_addresses() call
+    // addresses are optional at parse time, validation happens in get_addresses()
     let yaml = r#"{}"#;
     let result: Result<Http3ListenerArgs, _> =
       serde_yaml::from_str(yaml);
     // Parsing should succeed (no required fields)
     assert!(result.is_ok());
     let args = result.unwrap();
-    // But effective_addresses() should fail
-    assert!(args.effective_addresses().is_err());
+    // But get_addresses() should fail
+    assert!(args.get_addresses().is_err());
   }
 
   // ============== Constants Tests ==============
@@ -1671,49 +1661,25 @@ addresses:
   }
 
   #[test]
-  fn test_http3_listener_args_single_address_backward_compat() {
-    // Test that single address field still works for backward compatibility
-    // TLS and auth are now at server level, not listener level
-    let yaml = r#"
-address: "127.0.0.1:8443"
-"#;
-    let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    // Should convert to addresses internally via effective_addresses()
-    assert!(args.address.is_some());
-    assert_eq!(args.address.as_ref().unwrap(), "127.0.0.1:8443");
-    // effective_addresses should return the single address
-    let effective = args.effective_addresses().unwrap();
-    assert_eq!(effective.len(), 1);
-    assert_eq!(effective[0], "127.0.0.1:8443");
-  }
-
-  #[test]
-  fn test_http3_listener_args_effective_addresses_prioritizes_plural() {
-    // When both addresses and address are provided, addresses takes priority
-    // TLS and auth are now at server level, not listener level
+  fn test_http3_listener_args_single_address() {
     let yaml = r#"
 addresses:
   - "127.0.0.1:8443"
-  - "127.0.0.1:8444"
-address: "127.0.0.1:8445"
 "#;
     let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    let effective = args.effective_addresses().unwrap();
-    assert_eq!(effective.len(), 2);
-    assert_eq!(effective[0], "127.0.0.1:8443");
-    assert_eq!(effective[1], "127.0.0.1:8444");
+    assert_eq!(args.addresses.len(), 1);
+    assert_eq!(args.addresses[0], "127.0.0.1:8443");
   }
 
   #[test]
   fn test_http3_listener_args_no_address_error() {
-    // When neither addresses nor address is provided, should return error
-    // TLS and auth are now at server level, not listener level
+    // When addresses is empty, get_addresses should return error
     let yaml = r#"{}"#;
     let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    let result = args.effective_addresses();
+    let result = args.get_addresses();
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("addresses") || err.contains("address"));
+    assert!(err.contains("addresses"));
   }
 
   // ============== Task 011: Remove TLS/Auth from Listener Args Tests ==============

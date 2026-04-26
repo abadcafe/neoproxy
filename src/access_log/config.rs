@@ -3,6 +3,8 @@ use std::time::Duration;
 use byte_unit::Byte;
 use serde::{Deserialize, de};
 
+use crate::config_validator::{ConfigErrorCollector, ConfigErrorKind};
+
 /// Log output format.
 #[derive(Debug, Clone, Copy, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -104,6 +106,54 @@ impl AccessLogConfig {
       buffer: override_config.buffer.unwrap_or(self.buffer),
       flush: override_config.flush.unwrap_or(self.flush),
       max_size: override_config.max_size.unwrap_or(self.max_size),
+    }
+  }
+
+  /// Validate access log configuration.
+  pub fn validate(&self, collector: &mut ConfigErrorCollector) {
+    // Validate buffer minimum size (at least 1KB)
+    if self.buffer.as_u64() < 1024 {
+      collector.add(
+        "access_log.buffer",
+        format!(
+          "buffer size must be at least 1KB, got {} bytes",
+          self.buffer.as_u64()
+        ),
+        ConfigErrorKind::InvalidFormat,
+      );
+    }
+
+    // Validate max_size minimum size (at least 1MB)
+    if self.max_size.as_u64() < 1024 * 1024 {
+      collector.add(
+        "access_log.max_size",
+        format!(
+          "max_size must be at least 1MB, got {} bytes",
+          self.max_size.as_u64()
+        ),
+        ConfigErrorKind::InvalidFormat,
+      );
+    }
+
+    // Validate flush interval (at least 100ms)
+    if self.flush.0 < Duration::from_millis(100) {
+      collector.add(
+        "access_log.flush",
+        format!(
+          "flush interval must be at least 100ms, got {:?}",
+          self.flush.0
+        ),
+        ConfigErrorKind::InvalidFormat,
+      );
+    }
+
+    // Validate path_prefix not empty
+    if self.path_prefix.is_empty() {
+      collector.add(
+        "access_log.path_prefix",
+        "path_prefix cannot be empty".to_string(),
+        ConfigErrorKind::InvalidFormat,
+      );
     }
   }
 }
@@ -356,5 +406,79 @@ format: json
     assert!(override_config.buffer.is_none());
     assert!(override_config.flush.is_none());
     assert!(override_config.max_size.is_none());
+  }
+
+  // ============== Validation Tests ==============
+
+  #[test]
+  fn test_access_log_config_validate_valid() {
+    let config = AccessLogConfig::default();
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    assert!(!collector.has_errors(), "Default config should be valid");
+  }
+
+  #[test]
+  fn test_access_log_config_validate_buffer_too_small() {
+    let config = AccessLogConfig {
+      buffer: Byte::from_u64(512), // Less than 1KB
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors
+      .iter()
+      .any(|e| e.location == "access_log.buffer" && e.message.contains("at least 1KB"));
+    assert!(found, "Should have buffer size validation error");
+  }
+
+  #[test]
+  fn test_access_log_config_validate_max_size_too_small() {
+    let config = AccessLogConfig {
+      max_size: Byte::from_u64(512 * 1024), // Less than 1MB
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors
+      .iter()
+      .any(|e| e.location == "access_log.max_size" && e.message.contains("at least 1MB"));
+    assert!(found, "Should have max_size validation error");
+  }
+
+  #[test]
+  fn test_access_log_config_validate_flush_too_short() {
+    let config = AccessLogConfig {
+      flush: HumanDuration(Duration::from_millis(50)), // Less than 100ms
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors
+      .iter()
+      .any(|e| e.location == "access_log.flush" && e.message.contains("at least 100ms"));
+    assert!(found, "Should have flush interval validation error");
+  }
+
+  #[test]
+  fn test_access_log_config_validate_empty_path_prefix() {
+    let config = AccessLogConfig {
+      path_prefix: String::new(),
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.location == "access_log.path_prefix" && e.message.contains("cannot be empty")
+    });
+    assert!(found, "Should have empty path_prefix validation error");
   }
 }

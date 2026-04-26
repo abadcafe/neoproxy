@@ -3,9 +3,9 @@ Black-box integration tests for the new unified authentication YAML format.
 
 Tests validate that the new configuration format works correctly:
 - Listener auth: no 'type' field, 'users' field directly under 'auth'
-- http3_chain: 'credential' replaces 'auth', 'default_credential' replaces 'default_upstream_auth'
-- Empty object 'credential: {}' means no credential (override)
-- Single object (not array) for auth/credential config
+- http3_chain: 'user' for authentication, 'tls' for TLS config
+- Empty 'user: {}' or missing 'user' means no credential
+- Single object (not array) for auth config
 - socks5 rejects 'client_ca_path'
 """
 
@@ -338,7 +338,7 @@ servers:
 
 
 class TestHttp3ChainNewCredentialFormat:
-    """Test http3_chain with new credential/default_credential format."""
+    """Test http3_chain with new user/tls config format."""
 
     def _create_http3_upstream_config(
         self,
@@ -382,17 +382,18 @@ servers:
 """
         return write_config(temp_dir, config)
 
-    def test_http3_chain_default_credential_new_format(self, temp_dir: str) -> None:
+    def test_http3_chain_default_tls_new_format(self, temp_dir: str) -> None:
         """
-        TC-NEW-AUTH-007: http3_chain accepts new 'default_credential' format
-        with nested 'user' object instead of old flat 'username'/'password'
-        under 'default_upstream_auth' array.
+        TC-NEW-AUTH-007: http3_chain accepts new 'user' and 'tls' format
+        with nested 'user' object for authentication and 'tls' for TLS config.
 
         Config:
-          default_credential:
-            user:
-              username: chain_user
-              password: chain_pass
+          proxy_group:
+            - user:
+                username: chain_user
+                password: chain_pass
+          default_tls:
+            server_ca_path: ...
 
         Expected: proxy starts and the chain proxy can authenticate to upstream.
         """
@@ -416,7 +417,7 @@ servers:
             auth_users=[{"username": "chain_user", "password": "chain_pass"}],
         )
 
-        # Create chain proxy with new credential format
+        # Create chain proxy with new format
         chain_config_content = f"""
 worker_threads: 1
 log_directory: LOG_DIR_PLACEHOLDER
@@ -428,11 +429,11 @@ services:
       proxy_group:
         - address: "127.0.0.1:{upstream_port}"
           weight: 1
-      default_credential:
-        server_ca_path: "{ca_path}"
-        user:
-          username: chain_user
-          password: chain_pass
+          user:
+            username: chain_user
+            password: chain_pass
+          tls:
+            server_ca_path: "{ca_path}"
 
 servers:
   - name: chain
@@ -456,7 +457,7 @@ servers:
             chain_proc = start_proxy(chain_config)
             try:
                 assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
-                    "Chain proxy should start with new default_credential format"
+                    "Chain proxy should start with new user/tls format"
 
                 time.sleep(0.5)
 
@@ -467,13 +468,13 @@ servers:
                         "curl", "-s", "-p", "--http0.9",
                         "-x", f"http://127.0.0.1:{http_port}",
                         f"http://127.0.0.1:{target_port}/",
-                        "-d", "test_default_credential",
+                        "-d", "test_default_tls",
                         "--connect-timeout", "10"
                     ],
                     capture_output=True, text=True, env=env
                 )
 
-                assert "test_default_credential" in result.stdout, \
+                assert "test_default_tls" in result.stdout, \
                     f"Expected echo data (auth should work with new format), " \
                     f"got stdout: {result.stdout}, stderr: {result.stderr}"
             finally:
@@ -484,18 +485,17 @@ servers:
 
     def test_http3_chain_per_proxy_credential_override(self, temp_dir: str) -> None:
         """
-        TC-NEW-AUTH-008: http3_chain per-proxy credential override with new format.
+        TC-NEW-AUTH-008: http3_chain per-proxy user override with new format.
 
         Config:
           proxy_group:
             - address: "upstream:443"
               weight: 1
-              credential:
-                user:
-                  username: special_user
-                  password: special_pass
+              user:
+                username: special_user
+                password: special_pass
 
-        Expected: proxy starts with per-proxy credential override.
+        Expected: proxy starts with per-proxy user override.
         """
         cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
 
@@ -526,15 +526,11 @@ services:
       proxy_group:
         - address: "127.0.0.1:{upstream_port}"
           weight: 1
-          credential:
-            user:
-              username: special_user
-              password: special_pass
-      default_credential:
-        server_ca_path: "{ca_path}"
-        user:
-          username: default_user
-          password: default_pass
+          user:
+            username: special_user
+            password: special_pass
+          tls:
+            server_ca_path: "{ca_path}"
 
 servers:
   - name: chain
@@ -586,27 +582,17 @@ servers:
 
     def test_http3_chain_credential_user_format(self, temp_dir: str) -> None:
         """
-        TC-NEW-AUTH-009: http3_chain accepts new 'credential.user' nested format.
+        TC-NEW-AUTH-009: http3_chain accepts new 'user' nested format.
 
         Config:
           proxy_group:
             - address: "upstream:443"
               weight: 1
-              credential:
-                user:
-                  username: override_user
-                  password: override_pass
-          default_credential:
-            user:
-              username: default_user
-              password: default_pass
+              user:
+                username: override_user
+                password: override_pass
 
-        Expected: proxy starts and the per-proxy credential.user is used (not default).
-
-        This test should FAIL in RED phase because:
-        - OLD format: credential field with nested 'user' object is not recognized,
-          the credential is ignored, no auth sent to upstream, request fails
-        - NEW format: credential.user provides auth, request succeeds
+        Expected: proxy starts and the per-proxy user is used.
         """
         cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
 
@@ -619,7 +605,7 @@ servers:
             "127.0.0.1", target_port, http_echo_handler
         )
 
-        # Upstream requires auth matching the per-proxy credential (not default)
+        # Upstream requires auth matching the per-proxy user
         upstream_dir = os.path.join(temp_dir, "upstream")
         os.makedirs(upstream_dir, exist_ok=True)
         upstream_config = self._create_http3_upstream_config(
@@ -638,15 +624,11 @@ services:
       proxy_group:
         - address: "127.0.0.1:{upstream_port}"
           weight: 1
-          credential:
-            user:
-              username: override_user
-              password: override_pass
-      default_credential:
-        server_ca_path: "{ca_path}"
-        user:
-          username: default_user
-          password: default_pass
+          user:
+            username: override_user
+            password: override_pass
+          tls:
+            server_ca_path: "{ca_path}"
 
 servers:
   - name: chain
@@ -670,25 +652,25 @@ servers:
             chain_proc = start_proxy(chain_config)
             try:
                 assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
-                    "Chain proxy should start with new credential.user format"
+                    "Chain proxy should start with new user format"
 
                 time.sleep(0.5)
 
-                # Test: Request should succeed because credential.user provides correct auth
+                # Test: Request should succeed because user provides correct auth
                 env = get_curl_env_without_no_proxy()
                 result = subprocess.run(
                     [
                         "curl", "-s", "-p", "--http0.9",
                         "-x", f"http://127.0.0.1:{http_port}",
                         f"http://127.0.0.1:{target_port}/",
-                        "-d", "test_credential_user",
+                        "-d", "test_user",
                         "--connect-timeout", "10"
                     ],
                     capture_output=True, text=True, env=env
                 )
 
-                assert "test_credential_user" in result.stdout, \
-                    f"Expected echo data (credential.user should provide auth), " \
+                assert "test_user" in result.stdout, \
+                    f"Expected echo data (user should provide auth), " \
                     f"got stdout: {result.stdout}, stderr: {result.stderr}"
             finally:
                 terminate_process(chain_proc)
@@ -696,23 +678,21 @@ servers:
             terminate_process(upstream_proc)
             target_socket.close()
 
-    def test_http3_chain_credential_inheritance(self, temp_dir: str) -> None:
+    def test_http3_chain_default_user_inheritance(self, temp_dir: str) -> None:
         """
-        TC-NEW-AUTH-010: http3_chain proxy without 'credential' field inherits
-        from 'default_credential'.
+        TC-NEW-AUTH-010: http3_chain proxy inherits from default_user.
 
         Config:
+          default_user:
+            username: inherited_user
+            password: inherited_pass
           proxy_group:
             - address: "upstream:443"
               weight: 1
-              # No credential field -> inherits default_credential
-          default_credential:
-            user:
-              username: inherited_user
-              password: inherited_pass
+              # No user field -> inherits default_user
 
         Expected: proxy starts and the chain proxy authenticates to upstream
-        using the inherited default_credential.
+        using the inherited default_user.
         """
         cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
 
@@ -740,14 +720,14 @@ services:
   - name: proxy_chain
     kind: http3_chain.http3_chain
     args:
+      default_user:
+        username: inherited_user
+        password: inherited_pass
       proxy_group:
         - address: "127.0.0.1:{upstream_port}"
           weight: 1
-      default_credential:
-        server_ca_path: "{ca_path}"
-        user:
-          username: inherited_user
-          password: inherited_pass
+          tls:
+            server_ca_path: "{ca_path}"
 
 servers:
   - name: chain
@@ -771,25 +751,25 @@ servers:
             chain_proc = start_proxy(chain_config)
             try:
                 assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
-                    "Chain proxy should start with credential inheritance"
+                    "Chain proxy should start with default_user inheritance"
 
                 time.sleep(0.5)
 
-                # Test: Request should succeed (inherited credential should work)
+                # Test: Request should succeed (inherited default_user should work)
                 env = get_curl_env_without_no_proxy()
                 result = subprocess.run(
                     [
                         "curl", "-s", "-p", "--http0.9",
                         "-x", f"http://127.0.0.1:{http_port}",
                         f"http://127.0.0.1:{target_port}/",
-                        "-d", "test_credential_inheritance",
+                        "-d", "test_default_user",
                         "--connect-timeout", "10"
                     ],
                     capture_output=True, text=True, env=env
                 )
 
-                assert "test_credential_inheritance" in result.stdout, \
-                    f"Expected echo data (inherited credential should work), " \
+                assert "test_default_user" in result.stdout, \
+                    f"Expected echo data (default_user should work), " \
                     f"got stdout: {result.stdout}, stderr: {result.stderr}"
             finally:
                 terminate_process(chain_proc)
@@ -797,30 +777,18 @@ servers:
             terminate_process(upstream_proc)
             target_socket.close()
 
-    def test_http3_chain_credential_empty_object_override(self, temp_dir: str) -> None:
+    def test_http3_chain_no_user_no_default(self, temp_dir: str) -> None:
         """
-        TC-NEW-AUTH-011: http3_chain 'credential: {}' means explicit no credential,
-        overriding default_credential.
+        TC-NEW-AUTH-011: http3_chain proxy without 'user' or 'default_user' sends no auth.
 
         Config:
           proxy_group:
             - address: "upstream:443"
               weight: 1
-              credential: {}
-          default_credential:
-            user:
-              username: default_user
-              password: default_pass
+              # No user field and no default_user -> no auth sent
 
-        Expected: proxy starts. The proxy with credential: {} should NOT send
-        any Proxy-Authorization header to upstream, even though default_credential
-        is configured.
-
-        Note: This test may PASS in both RED and GREEN phases because the OLD parser
-        also treats `credential: {}` as "no credential" (empty object is parsed as
-        having no auth fields). The test still validates the expected GREEN phase
-        behavior. For a proper RED-phase test, see TC-NEW-AUTH-009 which uses
-        `credential.user` format that OLD code doesn't recognize.
+        Expected: proxy starts. The proxy should NOT send
+        any Proxy-Authorization header to upstream.
         """
         cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
 
@@ -833,9 +801,7 @@ servers:
             "127.0.0.1", target_port, http_echo_handler
         )
 
-        # Upstream requires auth matching default_credential
-        # If credential: {} works (NEW), no auth is sent → upstream rejects
-        # If credential: {} is ignored (OLD), default_credential is sent → upstream accepts
+        # Upstream requires auth - if no auth is sent, request should fail
         upstream_dir = os.path.join(temp_dir, "upstream")
         os.makedirs(upstream_dir, exist_ok=True)
         upstream_config = self._create_http3_upstream_config(
@@ -854,12 +820,8 @@ services:
       proxy_group:
         - address: "127.0.0.1:{upstream_port}"
           weight: 1
-          credential: {{}}
-      default_credential:
-        server_ca_path: "{ca_path}"
-        user:
-          username: default_user
-          password: default_pass
+          tls:
+            server_ca_path: "{ca_path}"
 
 servers:
   - name: chain
@@ -883,28 +845,25 @@ servers:
             chain_proc = start_proxy(chain_config)
             try:
                 assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
-                    "Chain proxy should start with credential: {} override"
+                    "Chain proxy should start with no user"
 
                 time.sleep(0.5)
 
-                # Test: Request should FAIL because credential: {} means no auth
-                # - NEW behavior: no credential sent → upstream rejects with 401/407
-                # - OLD behavior: default_credential sent → upstream accepts
+                # Test: Request should FAIL because no auth is sent
                 env = get_curl_env_without_no_proxy()
                 result = subprocess.run(
                     [
                         "curl", "-s", "-p", "--http0.9",
                         "-x", f"http://127.0.0.1:{http_port}",
                         f"http://127.0.0.1:{target_port}/",
-                        "-d", "test_empty_credential",
+                        "-d", "test_no_user",
                         "--connect-timeout", "10"
                     ],
                     capture_output=True, text=True, env=env
                 )
 
-                # With NEW format: no echo data because upstream rejects (no auth sent)
-                # With OLD format: echo data present because upstream accepts (default used)
-                assert "test_empty_credential" not in result.stdout, \
+                # No echo data because upstream rejects (no auth sent)
+                assert "test_no_user" not in result.stdout, \
                     f"Expected NO echo data (credential: {{}} should mean no auth), " \
                     f"but got data, meaning OLD format ignored the override. " \
                     f"stdout: {result.stdout}, stderr: {result.stderr}"

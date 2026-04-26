@@ -132,10 +132,10 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
-          credential:
-            user:
-              username: user1
-              password: pass1
+          user:
+            username: user1
+            password: pass1
+          tls:
             server_ca_path: "{ca_path}"
 
 servers:
@@ -174,7 +174,7 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
-          credential:
+          tls:
             client_cert_path: "{client_cert_path}"
             client_key_path: "{client_key_path}"
             server_ca_path: "{ca_path}"
@@ -213,22 +213,21 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
-          credential:
-            user:
-              username: user1
-              password: pass1
+          user:
+            username: user1
+            password: pass1
+          tls:
             server_ca_path: "{ca_path}"
 
 servers:
   - name: entry_socks5
+    users:
+      - username: user1
+        password: pass1
     listeners:
       - kind: socks5
         args:
           addresses: ["127.0.0.1:{socks5_port}"]
-          auth:
-            users:
-              - username: user1
-                password: pass1
     service: proxy_chain
 """
     config_path = os.path.join(temp_dir, "entry_socks5_password.yaml")
@@ -256,7 +255,7 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
-          credential:
+          tls:
             client_cert_path: "{client_cert_path}"
             client_key_path: "{client_key_path}"
             server_ca_path: "{ca_path}"
@@ -604,7 +603,7 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
-      default_credential:
+      default_tls:
         server_ca_path: "{ca_path}"
 
 servers:
@@ -641,7 +640,7 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
-      default_credential:
+      default_tls:
         server_ca_path: "{ca_path}"
 
 servers:
@@ -680,10 +679,10 @@ services:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
           weight: 1
-          credential:
-            user:
-              username: wrong_user
-              password: wrong_pass
+          user:
+            username: wrong_user
+            password: wrong_pass
+          tls:
             server_ca_path: "{ca_path}"
 
 servers:

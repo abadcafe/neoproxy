@@ -281,7 +281,7 @@ services:
   args:
     proxy_group:
 {proxy_section}
-    default_credential:
+    default_tls:
       server_ca_path: "{ca_path}"
 
 servers:

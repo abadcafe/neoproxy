@@ -786,16 +786,17 @@ services:
 
 servers:
 - name: http3_server
+  tls:
+    certificates:
+    - cert_path: "{cert_path}"
+      key_path: "{key_path}"
+  users:
+  - username: "testuser"
+    password: "invalid_hash_format_not_bcrypt"
   listeners:
   - kind: http3
     args:
-      address: "0.0.0.0:{proxy_port}"
-      server_cert_path: "{cert_path}"
-      server_key_path: "{key_path}"
-      auth:
-        credentials:
-        - username: "testuser"
-          password_hash: "invalid_hash_format_not_bcrypt"
+      addresses: ["0.0.0.0:{proxy_port}"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "invalid_hash.yaml")

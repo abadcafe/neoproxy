@@ -174,10 +174,10 @@ class TestHTTP3ChainProxy:
 
     def test_http3_chain_missing_ca(self) -> None:
         """
-        TC-CHAIN-004: HTTP/3 Chain with missing CA certificate in default_credential.
+        TC-CHAIN-004: HTTP/3 Chain with missing CA certificate in default_tls.
 
         Target: Verify http3_chain service behavior when CA file is missing.
-        Note: With new config structure, server_ca_path in default_credential is NOT
+        Note: With new config structure, server_ca_path in default_tls is NOT
         validated at startup - validation happens at connection time.
         The service should start successfully and fail only when attempting connections.
         """
@@ -195,7 +195,7 @@ services:
     proxy_group:
     - address: 127.0.0.1:30588
       weight: 1
-    default_credential:
+    default_tls:
       server_ca_path: "/nonexistent/ca.pem"
 
 servers:
@@ -220,14 +220,14 @@ servers:
                 text=False
             )
 
-            # With new config structure, server_ca_path in credential is not
+            # With new config structure, server_ca_path in tls is not
             # validated at startup. The service starts but connections will fail.
             # Verify the service starts (does not crash at config parse time).
             try:
                 return_code = proc.wait(timeout=5)
                 # If it exits, it should be due to other config issues
                 assert False, \
-                    f"Service should start with missing CA in default_credential, got exit code {return_code}"
+                    f"Service should start with missing CA in default_tls, got exit code {return_code}"
             except subprocess.TimeoutExpired:
                 # Service started successfully - this is expected with new format
                 proc.send_signal(signal.SIGTERM)

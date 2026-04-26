@@ -1,13 +1,13 @@
 """
 Certificate configuration refactoring integration tests.
 
-Test target: Verify new certificate config naming and per-proxy server_ca_path.
+Test target: Verify new certificate config naming and per-proxy tls config.
 Test nature: Black-box testing through external interface.
 
 Tests verify:
 1. http3 listener uses server-level TLS configuration
-2. http3_chain accepts server_ca_path inside credential and default_credential
-3. Deep merge of credential with default_credential works correctly
+2. http3_chain accepts server_ca_path inside tls and default_tls
+3. Deep merge of tls with default_tls works correctly
 """
 
 import subprocess
@@ -87,55 +87,60 @@ def create_new_http3_chain_config(
     http_port: int,
     proxy_group: List[Dict[str, Any]],
     temp_dir: str,
-    default_credential: Optional[Dict[str, Any]] = None,
+    default_user: Optional[Dict[str, str]] = None,
+    default_tls: Optional[Dict[str, Any]] = None,
     worker_threads: int = 1,
 ) -> str:
-    """Create HTTP/3 chain config with NEW structure (server_ca_path in credential).
+    """Create HTTP/3 chain config with new structure (user and tls separate).
 
     Args:
         http_port: HTTP listener port.
-        proxy_group: List of dicts with keys: address, port, weight, and optional credential dict.
-            credential dict can have: server_ca_path, client_cert_path, client_key_path,
-            user (dict with username, password).
+        proxy_group: List of dicts with keys: address, port, weight, and optional:
+            - user: dict with username, password
+            - tls: dict with server_ca_path, client_cert_path, client_key_path
         temp_dir: Temp directory for logs.
-        default_credential: Optional default credential dict with same keys as credential.
+        default_user: Optional default user with username, password.
+        default_tls: Optional default TLS config with same keys as tls.
         worker_threads: Worker thread count.
     """
     proxy_lines: list[str] = []
     for pg in proxy_group:
         proxy_lines.append(f"    - address: {pg['address']}:{pg['port']}")
         proxy_lines.append(f"      weight: {pg['weight']}")
-        if "credential" in pg and pg["credential"]:
-            proxy_lines.append("      credential:")
-            cred = pg["credential"]
-            if "user" in cred and cred["user"]:
-                proxy_lines.append("        user:")
-                proxy_lines.append(f"          username: \"{cred['user']['username']}\"")
-                proxy_lines.append(f"          password: \"{cred['user']['password']}\"")
-            if "client_cert_path" in cred and cred["client_cert_path"]:
-                proxy_lines.append(f"        client_cert_path: \"{cred['client_cert_path']}\"")
-            if "client_key_path" in cred and cred["client_key_path"]:
-                proxy_lines.append(f"        client_key_path: \"{cred['client_key_path']}\"")
-            if "server_ca_path" in cred and cred["server_ca_path"]:
-                proxy_lines.append(f"        server_ca_path: \"{cred['server_ca_path']}\"")
+        if "user" in pg and pg["user"]:
+            proxy_lines.append("      user:")
+            proxy_lines.append(f"        username: \"{pg['user']['username']}\"")
+            proxy_lines.append(f"        password: \"{pg['user']['password']}\"")
+        if "tls" in pg and pg["tls"]:
+            proxy_lines.append("      tls:")
+            tls = pg["tls"]
+            if "client_cert_path" in tls and tls["client_cert_path"]:
+                proxy_lines.append(f"        client_cert_path: \"{tls['client_cert_path']}\"")
+            if "client_key_path" in tls and tls["client_key_path"]:
+                proxy_lines.append(f"        client_key_path: \"{tls['client_key_path']}\"")
+            if "server_ca_path" in tls and tls["server_ca_path"]:
+                proxy_lines.append(f"        server_ca_path: \"{tls['server_ca_path']}\"")
 
     proxy_section = "\n".join(proxy_lines)
 
-    default_cred_section = ""
-    if default_credential:
-        default_cred_lines: list[str] = ["    default_credential:"]
-        dc = default_credential
-        if "user" in dc and dc["user"]:
-            default_cred_lines.append("      user:")
-            default_cred_lines.append(f"        username: \"{dc['user']['username']}\"")
-            default_cred_lines.append(f"        password: \"{dc['user']['password']}\"")
-        if "client_cert_path" in dc and dc["client_cert_path"]:
-            default_cred_lines.append(f"      client_cert_path: \"{dc['client_cert_path']}\"")
-        if "client_key_path" in dc and dc["client_key_path"]:
-            default_cred_lines.append(f"      client_key_path: \"{dc['client_key_path']}\"")
-        if "server_ca_path" in dc and dc["server_ca_path"]:
-            default_cred_lines.append(f"      server_ca_path: \"{dc['server_ca_path']}\"")
-        default_cred_section = "\n" + "\n".join(default_cred_lines)
+    default_user_section = ""
+    if default_user:
+        default_user_section = f"""
+    default_user:
+      username: "{default_user['username']}"
+      password: "{default_user['password']}\""""
+
+    default_tls_section = ""
+    if default_tls:
+        default_tls_lines: list[str] = ["    default_tls:"]
+        dt = default_tls
+        if "client_cert_path" in dt and dt["client_cert_path"]:
+            default_tls_lines.append(f"      client_cert_path: \"{dt['client_cert_path']}\"")
+        if "client_key_path" in dt and dt["client_key_path"]:
+            default_tls_lines.append(f"      client_key_path: \"{dt['client_key_path']}\"")
+        if "server_ca_path" in dt and dt["server_ca_path"]:
+            default_tls_lines.append(f"      server_ca_path: \"{dt['server_ca_path']}\"")
+        default_tls_section = "\n" + "\n".join(default_tls_lines)
 
     config_content = f"""worker_threads: {worker_threads}
 log_directory: "{temp_dir}/logs"
@@ -145,7 +150,7 @@ services:
   kind: http3_chain.http3_chain
   args:
     proxy_group:
-{proxy_section}{default_cred_section}
+{proxy_section}{default_user_section}{default_tls_section}
 
 servers:
 - name: http_proxy
@@ -206,19 +211,19 @@ class TestHttp3ListenerNewFieldNames:
 
 
 # ==============================================================================
-# Test: http3_chain server_ca_path in default_credential
+# Test: http3_chain server_ca_path in default_tls
 # ==============================================================================
 
 
-class TestHttp3ChainDefaultCredentialServerCa:
-    """Verify http3_chain accepts server_ca_path in default_credential."""
+class TestHttp3ChainDefaultTlsServerCa:
+    """Verify http3_chain accepts server_ca_path in default_tls."""
 
-    def test_chain_starts_with_default_credential_server_ca(self) -> None:
+    def test_chain_starts_with_default_tls_server_ca(self) -> None:
         """
-        TC-CERT-REFACTOR-002: http3_chain starts with server_ca_path in default_credential.
+        TC-CERT-REFACTOR-002: http3_chain starts with server_ca_path in default_tls.
 
         Verifies the chain service accepts the new config structure where
-        server_ca_path is inside default_credential instead of at service level.
+        server_ca_path is inside default_tls instead of at service level.
         """
         temp_dir = tempfile.mkdtemp()
         http_port = get_unique_port()
@@ -235,7 +240,7 @@ class TestHttp3ChainDefaultCredentialServerCa:
                     "port": h3_port,
                     "weight": 1,
                 }],
-                default_credential={"server_ca_path": ca_path},
+                default_tls={"server_ca_path": ca_path},
                 temp_dir=temp_dir,
             )
 
@@ -255,9 +260,9 @@ class TestHttp3ChainDefaultCredentialServerCa:
 
     def test_chain_starts_with_per_proxy_server_ca(self) -> None:
         """
-        TC-CERT-REFACTOR-003: http3_chain starts with server_ca_path in per-proxy credential.
+        TC-CERT-REFACTOR-003: http3_chain starts with server_ca_path in per-proxy tls.
 
-        Verifies per-proxy credential can contain server_ca_path.
+        Verifies per-proxy tls can contain server_ca_path.
         """
         temp_dir = tempfile.mkdtemp()
         http_port = get_unique_port()
@@ -273,7 +278,7 @@ class TestHttp3ChainDefaultCredentialServerCa:
                     "address": "127.0.0.1",
                     "port": h3_port,
                     "weight": 1,
-                    "credential": {"server_ca_path": ca_path},
+                    "tls": {"server_ca_path": ca_path},
                 }],
                 temp_dir=temp_dir,
             )
@@ -294,19 +299,19 @@ class TestHttp3ChainDefaultCredentialServerCa:
 
 
 # ==============================================================================
-# Test: Deep merge of credential with default_credential
+# Test: Deep merge of tls with default_tls
 # ==============================================================================
 
 
-class TestCredentialDeepMerge:
-    """Verify deep merge behavior between proxy credential and default_credential."""
+class TestTlsDeepMerge:
+    """Verify deep merge behavior between proxy tls and default_tls."""
 
-    def test_data_through_chain_with_default_credential(self) -> None:
+    def test_data_through_chain_with_default_tls(self) -> None:
         """
-        TC-CERT-REFACTOR-004: Data transmission through chain using default_credential.
+        TC-CERT-REFACTOR-004: Data transmission through chain using default_tls.
 
-        Verifies that server_ca_path from default_credential is used when
-        proxy has no credential of its own. End-to-end data test.
+        Verifies that server_ca_path from default_tls is used when
+        proxy has no tls of its own. End-to-end data test.
         """
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
@@ -338,7 +343,7 @@ class TestCredentialDeepMerge:
             assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
-            # Start chain with server_ca_path in default_credential
+            # Start chain with server_ca_path in default_tls
             chain_config = create_new_http3_chain_config(
                 http_port=http_port,
                 proxy_group=[{
@@ -346,7 +351,7 @@ class TestCredentialDeepMerge:
                     "port": h3_port,
                     "weight": 1,
                 }],
-                default_credential={"server_ca_path": ca_path},
+                default_tls={"server_ca_path": ca_path},
                 temp_dir=temp_dir2,
             )
             chain_proc = start_proxy(chain_config)
@@ -385,10 +390,10 @@ class TestCredentialDeepMerge:
 
     def test_per_proxy_ca_overrides_default(self) -> None:
         """
-        TC-CERT-REFACTOR-005: Per-proxy server_ca_path overrides default_credential.
+        TC-CERT-REFACTOR-005: Per-proxy server_ca_path overrides default_tls.
 
-        Verifies that when proxy has its own server_ca_path in credential,
-        it overrides the one from default_credential. End-to-end data test.
+        Verifies that when proxy has its own server_ca_path in tls,
+        it overrides the one from default_tls. End-to-end data test.
         """
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
@@ -420,16 +425,16 @@ class TestCredentialDeepMerge:
             assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
-            # Chain: default_credential has a WRONG ca, per-proxy has the CORRECT ca
+            # Chain: default_tls has a WRONG ca, per-proxy has the CORRECT ca
             chain_config = create_new_http3_chain_config(
                 http_port=http_port,
                 proxy_group=[{
                     "address": "127.0.0.1",
                     "port": h3_port,
                     "weight": 1,
-                    "credential": {"server_ca_path": ca_path},
+                    "tls": {"server_ca_path": ca_path},
                 }],
-                default_credential={"server_ca_path": "/nonexistent/wrong_ca.pem"},
+                default_tls={"server_ca_path": "/nonexistent/wrong_ca.pem"},
                 temp_dir=temp_dir2,
             )
             chain_proc = start_proxy(chain_config)
@@ -467,14 +472,13 @@ class TestCredentialDeepMerge:
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
-    def test_default_credential_user_inherited(self) -> None:
+    def test_default_tls_inherited(self) -> None:
         """
-        TC-CERT-REFACTOR-006: Proxy inherits user from default_credential via deep merge.
+        TC-CERT-REFACTOR-006: Proxy inherits TLS from default_tls via deep merge.
 
-        Verifies that when proxy credential has only server_ca_path,
-        user is inherited from default_credential.
+        Verifies that when proxy has no tls config,
+        server_ca_path is inherited from default_tls.
         This test starts the chain service and verifies it accepts the config.
-        Full auth verification requires an upstream that checks credentials.
         """
         temp_dir = tempfile.mkdtemp()
         http_port = get_unique_port()
@@ -490,11 +494,10 @@ class TestCredentialDeepMerge:
                     "address": "127.0.0.1",
                     "port": h3_port,
                     "weight": 1,
-                    "credential": {"server_ca_path": ca_path},
+                    "user": {"username": "proxy_user", "password": "proxy_pass"},
                 }],
-                default_credential={
-                    "user": {"username": "default_user", "password": "default_pass"},
-                    "server_ca_path": "/some/other/ca.pem",
+                default_tls={
+                    "server_ca_path": ca_path,
                 },
                 temp_dir=temp_dir,
             )
@@ -505,7 +508,7 @@ class TestCredentialDeepMerge:
                 "HTTP listener for chain service failed to start"
 
             assert proxy_proc.poll() is None, \
-                "Chain service should be running with deep-merged credential"
+                "Chain service should be running with deep-merged tls config"
 
         finally:
             if proxy_proc:

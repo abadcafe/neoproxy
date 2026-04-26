@@ -1,12 +1,15 @@
 # =============================================================================
 # NeoProxy Configuration File Example
 # =============================================================================
-# This file demonstrates the new configuration architecture where:
-# - Listener kinds are renamed: http, https, http3, socks5
-# - TLS, auth, and hostnames are configured at server level
-# - Access log is enabled by default
-#
 # Usage: ./neoproxy -c conf/example.yaml
+#
+# Prerequisites:
+#   1. Run ./generate_certs.sh to generate certificates
+#   2. server.crt now contains full chain (server cert + CA cert)
+#   3. Restart neoproxy after regenerating certificates
+#
+# Quick test without proxy chain:
+#   curl http://127.0.0.1:8081/test  (echo server, returns request info)
 
 # -----------------------------------------------------------------------------
 # Global Settings
@@ -44,13 +47,26 @@ services:
   - name: http3_chain
     kind: http3_chain.http3_chain
     args:
+      # Default credentials inherited by proxies without user/tls specified
+      default_user:
+        username: "default_user"
+        password: "default_pass"
+      default_tls:
+        server_ca_path: conf/certs/server-ca.crt
       proxy_group:
+        # Each proxy requires:
+        #   - address: IP:port of upstream proxy
+        #   - hostname: SNI hostname (must match server certificate SAN)
+        #   - weight: Load balancing weight
+        #   - user: (optional) Authentication credentials
+        #   - tls: (optional) TLS client certificate and CA
         - address: 127.0.0.1:9443
+          hostname: "http3.example.com"  # SNI hostname (must match server cert SAN)
           weight: 1
-          credential:
-            user:
-              username: "h3_user"
-              password: "h3_pass"
+          user:
+            username: "h3_user"
+            password: "h3_pass"
+          tls:
             client_cert_path: conf/certs/client.crt
             client_key_path: conf/certs/client.key
             server_ca_path: conf/certs/server-ca.crt
@@ -62,76 +78,24 @@ services:
 # Each server has:
 #   - name: Server identifier for logging
 #   - hostnames: Virtual hostnames for SNI/Host routing (optional)
-#   - tls: Server-level TLS configuration (for https/http3)
-#   - users: Server-level authentication (for http/https/socks5)
+#   - tls: Server-level TLS configuration (required for https/http3)
+#   - users: Server-level authentication (optional)
 #   - listeners: List of listener configurations
 #   - service: Service to route requests to
 
 servers:
-  # HTTP proxy with server-level auth
-  - name: http_proxy
-    hostnames: ["proxy.example.com"]
-    users:
-      - username: "admin"
-        password: "secret"
-    listeners:
-      - kind: http
-        args:
-          addresses: ["127.0.0.1:8081"]
-    service: http3_chain
-
-  # HTTPS + HTTP/3 proxy with server-level TLS
-  - name: https_proxy
-    hostnames: ["secure.example.com"]
-    tls:
-      certificates:
-        - cert_path: conf/certs/server.crt
-          key_path: conf/certs/server.key
-    users:
-      - username: "admin"
-        password: "secret"
-    listeners:
-      - kind: https
-        args:
-          addresses: ["127.0.0.1:8444"]
-      - kind: http3
-        args:
-          addresses: ["127.0.0.1:8444"]
-    service: http3_chain
-
-  # SOCKS5 proxy
-  - name: socks5_proxy
-    users:
-      - username: "socks_user"
-        password: "socks_pass"
-    listeners:
-      - kind: socks5
-        args:
-          addresses: ["127.0.0.1:1081"]
-          handshake_timeout: "10s"
-    service: http3_chain
-
-  # HTTP/3 chain proxy with mTLS
-  - name: http3_chain_proxy
-    hostnames: ["chain.example.com"]
-    tls:
-      certificates:
-        - cert_path: conf/certs/server.crt
-          key_path: conf/certs/server.key
-      client_ca_certs:
-        - conf/certs/client-ca.crt
-    users:
-      - username: "chain_user"
-        password: "chain_pass"
-    listeners:
-      - kind: http3
-        args:
-          addresses: ["127.0.0.1:8443"]
-    service: http3_chain
-
-  # HTTP/3 proxy
+  # ---------------------------------------------------------------------------
+  # HTTP/3 Proxy Server
+  # ---------------------------------------------------------------------------
+  # curl example:
+  #   # Connect through HTTP/3 proxy (requires client certificate)
+  #   curl --proxy https://127.0.0.1:9443 \
+  #        --cacert conf/certs/server-ca.crt \
+  #        --cert conf/certs/client.crt \
+  #        --key conf/certs/client.key \
+  #        -U "h3_user:h3_pass" \
+  #        https://httpbin.org/ip
   - name: http3_proxy
-    hostnames: ["h3.example.com"]
     tls:
       certificates:
         - cert_path: conf/certs/server.crt
@@ -147,8 +111,21 @@ servers:
           addresses: ["127.0.0.1:9443"]
     service: connect_tcp
 
-  # Echo server (default - no hostnames)
-  - name: echo_server
+  # ---------------------------------------------------------------------------
+  # Default Entry Proxy (no auth required)
+  # ---------------------------------------------------------------------------
+  # curl examples:
+  #   # HTTP proxy
+  #   curl --proxy http://127.0.0.1:8080 https://httpbin.org/ip
+  #
+  #   # SOCKS5 proxy
+  #   curl --socks5 127.0.0.1:1081 https://httpbin.org/ip
+  #
+  #   # HTTPS proxy (encrypted connection to proxy)
+  #   curl --proxy https://127.0.0.1:8443 \
+  #        --proxy-cacert conf/certs/server-ca.crt \
+  #        https://httpbin.org/ip
+  - name: default_entry_proxy
     tls:
       certificates:
         - cert_path: conf/certs/server.crt
@@ -156,84 +133,118 @@ servers:
     listeners:
       - kind: http
         args:
-          addresses: ["127.0.0.1:8082"]
+          addresses: ["127.0.0.1:8080"]
       - kind: https
         args:
-          addresses: ["127.0.0.1:8445"]
+          addresses: ["127.0.0.1:8443"]
       - kind: http3
         args:
-          addresses: ["127.0.0.1:8442"]
+          addresses: ["127.0.0.1:8443"]
+      - kind: socks5
+        args:
+          addresses: ["127.0.0.1:1081"]
+          handshake_timeout: "10s"
+    service: http3_chain
+
+  # ---------------------------------------------------------------------------
+  # Echo Server (for testing - returns request details)
+  # ---------------------------------------------------------------------------
+  # curl examples:
+  #   # HTTP echo
+  #   curl http://127.0.0.1:8080/test
+  #   curl -X POST http://127.0.0.1:8080/echo -d "hello world"
+  #
+  #   # HTTPS echo (with SNI hostname)
+  #   curl https://echo.example.com:8443/test \
+  #        --cacert conf/certs/server-ca.crt \
+  #        --resolve echo.example.com:8443:127.0.0.1
+  - name: echo_server
+    hostnames: ["echo.example.com"]
+    tls:
+      certificates:
+        - cert_path: conf/certs/server.crt
+          key_path: conf/certs/server.key
+    listeners:
+      - kind: http
+        args:
+          addresses: ["127.0.0.1:8080"]
+      - kind: https
+        args:
+          addresses: ["127.0.0.1:8443"]
+      - kind: http3
+        args:
+          addresses: ["127.0.0.1:8443"]
+    service: echo
+
+  # ---------------------------------------------------------------------------
+  # Entry Proxy with Authentication
+  # ---------------------------------------------------------------------------
+  # curl examples:
+  #   # HTTP proxy with basic auth
+  #   curl --proxy http://admin:secret@127.0.0.1:8081 https://httpbin.org/ip
+  #
+  #   # HTTPS proxy with auth and SNI
+  #   curl --proxy https://admin:secret@entry.example.com:8444 \
+  #        --proxy-cacert conf/certs/server-ca.crt \
+  #        --resolve entry.example.com:8444:127.0.0.1 \
+  #        https://httpbin.org/ip
+  - name: entry_proxy
+    hostnames: ["entry.example.com"]
+    tls:
+      certificates:
+        - cert_path: conf/certs/server.crt
+          key_path: conf/certs/server.key
+    users:
+      - username: "admin"
+        password: "secret"
+    listeners:
+      - kind: http
+        args:
+          addresses: ["127.0.0.1:8081"]
+      - kind: https
+        args:
+          addresses: ["127.0.0.1:8444"]
+      - kind: http3
+        args:
+          addresses: ["127.0.0.1:8444"]
+    service: http3_chain
+
+  # ---------------------------------------------------------------------------
+  # Default Echo Server (for testing - returns request details)
+  # ---------------------------------------------------------------------------
+  # curl examples:
+  #   # HTTP echo
+  #   curl http://127.0.0.1:8081/test
+  #   curl -X POST -H "Content-Type: application/json" \
+  #        http://127.0.0.1:8081/echo -d '{"message":"hello"}'
+  #
+  #   # HTTPS echo
+  #   curl https://127.0.0.1:8444/test \
+  #        --cacert conf/certs/server-ca.crt -k
+  #
+  #   # SOCKS5 echo
+  #   curl --socks5 127.0.0.1:1082 http://example.com/test
+  - name: default_echo_server
+    tls:
+      certificates:
+        - cert_path: conf/certs/server.crt
+          key_path: conf/certs/server.key
+    listeners:
+      - kind: http
+        args:
+          addresses: ["127.0.0.1:8081"]
+      - kind: https
+        args:
+          addresses: ["127.0.0.1:8444"]
+      - kind: http3
+        args:
+          addresses: ["127.0.0.1:8444"]
       - kind: socks5
         args:
           addresses: ["127.0.0.1:1082"]
           handshake_timeout: "10s"
     service: echo
 
-  # Virtual host routing example - shares port 8080 with default_server
-  - name: api_server
-    hostnames: ["api.example.com"]
-    listeners:
-      - kind: http
-        args:
-          addresses: ["127.0.0.1:8080"]
-    service: echo
-
-  # Default server - matches all unmatched requests
-  - name: default_server
-    listeners:
-      - kind: http
-        args:
-          addresses: ["127.0.0.1:8080"]
-    service: echo
-
-# =============================================================================
-# Migration Guide
-# =============================================================================
-#
-# Listener Kind Names (Old -> New):
-#   hyper.listener -> http
-#   http3.listener -> http3
-#   fast_socks5.listener -> socks5
-#   (new) https
-#
-# Server-Level Configuration:
-#   TLS, auth, and hostnames are now configured at server level, not listener.
-#
-# Before (old format):
-#   servers:
-#     - name: my_server
-#       listeners:
-#         - kind: hyper.listener
-#           args:
-#             addresses: ["127.0.0.1:8080"]
-#             auth:
-#               users:
-#                 - username: admin
-#                   password: secret
-#       service: echo
-#
-# After (new format):
-#   servers:
-#     - name: my_server
-#       users:
-#         - username: admin
-#           password: secret
-#       listeners:
-#         - kind: http
-#           args:
-#             addresses: ["127.0.0.1:8080"]
-#       service: echo
-#
-# HTTP/3 Listener Changes:
-#   - 'address' (singular) deprecated, use 'addresses' (plural)
-#   - 'server_cert_path', 'server_key_path' removed (use server-level tls)
-#   - 'auth' removed (use server-level users)
-#
-# Access Log:
-#   - Enabled by default (no config needed)
-#   - Default path_prefix: "access.log"
-#   - Default format: text
-#
 # =============================================================================
 # Certificate Generation
 # =============================================================================

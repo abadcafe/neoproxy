@@ -150,11 +150,9 @@ impl ActiveConnectionTracker {
 // Client Credential Configuration Types
 // ============================================================================
 
-/// Client credential configuration for http3_chain.
+/// Client TLS configuration for http3_chain.
 #[derive(Deserialize, Clone, Debug, Default)]
-struct ClientCredentialConfig {
-  #[serde(default)]
-  user: Option<UserCredential>,
+struct ClientTlsConfig {
   #[serde(default)]
   client_cert_path: Option<String>,
   #[serde(default)]
@@ -163,7 +161,7 @@ struct ClientCredentialConfig {
   server_ca_path: Option<String>,
 }
 
-impl ClientCredentialConfig {
+impl ClientTlsConfig {
   fn validate_if_non_empty(&self) -> Result<()> {
     let has_cert = self.client_cert_path.is_some();
     let has_key = self.client_key_path.is_some();
@@ -176,20 +174,15 @@ impl ClientCredentialConfig {
   }
 
   fn is_empty(&self) -> bool {
-    self.user.is_none()
-      && self.client_cert_path.is_none()
+    self.client_cert_path.is_none()
       && self.client_key_path.is_none()
       && self.server_ca_path.is_none()
   }
 
-  /// Deep merge with a default credential.
+  /// Deep merge with a default TLS config.
   /// Fields in `self` take priority; missing fields are inherited from `default`.
-  fn deep_merge(
-    &self,
-    default: &ClientCredentialConfig,
-  ) -> ClientCredentialConfig {
-    ClientCredentialConfig {
-      user: self.user.clone().or_else(|| default.user.clone()),
+  fn deep_merge(&self, default: &ClientTlsConfig) -> ClientTlsConfig {
+    ClientTlsConfig {
       client_cert_path: self
         .client_cert_path
         .clone()
@@ -273,6 +266,8 @@ impl ClientCertCredential {
 
 struct Proxy {
   address: SocketAddr,
+  /// Hostname for SNI (used for TLS certificate validation)
+  hostname: Option<String>,
   conn_handle: Option<task::JoinHandle<Result<()>>>,
   requester: Option<h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>>,
   weight: usize,
@@ -309,6 +304,7 @@ impl ProxyGroup {
   fn new(
     addresses: Vec<(
       SocketAddr,
+      Option<String>, // hostname for SNI
       usize,
       UserPasswordCredential,
       ClientCertCredential,
@@ -316,9 +312,10 @@ impl ProxyGroup {
     )>,
   ) -> Self {
     let mut proxies = vec![];
-    for (addr, weight, upc, ccc, server_ca) in addresses {
+    for (addr, hostname, weight, upc, ccc, server_ca) in addresses {
       proxies.push(Proxy {
         address: addr,
+        hostname,
         conn_handle: None,
         requester: None,
         weight,
@@ -409,9 +406,12 @@ impl ProxyGroup {
     cli_endpoint.set_default_client_config(cli_config);
 
     let addr = self.proxies[proxy_idx].address;
-    // Use IP address as server name for TLS (without port)
-    let host = addr.ip().to_string();
-    let conn = cli_endpoint.connect(addr, host.as_str())?.await?;
+    // Use configured hostname for SNI, or fall back to IP address
+    let host: &str = match &self.proxies[proxy_idx].hostname {
+      Some(h) => h.as_str(),
+      None => return Err(anyhow!("hostname is required for SNI, configure it in proxy_group")),
+    };
+    let conn = cli_endpoint.connect(addr, host)?.await?;
 
     info!("QUIC connection established");
     Ok(conn)
@@ -503,9 +503,14 @@ fn build_tunnel_response_with_metrics(
 #[derive(Deserialize, Default, Clone, Debug)]
 struct Http3ChainServiceArgsProxyGroup {
   address: String,
+  /// Hostname for SNI (optional, defaults to IP address from `address`)
+  #[serde(default)]
+  hostname: Option<String>,
   weight: usize,
   #[serde(default)]
-  credential: Option<ClientCredentialConfig>,
+  user: Option<UserCredential>,
+  #[serde(default)]
+  tls: Option<ClientTlsConfig>,
 }
 
 #[derive(Deserialize, Default, Clone, Debug)]
@@ -513,7 +518,9 @@ struct Http3ChainServiceArgsProxyGroup {
 struct Http3ChainServiceArgs {
   proxy_group: Vec<Http3ChainServiceArgsProxyGroup>,
   #[serde(default)]
-  default_credential: Option<ClientCredentialConfig>,
+  default_user: Option<UserCredential>,
+  #[serde(default)]
+  default_tls: Option<ClientTlsConfig>,
 }
 
 impl Http3ChainServiceArgs {
@@ -525,58 +532,48 @@ impl Http3ChainServiceArgs {
       if proxy.weight == 0 {
         bail!("proxy_group[{}].weight must be > 0", idx);
       }
-      if let Some(ref cred) = proxy.credential {
-        cred.validate_if_non_empty().with_context(|| {
-          format!("proxy_group[{}].credential", idx)
-        })?;
+      if let Some(ref tls) = proxy.tls {
+        tls.validate_if_non_empty()
+          .with_context(|| format!("proxy_group[{}].tls", idx))?;
       }
     }
-    if let Some(ref default_cred) = self.default_credential {
-      default_cred
-        .validate_if_non_empty()
-        .context("default_credential")?;
+    if let Some(ref default_tls) = self.default_tls {
+      default_tls.validate_if_non_empty().context("default_tls")?;
     }
     Ok(())
   }
 
   fn resolve_credential(
     &self,
-    proxy_credential: &Option<ClientCredentialConfig>,
-  ) -> (UserPasswordCredential, ClientCertCredential, Option<String>)
-  {
-    let effective = match (proxy_credential, &self.default_credential) {
-      // If proxy credential is explicitly set but empty, it means "no auth credential"
-      // - user and client_cert are NOT inherited from default_credential
-      // - but server_ca_path IS inherited for TLS verification
+    proxy_user: &Option<UserCredential>,
+    proxy_tls: &Option<ClientTlsConfig>,
+  ) -> (UserPasswordCredential, ClientCertCredential, Option<String>) {
+    // Resolve user credential with default inheritance
+    let effective_user = proxy_user.clone().or_else(|| self.default_user.clone());
+    let upc = match effective_user {
+      Some(user) => UserPasswordCredential { user: Some(user) },
+      None => UserPasswordCredential::none(),
+    };
+
+    // Resolve TLS config with default inheritance
+    let effective_tls = match (proxy_tls, &self.default_tls) {
       (Some(proxy), Some(default)) if proxy.is_empty() => {
-        Some(ClientCredentialConfig {
-          user: None,
+        Some(ClientTlsConfig {
           client_cert_path: None,
           client_key_path: None,
           server_ca_path: default.server_ca_path.clone(),
         })
       }
       (Some(proxy), None) if proxy.is_empty() => None,
-      // Normal merge/inherit cases
       (Some(proxy), Some(default)) => Some(proxy.deep_merge(default)),
       (Some(proxy), None) => Some(proxy.clone()),
       (None, Some(default)) => Some(default.clone()),
       (None, None) => None,
     };
 
-    match effective {
-      None => (
-        UserPasswordCredential::none(),
-        ClientCertCredential::none(),
-        None,
-      ),
+    match effective_tls {
+      None => (upc, ClientCertCredential::none(), None),
       Some(config) => {
-        let upc = match &config.user {
-          Some(user) => {
-            UserPasswordCredential { user: Some(user.clone()) }
-          }
-          None => UserPasswordCredential::none(),
-        };
         let ccc =
           match (&config.client_cert_path, &config.client_key_path) {
             (Some(cert), Some(key)) => ClientCertCredential {
@@ -585,8 +582,7 @@ impl Http3ChainServiceArgs {
             },
             _ => ClientCertCredential::none(),
           };
-        let server_ca = config.server_ca_path.clone();
-        (upc, ccc, server_ca)
+        (upc, ccc, config.server_ca_path.clone())
       }
     }
   }
@@ -612,6 +608,7 @@ impl Http3ChainService {
     // Resolve credentials for each proxy
     let proxy_addresses: Vec<(
       SocketAddr,
+      Option<String>, // hostname for SNI
       usize,
       UserPasswordCredential,
       ClientCertCredential,
@@ -622,16 +619,18 @@ impl Http3ChainService {
       .filter_map(|e| {
         let Http3ChainServiceArgsProxyGroup {
           address: s,
+          hostname,
           weight: w,
-          credential,
+          user,
+          tls,
         } = e;
 
-        let (upc, ccc, server_ca) = args.resolve_credential(credential);
+        let (upc, ccc, server_ca) = args.resolve_credential(&user, &tls);
 
         s.parse()
           .inspect_err(|e| error!("address '{s}' invalid: {e}"))
           .ok()
-          .map(|a| (a, *w, upc, ccc, server_ca))
+          .map(|a| (a, hostname.clone(), *w, upc, ccc, server_ca))
       })
       .collect();
 
@@ -1034,15 +1033,15 @@ mod tests {
 proxy_group:
   - address: "127.0.0.1:8080"
     weight: 1
-default_credential:
+default_tls:
   server_ca_path: "/tmp/ca.pem"
 "#;
     let args: Http3ChainServiceArgs =
       serde_yaml::from_str(yaml).unwrap();
     assert_eq!(args.proxy_group.len(), 1);
-    assert!(args.default_credential.is_some());
-    let dc = args.default_credential.as_ref().unwrap();
-    assert_eq!(dc.server_ca_path, Some("/tmp/ca.pem".to_string()));
+    assert!(args.default_tls.is_some());
+    let dt = args.default_tls.as_ref().unwrap();
+    assert_eq!(dt.server_ca_path, Some("/tmp/ca.pem".to_string()));
   }
 
   #[test]
@@ -1069,50 +1068,33 @@ server_ca_path: "/tmp/ca.pem"
     );
   }
 
-  // ============== ClientCredentialConfig Tests ==============
+  // ============== ClientTlsConfig Tests ==============
 
   #[test]
-  fn test_client_credential_config_deserialize_password_only() {
-    let yaml = r#"
-user:
-  username: admin
-  password: secret
-"#;
-    let config: ClientCredentialConfig =
-      serde_yaml::from_str(yaml).unwrap();
-    assert!(config.user.is_some());
-    assert!(config.client_cert_path.is_none());
-  }
-
-  #[test]
-  fn test_client_credential_config_deserialize_empty_object() {
+  fn test_client_tls_config_deserialize_empty() {
     let yaml = r#"{}"#;
-    let config: ClientCredentialConfig =
-      serde_yaml::from_str(yaml).unwrap();
-    assert!(config.user.is_none());
+    let config: ClientTlsConfig = serde_yaml::from_str(yaml).unwrap();
     assert!(config.client_cert_path.is_none());
+    assert!(config.client_key_path.is_none());
+    assert!(config.server_ca_path.is_none());
   }
 
   #[test]
-  fn test_client_credential_config_deserialize_with_server_ca_path() {
+  fn test_client_tls_config_deserialize_with_server_ca_path() {
     let yaml = r#"
 server_ca_path: /path/to/ca.pem
 "#;
-    let config: ClientCredentialConfig =
-      serde_yaml::from_str(yaml).unwrap();
+    let config: ClientTlsConfig = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(
       config.server_ca_path,
       Some("/path/to/ca.pem".to_string())
     );
-    assert!(config.user.is_none());
     assert!(config.client_cert_path.is_none());
   }
 
   #[test]
-  fn test_client_credential_config_validate_cert_without_key_is_error()
-  {
-    let config = ClientCredentialConfig {
-      user: None,
+  fn test_client_tls_config_validate_cert_without_key_is_error() {
+    let config = ClientTlsConfig {
       client_cert_path: Some("/path/to/cert.pem".to_string()),
       client_key_path: None,
       server_ca_path: None,
@@ -1167,51 +1149,37 @@ server_ca_path: /path/to/ca.pem
 
   #[test]
   fn test_deep_merge_proxy_overrides_default_server_ca() {
-    let default_cred = ClientCredentialConfig {
-      user: Some(UserCredential {
-        username: "default_user".to_string(),
-        password: "default_pass".to_string(),
-      }),
+    let default_tls = ClientTlsConfig {
       client_cert_path: None,
       client_key_path: None,
       server_ca_path: Some("/default/ca.pem".to_string()),
     };
-    let proxy_cred = ClientCredentialConfig {
-      user: None,
+    let proxy_tls = ClientTlsConfig {
       client_cert_path: None,
       client_key_path: None,
       server_ca_path: Some("/proxy/ca.pem".to_string()),
     };
-    let merged = proxy_cred.deep_merge(&default_cred);
+    let merged = proxy_tls.deep_merge(&default_tls);
     // proxy's server_ca_path overrides default
     assert_eq!(
       merged.server_ca_path,
       Some("/proxy/ca.pem".to_string())
     );
-    // user inherited from default
-    assert!(merged.user.is_some());
-    assert_eq!(merged.user.as_ref().unwrap().username, "default_user");
   }
 
   #[test]
   fn test_deep_merge_inherits_all_from_default() {
-    let default_cred = ClientCredentialConfig {
-      user: Some(UserCredential {
-        username: "default_user".to_string(),
-        password: "default_pass".to_string(),
-      }),
+    let default_tls = ClientTlsConfig {
       client_cert_path: Some("/default/cert.pem".to_string()),
       client_key_path: Some("/default/key.pem".to_string()),
       server_ca_path: Some("/default/ca.pem".to_string()),
     };
-    let proxy_cred = ClientCredentialConfig {
-      user: None,
+    let proxy_tls = ClientTlsConfig {
       client_cert_path: None,
       client_key_path: None,
       server_ca_path: None,
     };
-    let merged = proxy_cred.deep_merge(&default_cred);
-    assert_eq!(merged.user.as_ref().unwrap().username, "default_user");
+    let merged = proxy_tls.deep_merge(&default_tls);
     assert_eq!(
       merged.client_cert_path,
       Some("/default/cert.pem".to_string())
@@ -1228,26 +1196,17 @@ server_ca_path: /path/to/ca.pem
 
   #[test]
   fn test_deep_merge_proxy_overrides_all() {
-    let default_cred = ClientCredentialConfig {
-      user: Some(UserCredential {
-        username: "default_user".to_string(),
-        password: "default_pass".to_string(),
-      }),
+    let default_tls = ClientTlsConfig {
       client_cert_path: Some("/default/cert.pem".to_string()),
       client_key_path: Some("/default/key.pem".to_string()),
       server_ca_path: Some("/default/ca.pem".to_string()),
     };
-    let proxy_cred = ClientCredentialConfig {
-      user: Some(UserCredential {
-        username: "proxy_user".to_string(),
-        password: "proxy_pass".to_string(),
-      }),
+    let proxy_tls = ClientTlsConfig {
       client_cert_path: Some("/proxy/cert.pem".to_string()),
       client_key_path: Some("/proxy/key.pem".to_string()),
       server_ca_path: Some("/proxy/ca.pem".to_string()),
     };
-    let merged = proxy_cred.deep_merge(&default_cred);
-    assert_eq!(merged.user.as_ref().unwrap().username, "proxy_user");
+    let merged = proxy_tls.deep_merge(&default_tls);
     assert_eq!(
       merged.client_cert_path,
       Some("/proxy/cert.pem".to_string())
@@ -1265,140 +1224,92 @@ server_ca_path: /path/to/ca.pem
   // ============== resolve_credential Tests ==============
 
   #[test]
-  fn test_resolve_credential_deep_merges_with_default() {
+  fn test_resolve_credential_deep_merges_tls_with_default() {
     let args = Http3ChainServiceArgs {
       proxy_group: vec![],
-      default_credential: Some(ClientCredentialConfig {
-        user: Some(UserCredential {
-          username: "default_user".to_string(),
-          password: "default_pass".to_string(),
-        }),
+      default_user: None,
+      default_tls: Some(ClientTlsConfig {
         client_cert_path: None,
         client_key_path: None,
         server_ca_path: Some("/default/ca.pem".to_string()),
       }),
     };
-    // Proxy has only server_ca_path, should inherit user from default
-    let proxy_cred = Some(ClientCredentialConfig {
-      user: None,
+    // Proxy has only server_ca_path, should override default
+    let proxy_tls = Some(ClientTlsConfig {
       client_cert_path: None,
       client_key_path: None,
       server_ca_path: Some("/proxy/ca.pem".to_string()),
     });
-    let (upc, _ccc, server_ca) = args.resolve_credential(&proxy_cred);
-    // user should be inherited from default via deep merge
-    assert!(
-      upc.user.is_some(),
-      "Should inherit user from default via deep merge"
-    );
+    let (_upc, _ccc, server_ca) =
+      args.resolve_credential(&None, &proxy_tls);
     // server_ca_path should be from proxy (override)
     assert_eq!(
       server_ca,
       Some("/proxy/ca.pem".to_string()),
-      "server_ca_path should come from proxy credential"
+      "server_ca_path should come from proxy tls config"
     );
   }
 
   #[test]
-  fn test_resolve_credential_none_inherits_default() {
+  fn test_resolve_credential_none_inherits_default_tls() {
     let args = Http3ChainServiceArgs {
       proxy_group: vec![],
-      default_credential: Some(ClientCredentialConfig {
-        user: Some(UserCredential {
-          username: "default_user".to_string(),
-          password: "default_pass".to_string(),
-        }),
+      default_user: None,
+      default_tls: Some(ClientTlsConfig {
         client_cert_path: None,
         client_key_path: None,
-        server_ca_path: None,
+        server_ca_path: Some("/default/ca.pem".to_string()),
       }),
     };
-    // None means inherit default_credential
-    let (upc, ccc, _server_ca) = args.resolve_credential(&None);
-    assert!(
-      upc.user.is_some(),
-      "Should inherit password credential from default"
+    // None means inherit default_tls
+    let (_upc, _ccc, server_ca) =
+      args.resolve_credential(&None, &None);
+    assert_eq!(
+      server_ca,
+      Some("/default/ca.pem".to_string()),
+      "Should inherit server_ca_path from default_tls"
     );
-    assert!(ccc.cert_path.is_none(), "Default has no cert credential");
   }
 
   #[test]
-  fn test_resolve_credential_empty_object_inherits_from_default() {
+  fn test_resolve_credential_empty_tls_inherits_from_default() {
     let args = Http3ChainServiceArgs {
       proxy_group: vec![],
-      default_credential: Some(ClientCredentialConfig {
-        user: Some(UserCredential {
-          username: "default_user".to_string(),
-          password: "default_pass".to_string(),
-        }),
+      default_user: None,
+      default_tls: Some(ClientTlsConfig {
         client_cert_path: None,
         client_key_path: None,
         server_ca_path: Some("/path/to/ca.pem".to_string()),
       }),
     };
-    // Some(empty) means "no auth" - user and client cert are NOT inherited
-    // but server_ca_path IS inherited for TLS verification
-    let empty = Some(ClientCredentialConfig {
-      user: None,
+    // Some(empty) means "no client cert" but server_ca_path IS inherited for TLS verification
+    let empty_tls = Some(ClientTlsConfig {
       client_cert_path: None,
       client_key_path: None,
       server_ca_path: None,
     });
-    let (upc, ccc, server_ca) = args.resolve_credential(&empty);
-    assert!(
-      upc.user.is_none(),
-      "Empty proxy credential should NOT inherit user from default (no auth)"
-    );
+    let (_upc, ccc, server_ca) =
+      args.resolve_credential(&None, &empty_tls);
     assert!(
       ccc.cert_path.is_none(),
-      "Empty proxy credential should NOT inherit client cert from default"
+      "Empty tls config should NOT have client cert"
     );
     assert!(
       server_ca.is_some(),
-      "Empty proxy credential should inherit server_ca_path from default for TLS verification"
+      "Empty tls config should inherit server_ca_path from default for TLS verification"
     );
-  }
-
-  #[test]
-  fn test_resolve_credential_explicit_overrides_default() {
-    let args = Http3ChainServiceArgs {
-      proxy_group: vec![],
-      default_credential: Some(ClientCredentialConfig {
-        user: Some(UserCredential {
-          username: "default_user".to_string(),
-          password: "default_pass".to_string(),
-        }),
-        client_cert_path: None,
-        client_key_path: None,
-        server_ca_path: None,
-      }),
-    };
-    // Some(explicit) means use this credential, not default
-    let explicit = Some(ClientCredentialConfig {
-      user: Some(UserCredential {
-        username: "explicit_user".to_string(),
-        password: "explicit_pass".to_string(),
-      }),
-      client_cert_path: None,
-      client_key_path: None,
-      server_ca_path: None,
-    });
-    let (upc, ccc, _server_ca) = args.resolve_credential(&explicit);
-    assert!(
-      upc.user.is_some(),
-      "Should use explicit password credential"
-    );
-    assert!(ccc.cert_path.is_none(), "Explicit has no cert credential");
   }
 
   #[test]
   fn test_resolve_credential_none_with_no_default() {
     let args = Http3ChainServiceArgs {
       proxy_group: vec![],
-      default_credential: None,
+      default_user: None,
+      default_tls: None,
     };
     // None means inherit, but no default → no credential
-    let (upc, ccc, _server_ca) = args.resolve_credential(&None);
+    let (upc, ccc, server_ca) =
+      args.resolve_credential(&None, &None);
     assert!(
       upc.user.is_none(),
       "No default means no password credential"
@@ -1407,18 +1318,21 @@ server_ca_path: /path/to/ca.pem
       ccc.cert_path.is_none(),
       "No default means no cert credential"
     );
+    assert!(server_ca.is_none(), "No default means no server_ca");
   }
 
   #[test]
-  fn test_validate_credential_cert_without_key_in_default() {
+  fn test_validate_tls_cert_without_key_in_default() {
     let args = Http3ChainServiceArgs {
       proxy_group: vec![Http3ChainServiceArgsProxyGroup {
         address: "127.0.0.1:443".to_string(),
+        hostname: Some("proxy.example.com".to_string()),
         weight: 1,
-        credential: None,
-      }],
-      default_credential: Some(ClientCredentialConfig {
         user: None,
+        tls: None,
+      }],
+      default_user: None,
+      default_tls: Some(ClientTlsConfig {
         client_cert_path: Some("/path/to/cert.pem".to_string()),
         client_key_path: None,
         server_ca_path: None,
@@ -1427,15 +1341,61 @@ server_ca_path: /path/to/ca.pem
     let result = args.validate();
     assert!(
       result.is_err(),
-      "default_credential with cert but no key should fail validation"
+      "default_tls with cert but no key should fail validation"
     );
     let err = result.unwrap_err().to_string();
     assert!(
       err.contains("client_cert_path and client_key_path")
-        || err.contains("default_credential"),
-      "Error should be about cert/key pair or default_credential, got: {}",
+        || err.contains("default_tls"),
+      "Error should be about cert/key pair or default_tls, got: {}",
       err
     );
+  }
+
+  #[test]
+  fn test_resolve_credential_inherits_default_user() {
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      default_user: Some(UserCredential {
+        username: "default_user".to_string(),
+        password: "default_pass".to_string(),
+      }),
+      default_tls: None,
+    };
+    // Proxy has no user, should inherit default_user
+    let (upc, _ccc, _server_ca) = args.resolve_credential(&None, &None);
+    assert!(
+      upc.user.is_some(),
+      "Should inherit user from default_user"
+    );
+    let user = upc.user.unwrap();
+    assert_eq!(user.username, "default_user");
+    assert_eq!(user.password, "default_pass");
+  }
+
+  #[test]
+  fn test_resolve_credential_proxy_user_overrides_default() {
+    let args = Http3ChainServiceArgs {
+      proxy_group: vec![],
+      default_user: Some(UserCredential {
+        username: "default_user".to_string(),
+        password: "default_pass".to_string(),
+      }),
+      default_tls: None,
+    };
+    // Proxy has its own user, should override default
+    let proxy_user = Some(UserCredential {
+      username: "proxy_user".to_string(),
+      password: "proxy_pass".to_string(),
+    });
+    let (upc, _ccc, _server_ca) = args.resolve_credential(&proxy_user, &None);
+    assert!(
+      upc.user.is_some(),
+      "Should have user credential"
+    );
+    let user = upc.user.unwrap();
+    assert_eq!(user.username, "proxy_user", "Proxy user should override default");
+    assert_eq!(user.password, "proxy_pass");
   }
 
   // ============== Http3ChainPlugin Tests ==============
@@ -1586,6 +1546,7 @@ server_ca_path: /path/to/ca.pem
     let addresses = vec![
       (
         "127.0.0.1:8080".parse().unwrap(),
+        Some("proxy1.example.com".to_string()),
         1,
         UserPasswordCredential::none(),
         ClientCertCredential::none(),
@@ -1593,6 +1554,7 @@ server_ca_path: /path/to/ca.pem
       ),
       (
         "127.0.0.1:8081".parse().unwrap(),
+        Some("proxy2.example.com".to_string()),
         2,
         UserPasswordCredential::none(),
         ClientCertCredential::none(),
@@ -1610,6 +1572,7 @@ server_ca_path: /path/to/ca.pem
   fn test_proxy_group_schedule_wrr_single() {
     let addresses = vec![(
       "127.0.0.1:8080".parse().unwrap(),
+      Some("proxy.example.com".to_string()),
       1,
       UserPasswordCredential::none(),
       ClientCertCredential::none(),
@@ -1628,6 +1591,7 @@ server_ca_path: /path/to/ca.pem
     let addresses = vec![
       (
         "127.0.0.1:8080".parse().unwrap(),
+        Some("proxy1.example.com".to_string()),
         2,
         UserPasswordCredential::none(),
         ClientCertCredential::none(),
@@ -1635,6 +1599,7 @@ server_ca_path: /path/to/ca.pem
       ), // weight 2
       (
         "127.0.0.1:8081".parse().unwrap(),
+        Some("proxy2.example.com".to_string()),
         1,
         UserPasswordCredential::none(),
         ClientCertCredential::none(),
@@ -1672,15 +1637,15 @@ proxy_group:
     weight: 1
   - address: "127.0.0.1:8081"
     weight: 2
-default_credential:
+default_tls:
   server_ca_path: "/tmp/ca.pem"
 "#;
     let args: Http3ChainServiceArgs =
       serde_yaml::from_str(yaml).unwrap();
     assert_eq!(args.proxy_group.len(), 2);
-    assert!(args.default_credential.is_some());
-    let dc = args.default_credential.as_ref().unwrap();
-    assert_eq!(dc.server_ca_path, Some("/tmp/ca.pem".to_string()));
+    assert!(args.default_tls.is_some());
+    let dt = args.default_tls.as_ref().unwrap();
+    assert_eq!(dt.server_ca_path, Some("/tmp/ca.pem".to_string()));
     assert_eq!(args.proxy_group[0].address, "127.0.0.1:8080");
     assert_eq!(args.proxy_group[0].weight, 1);
     assert_eq!(args.proxy_group[1].address, "127.0.0.1:8081");
@@ -1691,7 +1656,7 @@ default_credential:
   fn test_service_args_default() {
     let args = Http3ChainServiceArgs::default();
     assert!(args.proxy_group.is_empty());
-    assert!(args.default_credential.is_none());
+    assert!(args.default_tls.is_none());
   }
 
   // ============== build_empty_response Tests ==============

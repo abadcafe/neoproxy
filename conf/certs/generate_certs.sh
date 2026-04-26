@@ -24,17 +24,21 @@ openssl req -x509 -new -nodes -key client-ca.key -sha256 -days 3650 \
 echo "=== 生成服务器证书 (EKU: serverAuth) ==="
 openssl genrsa -out server.key 2048
 openssl req -new -key server.key -out server.csr \
-  -subj "/CN=localhost/O=NeoProxy/C=CN"
+  -subj "/CN=*.example.com/O=NeoProxy/C=CN"
 
 cat > server.ext << 'EXT'
 basicConstraints = CA:FALSE
 keyUsage = digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth
-subjectAltName = DNS:localhost, IP:127.0.0.1
+subjectAltName = DNS:*.example.com
 EXT
 
 openssl x509 -req -in server.csr -CA server-ca.crt -CAkey server-ca.key \
   -CAcreateserial -out server.crt -days 3650 -sha256 -extfile server.ext
+
+# 将 CA 证书追加到服务器证书，形成完整证书链
+# 这样 TLS 握手时可以发送完整的证书链
+cat server-ca.crt >> server.crt
 
 echo "=== 生成客户端证书 (EKU: clientAuth) ==="
 openssl genrsa -out client.key 2048

@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use hyper::{body as hyper_body, service as hyper_svc};
 use hyper_util::rt as rt_util;
 use hyper_util::server::conn::auto as conn_util;
@@ -44,12 +44,15 @@ pub struct HttpsListenerArgs {
   pub addresses: Vec<String>,
 }
 
-/// Load TLS server configuration from server-level config.
-fn load_tls_config_from_server(
-  tls: &crate::config::ServerTlsConfig,
+/// Load TLS server configuration from server routing table.
+///
+/// This function builds a TLS config that includes certificates from all servers
+/// in the routing table, enabling SNI-based certificate selection.
+fn load_tls_config_from_servers(
+  servers: &[ServerRoutingEntry],
 ) -> Result<Arc<rustls::ServerConfig>> {
   // Use HTTP/1.1 ALPN
-  build_tls_server_config(tls, vec![b"http/1.1".to_vec()])
+  build_tls_server_config(servers, vec![b"http/1.1".to_vec()])
 }
 
 /// HTTPS Service Adaptor with routing support.
@@ -258,17 +261,15 @@ impl HttpsListener {
   ) -> Result<plugin::Listener> {
     let args: HttpsListenerArgs = serde_yaml::from_value(sargs)?;
 
-    // TLS config is required for https listener - get from first routing entry
-    let tls_config = server_routing_table
-      .first()
-      .and_then(|e| e.tls.as_ref())
-      .map(load_tls_config_from_server)
-      .transpose()?
-      .ok_or_else(|| {
-        anyhow::anyhow!(
-          "https listener requires server-level tls configuration"
-        )
-      })?;
+    // TLS config is required for https listener
+    // Check that at least one server has TLS configured
+    let has_tls = server_routing_table.iter().any(|e| e.tls.is_some());
+    if !has_tls {
+      bail!("https listener requires server-level tls configuration");
+    }
+
+    // Build TLS config from all servers' certificates (SNI-based selection)
+    let tls_config = load_tls_config_from_servers(&server_routing_table)?;
 
     // Parse addresses
     let addresses: Vec<SocketAddr> = args
@@ -589,34 +590,91 @@ addresses:
     let _cloned = executor.clone();
   }
 
-  // ============== load_tls_config_from_server Tests ==============
+  // ============== load_tls_config_from_servers Tests ==============
 
   #[test]
-  fn test_load_tls_config_from_server_valid_cert() {
+  fn test_load_tls_config_from_servers_valid_cert() {
     ensure_crypto_provider();
     let (cert_path, key_path, _temp_dir) = write_test_cert_files();
 
-    let tls = ServerTlsConfig {
-      certificates: vec![CertificateConfig { cert_path, key_path }],
-      client_ca_certs: None,
+    let entry = ServerRoutingEntry {
+      hostnames: vec!["test.local".to_string()],
+      service: crate::server::placeholder_service(),
+      service_name: "test_service".to_string(),
+      users: None,
+      tls: Some(ServerTlsConfig {
+        certificates: vec![CertificateConfig { cert_path, key_path }],
+        client_ca_certs: None,
+      }),
+      access_log_writer: None,
     };
 
-    let result = load_tls_config_from_server(&tls);
+    let result = load_tls_config_from_servers(&[entry]);
     assert!(result.is_ok(), "Should load valid TLS config");
   }
 
   #[test]
-  fn test_load_tls_config_from_server_empty_certificates() {
+  fn test_load_tls_config_from_servers_empty_certificates() {
     ensure_crypto_provider();
-    let tls =
-      ServerTlsConfig { certificates: vec![], client_ca_certs: None };
 
-    let result = load_tls_config_from_server(&tls);
-    assert!(result.is_err(), "Should fail with empty certificates");
-    let err = result.unwrap_err().to_string();
+    let entry = ServerRoutingEntry {
+      hostnames: vec![],
+      service: crate::server::placeholder_service(),
+      service_name: "test_service".to_string(),
+      users: None,
+      tls: Some(ServerTlsConfig {
+        certificates: vec![],
+        client_ca_certs: None,
+      }),
+      access_log_writer: None,
+    };
+
+    // Should succeed but resolver will have no certificates
+    let result = load_tls_config_from_servers(&[entry]);
+    assert!(result.is_ok(), "Should succeed with empty certificates list");
+  }
+
+  #[test]
+  fn test_load_tls_config_from_servers_multiple_servers() {
+    ensure_crypto_provider();
+    let (cert_path1, key_path1, _temp_dir1) = write_test_cert_files();
+    let (cert_path2, key_path2, _temp_dir2) = write_test_cert_files();
+
+    let entries = vec![
+      ServerRoutingEntry {
+        hostnames: vec!["app1.test.local".to_string()],
+        service: crate::server::placeholder_service(),
+        service_name: "server1".to_string(),
+        users: None,
+        tls: Some(ServerTlsConfig {
+          certificates: vec![CertificateConfig {
+            cert_path: cert_path1,
+            key_path: key_path1,
+          }],
+          client_ca_certs: None,
+        }),
+        access_log_writer: None,
+      },
+      ServerRoutingEntry {
+        hostnames: vec!["app2.test.local".to_string()],
+        service: crate::server::placeholder_service(),
+        service_name: "server2".to_string(),
+        users: None,
+        tls: Some(ServerTlsConfig {
+          certificates: vec![CertificateConfig {
+            cert_path: cert_path2,
+            key_path: key_path2,
+          }],
+          client_ca_certs: None,
+        }),
+        access_log_writer: None,
+      },
+    ];
+
+    let result = load_tls_config_from_servers(&entries);
     assert!(
-      err.contains("No certificates configured"),
-      "Error should mention no certificates: {err}"
+      result.is_ok(),
+      "Should load TLS config from multiple servers"
     );
   }
 

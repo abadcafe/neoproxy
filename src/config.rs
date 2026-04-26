@@ -197,6 +197,7 @@ impl Config {
   /// Validate the configuration
   ///
   /// This method validates:
+  /// - Global settings (worker_threads)
   /// - Kind format for all services and listeners
   /// - Plugin existence for all kinds
   /// - Service/listener builder existence in plugins
@@ -204,6 +205,20 @@ impl Config {
   /// - Address parsing in listener args
   /// - Args parsing for all services and listeners
   pub fn validate(&self, collector: &mut ConfigErrorCollector) {
+    // Validate global settings
+    if self.worker_threads == 0 {
+      collector.add(
+        "worker_threads",
+        "must be at least 1".to_string(),
+        ConfigErrorKind::InvalidFormat,
+      );
+    }
+
+    // Validate access_log if present
+    if let Some(ref access_log) = self.access_log {
+      access_log.validate(collector);
+    }
+
     // Collect all service names for reference validation
     let service_names: HashSet<&str> =
       self.services.iter().map(|s| s.name.as_str()).collect();
@@ -576,6 +591,24 @@ impl Config {
         }
       };
 
+    // Check TLS requirement for https and http3 listeners
+    match listener.kind.as_str() {
+      "https" | "http3" => {
+        if server_tls.is_none() {
+          collector.add(
+            location.to_string(),
+            format!(
+              "listener kind '{}' requires server-level 'tls' configuration",
+              listener.kind
+            ),
+            ConfigErrorKind::InvalidFormat,
+          );
+          return;
+        }
+      }
+      _ => {}
+    }
+
     // Check listener builder existence directly using the full kind
     let Some(builder) =
       ListenerBuilderSet::global().listener_builder(&listener.kind)
@@ -811,9 +844,9 @@ impl Config {
   /// Validate HTTP/3 listener specific configuration
   ///
   /// Validates:
-  /// - Address format
   /// - QUIC parameters validity
   ///
+  /// Note: Address validation is handled by validate_listener_addresses.
   /// Note: TLS and auth are now at server level, not listener level.
   fn validate_http3_listener_args(
     &self,
@@ -821,35 +854,6 @@ impl Config {
     location: &str,
     collector: &mut ConfigErrorCollector,
   ) {
-    // Validate address format
-    if let Some(address) = args.get("address")
-      && let Some(addr_str) = address.as_str()
-      && addr_str.parse::<std::net::SocketAddr>().is_err()
-    {
-      collector.add(
-        format!("{}.args.address", location),
-        format!("invalid address '{}'", addr_str),
-        ConfigErrorKind::InvalidAddress,
-      );
-    }
-
-    // Validate addresses (plural) field
-    if let Some(addresses) = args.get("addresses")
-      && let Some(addrs) = addresses.as_sequence()
-    {
-      for (addr_idx, addr) in addrs.iter().enumerate() {
-        if let Some(addr_str) = addr.as_str()
-          && addr_str.parse::<std::net::SocketAddr>().is_err()
-        {
-          collector.add(
-            format!("{}.args.addresses[{}]", location, addr_idx),
-            format!("invalid address '{}'", addr_str),
-            ConfigErrorKind::InvalidAddress,
-          );
-        }
-      }
-    }
-
     // Validate QUIC parameters
     if let Some(quic) = args.get("quic") {
       self.validate_quic_config(
@@ -2291,5 +2295,112 @@ client_ca_certs:
       found,
       "Should have multiple default servers error for SOCKS5"
     );
+  }
+
+  // =========================================================================
+  // Worker Threads Validation Tests
+  // =========================================================================
+
+  #[test]
+  fn test_validate_worker_threads_zero_is_error() {
+    let config = Config {
+      worker_threads: 0,
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors
+      .iter()
+      .any(|e| e.location == "worker_threads" && e.message.contains("at least 1"));
+    assert!(found, "Should have worker_threads validation error");
+  }
+
+  #[test]
+  fn test_validate_worker_threads_one_is_valid() {
+    let config = Config {
+      worker_threads: 1,
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    assert!(!collector.has_errors(), "worker_threads=1 should be valid");
+  }
+
+  // =========================================================================
+  // TLS Required for HTTPS/HTTP3 Tests
+  // =========================================================================
+
+  #[test]
+  fn test_validate_https_without_tls_is_error() {
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8443"]}"#).unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "https_server".to_string(),
+        listeners: vec![Listener { kind: "https".to_string(), args }],
+        service: "".to_string(),
+        tls: None, // Missing TLS!
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.message.contains("requires server-level 'tls' configuration")
+    });
+    assert!(found, "Should have TLS required error for https");
+  }
+
+  #[test]
+  fn test_validate_http3_without_tls_is_error() {
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8443"]}"#).unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "http3_server".to_string(),
+        listeners: vec![Listener { kind: "http3".to_string(), args }],
+        service: "".to_string(),
+        tls: None, // Missing TLS!
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.message.contains("requires server-level 'tls' configuration")
+    });
+    assert!(found, "Should have TLS required error for http3");
+  }
+
+  #[test]
+  fn test_validate_http_without_tls_is_valid() {
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#).unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "http_server".to_string(),
+        listeners: vec![Listener { kind: "http".to_string(), args }],
+        service: "".to_string(),
+        tls: None, // HTTP doesn't need TLS
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    config.validate(&mut collector);
+    // Should NOT have TLS required error (may have other errors like missing service)
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.message.contains("requires server-level 'tls' configuration")
+    });
+    assert!(!found, "HTTP should not require TLS");
   }
 }

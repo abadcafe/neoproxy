@@ -23,7 +23,6 @@ import subprocess
 import socket
 import tempfile
 import shutil
-import time
 import os
 import signal
 import pytest
@@ -36,6 +35,7 @@ from .utils.helpers import (
     echo_handler,
     create_target_server,
     get_curl_env_without_no_proxy,
+    wait_for_udp_port_bound,
 )
 
 from .conftest import get_unique_port
@@ -43,9 +43,10 @@ from .conftest import get_unique_port
 from .test_http3_listener import (
     generate_test_certificates,
     generate_client_certificate,
-    wait_for_udp_port,
     create_http3_listener_config,
 )
+
+# Alias for backward compatibility in this file
 
 from .test_http3_auth import (
     create_http3_listener_config_with_password_auth,
@@ -82,7 +83,7 @@ def create_http3_chain_config_with_per_proxy_auth(
     """
     proxy_list = []
     for addr, port, weight, user_yaml, tls_yaml in proxy_group:
-        proxy_entry = f"    - address: {addr}:{port}\n      weight: {weight}"
+        proxy_entry = f"    - address: {addr}:{port}\n      hostname: localhost\n      weight: {weight}"
         if user_yaml:
             proxy_entry += f"\n      user:\n{user_yaml}"
         if tls_yaml:
@@ -166,7 +167,6 @@ class TestHTTP3ChainPerProxyPasswordAuth:
             cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
 
             _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
-            time.sleep(0.5)
 
             # Start HTTP/3 listener with password auth
             h3_config = create_http3_listener_config_with_password_auth(
@@ -177,7 +177,7 @@ class TestHTTP3ChainPerProxyPasswordAuth:
                 users=[("proxy_user", "proxy_pass")]
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0)
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0)
 
             # Start chain service with per-proxy password auth
             user_yaml = """
@@ -192,8 +192,6 @@ class TestHTTP3ChainPerProxyPasswordAuth:
             )
             chain_proc = start_proxy(chain_config)
             assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
-
-            time.sleep(0.5)
 
             # Test data transmission
             # Clear no_proxy to force proxy usage for localhost
@@ -261,7 +259,6 @@ class TestHTTP3ChainPerProxyTlsCertAuth:
             )
 
             _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
-            time.sleep(0.5)
 
             # Start HTTP/3 listener with TLS client cert auth (mTLS)
             h3_config = create_http3_listener_config_with_tls_client_cert(
@@ -272,7 +269,7 @@ class TestHTTP3ChainPerProxyTlsCertAuth:
                 temp_dir=temp_dir1
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0)
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0)
 
             # Start chain service with per-proxy TLS cert auth
             tls_yaml = f"""
@@ -287,8 +284,6 @@ class TestHTTP3ChainPerProxyTlsCertAuth:
             )
             chain_proc = start_proxy(chain_config)
             assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
-
-            time.sleep(0.5)
 
             # Test data transmission
             # Clear no_proxy to force proxy usage for localhost
@@ -351,7 +346,6 @@ class TestHTTP3ChainAuthInheritance:
             cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
 
             _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
-            time.sleep(0.5)
 
             h3_config = create_http3_listener_config_with_password_auth(
                 proxy_port=h3_port,
@@ -361,7 +355,7 @@ class TestHTTP3ChainAuthInheritance:
                 users=[("inherited_user", "inherited_pass")]
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0)
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0)
 
             # Proxy has NO user field - should inherit from default_user
             chain_config = create_http3_chain_config_with_per_proxy_auth(
@@ -373,8 +367,6 @@ class TestHTTP3ChainAuthInheritance:
             )
             chain_proc = start_proxy(chain_config)
             assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
-
-            time.sleep(0.5)
 
             # Clear no_proxy to force proxy usage for localhost
             env = get_curl_env_without_no_proxy()
@@ -436,7 +428,6 @@ class TestHTTP3ChainAuthNone:
             cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
 
             _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
-            time.sleep(0.5)
 
             # Start H3 listener WITHOUT any auth requirement
             h3_config = create_http3_listener_config(
@@ -446,7 +437,7 @@ class TestHTTP3ChainAuthNone:
                 temp_dir=temp_dir1
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0)
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0)
 
             # Proxy with no user and no tls - should work without auth
             chain_config = create_http3_chain_config_with_per_proxy_auth(
@@ -457,8 +448,6 @@ class TestHTTP3ChainAuthNone:
             )
             chain_proc = start_proxy(chain_config)
             assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
-
-            time.sleep(0.5)
 
             # Clear no_proxy to force proxy usage for localhost
             env = get_curl_env_without_no_proxy()
@@ -525,7 +514,7 @@ class TestHTTP3ChainAuthFailure:
                 users=[("correct_user", "correct_pass")]
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0)
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0)
 
             # Configure WRONG credentials in user
             user_yaml = """
@@ -540,8 +529,6 @@ class TestHTTP3ChainAuthFailure:
             )
             chain_proc = start_proxy(chain_config)
             assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
-
-            time.sleep(0.5)
 
             # Clear no_proxy to force proxy usage for localhost
             env = get_curl_env_without_no_proxy()
@@ -602,8 +589,6 @@ class TestHTTP3ChainAuthFailure:
             )
             chain_proc = start_proxy(chain_config)
             assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
-
-            time.sleep(0.5)
 
             # Make a request - should fail with connection error (NOT auth fallback)
             # Clear no_proxy to force proxy usage for localhost

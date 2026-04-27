@@ -26,14 +26,16 @@ from .utils.helpers import (
     wait_for_proxy,
     create_target_server,
     terminate_process,
+    wait_for_udp_port_bound,
 )
 
 from .utils.http_echo import http_echo_handler
 
 from .test_http3_listener import (
     generate_test_certificates,
-    wait_for_udp_port,
 )
+
+# Alias for convenience
 
 from .conftest import get_unique_port
 
@@ -106,6 +108,7 @@ def create_new_http3_chain_config(
     proxy_lines: list[str] = []
     for pg in proxy_group:
         proxy_lines.append(f"    - address: {pg['address']}:{pg['port']}")
+        proxy_lines.append(f"      hostname: localhost")
         proxy_lines.append(f"      weight: {pg['weight']}")
         if "user" in pg and pg["user"]:
             proxy_lines.append("      user:")
@@ -197,7 +200,7 @@ class TestHttp3ListenerNewFieldNames:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
                 "HTTP/3 listener with server-level TLS failed to start"
 
             assert proxy_proc.poll() is None, \
@@ -340,7 +343,7 @@ class TestTlsDeepMerge:
                 temp_dir=temp_dir1,
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Start chain with server_ca_path in default_tls
@@ -422,7 +425,7 @@ class TestTlsDeepMerge:
                 temp_dir=temp_dir1,
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Chain: default_tls has a WRONG ca, per-proxy has the CORRECT ca
@@ -550,6 +553,7 @@ services:
   args:
     proxy_group:
     - address: 127.0.0.1:30588
+      hostname: localhost
       weight: 1
     ca_path: "{ca_path}"
 

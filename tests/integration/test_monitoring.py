@@ -36,14 +36,41 @@ from .utils.helpers import (
     wait_for_proxy,
     create_test_config,
     create_target_server,
-    terminate_process,
+    wait_for_udp_port_bound,
+    wait_for_log_contains,
+    wait_for_metric_value,
 )
 
 from .test_http3_listener import (
     generate_test_certificates,
     create_http3_listener_config,
-    wait_for_udp_port,
 )
+
+from .conftest import get_unique_port
+
+
+def wait_for_log_dir_populated(
+    log_dir: str,
+    timeout: float = 3.0,
+    interval: float = 0.1
+) -> bool:
+    """
+    Wait for log directory to contain at least one file.
+
+    Args:
+        log_dir: Path to log directory
+        timeout: Maximum wait time in seconds
+        interval: Check interval in seconds
+
+    Returns:
+        bool: True if log directory has files, False if timeout
+    """
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        if os.path.exists(log_dir) and os.listdir(log_dir):
+            return True
+        time.sleep(interval)
+    return False
 
 
 def parse_monitoring_log(log_content: str) -> List[dict]:
@@ -111,7 +138,7 @@ class TestMonitoring:
         Target: Verify log directory is created when server starts
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30800
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -139,7 +166,7 @@ class TestMonitoring:
         Target: Verify log files are created in log directory
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30801
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -149,10 +176,11 @@ class TestMonitoring:
             assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
                 "Proxy server failed to start"
 
-            # Wait for logs to be written
-            time.sleep(1)
-
+            # Wait for log files to be created using polling
             log_dir = os.path.join(temp_dir, "logs")
+            assert wait_for_log_dir_populated(log_dir, timeout=3.0), \
+                "Log files should be created"
+
             log_files = os.listdir(log_dir)
 
             assert len(log_files) > 0, "Log files should be created"
@@ -170,7 +198,7 @@ class TestMonitoring:
         Target: Verify logs contain startup information with specific keywords.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30802
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -180,15 +208,28 @@ class TestMonitoring:
             assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
                 "Proxy server failed to start"
 
-            # Wait for logs
-            time.sleep(1)
+            # Wait for log directory and files to be created
+            log_dir = os.path.join(temp_dir, "logs")
+            log_start_time = time.time()
+            while time.time() - log_start_time < 5.0:
+                if os.path.exists(log_dir) and os.listdir(log_dir):
+                    break
+                time.sleep(0.1)
+
+            # Use wait_for_log_contains to wait for startup content
+            # The log should contain INFO level which indicates proper logging
+            if os.path.exists(log_dir) and os.listdir(log_dir):
+                log_files = os.listdir(log_dir)
+                if log_files:
+                    first_log_path = os.path.join(log_dir, log_files[0])
+                    # Wait for any INFO log entry (common startup indicator)
+                    wait_for_log_contains(first_log_path, "INFO", timeout=3.0)
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
             proxy_proc.wait(timeout=10)
 
             # Read log content
-            log_dir = os.path.join(temp_dir, "logs")
             log_content = ""
             for log_file in os.listdir(log_dir):
                 log_path = os.path.join(log_dir, log_file)
@@ -222,8 +263,8 @@ class TestMonitoring:
         Target: Verify logs contain connection information.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30803
-        target_port = 30804
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
         client_sock: Optional[socket.socket] = None
@@ -271,7 +312,15 @@ class TestMonitoring:
                 response += chunk
 
             client_sock.close()
-            time.sleep(1)
+
+            # Wait for connection-related log entries using polling
+            log_dir = os.path.join(temp_dir, "logs")
+            if os.path.exists(log_dir) and os.listdir(log_dir):
+                log_files = os.listdir(log_dir)
+                if log_files:
+                    first_log_path = os.path.join(log_dir, log_files[0])
+                    # Wait for any connection-related log entry
+                    wait_for_log_contains(first_log_path, "connect", timeout=3.0)
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -311,8 +360,8 @@ class TestMonitoring:
         3. Multiple connections are tracked correctly
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30805
-        target_port = 30806
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
         client_socks: List[socket.socket] = []
@@ -373,7 +422,28 @@ class TestMonitoring:
                 except Exception:
                     pass
 
-            time.sleep(1)
+            # Wait for connection-related metrics to appear in logs
+            log_dir = os.path.join(temp_dir, "logs")
+            if os.path.exists(log_dir) and os.listdir(log_dir):
+                log_files = os.listdir(log_dir)
+                if log_files:
+                    first_log_path = os.path.join(log_dir, log_files[0])
+
+                    def fetch_log_content() -> str:
+                        """Fetch current log content for metric checking."""
+                        try:
+                            with open(first_log_path, "r", errors="ignore") as f:
+                                return f.read()
+                        except Exception:
+                            return ""
+
+                    # Use wait_for_metric_value to wait for connection metrics
+                    # This is more efficient than fixed sleep
+                    wait_for_metric_value(
+                        fetch_log_content,
+                        "connection",  # Wait for any connection-related log
+                        timeout=3.0
+                    )
 
             # Graceful shutdown
             proxy_proc.send_signal(signal.SIGTERM)
@@ -429,7 +499,7 @@ class TestHTTP3Monitoring:
         Target: Verify HTTP/3 listener creates log directory
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30810
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -440,7 +510,7 @@ class TestHTTP3Monitoring:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             log_dir = os.path.join(temp_dir, "logs")
@@ -460,7 +530,7 @@ class TestHTTP3Monitoring:
         Target: Verify HTTP/3 listener logs contain startup info
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30811
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -471,10 +541,16 @@ class TestHTTP3Monitoring:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
-            time.sleep(1)
+            # Wait for log content using polling
+            log_dir = os.path.join(temp_dir, "logs")
+            if os.path.exists(log_dir) and os.listdir(log_dir):
+                log_files = os.listdir(log_dir)
+                if log_files:
+                    first_log_path = os.path.join(log_dir, log_files[0])
+                    wait_for_log_contains(first_log_path, "INFO", timeout=3.0)
 
             proxy_proc.send_signal(signal.SIGTERM)
             proxy_proc.wait(timeout=10)
@@ -502,7 +578,7 @@ class TestHTTP3Monitoring:
         Target: Verify that HTTP/3 listener logs contain stream information.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30812
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -513,11 +589,16 @@ class TestHTTP3Monitoring:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
-            # Wait for periodic logging (every 60 seconds per design, but we test startup)
-            time.sleep(2)
+            # Wait for HTTP/3 log content using polling
+            log_dir = os.path.join(temp_dir, "logs")
+            if os.path.exists(log_dir) and os.listdir(log_dir):
+                log_files = os.listdir(log_dir)
+                if log_files:
+                    first_log_path = os.path.join(log_dir, log_files[0])
+                    wait_for_log_contains(first_log_path, "INFO", timeout=3.0)
 
             # Graceful shutdown
             proxy_proc.send_signal(signal.SIGTERM)
@@ -605,7 +686,7 @@ servers: []
         Target: Verify connection errors don't crash the server
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30820
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -663,7 +744,7 @@ class TestMonitoringLogCycle:
         waiting for the full cycle.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30830
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -674,13 +755,18 @@ class TestMonitoringLogCycle:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
-            # Wait a short time for logs to be written
+            # Wait for log content using polling
             # Note: 60-second cycle is too long for tests, but we can verify
             # that the logging infrastructure is in place
-            time.sleep(2)
+            log_dir = os.path.join(temp_dir, "logs")
+            if os.path.exists(log_dir) and os.listdir(log_dir):
+                log_files = os.listdir(log_dir)
+                if log_files:
+                    first_log_path = os.path.join(log_dir, log_files[0])
+                    wait_for_log_contains(first_log_path, "INFO", timeout=3.0)
 
             # Graceful shutdown
             proxy_proc.send_signal(signal.SIGTERM)
@@ -731,7 +817,7 @@ class TestMonitoringLogCycle:
         connection and stream counts.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30831
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -742,11 +828,16 @@ class TestMonitoringLogCycle:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
-            # Keep server running briefly
-            time.sleep(1)
+            # Wait for log content using polling
+            log_dir = os.path.join(temp_dir, "logs")
+            if os.path.exists(log_dir) and os.listdir(log_dir):
+                log_files = os.listdir(log_dir)
+                if log_files:
+                    first_log_path = os.path.join(log_dir, log_files[0])
+                    wait_for_log_contains(first_log_path, "INFO", timeout=3.0)
 
             # Graceful shutdown
             proxy_proc.send_signal(signal.SIGTERM)
@@ -802,7 +893,7 @@ class TestHttpListenerMonitoring:
         - Monitoring interval: 60 seconds
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30840
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -812,8 +903,13 @@ class TestHttpListenerMonitoring:
             assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
                 "Proxy server failed to start"
 
-            # Wait for logs to be written
-            time.sleep(2)
+            # Wait for log content using polling
+            log_dir = os.path.join(temp_dir, "logs")
+            if os.path.exists(log_dir) and os.listdir(log_dir):
+                log_files = os.listdir(log_dir)
+                if log_files:
+                    first_log_path = os.path.join(log_dir, log_files[0])
+                    wait_for_log_contains(first_log_path, "INFO", timeout=3.0)
 
             # Graceful shutdown
             proxy_proc.send_signal(signal.SIGTERM)
@@ -858,8 +954,8 @@ class TestHttpListenerMonitoring:
         connection counts.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30841
-        target_port = 30842
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
         client_socks: List[socket.socket] = []
@@ -969,7 +1065,7 @@ class TestSocks5ListenerMonitoring:
         - Monitoring interval: 60 seconds
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30850
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -984,8 +1080,13 @@ class TestSocks5ListenerMonitoring:
             assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
                 "SOCKS5 listener failed to start"
 
-            # Wait for logs to be written
-            time.sleep(2)
+            # Wait for log content using polling
+            log_dir = os.path.join(temp_dir, "logs")
+            if os.path.exists(log_dir) and os.listdir(log_dir):
+                log_files = os.listdir(log_dir)
+                if log_files:
+                    first_log_path = os.path.join(log_dir, log_files[0])
+                    wait_for_log_contains(first_log_path, "INFO", timeout=3.0)
 
             # Graceful shutdown
             proxy_proc.send_signal(signal.SIGTERM)
@@ -1030,8 +1131,8 @@ class TestSocks5ListenerMonitoring:
         connection counts.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30851
-        target_port = 30852
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
         client_socks: List[socket.socket] = []
@@ -1141,16 +1242,15 @@ class TestMultiListenerMonitoring:
         their monitoring logs can be distinguished by listener_name.
         """
         temp_dir = tempfile.mkdtemp()
-        http_port = 30960
-        socks5_port = 30961
-        http3_port = 30962
+        http_port = get_unique_port()
+        socks5_port = get_unique_port()
+        http3_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
             from .test_socks5 import create_socks5_config
             from .test_http3_listener import (
                 generate_test_certificates,
-                wait_for_udp_port,
             )
 
             # Generate certificates for HTTP/3
@@ -1193,11 +1293,16 @@ servers:
                 "HTTP listener failed to start"
             assert wait_for_proxy("127.0.0.1", socks5_port, timeout=5.0), \
                 "SOCKS5 listener failed to start"
-            assert wait_for_udp_port("127.0.0.1", http3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", http3_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
-            # Wait for logs to be written
-            time.sleep(2)
+            # Wait for log content using polling
+            log_dir = os.path.join(temp_dir, "logs")
+            if os.path.exists(log_dir) and os.listdir(log_dir):
+                log_files = os.listdir(log_dir)
+                if log_files:
+                    first_log_path = os.path.join(log_dir, log_files[0])
+                    wait_for_log_contains(first_log_path, "INFO", timeout=3.0)
 
             # Graceful shutdown
             proxy_proc.send_signal(signal.SIGTERM)

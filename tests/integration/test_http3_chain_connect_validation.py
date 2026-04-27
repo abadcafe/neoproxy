@@ -32,6 +32,8 @@ from .test_http3_listener import (
     create_http3_chain_config,
 )
 
+from .conftest import get_unique_port
+
 
 def parse_http_response(response: bytes) -> Tuple[int, str, dict, bytes]:
     """
@@ -128,8 +130,6 @@ class TestHTTP3ChainConnectValidation:
         Send a GET request to the http3_chain service.
         Expected: 405 Method Not Allowed with text/plain body.
         """
-        from .conftest import get_unique_port
-
         http_port = get_unique_port()
         h3_port = get_unique_port()
 
@@ -160,8 +160,6 @@ class TestHTTP3ChainConnectValidation:
         Send a POST request to the http3_chain service.
         Expected: 405 Method Not Allowed.
         """
-        from .conftest import get_unique_port
-
         http_port = get_unique_port()
         h3_port = get_unique_port()
 
@@ -188,8 +186,6 @@ class TestHTTP3ChainConnectValidation:
         Send a CONNECT request with no port in the target.
         Expected: 400 Bad Request.
         """
-        from .conftest import get_unique_port
-
         http_port = get_unique_port()
         h3_port = get_unique_port()
 
@@ -215,8 +211,6 @@ class TestHTTP3ChainConnectValidation:
         Send a CONNECT request with port 0.
         Expected: 400 Bad Request.
         """
-        from .conftest import get_unique_port
-
         http_port = get_unique_port()
         h3_port = get_unique_port()
 
@@ -242,8 +236,6 @@ class TestHTTP3ChainConnectValidation:
         Send a CONNECT request with no authority (just CONNECT without target).
         Expected: 400 Bad Request.
         """
-        from .conftest import get_unique_port
-
         http_port = get_unique_port()
         h3_port = get_unique_port()
 

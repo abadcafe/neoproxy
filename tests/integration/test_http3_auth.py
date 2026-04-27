@@ -31,14 +31,18 @@ from .utils.helpers import (
     create_target_server,
     terminate_process,
     echo_handler,
+    wait_for_udp_port_bound,
 )
 
 from .test_http3_listener import (
     generate_test_certificates,
     generate_client_certificate,
     create_http3_listener_config,
-    wait_for_udp_port,
 )
+
+from .conftest import get_unique_port
+
+# Alias for convenience
 
 from .utils.http3_client import (
     AIOQUIC_AVAILABLE,
@@ -269,7 +273,7 @@ class TestHTTP3PasswordAuth:
         using plaintext passwords.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31001
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -288,7 +292,7 @@ class TestHTTP3PasswordAuth:
             proxy_proc = start_proxy(config_path)
 
             # Verify process starts and stays running
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start with password auth"
 
             assert proxy_proc.poll() is None, \
@@ -308,8 +312,8 @@ class TestHTTP3PasswordAuth:
         Uses real HTTP/3 client to verify authentication.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31002
-        target_port = 31003
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -351,7 +355,7 @@ class TestHTTP3PasswordAuth:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Test with real HTTP/3 client using valid credentials
@@ -393,8 +397,8 @@ class TestHTTP3PasswordAuth:
         Target: Verify HTTP/3 listener returns 407 for invalid credentials.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31004
-        target_port = 31005
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -436,7 +440,7 @@ class TestHTTP3PasswordAuth:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Test with wrong password
@@ -478,7 +482,7 @@ class TestHTTP3PasswordAuth:
         Target: Verify HTTP/3 listener fails to start with empty credentials list.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31006
+        proxy_port = get_unique_port()
 
         try:
             cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
@@ -545,7 +549,7 @@ class TestHTTP3TLSClientCertAuth:
         Target: Verify HTTP/3 listener starts with TLS client cert auth config
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31010
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -561,7 +565,7 @@ class TestHTTP3TLSClientCertAuth:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start with TLS client cert auth"
 
             assert proxy_proc.poll() is None, \
@@ -581,7 +585,7 @@ class TestHTTP3TLSClientCertAuth:
         is specified but does not exist.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31011
+        proxy_port = get_unique_port()
 
         try:
             cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
@@ -640,7 +644,7 @@ servers:
         Target: Verify HTTP/3 listener correctly configures TLS client cert auth.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31012
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -656,7 +660,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Verify graceful shutdown works with TLS client cert auth
@@ -680,7 +684,7 @@ servers:
         Uses real HTTP/3 client with client certificate.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31013
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -702,7 +706,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Test with real HTTP/3 client using valid client certificate
@@ -744,7 +748,7 @@ servers:
         Verification: success must be False, indicating connection was rejected.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31014
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -786,7 +790,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Test with HTTP/3 client using INVALID client certificate
@@ -833,7 +837,7 @@ servers:
         Verification: success must be False, indicating connection was rejected.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31015
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -850,7 +854,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Test with HTTP/3 client without client certificate
@@ -905,8 +909,8 @@ class TestHTTP3DualAuth:
         AND valid password should get 200.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31030
-        target_port = 31031
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -932,7 +936,7 @@ class TestHTTP3DualAuth:
             time.sleep(0.5)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Use H3Client with client cert AND password
@@ -984,8 +988,8 @@ class TestHTTP3DualAuth:
         password would be valid. This is the key AND-logic test.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31032
-        target_port = 31033
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -1008,7 +1012,7 @@ class TestHTTP3DualAuth:
             time.sleep(0.5)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Connect WITHOUT client cert - should fail at transport layer
@@ -1053,8 +1057,8 @@ class TestHTTP3DualAuth:
         and gets 407.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31034
-        target_port = 31035
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -1079,7 +1083,7 @@ class TestHTTP3DualAuth:
             time.sleep(0.5)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Use H3Client with valid client cert but WRONG password
@@ -1131,8 +1135,8 @@ class TestHTTP3DualAuth:
         fails application layer and gets 407.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31036
-        target_port = 31037
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -1157,7 +1161,7 @@ class TestHTTP3DualAuth:
             time.sleep(0.5)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Use H3Client with valid client cert but NO password
@@ -1208,7 +1212,7 @@ class TestHTTP3DualAuth:
         to password auth.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31038
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -1245,7 +1249,7 @@ class TestHTTP3DualAuth:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Connect with INVALID cert - should fail at transport
@@ -1295,7 +1299,7 @@ class TestHTTP3AuthConfigValidation:
         unrecognized fields (auth is no longer at listener level).
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31020
+        proxy_port = get_unique_port()
 
         try:
             cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
@@ -1355,7 +1359,7 @@ servers:
         but credentials list is empty
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31021
+        proxy_port = get_unique_port()
 
         try:
             cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
@@ -1413,7 +1417,7 @@ servers:
         specified but client_ca_certs path doesn't exist
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31022
+        proxy_port = get_unique_port()
 
         try:
             cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
@@ -1471,7 +1475,7 @@ servers:
         Target: Verify HTTP/3 listener accepts plaintext password in config.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31023
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -1489,7 +1493,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener should start with plaintext password"
 
         finally:
@@ -1505,7 +1509,7 @@ servers:
         Target: Verify HTTP/3 listener accepts multiple users in config.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 31024
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -1525,7 +1529,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener should start with multiple users"
 
         finally:

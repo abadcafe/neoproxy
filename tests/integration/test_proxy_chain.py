@@ -28,13 +28,15 @@ from .utils.helpers import (
     start_proxy,
     wait_for_proxy,
     create_target_server,
+    wait_for_udp_port_bound,
 )
 
 from .test_http3_listener import (
     generate_test_certificates,
     generate_client_certificate,
-    wait_for_udp_port,
 )
+
+# Alias for convenience
 
 from .utils.http_echo import http_echo_handler, read_http_request
 
@@ -131,6 +133,7 @@ services:
     args:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
+          hostname: localhost
           weight: 1
           user:
             username: user1
@@ -173,6 +176,7 @@ services:
     args:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
+          hostname: localhost
           weight: 1
           tls:
             client_cert_path: "{client_cert_path}"
@@ -212,6 +216,7 @@ services:
     args:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
+          hostname: localhost
           weight: 1
           user:
             username: user1
@@ -254,6 +259,7 @@ services:
     args:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
+          hostname: localhost
           weight: 1
           tls:
             client_cert_path: "{client_cert_path}"
@@ -362,7 +368,7 @@ def run_proxy_chain_test(
             )
 
         upstream_proc = start_proxy(upstream_config)
-        assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
+        assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
             "Upstream HTTP/3 listener failed to start"
 
         # Create entry config
@@ -602,6 +608,7 @@ services:
     args:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
+          hostname: localhost
           weight: 1
       default_tls:
         server_ca_path: "{ca_path}"
@@ -639,6 +646,7 @@ services:
     args:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
+          hostname: localhost
           weight: 1
       default_tls:
         server_ca_path: "{ca_path}"
@@ -678,6 +686,7 @@ services:
     args:
       proxy_group:
         - address: "127.0.0.1:{h3_port}"
+          hostname: localhost
           weight: 1
           user:
             username: wrong_user
@@ -783,7 +792,7 @@ class TestNegativeAuthHTTPEntry:
                 h3_port, cert_path, key_path, temp_dir1
             )
             upstream_proc = start_proxy(upstream_config)
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
                 "Upstream HTTP/3 listener failed to start"
 
             # Start entry HTTP with password auth
@@ -848,7 +857,7 @@ class TestNegativeAuthHTTPEntry:
                 h3_port, cert_path, key_path, temp_dir1
             )
             upstream_proc = start_proxy(upstream_config)
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
                 "Upstream HTTP/3 listener failed to start"
 
             # Start entry HTTP with password auth
@@ -915,7 +924,7 @@ class TestNegativeAuthSOCKS5Entry:
                 h3_port, cert_path, key_path, temp_dir1
             )
             upstream_proc = start_proxy(upstream_config)
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
                 "Upstream HTTP/3 listener failed to start"
 
             # Start entry SOCKS5 with password auth
@@ -985,7 +994,7 @@ class TestNegativeAuthUpstream:
                 h3_port, cert_path, key_path, temp_dir1
             )
             upstream_proc = start_proxy(upstream_config)
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
                 "Upstream HTTP/3 listener failed to start"
 
             # Start entry HTTP with WRONG upstream credentials (wrong_user:wrong_pass)

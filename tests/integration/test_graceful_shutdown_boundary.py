@@ -5,7 +5,7 @@ Test target: Verify neoproxy graceful shutdown boundary conditions
 Test nature: Black-box testing through external interface (signals, process exit codes)
 
 This test module covers:
-- 7.1 Normal shutdown with no worker threads (boundary condition)
+- 7.1 Normal shutdown with no services/servers (boundary condition)
 - Additional edge cases for graceful shutdown
 """
 
@@ -29,6 +29,7 @@ from .utils.helpers import (
     create_target_server,
     create_test_config,
 )
+from .conftest import get_unique_port
 
 
 # ==============================================================================
@@ -40,9 +41,9 @@ def create_empty_config(temp_dir: str) -> str:
     """
     Create configuration file with no services or servers.
 
-    This creates a minimal config with worker_threads: 0, which means
-    no worker threads will be spawned. The process should still be
-    able to handle signals and exit gracefully.
+    This creates a minimal config with worker_threads: 1 (minimum allowed)
+    and no services or servers. The process should still be able to
+    handle signals and exit gracefully.
 
     Args:
         temp_dir: Temporary directory for logs
@@ -50,7 +51,7 @@ def create_empty_config(temp_dir: str) -> str:
     Returns:
         str: Path to the configuration file
     """
-    config_content = f"""worker_threads: 0
+    config_content = f"""worker_threads: 1
 log_directory: "{temp_dir}/logs"
 
 services: []
@@ -71,17 +72,18 @@ servers: []
 class TestBoundaryConditions:
     """Test boundary conditions for graceful shutdown."""
 
-    def test_no_worker_threads_shutdown(self) -> None:
+    def test_empty_config_shutdown(self) -> None:
         """
-        TC-BOUNDARY-001: No worker threads - shutdown should be immediate.
+        TC-BOUNDARY-001: Empty config shutdown should be immediate.
 
-        Target: Verify that with worker_threads: 0, the process:
+        Target: Verify that with worker_threads: 1 and no services/servers,
+        the process:
         1. Starts successfully
         2. Waits for signals
         3. Exits immediately with code 0 when signaled
 
-        This is a boundary condition test per requirements section 4.1:
-        "No worker threads, received signal should immediately exit normally"
+        This is a boundary condition test: minimal configuration with no
+        active listeners, so shutdown should be near-instant.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_proc: Optional[subprocess.Popen] = None
@@ -127,11 +129,12 @@ class TestBoundaryConditions:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_no_worker_threads_sigint(self) -> None:
+    def test_empty_config_sigint(self) -> None:
         """
-        TC-BOUNDARY-002: No worker threads - SIGINT handling.
+        TC-BOUNDARY-002: Empty config - SIGINT handling.
 
-        Target: Verify SIGINT works the same as SIGTERM for no worker threads
+        Target: Verify SIGINT works the same as SIGTERM for empty config
+        (worker_threads: 1, no services/servers).
         """
         temp_dir = tempfile.mkdtemp()
         proxy_proc: Optional[subprocess.Popen] = None
@@ -182,7 +185,7 @@ class TestShutdownTiming:
         completes quickly (well within the timeout period)
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29600
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -227,7 +230,7 @@ class TestLogVerification:
         Target: Verify that log files are created in the specified directory
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29700
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:

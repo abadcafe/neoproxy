@@ -27,6 +27,8 @@ from .utils.helpers import (
     terminate_process,
 )
 
+from .conftest import get_unique_port
+
 
 # ==============================================================================
 # Test cases - 7.6 Performance scenarios
@@ -43,8 +45,8 @@ class TestPerformance:
         Target: Verify proxy handles 100 concurrent connections
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30700
-        target_port = 30701
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -154,8 +156,8 @@ class TestPerformance:
         Target: Verify connection stays stable for extended duration
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30702
-        target_port = 30703
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
         client_sock: Optional[socket.socket] = None
@@ -230,8 +232,8 @@ class TestPerformance:
         Target: Verify large data can be transferred efficiently
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30704
-        target_port = 30705
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
         client_sock: Optional[socket.socket] = None
@@ -328,8 +330,8 @@ class TestPerformance:
         Target: Verify proxy handles rapid connection cycling
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30706
-        target_port = 30707
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -406,8 +408,8 @@ class TestPerformance:
         as required by architecture document section 3.1.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 30708
-        target_port = 30709
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 

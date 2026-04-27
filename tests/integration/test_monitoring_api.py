@@ -35,13 +35,15 @@ from .utils.helpers import (
     create_test_config,
     create_target_server,
     terminate_process,
+    wait_for_udp_port_bound,
 )
 
 from .test_http3_listener import (
     generate_test_certificates,
     create_http3_listener_config,
-    wait_for_udp_port,
 )
+
+from .conftest import get_unique_port
 
 
 def parse_monitoring_entries(log_content: str) -> List[dict]:
@@ -106,8 +108,8 @@ class TestMonitoringAPI:
         3. Log format is valid
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 32000
-        target_port = 32001
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
         client_sock: Optional[socket.socket] = None
@@ -210,7 +212,7 @@ class TestMonitoringAPI:
         Target: Verify that shutdown logs contain connection summary.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 32002
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -266,7 +268,7 @@ class TestHTTP3MonitoringAPI:
         Target: Verify that HTTP/3 listener logs contain active stream info.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 32010
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -277,7 +279,7 @@ class TestHTTP3MonitoringAPI:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Wait for logs to be written
@@ -318,7 +320,7 @@ class TestHTTP3MonitoringAPI:
         Target: Verify that HTTP/3 connection metrics are logged periodically.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 32011
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -329,7 +331,7 @@ class TestHTTP3MonitoringAPI:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Wait for periodic logging (every 60 seconds per design)
@@ -384,8 +386,8 @@ class TestInternalMonitoringAPI:
         3. Connection tracking works correctly
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 32020
-        target_port = 32021
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
         client_socks: List[socket.socket] = []
@@ -501,7 +503,7 @@ class TestInternalMonitoringAPI:
         are logged properly.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 32022
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -556,7 +558,7 @@ class TestErrorMonitoring:
         Target: Verify that error events are properly logged.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 32030
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -602,7 +604,7 @@ class TestErrorMonitoring:
         Target: Verify that proxy start failures are properly logged.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 32031
+        proxy_port = get_unique_port()
 
         try:
             # Create invalid config

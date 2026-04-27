@@ -22,14 +22,17 @@ from .utils.helpers import (
     terminate_process,
     wait_for_proxy,
     get_curl_env_without_no_proxy,
+    wait_for_udp_port_bound,
+    create_target_server,
 )
 
 from .test_http3_listener import (
     generate_test_certificates,
-    wait_for_udp_port,
 )
+
+# Alias for convenience
+
 from .utils.http_echo import http_echo_handler
-from .utils.helpers import create_target_server
 
 
 def write_config(temp_dir: str, config_content: str) -> str:
@@ -211,7 +214,6 @@ servers:
         config_path = write_config(temp_dir, config)
         proc = start_proxy(config_path)
         try:
-            time.sleep(2)
             started = wait_for_proxy("127.0.0.1", port, timeout=3.0)
             assert not started, \
                 "Proxy should NOT start with users missing password field"
@@ -245,7 +247,6 @@ servers:
         config_path = write_config(temp_dir, config)
         proc = start_proxy(config_path)
         try:
-            time.sleep(2)
             started = wait_for_proxy("127.0.0.1", port, timeout=3.0)
             assert not started, \
                 "Proxy should NOT start with empty users array"
@@ -324,7 +325,6 @@ servers:
         config_path = write_config(temp_dir, config)
         proc = start_proxy(config_path)
         try:
-            time.sleep(2)
             started = wait_for_proxy("127.0.0.1", port, timeout=3.0)
             assert not started, \
                 "Proxy should NOT start with client_ca_path on socks5 listener"
@@ -428,6 +428,7 @@ services:
     args:
       proxy_group:
         - address: "127.0.0.1:{upstream_port}"
+          hostname: localhost
           weight: 1
           user:
             username: chain_user
@@ -451,7 +452,7 @@ servers:
 
         upstream_proc = start_proxy(upstream_config)
         try:
-            assert wait_for_udp_port("127.0.0.1", upstream_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", upstream_port, timeout=5.0), \
                 "Upstream HTTP/3 proxy should start"
 
             chain_proc = start_proxy(chain_config)
@@ -525,6 +526,7 @@ services:
     args:
       proxy_group:
         - address: "127.0.0.1:{upstream_port}"
+          hostname: localhost
           weight: 1
           user:
             username: special_user
@@ -548,7 +550,7 @@ servers:
 
         upstream_proc = start_proxy(upstream_config)
         try:
-            assert wait_for_udp_port("127.0.0.1", upstream_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", upstream_port, timeout=5.0), \
                 "Upstream HTTP/3 proxy should start"
 
             chain_proc = start_proxy(chain_config)
@@ -623,6 +625,7 @@ services:
     args:
       proxy_group:
         - address: "127.0.0.1:{upstream_port}"
+          hostname: localhost
           weight: 1
           user:
             username: override_user
@@ -646,7 +649,7 @@ servers:
 
         upstream_proc = start_proxy(upstream_config)
         try:
-            assert wait_for_udp_port("127.0.0.1", upstream_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", upstream_port, timeout=5.0), \
                 "Upstream HTTP/3 proxy should start"
 
             chain_proc = start_proxy(chain_config)
@@ -725,6 +728,7 @@ services:
         password: inherited_pass
       proxy_group:
         - address: "127.0.0.1:{upstream_port}"
+          hostname: localhost
           weight: 1
           tls:
             server_ca_path: "{ca_path}"
@@ -745,7 +749,7 @@ servers:
 
         upstream_proc = start_proxy(upstream_config)
         try:
-            assert wait_for_udp_port("127.0.0.1", upstream_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", upstream_port, timeout=5.0), \
                 "Upstream HTTP/3 proxy should start"
 
             chain_proc = start_proxy(chain_config)
@@ -819,6 +823,7 @@ services:
     args:
       proxy_group:
         - address: "127.0.0.1:{upstream_port}"
+          hostname: localhost
           weight: 1
           tls:
             server_ca_path: "{ca_path}"
@@ -839,7 +844,7 @@ servers:
 
         upstream_proc = start_proxy(upstream_config)
         try:
-            assert wait_for_udp_port("127.0.0.1", upstream_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", upstream_port, timeout=5.0), \
                 "Upstream HTTP/3 proxy should start"
 
             chain_proc = start_proxy(chain_config)

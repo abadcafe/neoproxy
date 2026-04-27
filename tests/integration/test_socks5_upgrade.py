@@ -23,6 +23,8 @@ from .utils.helpers import (
     terminate_process,
 )
 
+from .conftest import get_unique_port
+
 
 # SOCKS5 constants
 SOCKS5_VERSION = 0x05
@@ -180,20 +182,12 @@ class TestSocks5UpgradeConnectTcp:
         _, server_sock = create_target_server("127.0.0.1", port, handler)
         self.sockets.append(server_sock)
 
-    def _get_free_port(self) -> int:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
-
     def _get_closed_port(self) -> int:
         """Get a port guaranteed to refuse connections.
 
         Binds a socket to port 0 (OS-assigned), reads the port number,
-        and keeps the socket bound (but NOT listening). This prevents
-        the TOCTOU race where another process could grab the port
-        between _get_free_port() releasing it and the proxy trying
-        to connect. A bound-but-not-listening socket causes
-        ConnectionRefused for any connection attempt.
+        and keeps the socket bound (but NOT listening). A bound-but-not-listening
+        socket causes ConnectionRefused for any connection attempt.
 
         The socket is registered in self.sockets for cleanup.
         """
@@ -206,8 +200,8 @@ class TestSocks5UpgradeConnectTcp:
 
     def test_socks5_connect_ipv4_bidirectional_transfer(self) -> None:
         """SOCKS5 CONNECT to IPv4 target with bidirectional data transfer."""
-        proxy_port = self._get_free_port()
-        target_port = self._get_free_port()
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
 
         self._create_echo_target(target_port)
         self._start_proxy(proxy_port)
@@ -229,8 +223,8 @@ class TestSocks5UpgradeConnectTcp:
 
     def test_socks5_connect_domain_bidirectional_transfer(self) -> None:
         """SOCKS5 CONNECT to domain target with bidirectional data transfer."""
-        proxy_port = self._get_free_port()
-        target_port = self._get_free_port()
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
 
         self._create_echo_target(target_port)
         self._start_proxy(proxy_port)
@@ -251,7 +245,7 @@ class TestSocks5UpgradeConnectTcp:
 
     def test_socks5_connect_refused_target(self) -> None:
         """SOCKS5 CONNECT to a port with no listener returns error reply."""
-        proxy_port = self._get_free_port()
+        proxy_port = get_unique_port()
         # Get a port that is guaranteed to refuse connections
         closed_port = self._get_closed_port()
 
@@ -274,7 +268,7 @@ class TestSocks5UpgradeConnectTcp:
         Per RFC 1928 section 6, when the target host refuses the connection,
         the SOCKS5 proxy should reply with REP=0x05 (Connection refused).
         """
-        proxy_port = self._get_free_port()
+        proxy_port = get_unique_port()
         closed_port = self._get_closed_port()
 
         self._start_proxy(proxy_port)
@@ -291,8 +285,8 @@ class TestSocks5UpgradeConnectTcp:
 
     def test_socks5_concurrent_connections(self) -> None:
         """Multiple concurrent SOCKS5 connections work independently."""
-        proxy_port = self._get_free_port()
-        target_port = self._get_free_port()
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
 
         self._create_echo_target(target_port)
         self._start_proxy(proxy_port)
@@ -317,8 +311,8 @@ class TestSocks5UpgradeConnectTcp:
 
     def test_socks5_large_data_transfer(self) -> None:
         """SOCKS5 tunnel handles large data transfer correctly."""
-        proxy_port = self._get_free_port()
-        target_port = self._get_free_port()
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
 
         self._create_echo_target(target_port)
         self._start_proxy(proxy_port)

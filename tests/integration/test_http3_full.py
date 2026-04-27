@@ -32,14 +32,18 @@ from .utils.helpers import (
     wait_for_proxy,
     create_target_server,
     terminate_process,
+    wait_for_udp_port_bound,
 )
 
 from .test_http3_listener import (
     generate_test_certificates,
     create_http3_listener_config,
     create_http3_chain_config,
-    wait_for_udp_port,
 )
+
+from .conftest import get_unique_port
+
+# Alias for convenience
 
 from .utils.http3_client import (
     AIOQUIC_AVAILABLE,
@@ -66,7 +70,7 @@ class TestHTTP3FullConnection:
         connects to HTTP/3 listener using real HTTP/3 client.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33000
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -77,7 +81,7 @@ class TestHTTP3FullConnection:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Use real HTTP/3 client to verify QUIC handshake
@@ -106,8 +110,8 @@ class TestHTTP3FullConnection:
         Target: Verify HTTP/3 listener accepts CONNECT request and returns 200.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33001
-        target_port = 33002
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -139,7 +143,7 @@ class TestHTTP3FullConnection:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Send CONNECT request using real HTTP/3 client
@@ -184,8 +188,8 @@ class TestHTTP3FullConnection:
         forwards to TCP target, and responses are sent back through the stream.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33003
-        target_port = 33004
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -221,7 +225,7 @@ class TestHTTP3FullConnection:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Test actual data transfer through HTTP/3 tunnel
@@ -298,7 +302,7 @@ class TestHTTP3GracefulShutdownWithConnections:
         active connections.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33010
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -310,7 +314,7 @@ class TestHTTP3GracefulShutdownWithConnections:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Give the listener some time to be "active"
@@ -343,7 +347,7 @@ class TestHTTP3GracefulShutdownWithConnections:
         Target: Verify HTTP/3 listener shutdown timeout behavior.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33011
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -354,7 +358,7 @@ class TestHTTP3GracefulShutdownWithConnections:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Graceful shutdown - should complete within timeout
@@ -390,9 +394,9 @@ class TestFullHTTP3ProxyChain:
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
 
-        http_port = 33020
-        h3_port = 33021
-        target_port = 33022
+        http_port = get_unique_port()
+        h3_port = get_unique_port()
+        target_port = get_unique_port()
 
         chain_proc: Optional[subprocess.Popen] = None
         h3_proc: Optional[subprocess.Popen] = None
@@ -410,7 +414,7 @@ class TestFullHTTP3ProxyChain:
             )
             h3_proc = start_proxy(h3_config)
 
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Create HTTP/3 chain service (machine 1 - the frontend)
@@ -451,8 +455,8 @@ class TestFullHTTP3ProxyChain:
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
 
-        http_port = 33030
-        h3_port = 33031
+        http_port = get_unique_port()
+        h3_port = get_unique_port()
 
         chain_proc: Optional[subprocess.Popen] = None
         h3_proc: Optional[subprocess.Popen] = None
@@ -469,7 +473,7 @@ class TestFullHTTP3ProxyChain:
             )
             h3_proc = start_proxy(h3_config)
 
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Start chain service
@@ -522,7 +526,7 @@ class TestHTTP3ErrorHandling:
         using real HTTP/3 client.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33040
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -533,7 +537,7 @@ class TestHTTP3ErrorHandling:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Send a GET request (non-CONNECT) using HTTP/3 client
@@ -575,7 +579,7 @@ class TestHTTP3ErrorHandling:
         Target: Verify HTTP/3 listener returns 400 for invalid target.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33041
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -586,7 +590,7 @@ class TestHTTP3ErrorHandling:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # CONNECT to an invalid target (port 0 is invalid)
@@ -633,7 +637,7 @@ class TestHTTP3ErrorHandling:
         Target: Verify HTTP/3 listener returns 502 when target is unreachable.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33042
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -644,7 +648,7 @@ class TestHTTP3ErrorHandling:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # CONNECT to an unreachable target
@@ -695,7 +699,7 @@ class TestHTTP3ConfigValidationFull:
         Target: Verify HTTP/3 listener uses default for invalid stream count.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33050
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -713,7 +717,7 @@ class TestHTTP3ConfigValidationFull:
             proxy_proc = start_proxy(config_path)
 
             # Should still start successfully
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener should start with valid QUIC params"
 
             assert proxy_proc.poll() is None, \
@@ -732,7 +736,7 @@ class TestHTTP3ConfigValidationFull:
         Target: Verify HTTP/3 listener uses default for invalid timeout.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33051
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -750,7 +754,7 @@ class TestHTTP3ConfigValidationFull:
             proxy_proc = start_proxy(config_path)
 
             # Should still start successfully with default
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener should start with default timeout"
 
         finally:
@@ -771,7 +775,7 @@ class TestHTTP3ConfigValidationFull:
         changes are properly detected at startup.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33052
+        proxy_port = get_unique_port()
 
         try:
             cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
@@ -834,7 +838,7 @@ servers:
         Plaintext passwords are now the standard format.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33053
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -869,7 +873,7 @@ servers:
             proxy_proc = start_proxy(config_path)
 
             # Should start successfully with valid plaintext password
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener should start with valid plaintext password"
 
         finally:
@@ -885,7 +889,7 @@ servers:
         Target: Verify HTTP/3 listener handles minimum boundary values correctly.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33054
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -906,7 +910,7 @@ servers:
             proxy_proc = start_proxy(config_path)
 
             # Should start with minimum valid values
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener should start with minimum QUIC params"
 
             assert proxy_proc.poll() is None, \
@@ -925,7 +929,7 @@ servers:
         Target: Verify HTTP/3 listener handles maximum boundary values correctly.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33055
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -946,7 +950,7 @@ servers:
             proxy_proc = start_proxy(config_path)
 
             # Should start with maximum valid values
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener should start with maximum QUIC params"
 
             assert proxy_proc.poll() is None, \
@@ -965,7 +969,7 @@ servers:
         Target: Verify HTTP/3 listener uses defaults for negative values.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33056
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -983,7 +987,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener should start"
 
         finally:
@@ -1019,9 +1023,9 @@ class TestFullHTTP3ProxyChainDataTransfer:
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
 
-        http_port = 33060
-        h3_port = 33061
-        target_port = 33062
+        http_port = get_unique_port()
+        h3_port = get_unique_port()
+        target_port = get_unique_port()
 
         chain_proc: Optional[subprocess.Popen] = None
         h3_proc: Optional[subprocess.Popen] = None
@@ -1039,7 +1043,7 @@ class TestFullHTTP3ProxyChainDataTransfer:
             )
             h3_proc = start_proxy(h3_config)
 
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Create target server that echoes data
@@ -1145,8 +1149,8 @@ class TestHTTP3GracefulShutdownTimeout:
         - After timeout, should force close all connections
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33070
-        target_port = 33071
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -1172,7 +1176,7 @@ class TestHTTP3GracefulShutdownTimeout:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Wait for target server
@@ -1219,8 +1223,8 @@ class TestHTTP3Performance:
         Uses aioquic to establish multiple HTTP/3 connections simultaneously.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33080
-        target_port = 33081
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -1249,7 +1253,7 @@ class TestHTTP3Performance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             time.sleep(0.5)
@@ -1307,7 +1311,7 @@ class TestHTTP3Performance:
         Per design doc: TLS 0-RTT connection latency should be < 50ms.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33082
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -1318,7 +1322,7 @@ class TestHTTP3Performance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Measure connection latency
@@ -1366,8 +1370,8 @@ class TestHTTP3Performance:
         Per design doc: throughput should be >= 90% of network bandwidth.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 33083
-        target_port = 33084
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -1398,7 +1402,7 @@ class TestHTTP3Performance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             time.sleep(0.5)

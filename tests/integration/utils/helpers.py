@@ -13,6 +13,7 @@ import time
 import os
 import signal
 import sys
+import errno
 from typing import Optional, Tuple, List, Callable, Generator
 
 # ==============================================================================
@@ -594,3 +595,121 @@ def get_curl_env_without_no_proxy() -> dict:
     env["no_proxy"] = ""
     env["NO_PROXY"] = ""
     return env
+
+
+# ==============================================================================
+# UDP Port Helpers
+# ==============================================================================
+
+
+def wait_for_udp_port_bound(
+    host: str,
+    port: int,
+    timeout: float = 5.0,
+    interval: float = 0.1
+) -> bool:
+    """
+    Wait for UDP port to be bound (indicating server started).
+
+    This function checks if a UDP port is in use by attempting to bind to it.
+    If binding fails with EADDRINUSE, the port is bound by another process.
+
+    Args:
+        host: Host address
+        port: Port number
+        timeout: Maximum wait time in seconds
+        interval: Check interval in seconds
+
+    Returns:
+        bool: True if port is bound by another process, False if timeout
+    """
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            test_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                test_sock.bind((host, port))
+                test_sock.close()
+                # Port is available, server not started yet
+            except OSError as e:
+                test_sock.close()
+                # Only return True if the error is specifically EADDRINUSE
+                # Other errors (EACCES, EADDRNOTAVAIL, etc.) should continue polling
+                if e.errno == errno.EADDRINUSE:
+                    return True
+                # For other OSError types, continue polling
+        except (socket.error, OSError):
+            # Socket creation or other low-level errors - continue polling
+            pass
+        time.sleep(interval)
+    return False
+
+
+# ==============================================================================
+# Log Helpers
+# ==============================================================================
+
+
+def wait_for_log_contains(
+    log_path: str,
+    pattern: str,
+    timeout: float = 5.0,
+    interval: float = 0.1
+) -> bool:
+    """
+    Wait for log file to contain a specific pattern.
+
+    Args:
+        log_path: Path to log file
+        pattern: String pattern to search for
+        timeout: Maximum wait time in seconds
+        interval: Check interval in seconds
+
+    Returns:
+        bool: True if pattern found, False if timeout
+    """
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            with open(log_path, 'r') as f:
+                if pattern in f.read():
+                    return True
+        except FileNotFoundError:
+            pass
+        time.sleep(interval)
+    return False
+
+
+# ==============================================================================
+# Metrics Helpers
+# ==============================================================================
+
+
+def wait_for_metric_value(
+    fetch_func: "Callable[[], str]",
+    expected: str,
+    timeout: float = 5.0,
+    interval: float = 0.1
+) -> bool:
+    """
+    Wait for a metric to have a specific value.
+
+    Args:
+        fetch_func: Callable that returns the current metric string
+        expected: Expected string to find in the response
+        timeout: Maximum wait time in seconds
+        interval: Check interval in seconds
+
+    Returns:
+        bool: True if expected value found, False if timeout
+    """
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            response = fetch_func()
+            if expected in response:
+                return True
+        except Exception:
+            pass
+        time.sleep(interval)
+    return False

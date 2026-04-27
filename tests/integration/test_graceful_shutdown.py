@@ -23,6 +23,7 @@ from .utils.helpers import (
     create_test_config,
     create_echo_config,
 )
+from .conftest import get_unique_port
 
 
 # ==============================================================================
@@ -40,7 +41,7 @@ class TestGracefulShutdown:
         Target: Verify neoproxy handles SIGINT gracefully
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 28080
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -82,7 +83,7 @@ class TestGracefulShutdown:
         Target: Verify neoproxy handles SIGTERM gracefully
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 28081
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -120,7 +121,7 @@ class TestGracefulShutdown:
         Target: Verify idle connections are properly closed during shutdown
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 28082
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         client_sock: Optional[socket.socket] = None
 
@@ -171,8 +172,8 @@ class TestGracefulShutdown:
         Target: Verify active tunnel is properly closed during shutdown
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 28083
-        target_port = 28084
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
         client_sock: Optional[socket.socket] = None
@@ -262,8 +263,8 @@ class TestGracefulShutdown:
         Target: Verify process exits after 5 second timeout
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 28085
-        target_port = 28086
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
         client_sock: Optional[socket.socket] = None

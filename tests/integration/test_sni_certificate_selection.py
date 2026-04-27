@@ -24,6 +24,8 @@ from .utils.helpers import (
     terminate_process,
 )
 
+from .conftest import get_unique_port
+
 
 # ==============================================================================
 # Certificate Generation Helpers
@@ -387,7 +389,7 @@ class TestSniCertificateSelection:
         - SNI=web.test.local returns Server B's certificate
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 38443
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -454,7 +456,7 @@ class TestSniCertificateSelection:
         - SNI=foo.test.local succeeds with wildcard certificate
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 38444
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -493,7 +495,7 @@ class TestSniCertificateSelection:
         This is the behavior we implement - wildcard also matches the bare domain.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 38445
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -534,7 +536,7 @@ class TestSniCertificateSelection:
         Multi-level subdomains should NOT match a single-level wildcard.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 38446
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -574,7 +576,7 @@ class TestSniCertificateSelection:
         No default certificate is used - unknown SNI is rejected.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 38447
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -621,7 +623,7 @@ class TestSniCertificateSelection:
         - SNI=foo.test.local returns Certificate A (wildcard match)
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 38448
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:

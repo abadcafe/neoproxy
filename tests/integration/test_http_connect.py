@@ -23,6 +23,7 @@ from .utils.helpers import (
     send_raw_request,
     create_test_config,
 )
+from .conftest import get_unique_port
 
 
 # ==============================================================================
@@ -84,8 +85,8 @@ class TestHTTPConnect:
         使用 curl 发送 CONNECT 请求通过代理访问目标服务器
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 18080
-        target_port = 18081
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -161,7 +162,7 @@ class TestHTTPConnect:
         测试目标: 验证代理服务器对非 CONNECT 方法返回 405 Method Not Allowed
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 18082
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -206,7 +207,7 @@ class TestHTTPConnect:
         测试目标: 验证代理服务器对无效目标地址返回 400 Bad Request
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 18083
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -250,7 +251,7 @@ class TestHTTPConnect:
         测试目标: 验证代理服务器在目标不可达时的行为
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 18084
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -322,8 +323,8 @@ class TestHTTPConnect:
         测试目标: 验证代理服务器能够同时处理多个 CONNECT 隧道
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 18085
-        target_port = 18086
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -416,8 +417,8 @@ class TestHTTPConnect:
         测试目标: 验证 CONNECT 隧道能够双向转发数据
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 18087
-        target_port = 18088
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -505,8 +506,8 @@ class TestHTTPConnect:
         测试目标: 验证隧道一端关闭时，另一端能够正确感知
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 18089
-        target_port = 18090
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 

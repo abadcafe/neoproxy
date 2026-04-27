@@ -11,6 +11,7 @@ import os
 from typing import Tuple, Optional
 
 from .utils.helpers import NEOPROXY_BINARY
+from .conftest import get_unique_port
 
 
 # ==============================================================================

@@ -37,6 +37,7 @@ from .utils.helpers import (
     create_echo_config,
     create_test_config,
 )
+from .conftest import get_unique_port
 
 
 def parse_http_response(response: bytes) -> Tuple[int, str, dict, bytes]:
@@ -105,7 +106,7 @@ class TestHTTPErrorResponse:
         through unit tests in echo.rs.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 38080
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -156,7 +157,7 @@ class TestHTTPErrorResponse:
         3. Content-Type header is present
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 38081
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -209,7 +210,7 @@ class TestHTTPErrorResponse:
         3. Error message explains the issue
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 38082
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -256,7 +257,7 @@ class TestHTTPErrorResponse:
         Target: Verify echo service works correctly without errors
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 38083
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:

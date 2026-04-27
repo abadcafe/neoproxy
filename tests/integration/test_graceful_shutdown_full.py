@@ -39,6 +39,7 @@ from .utils.helpers import (
     create_test_config,
     create_echo_config,
 )
+from .conftest import get_unique_port
 
 
 # ==============================================================================
@@ -56,7 +57,7 @@ class TestNormalShutdown:
         Target: Verify neoproxy handles SIGINT gracefully with exit code 0
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29080
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -94,7 +95,7 @@ class TestNormalShutdown:
         Target: Verify neoproxy handles SIGTERM gracefully with exit code 0
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29081
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -132,7 +133,7 @@ class TestNormalShutdown:
         Target: Verify idle connections are properly closed during shutdown
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29082
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         client_sock: Optional[socket.socket] = None
 
@@ -190,7 +191,7 @@ class TestRepeatedSignal:
         Target: Verify that repeated signals are ignored and exit code is 0
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29090
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -246,8 +247,8 @@ class TestShutdownTimeout:
         - Exit code should be 0
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29100
-        target_port = 29101
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
         client_sock: Optional[socket.socket] = None
@@ -341,7 +342,7 @@ class TestErrorExit:
         """
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
-        proxy_port = 29200
+        proxy_port = get_unique_port()
         first_proc: Optional[subprocess.Popen] = None
         second_proc: Optional[subprocess.Popen] = None
 
@@ -412,8 +413,8 @@ class TestConnectTunnel:
         Target: Verify that active CONNECT tunnel is properly closed
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29300
-        target_port = 29301
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
         client_sock: Optional[socket.socket] = None
@@ -499,7 +500,7 @@ class TestResourceCleanup:
         Target: Verify that listening socket is properly closed and port is released
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29400
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -550,7 +551,7 @@ class TestResourceCleanup:
         Target: Verify that multiple active connections are all cleaned up
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29401
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         client_socks: List[socket.socket] = []
 
@@ -720,7 +721,7 @@ class TestMultipleWorkerThreads:
         Target: Verify graceful shutdown works with multiple worker threads
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29500
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -760,8 +761,8 @@ class TestMultipleWorkerThreads:
         Target: Verify graceful shutdown with multiple workers handling connections
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29501
-        target_port = 29502
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
         client_socks: List[socket.socket] = []

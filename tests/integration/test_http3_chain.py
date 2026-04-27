@@ -29,6 +29,7 @@ from .utils.helpers import (
     wait_for_proxy,
     create_target_server,
     terminate_process,
+    wait_for_udp_port_bound,
 )
 
 from .utils.http_echo import http_echo_handler
@@ -37,8 +38,11 @@ from .test_http3_listener import (
     generate_test_certificates,
     create_http3_listener_config,
     create_http3_chain_config,
-    wait_for_udp_port,
 )
+
+from .conftest import get_unique_port
+
+# Alias for backward compatibility in this file
 
 
 # ==============================================================================
@@ -56,8 +60,8 @@ class TestHTTP3ChainProxy:
         Target: Verify http3_chain service starts with valid configuration
         """
         temp_dir = tempfile.mkdtemp()
-        http_port = 30580
-        h3_port = 30581
+        http_port = get_unique_port()
+        h3_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -95,8 +99,8 @@ class TestHTTP3ChainProxy:
         Target: Verify http3_chain service shuts down gracefully
         """
         temp_dir = tempfile.mkdtemp()
-        http_port = 30582
-        h3_port = 30583
+        http_port = get_unique_port()
+        h3_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -140,7 +144,9 @@ class TestHTTP3ChainProxy:
         Target: Verify http3_chain service handles multiple proxy configs
         """
         temp_dir = tempfile.mkdtemp()
-        http_port = 30584
+        http_port = get_unique_port()
+        h3_port1 = get_unique_port()
+        h3_port2 = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -150,8 +156,8 @@ class TestHTTP3ChainProxy:
             config_path = create_http3_chain_config(
                 http_port=http_port,
                 proxy_group=[
-                    ("127.0.0.1", 30585, 2),
-                    ("127.0.0.1", 30586, 1),
+                    ("127.0.0.1", h3_port1, 2),
+                    ("127.0.0.1", h3_port2, 1),
                 ],
                 ca_path=ca_path,
                 temp_dir=temp_dir
@@ -182,7 +188,8 @@ class TestHTTP3ChainProxy:
         The service should start successfully and fail only when attempting connections.
         """
         temp_dir = tempfile.mkdtemp()
-        http_port = 30587
+        http_port = get_unique_port()
+        h3_port = get_unique_port()
 
         try:
             config_content = f"""worker_threads: 1
@@ -193,7 +200,8 @@ services:
   kind: http3_chain.http3_chain
   args:
     proxy_group:
-    - address: 127.0.0.1:30588
+    - address: 127.0.0.1:{h3_port}
+      hostname: localhost
       weight: 1
     default_tls:
       server_ca_path: "/nonexistent/ca.pem"
@@ -248,9 +256,9 @@ servers:
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
 
-        http_port = 30590
-        h3_port = 30591
-        target_port = 30592
+        http_port = get_unique_port()
+        h3_port = get_unique_port()
+        target_port = get_unique_port()
 
         chain_proc: Optional[subprocess.Popen] = None
         h3_proc: Optional[subprocess.Popen] = None
@@ -272,7 +280,7 @@ servers:
                 temp_dir=temp_dir1
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Start chain service
@@ -285,8 +293,6 @@ servers:
             chain_proc = start_proxy(chain_config)
             assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
                 "HTTP listener failed to start"
-
-            time.sleep(0.5)
 
             # Test data transmission using curl
             result = subprocess.run(
@@ -334,9 +340,8 @@ class TestFullProxyChain:
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
 
-        http_port = 30600
-        h3_port = 30601
-        target_port = 30602
+        http_port = get_unique_port()
+        h3_port = get_unique_port()
 
         chain_proc: Optional[subprocess.Popen] = None
         h3_proc: Optional[subprocess.Popen] = None
@@ -354,7 +359,7 @@ class TestFullProxyChain:
             )
             h3_proc = start_proxy(h3_config)
 
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Create HTTP/3 chain service (machine 1)
@@ -394,8 +399,8 @@ class TestFullProxyChain:
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
 
-        http_port = 30610
-        h3_port = 30611
+        http_port = get_unique_port()
+        h3_port = get_unique_port()
 
         chain_proc: Optional[subprocess.Popen] = None
         h3_proc: Optional[subprocess.Popen] = None
@@ -412,7 +417,7 @@ class TestFullProxyChain:
             )
             h3_proc = start_proxy(h3_config)
 
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Start chain service
@@ -464,8 +469,8 @@ class TestHTTP3ChainGracefulShutdown:
         Target: Verify http3_chain uninstalls immediately when no streams are active.
         """
         temp_dir = tempfile.mkdtemp()
-        http_port = 30620
-        h3_port = 30621
+        http_port = get_unique_port()
+        h3_port = get_unique_port()
 
         chain_proc: Optional[subprocess.Popen] = None
         h3_proc: Optional[subprocess.Popen] = None
@@ -482,7 +487,7 @@ class TestHTTP3ChainGracefulShutdown:
             )
             h3_proc = start_proxy(h3_config)
 
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Start chain service
@@ -531,9 +536,9 @@ class TestHTTP3ChainGracefulShutdown:
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
 
-        http_port = 30630
-        h3_port = 30631
-        target_port = 30632
+        http_port = get_unique_port()
+        h3_port = get_unique_port()
+        target_port = get_unique_port()
 
         chain_proc: Optional[subprocess.Popen] = None
         h3_proc: Optional[subprocess.Popen] = None
@@ -551,7 +556,7 @@ class TestHTTP3ChainGracefulShutdown:
             )
             h3_proc = start_proxy(h3_config)
 
-            assert wait_for_udp_port("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
             # Create a target server that accepts connection
@@ -578,9 +583,6 @@ class TestHTTP3ChainGracefulShutdown:
 
             assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
                 "HTTP listener failed to start"
-
-            # Give time for services to be fully ready
-            time.sleep(1.0)
 
             # Trigger shutdown while server is running
             start_time = time.time()
@@ -648,8 +650,6 @@ class TestWRRLoadBalancing:
         which is not available in black-box testing. The WRR algorithm correctness
         is verified by unit tests in src/plugins/http3_chain.rs (test_proxy_group_schedule_wrr_*).
         """
-        from .conftest import get_unique_port
-
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
         temp_dir3 = tempfile.mkdtemp()
@@ -681,7 +681,7 @@ class TestWRRLoadBalancing:
                 temp_dir=temp_dir1
             )
             h3_proc1 = start_proxy(h3_config1)
-            assert wait_for_udp_port("127.0.0.1", h3_port1, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port1, timeout=5.0), \
                 "HTTP/3 listener 1 failed to start"
 
             # Start HTTP/3 listener 2 (weight 1)
@@ -692,7 +692,7 @@ class TestWRRLoadBalancing:
                 temp_dir=temp_dir2
             )
             h3_proc2 = start_proxy(h3_config2)
-            assert wait_for_udp_port("127.0.0.1", h3_port2, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port2, timeout=5.0), \
                 "HTTP/3 listener 2 failed to start"
 
             # Start chain service with weights 2:1
@@ -708,8 +708,6 @@ class TestWRRLoadBalancing:
             chain_proc = start_proxy(chain_config)
             assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
                 "HTTP listener failed to start"
-
-            time.sleep(1.0)
 
             # Send multiple requests through the chain
             # WRR should distribute these across both upstreams

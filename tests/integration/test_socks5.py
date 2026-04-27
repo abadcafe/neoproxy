@@ -24,6 +24,8 @@ from .utils.helpers import (
     terminate_process,
 )
 
+from .conftest import get_unique_port
+
 
 # ==============================================================================
 # Constants
@@ -411,8 +413,8 @@ class TestSocks5BasicConnection:
         and bidirectional data transfer works correctly.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29001
-        target_port = 29002
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -487,8 +489,8 @@ class TestSocks5BasicConnection:
         Test that SOCKS5 connection succeeds with correct credentials.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29003
-        target_port = 29004
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -558,7 +560,7 @@ class TestSocks5BasicConnection:
         Note: RFC 1929 allows any non-zero status code for auth failure.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29005
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -604,7 +606,7 @@ class TestSocks5BasicConnection:
         an authentication method not supported by server.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29006
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -648,7 +650,7 @@ class TestSocks5UnsupportedCommands:
         Test that BIND command returns REP=0x07 (command not supported).
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29007
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -685,7 +687,7 @@ class TestSocks5UnsupportedCommands:
         Test that UDP ASSOCIATE command returns REP=0x07 (command not supported).
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29008
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -727,7 +729,7 @@ class TestSocks5HandshakeTimeout:
         sends no data. No response should be sent.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29009
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -776,7 +778,7 @@ class TestSocks5HandshakeTimeout:
         sends partial handshake data and stops.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29010
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -825,7 +827,7 @@ class TestSocks5HandshakeTimeout:
         Test that custom handshake timeout is applied correctly.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29011
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -874,8 +876,8 @@ class TestSocks5TargetAddressTypes:
         Test connection to IPv4 target address.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29012
-        target_port = 29013
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -930,8 +932,8 @@ class TestSocks5TargetAddressTypes:
         Test connection to IPv6 target address (localhost ::1).
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29014
-        target_port = 29015
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -1000,8 +1002,8 @@ class TestSocks5TargetAddressTypes:
         Test connection to domain target address (localhost).
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29016
-        target_port = 29017
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -1061,8 +1063,8 @@ class TestSocks5ConnectionTarget:
         Test that Service sends REP=0x00 on successful connection.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29018
-        target_port = 29019
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -1106,8 +1108,8 @@ class TestSocks5ConnectionTarget:
         Test that Service sends REP=0x05 when target refuses connection.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29020
-        target_port = 29021
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -1149,7 +1151,7 @@ class TestSocks5PortBoundary:
         Test connection to port 1 (minimum valid port).
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29022
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -1185,7 +1187,7 @@ class TestSocks5PortBoundary:
         Test connection to port 65535 (maximum valid port).
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29023
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -1225,8 +1227,8 @@ class TestSocks5UsernamePasswordBoundary:
         Test authentication with 1-byte username (minimum).
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29024
-        target_port = 29025
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -1270,8 +1272,8 @@ class TestSocks5UsernamePasswordBoundary:
         Test authentication with 1-byte password (minimum).
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29026
-        target_port = 29027
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -1315,8 +1317,8 @@ class TestSocks5UsernamePasswordBoundary:
         Test authentication with 255-byte username (maximum).
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29028
-        target_port = 29029
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -1365,8 +1367,8 @@ class TestSocks5DomainBoundary:
         Test connection to 1-byte domain (minimum).
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29030
-        target_port = 29031
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -1410,7 +1412,7 @@ class TestSocks5DomainBoundary:
         Test connection to 255-byte domain (maximum).
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29032
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -1451,9 +1453,9 @@ class TestSocks5MultiAddress:
         Test that SOCKS5 listener works on multiple addresses.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port1 = 29033
-        proxy_port2 = 29034
-        target_port = 29035
+        proxy_port1 = get_unique_port()
+        proxy_port2 = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -1520,7 +1522,7 @@ class TestSocks5MultiAddress:
         time and rejects invalid configurations.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29036
+        proxy_port = get_unique_port()
 
         try:
             # Mix of valid and invalid addresses
@@ -1564,7 +1566,7 @@ class TestSocks5ClientDisconnect:
         Test that server handles client disconnect during handshake gracefully.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29038
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -1613,8 +1615,8 @@ class TestSocks5GracefulShutdown:
         Test that server shuts down gracefully with active connections.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29039
-        target_port = 29040
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -1678,8 +1680,8 @@ class TestSocks5BidirectionalTransfer:
         Test that data can be sent in both directions through SOCKS5 tunnel.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29041
-        target_port = 29042
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -1751,7 +1753,7 @@ class TestSocks5ConfigErrors:
         Test that proxy fails to start with invalid YAML configuration.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29050
+        proxy_port = get_unique_port()
 
         try:
             # Create invalid YAML config
@@ -1877,7 +1879,7 @@ servers:
         Test that proxy fails to start when type is password but users is empty.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29051
+        proxy_port = get_unique_port()
 
         try:
             config_content = f"""worker_threads: 1
@@ -1923,7 +1925,7 @@ servers:
         In the new unified auth format, unknown fields should be rejected.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29052
+        proxy_port = get_unique_port()
 
         try:
             config_content = f"""worker_threads: 1
@@ -1968,7 +1970,7 @@ servers:
         Test that proxy fails to start with invalid handshake timeout format.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29053
+        proxy_port = get_unique_port()
 
         try:
             config_content = f"""worker_threads: 1
@@ -2016,8 +2018,8 @@ class TestSocks5AdditionalBoundary:
         Test authentication with 255-byte password (maximum).
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29054
-        target_port = 29055
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
         target_socket: Optional[socket.socket] = None
 
@@ -2062,7 +2064,7 @@ class TestSocks5AdditionalBoundary:
         Test connection to port 0 (invalid port).
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29057
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -2102,7 +2104,7 @@ class TestSocks5InvalidVersion:
         Test that server closes connection without response for invalid version.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29058
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -2146,7 +2148,7 @@ class TestSocks5InvalidVersion:
         Test that server handles non-SOCKS5 data gracefully.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29059
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -2196,7 +2198,7 @@ class TestSocks5HandshakeTimeoutFormat:
         Test that handshake timeout string format (e.g., "5s") is correctly parsed.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29060
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -2242,7 +2244,7 @@ class TestSocks5HandshakeTimeoutFormat:
         Test that default handshake timeout is 10 seconds.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29061
+        proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -2291,7 +2293,7 @@ class TestSocks5TlsClientCertRejected:
         SOCKS5 protocol only supports password authentication.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_port = 29062
+        proxy_port = get_unique_port()
 
         try:
             config_content = f"""worker_threads: 1

@@ -460,17 +460,16 @@ servers:
                 assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
                     "Chain proxy should start with new user/tls format"
 
-                time.sleep(0.5)
 
                 # Test: Request through chain should succeed (auth should work)
                 env = get_curl_env_without_no_proxy()
                 result = subprocess.run(
-                    [
-                        "curl", "-s", "-p", "--http0.9",
+                    ["curl", "-s", "-p",
                         "-x", f"http://127.0.0.1:{http_port}",
                         f"http://127.0.0.1:{target_port}/",
                         "-d", "test_default_tls",
-                        "--connect-timeout", "10"
+                        "--connect-timeout", "10",
+                        "--max-time", "2"
                     ],
                     capture_output=True, text=True, env=env
                 )
@@ -558,17 +557,16 @@ servers:
                 assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
                     "Chain proxy should start with per-proxy credential override"
 
-                time.sleep(0.5)
 
                 # Test: Request through chain should succeed (per-proxy credential should work)
                 env = get_curl_env_without_no_proxy()
                 result = subprocess.run(
-                    [
-                        "curl", "-s", "-p", "--http0.9",
+                    ["curl", "-s", "-p",
                         "-x", f"http://127.0.0.1:{http_port}",
                         f"http://127.0.0.1:{target_port}/",
                         "-d", "test_per_proxy_credential",
-                        "--connect-timeout", "10"
+                        "--connect-timeout", "10",
+                        "--max-time", "2"
                     ],
                     capture_output=True, text=True, env=env
                 )
@@ -657,17 +655,16 @@ servers:
                 assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
                     "Chain proxy should start with new user format"
 
-                time.sleep(0.5)
 
                 # Test: Request should succeed because user provides correct auth
                 env = get_curl_env_without_no_proxy()
                 result = subprocess.run(
-                    [
-                        "curl", "-s", "-p", "--http0.9",
+                    ["curl", "-s", "-p",
                         "-x", f"http://127.0.0.1:{http_port}",
                         f"http://127.0.0.1:{target_port}/",
                         "-d", "test_user",
-                        "--connect-timeout", "10"
+                        "--connect-timeout", "10",
+                        "--max-time", "2"
                     ],
                     capture_output=True, text=True, env=env
                 )
@@ -757,17 +754,16 @@ servers:
                 assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
                     "Chain proxy should start with default_user inheritance"
 
-                time.sleep(0.5)
 
                 # Test: Request should succeed (inherited default_user should work)
                 env = get_curl_env_without_no_proxy()
                 result = subprocess.run(
-                    [
-                        "curl", "-s", "-p", "--http0.9",
+                    ["curl", "-s", "-p",
                         "-x", f"http://127.0.0.1:{http_port}",
                         f"http://127.0.0.1:{target_port}/",
                         "-d", "test_default_user",
-                        "--connect-timeout", "10"
+                        "--connect-timeout", "10",
+                        "--max-time", "2"
                     ],
                     capture_output=True, text=True, env=env
                 )
@@ -852,17 +848,16 @@ servers:
                 assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
                     "Chain proxy should start with no user"
 
-                time.sleep(0.5)
 
                 # Test: Request should FAIL because no auth is sent
                 env = get_curl_env_without_no_proxy()
                 result = subprocess.run(
-                    [
-                        "curl", "-s", "-p", "--http0.9",
+                    ["curl", "-s", "-p",
                         "-x", f"http://127.0.0.1:{http_port}",
                         f"http://127.0.0.1:{target_port}/",
                         "-d", "test_no_user",
-                        "--connect-timeout", "10"
+                        "--connect-timeout", "10",
+                        "--max-time", "2"
                     ],
                     capture_output=True, text=True, env=env
                 )

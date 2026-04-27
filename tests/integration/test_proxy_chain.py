@@ -397,8 +397,6 @@ def run_proxy_chain_test(
         assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
             "Entry listener failed to start"
 
-        time.sleep(0.5)
-
         # Create target server for mock tests
         if target_type == "mock" and target_port:
             target_thread, target_socket = create_echo_target_server(

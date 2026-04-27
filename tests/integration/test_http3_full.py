@@ -1179,9 +1179,6 @@ class TestHTTP3GracefulShutdownTimeout:
             assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
 
-            # Wait for target server
-            time.sleep(0.5)
-
             # Send SIGTERM while server is running (no active streams, but tests timeout)
             start_time = time.time()
             proxy_proc.send_signal(signal.SIGTERM)
@@ -1255,8 +1252,6 @@ class TestHTTP3Performance:
 
             assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
                 "HTTP/3 listener failed to start"
-
-            time.sleep(0.5)
 
             # Test concurrent connections
             num_connections = 10

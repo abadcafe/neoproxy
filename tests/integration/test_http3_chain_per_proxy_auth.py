@@ -197,12 +197,12 @@ class TestHTTP3ChainPerProxyPasswordAuth:
             # Clear no_proxy to force proxy usage for localhost
             env = get_curl_env_without_no_proxy()
             result = subprocess.run(
-                [
-                    "curl", "-s", "-p", "--http0.9",
+                ["curl", "-s", "-p", "--http0.9",
                     "-x", f"http://127.0.0.1:{http_port}",
                     f"http://127.0.0.1:{target_port}/",
                     "-d", "test_password_auth",
-                    "--connect-timeout", "10"
+                    "--connect-timeout", "10",
+                    "--max-time", "2"
                 ],
                 capture_output=True,
                 text=True,
@@ -289,12 +289,12 @@ class TestHTTP3ChainPerProxyTlsCertAuth:
             # Clear no_proxy to force proxy usage for localhost
             env = get_curl_env_without_no_proxy()
             result = subprocess.run(
-                [
-                    "curl", "-s", "-p", "--http0.9",
+                ["curl", "-s", "-p", "--http0.9",
                     "-x", f"http://127.0.0.1:{http_port}",
                     f"http://127.0.0.1:{target_port}/",
                     "-d", "test_tls_cert_auth",
-                    "--connect-timeout", "10"
+                    "--connect-timeout", "10",
+                    "--max-time", "2"
                 ],
                 capture_output=True,
                 text=True,
@@ -371,12 +371,12 @@ class TestHTTP3ChainAuthInheritance:
             # Clear no_proxy to force proxy usage for localhost
             env = get_curl_env_without_no_proxy()
             result = subprocess.run(
-                [
-                    "curl", "-s", "-p", "--http0.9",
+                ["curl", "-s", "-p", "--http0.9",
                     "-x", f"http://127.0.0.1:{http_port}",
                     f"http://127.0.0.1:{target_port}/",
                     "-d", "test_inheritance",
-                    "--connect-timeout", "10"
+                    "--connect-timeout", "10",
+                    "--max-time", "2"
                 ],
                 capture_output=True,
                 text=True,
@@ -452,12 +452,12 @@ class TestHTTP3ChainAuthNone:
             # Clear no_proxy to force proxy usage for localhost
             env = get_curl_env_without_no_proxy()
             result = subprocess.run(
-                [
-                    "curl", "-s", "-p", "--http0.9",
+                ["curl", "-s", "-p", "--http0.9",
                     "-x", f"http://127.0.0.1:{http_port}",
                     f"http://127.0.0.1:{target_port}/",
                     "-d", "test_explicit_none",
-                    "--connect-timeout", "10"
+                    "--connect-timeout", "10",
+                    "--max-time", "2"
                 ],
                 capture_output=True,
                 text=True,
@@ -533,8 +533,7 @@ class TestHTTP3ChainAuthFailure:
             # Clear no_proxy to force proxy usage for localhost
             env = get_curl_env_without_no_proxy()
             result = subprocess.run(
-                [
-                    "curl", "-s", "-p",
+                ["curl", "-s", "-p",
                     "-x", f"http://127.0.0.1:{http_port}",
                     "http://example.com:80/",
                     "--connect-timeout", "10"
@@ -594,8 +593,7 @@ class TestHTTP3ChainAuthFailure:
             # Clear no_proxy to force proxy usage for localhost
             env = get_curl_env_without_no_proxy()
             result = subprocess.run(
-                [
-                    "curl", "-s", "-p",
+                ["curl", "-s", "-p",
                     "-x", f"http://127.0.0.1:{http_port}",
                     "http://example.com:80/",
                     "--connect-timeout", "5"

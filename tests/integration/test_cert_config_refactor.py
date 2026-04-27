@@ -361,8 +361,6 @@ class TestTlsDeepMerge:
             assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
                 "HTTP listener failed to start"
 
-            time.sleep(0.5)
-
             # Test data transmission
             result = subprocess.run(
                 [

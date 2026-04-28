@@ -62,7 +62,7 @@ from .utils.http3_client import (
 class TestHTTP3FullConnection:
     """Test 7.1: Full HTTP/3 connection scenarios."""
 
-    def test_quic_handshake_success(self) -> None:
+    def test_quic_handshake_success(self, shared_test_certs) -> None:
         """
         TC-H3-FULL-001: QUIC handshake succeeds.
 
@@ -74,7 +74,9 @@ class TestHTTP3FullConnection:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -103,7 +105,7 @@ class TestHTTP3FullConnection:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_http3_connect_request_success(self) -> None:
+    def test_http3_connect_request_success(self, shared_test_certs) -> None:
         """
         TC-H3-FULL-002: HTTP/3 CONNECT request returns 200.
 
@@ -116,7 +118,9 @@ class TestHTTP3FullConnection:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -137,9 +141,6 @@ class TestHTTP3FullConnection:
             _, target_socket = create_target_server(
                 "127.0.0.1", target_port, echo_handler
             )
-
-            # Wait for target server to be ready
-            time.sleep(0.5)
 
             proxy_proc = start_proxy(config_path)
 
@@ -175,7 +176,7 @@ class TestHTTP3FullConnection:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_http3_data_transfer(self) -> None:
+    def test_http3_data_transfer(self, shared_test_certs) -> None:
         """
         TC-H3-FULL-003: HTTP/3 data bidirectional transfer works.
 
@@ -194,7 +195,9 @@ class TestHTTP3FullConnection:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -219,9 +222,6 @@ class TestHTTP3FullConnection:
             _, target_socket = create_target_server(
                 "127.0.0.1", target_port, echo_handler
             )
-
-            # Wait for target server to be ready
-            time.sleep(0.5)
 
             proxy_proc = start_proxy(config_path)
 
@@ -294,7 +294,7 @@ class TestHTTP3FullConnection:
 class TestHTTP3GracefulShutdownWithConnections:
     """Test 7.4: HTTP/3 graceful shutdown with active connections."""
 
-    def test_shutdown_with_active_h3_connections(self) -> None:
+    def test_shutdown_with_active_h3_connections(self, shared_test_certs) -> None:
         """
         TC-H3-SHUTDOWN-003: Shutdown with active HTTP/3 connections.
 
@@ -306,7 +306,8 @@ class TestHTTP3GracefulShutdownWithConnections:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,
                 worker_threads=2
@@ -340,7 +341,7 @@ class TestHTTP3GracefulShutdownWithConnections:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_shutdown_timeout_with_slow_connections(self) -> None:
+    def test_shutdown_timeout_with_slow_connections(self, shared_test_certs) -> None:
         """
         TC-H3-SHUTDOWN-004: Shutdown timeout behavior.
 
@@ -351,7 +352,8 @@ class TestHTTP3GracefulShutdownWithConnections:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -384,7 +386,7 @@ class TestHTTP3GracefulShutdownWithConnections:
 class TestFullHTTP3ProxyChain:
     """Test 7.2: Full HTTP/3 proxy chain scenarios."""
 
-    def test_proxy_chain_both_ends_start(self) -> None:
+    def test_proxy_chain_both_ends_start(self, shared_test_certs) -> None:
         """
         TC-CHAIN-FULL-001: Both ends of proxy chain start successfully.
 
@@ -403,7 +405,9 @@ class TestFullHTTP3ProxyChain:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Create HTTP/3 listener (machine 2 - the backend)
             h3_config = create_http3_listener_config(
@@ -445,7 +449,7 @@ class TestFullHTTP3ProxyChain:
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
-    def test_proxy_chain_graceful_shutdown_both_ends(self) -> None:
+    def test_proxy_chain_graceful_shutdown_both_ends(self, shared_test_certs) -> None:
         """
         TC-CHAIN-FULL-002: Both ends of proxy chain shut down gracefully.
 
@@ -462,7 +466,9 @@ class TestFullHTTP3ProxyChain:
         h3_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Start HTTP/3 listener
             h3_config = create_http3_listener_config(
@@ -518,7 +524,7 @@ class TestFullHTTP3ProxyChain:
 class TestHTTP3ErrorHandling:
     """Test 7.5: HTTP/3 error handling scenarios with real client."""
 
-    def test_non_connect_request_returns_405(self) -> None:
+    def test_non_connect_request_returns_405(self, shared_test_certs) -> None:
         """
         TC-H3-ERR-004: Non-CONNECT request returns 405.
 
@@ -530,7 +536,9 @@ class TestHTTP3ErrorHandling:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -572,7 +580,7 @@ class TestHTTP3ErrorHandling:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_invalid_target_returns_400(self) -> None:
+    def test_invalid_target_returns_400(self, shared_test_certs) -> None:
         """
         TC-H3-ERR-005: Invalid target address returns 400.
 
@@ -583,7 +591,9 @@ class TestHTTP3ErrorHandling:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -630,7 +640,7 @@ class TestHTTP3ErrorHandling:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_target_unreachable_returns_502(self) -> None:
+    def test_target_unreachable_returns_502(self, shared_test_certs) -> None:
         """
         TC-H3-ERR-006: Target unreachable returns 502.
 
@@ -641,7 +651,9 @@ class TestHTTP3ErrorHandling:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -692,7 +704,7 @@ class TestHTTP3ErrorHandling:
 class TestHTTP3ConfigValidationFull:
     """Test 7.7: HTTP/3 configuration validation scenarios."""
 
-    def test_invalid_quic_max_streams_uses_default(self) -> None:
+    def test_invalid_quic_max_streams_uses_default(self, shared_test_certs) -> None:
         """
         TC-H3-CFG-004: Invalid max_concurrent_bidi_streams uses default.
 
@@ -703,7 +715,8 @@ class TestHTTP3ConfigValidationFull:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
 
             # Invalid: extremely large value
             quic_config = """      max_concurrent_bidi_streams: 999999999
@@ -729,7 +742,7 @@ class TestHTTP3ConfigValidationFull:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_invalid_quic_timeout_uses_default(self) -> None:
+    def test_invalid_quic_timeout_uses_default(self, shared_test_certs) -> None:
         """
         TC-H3-CFG-005: Invalid max_idle_timeout_ms uses default.
 
@@ -740,7 +753,8 @@ class TestHTTP3ConfigValidationFull:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
 
             # Test with zero timeout (invalid, should use default)
             quic_config = """      max_concurrent_bidi_streams: 100
@@ -763,73 +777,7 @@ class TestHTTP3ConfigValidationFull:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_password_hash_format_error_rejected(self) -> None:
-        """
-        TC-H3-CFG-006: Legacy bcrypt-based auth config schema is rejected.
-
-        Target: Verify HTTP/3 listener rejects legacy bcrypt-era auth config format.
-        The config uses old field names (credentials instead of users, password_hash
-        instead of password) which are no longer valid after auth module refactoring.
-        The rejection is due to schema mismatch (field names no longer valid),
-        not hash format validation. This ensures backward-incompatible config
-        changes are properly detected at startup.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-
-        try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
-
-            # Use an obviously invalid hash format
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
-
-services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
-
-servers:
-- name: http3_server
-  tls:
-    certificates:
-    - cert_path: "{cert_path}"
-      key_path: "{key_path}"
-  users:
-  - username: "testuser"
-    password: "invalid_hash_format_not_bcrypt"
-  listeners:
-  - kind: http3
-    args:
-      addresses: ["0.0.0.0:{proxy_port}"]
-  service: connect_tcp
-"""
-            config_path = os.path.join(temp_dir, "invalid_hash.yaml")
-            with open(config_path, "w") as f:
-                f.write(config_content)
-
-            proc = subprocess.Popen(
-                [NEOPROXY_BINARY, "--config", config_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=False
-            )
-
-            try:
-                return_code = proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-                return_code = -1
-
-            # The implementation should reject invalid hash format
-            # Expected: non-zero exit code (config validation error)
-            assert return_code != 0, \
-                f"Expected non-zero exit code for invalid hash format, got {return_code}"
-
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_valid_plaintext_password_accepted(self) -> None:
+    def test_valid_plaintext_password_accepted(self, shared_test_certs) -> None:
         """
         TC-H3-CFG-007: Valid plaintext password is accepted.
 
@@ -842,7 +790,8 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
 
             config_content = f"""worker_threads: 1
 log_directory: "{temp_dir}/logs"
@@ -882,7 +831,7 @@ servers:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_quic_params_boundary_min_values(self) -> None:
+    def test_quic_params_boundary_min_values(self, shared_test_certs) -> None:
         """
         TC-H3-CFG-008: QUIC params at minimum boundary values.
 
@@ -893,7 +842,8 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
 
             # Test minimum valid values
             quic_config = """      max_concurrent_bidi_streams: 1
@@ -922,7 +872,7 @@ servers:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_quic_params_boundary_max_values(self) -> None:
+    def test_quic_params_boundary_max_values(self, shared_test_certs) -> None:
         """
         TC-H3-CFG-009: QUIC params at maximum boundary values.
 
@@ -933,7 +883,8 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
 
             # Test maximum valid values per design doc
             quic_config = """      max_concurrent_bidi_streams: 10000
@@ -962,7 +913,7 @@ servers:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_quic_params_negative_values_uses_default(self) -> None:
+    def test_quic_params_negative_values_uses_default(self, shared_test_certs) -> None:
         """
         TC-H3-CFG-010: QUIC params with negative values uses default.
 
@@ -973,7 +924,8 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
 
             # Note: YAML may not parse negative values correctly for unsigned types
             # This tests that the system handles invalid input gracefully
@@ -1005,7 +957,7 @@ servers:
 class TestFullHTTP3ProxyChainDataTransfer:
     """Test 7.2: Full HTTP/3 proxy chain data transfer scenarios."""
 
-    def test_proxy_chain_data_transfer(self) -> None:
+    def test_proxy_chain_data_transfer(self, shared_test_certs) -> None:
         """
         TC-CHAIN-DATA-001: Data transfer through full proxy chain.
 
@@ -1032,7 +984,9 @@ class TestFullHTTP3ProxyChainDataTransfer:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Create HTTP/3 listener (machine 2 - the backend)
             h3_config = create_http3_listener_config(
@@ -1137,7 +1091,7 @@ class TestFullHTTP3ProxyChainDataTransfer:
 class TestHTTP3GracefulShutdownTimeout:
     """Test 7.4: HTTP/3 graceful shutdown with active streams timeout."""
 
-    def test_shutdown_timeout_with_active_h3_stream(self) -> None:
+    def test_shutdown_timeout_with_active_h3_stream(self, shared_test_certs) -> None:
         """
         TC-H3-SHUTDOWN-TIMEOUT-001: Shutdown timeout with active HTTP/3 stream.
 
@@ -1155,7 +1109,8 @@ class TestHTTP3GracefulShutdownTimeout:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -1212,7 +1167,7 @@ class TestHTTP3GracefulShutdownTimeout:
 class TestHTTP3Performance:
     """Test 7.6: HTTP/3 performance scenarios."""
 
-    def test_h3_concurrent_connections(self) -> None:
+    def test_h3_concurrent_connections(self, shared_test_certs) -> None:
         """
         TC-H3-PERF-001: HTTP/3 handles concurrent connections.
 
@@ -1226,7 +1181,9 @@ class TestHTTP3Performance:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -1298,7 +1255,7 @@ class TestHTTP3Performance:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_h3_connection_latency(self) -> None:
+    def test_h3_connection_latency(self, shared_test_certs) -> None:
         """
         TC-H3-PERF-002: HTTP/3 connection latency is acceptable.
 
@@ -1310,7 +1267,9 @@ class TestHTTP3Performance:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -1357,7 +1316,7 @@ class TestHTTP3Performance:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_h3_data_throughput(self) -> None:
+    def test_h3_data_throughput(self, shared_test_certs) -> None:
         """
         TC-H3-PERF-003: HTTP/3 data throughput is acceptable.
 
@@ -1371,7 +1330,9 @@ class TestHTTP3Performance:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )

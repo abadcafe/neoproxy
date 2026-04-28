@@ -12,7 +12,7 @@ import shutil
 import threading
 import os
 import sys
-from typing import Optional, Generator, Callable
+from typing import Optional, Generator, Callable, Dict
 
 import pytest
 
@@ -315,6 +315,71 @@ def available_port() -> Callable[[], int]:
         Callable that returns unique port numbers.
     """
     return get_unique_port
+
+
+# ==============================================================================
+# Session-scoped Certificate Cache
+# ==============================================================================
+
+
+@pytest.fixture(scope="session")
+def shared_certs_dir() -> Generator[str, None, None]:
+    """
+    Session-scoped directory for shared test certificates.
+
+    This directory persists across all tests in the session,
+    allowing certificate generation to be cached and reused.
+    """
+    cert_dir = tempfile.mkdtemp(prefix="neoproxy_certs_")
+    yield cert_dir
+    shutil.rmtree(cert_dir, ignore_errors=True)
+
+
+@pytest.fixture(scope="session")
+def shared_test_certs(shared_certs_dir: str) -> Dict[str, str]:
+    """
+    Session-scoped TLS test certificates.
+
+    Generates a CA certificate and a server certificate signed by that CA.
+    Shared across all tests in the session to avoid repeated openssl calls
+    (~0.2s per call, ~97 calls total without caching).
+
+    Returns:
+        Dict with keys: cert_path, key_path, ca_path, ca_key_path
+    """
+    from .test_http3_listener import generate_test_certificates
+    cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(
+        shared_certs_dir
+    )
+    return {
+        'cert_path': cert_path,
+        'key_path': key_path,
+        'ca_path': ca_path,
+        'ca_key_path': ca_key_path,
+    }
+
+
+@pytest.fixture(scope="session")
+def shared_client_cert(shared_certs_dir: str, shared_test_certs: Dict[str, str]) -> Dict[str, str]:
+    """
+    Session-scoped client certificate for mTLS tests.
+
+    Generates a client certificate signed by the same CA as shared_test_certs.
+    Shared across all tests that need a valid client certificate.
+
+    Returns:
+        Dict with keys: client_cert_path, client_key_path
+    """
+    from .test_http3_listener import generate_client_certificate
+    client_cert_path, client_key_path = generate_client_certificate(
+        shared_certs_dir,
+        shared_test_certs['ca_path'],
+        shared_test_certs['ca_key_path'],
+    )
+    return {
+        'client_cert_path': client_cert_path,
+        'client_key_path': client_key_path,
+    }
 
 
 # ==============================================================================

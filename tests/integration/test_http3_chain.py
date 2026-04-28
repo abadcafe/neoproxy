@@ -53,7 +53,7 @@ from .conftest import get_unique_port
 class TestHTTP3ChainProxy:
     """Test 7.2: HTTP/3 Chain proxy scenarios."""
 
-    def test_http3_chain_config_valid(self) -> None:
+    def test_http3_chain_config_valid(self, shared_test_certs) -> None:
         """
         TC-CHAIN-001: HTTP/3 Chain configuration is valid.
 
@@ -65,7 +65,9 @@ class TestHTTP3ChainProxy:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Create http3_chain config pointing to a non-existent H3 listener
             # The service should still start, it will try to connect on demand
@@ -92,7 +94,7 @@ class TestHTTP3ChainProxy:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_http3_chain_graceful_shutdown(self) -> None:
+    def test_http3_chain_graceful_shutdown(self, shared_test_certs) -> None:
         """
         TC-CHAIN-002: HTTP/3 Chain graceful shutdown.
 
@@ -104,7 +106,9 @@ class TestHTTP3ChainProxy:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             config_path = create_http3_chain_config(
                 http_port=http_port,
@@ -137,7 +141,7 @@ class TestHTTP3ChainProxy:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_http3_chain_multiple_proxies(self) -> None:
+    def test_http3_chain_multiple_proxies(self, shared_test_certs) -> None:
         """
         TC-CHAIN-003: HTTP/3 Chain with multiple proxy servers.
 
@@ -150,7 +154,9 @@ class TestHTTP3ChainProxy:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Multiple proxy servers with WRR weights
             config_path = create_http3_chain_config(
@@ -178,7 +184,7 @@ class TestHTTP3ChainProxy:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_http3_chain_missing_ca(self) -> None:
+    def test_http3_chain_missing_ca(self, shared_test_certs) -> None:
         """
         TC-CHAIN-004: HTTP/3 Chain with missing CA certificate in default_tls.
 
@@ -247,7 +253,7 @@ servers:
                 proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_http3_chain_data_transmission(self) -> None:
+    def test_http3_chain_data_transmission(self, shared_test_certs) -> None:
         """
         TC-CHAIN-DATA-001: HTTP/3 Chain data transmission.
 
@@ -265,7 +271,9 @@ servers:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Create target echo server (HTTP response for curl compatibility)
             _, target_socket = create_target_server(
@@ -331,7 +339,7 @@ servers:
 class TestFullProxyChain:
     """Test complete proxy chain scenarios."""
 
-    def test_full_chain_starts_successfully(self) -> None:
+    def test_full_chain_starts_successfully(self, shared_test_certs) -> None:
         """
         TC-FULL-CHAIN-001: Full proxy chain starts successfully.
 
@@ -348,7 +356,9 @@ class TestFullProxyChain:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Create HTTP/3 listener (machine 2)
             h3_config = create_http3_listener_config(
@@ -390,7 +400,7 @@ class TestFullProxyChain:
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
-    def test_full_chain_graceful_shutdown(self) -> None:
+    def test_full_chain_graceful_shutdown(self, shared_test_certs) -> None:
         """
         TC-FULL-CHAIN-002: Full proxy chain graceful shutdown.
 
@@ -406,7 +416,9 @@ class TestFullProxyChain:
         h3_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Start HTTP/3 listener
             h3_config = create_http3_listener_config(
@@ -462,7 +474,7 @@ class TestFullProxyChain:
 class TestHTTP3ChainGracefulShutdown:
     """Test 7.4: HTTP/3 chain graceful shutdown with active streams."""
 
-    def test_chain_uninstall_no_active_streams(self) -> None:
+    def test_chain_uninstall_no_active_streams(self, shared_test_certs) -> None:
         """
         TC-CHAIN-UNINSTALL-001: http3_chain uninstall with no active streams.
 
@@ -476,7 +488,9 @@ class TestHTTP3ChainGracefulShutdown:
         h3_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Start HTTP/3 listener
             h3_config = create_http3_listener_config(
@@ -522,7 +536,7 @@ class TestHTTP3ChainGracefulShutdown:
                 h3_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_chain_uninstall_with_active_stream(self) -> None:
+    def test_chain_uninstall_with_active_stream(self, shared_test_certs) -> None:
         """
         TC-CHAIN-UNINSTALL-002: http3_chain uninstall with potential active stream.
 
@@ -545,7 +559,9 @@ class TestHTTP3ChainGracefulShutdown:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Start HTTP/3 listener
             h3_config = create_http3_listener_config(
@@ -636,7 +652,7 @@ class TestWRRLoadBalancing:
     - All configured upstreams are reachable
     """
 
-    def test_wrr_weight_distribution(self) -> None:
+    def test_wrr_weight_distribution(self, shared_test_certs) -> None:
         """
         TC-WRR-001: WRR with multiple weighted upstreams.
 
@@ -666,7 +682,9 @@ class TestWRRLoadBalancing:
 
         try:
             # Generate certificates once - both HTTP/3 listeners use the same CA
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Create target echo server
             _, target_socket = create_target_server(

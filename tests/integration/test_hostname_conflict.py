@@ -11,7 +11,8 @@ All tests should FAIL initially because the feature is not implemented.
 import subprocess
 import tempfile
 import os
-from typing import Tuple
+import time
+from typing import Tuple, Optional
 
 import pytest
 
@@ -24,11 +25,13 @@ def run_neoproxy_with_config(
     timeout: float = 5.0
 ) -> Tuple[int, str, str]:
     """
-    Run neoproxy with a given configuration content.
+    Run neoproxy with a given configuration content and wait for it to exit.
+
+    Use this for testing INVALID configurations that should fail at startup.
 
     Args:
         config_content: Configuration content to write to a temp file
-        timeout: Timeout for the process
+        timeout: Timeout for the process to exit
 
     Returns:
         Tuple[int, str, str]: Return code, stdout, stderr
@@ -47,6 +50,53 @@ def run_neoproxy_with_config(
             timeout=timeout
         )
         return result.returncode, result.stdout, result.stderr
+    finally:
+        os.unlink(temp_file.name)
+
+
+def start_neoproxy_and_check_running(
+    config_content: str,
+    startup_timeout: float = 1.0
+) -> Tuple[Optional[subprocess.Popen], str, str]:
+    """
+    Start neoproxy as a background process and verify it starts successfully.
+
+    Use this for testing VALID configurations that should run without errors.
+
+    Args:
+        config_content: Configuration content to write to a temp file
+        startup_timeout: Time to wait for process to start and stay running
+
+    Returns:
+        Tuple[Optional[Popen], str, str]: Process handle (None if exited), stdout, stderr
+    """
+    temp_file = tempfile.NamedTemporaryFile(
+        mode='w', suffix='.yaml', delete=False
+    )
+    temp_file.write(config_content)
+    temp_file.close()
+
+    proc = None
+    stdout_data = ""
+    stderr_data = ""
+
+    try:
+        proc = subprocess.Popen(
+            [NEOPROXY_BINARY, "--config", temp_file.name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        # Wait a short time and check if process is still running
+        time.sleep(startup_timeout)
+
+        if proc.poll() is not None:
+            # Process exited, capture output
+            stdout_data, stderr_data = proc.communicate()
+            proc = None  # Return None to indicate process exited
+
+        return proc, stdout_data, stderr_data
     finally:
         os.unlink(temp_file.name)
 
@@ -101,7 +151,7 @@ servers:
         SOCKS5 with empty hostnames (or no hostnames field) is valid.
         SOCKS5 is treated as a default server.
 
-        Expected: Exit code 0 (success)
+        Expected: Process starts successfully and stays running.
         """
         socks_port = get_unique_port()
         config = f"""worker_threads: 1
@@ -120,16 +170,21 @@ servers:
       addresses: ["127.0.0.1:{socks_port}"]
   service: connect_tcp
 """
+        proc, stdout, stderr = start_neoproxy_and_check_running(config)
         try:
-            returncode, stdout, stderr = run_neoproxy_with_config(config)
-            # If process exited within timeout, check for errors
-            # Should NOT have SOCKS5 hostname error
-            assert "hostnames cannot be configured with SOCKS5" not in stderr, \
-                f"Should not have SOCKS5 hostname error, got: {stderr}"
-        except subprocess.TimeoutExpired:
-            # Timeout means server started successfully (no validation error)
-            # This is expected behavior for valid config
-            pass
+            if proc is None:
+                # Process exited unexpectedly
+                assert "hostnames cannot be configured with SOCKS5" not in stderr, \
+                    f"Should not have SOCKS5 hostname error, got: {stderr}"
+                pytest.fail(
+                    f"Process exited unexpectedly with code. stderr: {stderr}"
+                )
+            # Process is running — valid config accepted
+            assert "hostnames cannot be configured with SOCKS5" not in stderr
+        finally:
+            if proc is not None:
+                proc.terminate()
+                proc.wait()
 
 
 class TestExactHostnameConflict:
@@ -289,7 +344,7 @@ servers:
         A wildcard (*.example.com) and an exact match (api.example.com)
         on the same address is NOT a conflict - exact match takes precedence.
 
-        Expected: Config validation passes (no hostname conflict error)
+        Expected: Process starts successfully and stays running.
         """
         http_port = get_unique_port()
         config = f"""worker_threads: 1
@@ -316,16 +371,21 @@ servers:
       addresses: ["127.0.0.1:{http_port}"]
   service: echo
 """
+        proc, stdout, stderr = start_neoproxy_and_check_running(config)
         try:
-            returncode, stdout, stderr = run_neoproxy_with_config(config)
-            # If process exited within timeout, check for errors
-            # Should NOT have hostname conflict error
-            assert "defined in multiple servers" not in stderr, \
-                f"Wildcard + exact should not be a conflict, got: {stderr}"
-        except subprocess.TimeoutExpired:
-            # Timeout means server started successfully (no validation error)
-            # This is expected behavior for valid config
-            pass
+            if proc is None:
+                # Process exited unexpectedly
+                assert "defined in multiple servers" not in stderr, \
+                    f"Wildcard + exact should not be a conflict, got: {stderr}"
+                pytest.fail(
+                    f"Process exited unexpectedly. stderr: {stderr}"
+                )
+            # Process is running — valid config accepted
+            assert "defined in multiple servers" not in stderr
+        finally:
+            if proc is not None:
+                proc.terminate()
+                proc.wait()
 
 
 class TestMultipleSOCKS5Conflict:
@@ -388,7 +448,7 @@ class TestDifferentHostnamesNoConflict:
         Multiple servers with different hostnames on the same address is NOT a conflict.
         This is the intended use case for hostname-based routing.
 
-        Expected: Config validation passes (no hostname conflict error)
+        Expected: Process starts successfully and stays running.
         """
         http_port = get_unique_port()
         config = f"""worker_threads: 1
@@ -415,13 +475,18 @@ servers:
       addresses: ["127.0.0.1:{http_port}"]
   service: echo
 """
+        proc, stdout, stderr = start_neoproxy_and_check_running(config)
         try:
-            returncode, stdout, stderr = run_neoproxy_with_config(config)
-            # If process exited within timeout, check for errors
-            # Should NOT have hostname conflict error
-            assert "defined in multiple servers" not in stderr, \
-                f"Different hostnames should not be a conflict, got: {stderr}"
-        except subprocess.TimeoutExpired:
-            # Timeout means server started successfully (no validation error)
-            # This is expected behavior for valid config
-            pass
+            if proc is None:
+                # Process exited unexpectedly
+                assert "defined in multiple servers" not in stderr, \
+                    f"Different hostnames should not be a conflict, got: {stderr}"
+                pytest.fail(
+                    f"Process exited unexpectedly. stderr: {stderr}"
+                )
+            # Process is running — valid config accepted
+            assert "defined in multiple servers" not in stderr
+        finally:
+            if proc is not None:
+                proc.terminate()
+                proc.wait()

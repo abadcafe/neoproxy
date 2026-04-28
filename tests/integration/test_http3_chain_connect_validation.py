@@ -32,6 +32,7 @@ from .test_http3_listener import (
     create_http3_chain_config,
 )
 
+
 from .conftest import get_unique_port
 
 
@@ -77,7 +78,8 @@ def parse_http_response(response: bytes) -> Tuple[int, str, dict, bytes]:
 @contextmanager
 def chain_service_context(
     http_port: int,
-    h3_port: int
+    h3_port: int,
+    shared_test_certs: Optional[dict] = None
 ) -> Generator[Tuple[str, subprocess.Popen], None, None]:
     """
     Context manager for http3_chain service setup and teardown.
@@ -88,6 +90,7 @@ def chain_service_context(
     Args:
         http_port: Port for the HTTP listener
         h3_port: Port for the (non-existent) H3 upstream
+        shared_test_certs: Optional session-scoped cert dict for cert reuse
 
     Yields:
         Tuple[str, subprocess.Popen]: (temp_dir, proxy_process)
@@ -96,7 +99,10 @@ def chain_service_context(
     proxy_proc: Optional[subprocess.Popen] = None
 
     try:
-        _, _, ca_path, _ = generate_test_certificates(temp_dir)
+        if shared_test_certs:
+            ca_path = shared_test_certs['ca_path']
+        else:
+            _, _, ca_path, _ = generate_test_certificates(temp_dir)
         config_path = create_http3_chain_config(
             http_port=http_port,
             proxy_group=[("127.0.0.1", h3_port, 1)],
@@ -123,7 +129,7 @@ class TestHTTP3ChainConnectValidation:
     HTTP listener port and verify the error responses.
     """
 
-    def test_non_connect_method_returns_405(self) -> None:
+    def test_non_connect_method_returns_405(self, shared_test_certs: dict) -> None:
         """
         TC-CHAIN-VALIDATE-001: Non-CONNECT method returns 405.
 
@@ -133,7 +139,7 @@ class TestHTTP3ChainConnectValidation:
         http_port = get_unique_port()
         h3_port = get_unique_port()
 
-        with chain_service_context(http_port, h3_port) as (temp_dir, proxy_proc):
+        with chain_service_context(http_port, h3_port, shared_test_certs) as (temp_dir, proxy_proc):
             # Send GET request (non-CONNECT)
             request = (
                 b"GET / HTTP/1.1\r\n"
@@ -153,7 +159,7 @@ class TestHTTP3ChainConnectValidation:
             assert "text/plain" in headers.get("content-type", ""), \
                 f"Expected text/plain Content-Type, got: {headers.get('content-type')}"
 
-    def test_post_method_returns_405(self) -> None:
+    def test_post_method_returns_405(self, shared_test_certs: dict) -> None:
         """
         TC-CHAIN-VALIDATE-002: POST method returns 405.
 
@@ -163,7 +169,7 @@ class TestHTTP3ChainConnectValidation:
         http_port = get_unique_port()
         h3_port = get_unique_port()
 
-        with chain_service_context(http_port, h3_port) as (temp_dir, proxy_proc):
+        with chain_service_context(http_port, h3_port, shared_test_certs) as (temp_dir, proxy_proc):
             request = (
                 b"POST / HTTP/1.1\r\n"
                 b"Host: localhost\r\n"
@@ -179,7 +185,7 @@ class TestHTTP3ChainConnectValidation:
                 f"Expected 405 for POST, got {status_code}. " \
                 f"Response: {response.decode(errors='ignore')}"
 
-    def test_connect_missing_port_returns_400(self) -> None:
+    def test_connect_missing_port_returns_400(self, shared_test_certs: dict) -> None:
         """
         TC-CHAIN-VALIDATE-003: CONNECT with missing port returns 400.
 
@@ -189,7 +195,7 @@ class TestHTTP3ChainConnectValidation:
         http_port = get_unique_port()
         h3_port = get_unique_port()
 
-        with chain_service_context(http_port, h3_port) as (temp_dir, proxy_proc):
+        with chain_service_context(http_port, h3_port, shared_test_certs) as (temp_dir, proxy_proc):
             # CONNECT with no port
             request = (
                 b"CONNECT example.com HTTP/1.1\r\n"
@@ -204,7 +210,7 @@ class TestHTTP3ChainConnectValidation:
                 f"Expected 400 for missing port, got {status_code}. " \
                 f"Response: {response.decode(errors='ignore')}"
 
-    def test_connect_port_zero_returns_400(self) -> None:
+    def test_connect_port_zero_returns_400(self, shared_test_certs: dict) -> None:
         """
         TC-CHAIN-VALIDATE-004: CONNECT with port zero returns 400.
 
@@ -214,7 +220,7 @@ class TestHTTP3ChainConnectValidation:
         http_port = get_unique_port()
         h3_port = get_unique_port()
 
-        with chain_service_context(http_port, h3_port) as (temp_dir, proxy_proc):
+        with chain_service_context(http_port, h3_port, shared_test_certs) as (temp_dir, proxy_proc):
             # CONNECT with port 0
             request = (
                 b"CONNECT example.com:0 HTTP/1.1\r\n"
@@ -229,7 +235,7 @@ class TestHTTP3ChainConnectValidation:
                 f"Expected 400 for port zero, got {status_code}. " \
                 f"Response: {response.decode(errors='ignore')}"
 
-    def test_connect_no_authority_returns_400(self) -> None:
+    def test_connect_no_authority_returns_400(self, shared_test_certs: dict) -> None:
         """
         TC-CHAIN-VALIDATE-005: CONNECT with no authority returns 400.
 
@@ -239,7 +245,7 @@ class TestHTTP3ChainConnectValidation:
         http_port = get_unique_port()
         h3_port = get_unique_port()
 
-        with chain_service_context(http_port, h3_port) as (temp_dir, proxy_proc):
+        with chain_service_context(http_port, h3_port, shared_test_certs) as (temp_dir, proxy_proc):
             # CONNECT with no authority (empty URI path instead of host:port)
             request = (
                 b"CONNECT / HTTP/1.1\r\n"

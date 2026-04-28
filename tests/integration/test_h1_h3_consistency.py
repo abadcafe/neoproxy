@@ -28,7 +28,6 @@ from .utils.helpers import (
     NEOPROXY_BINARY,
 )
 from .conftest import get_unique_port
-from .test_http3_listener import generate_test_certificates
 
 
 # ==============================================================================
@@ -553,7 +552,7 @@ class TestHTTP3MultiAddress:
 
         assert proc.poll() is None, "Process should be running with http3 'addresses' field"
 
-    def test_http3_listens_on_multiple_addresses(self) -> None:
+    def test_http3_listens_on_multiple_addresses(self, shared_test_certs: dict) -> None:
         """
         Test that http3 listener can listen on multiple addresses.
 
@@ -566,8 +565,8 @@ class TestHTTP3MultiAddress:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            # Generate test certificates for HTTP/3
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
 
             log_dir = os.path.join(temp_dir, "logs")
             os.makedirs(log_dir, exist_ok=True)
@@ -875,7 +874,7 @@ class TestSNIHostMismatch:
 class TestHTTP3SNIHostMismatch:
     """Test that HTTP/3 :authority vs Host header mismatch returns 421 Misdirected Request."""
 
-    def test_h3_authority_host_match_returns_200(self) -> None:
+    def test_h3_authority_host_match_returns_200(self, shared_test_certs: dict) -> None:
         """
         Test that matching :authority and Host in HTTP/3 returns 200 OK.
 
@@ -896,7 +895,9 @@ class TestHTTP3SNIHostMismatch:
         proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Create HTTP/3 config with echo service
             log_dir = os.path.join(temp_dir, "logs")
@@ -980,7 +981,7 @@ class TestHTTP3SNIHostMismatch:
                 terminate_process(proc)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_h3_authority_host_mismatch_returns_421(self) -> None:
+    def test_h3_authority_host_mismatch_returns_421(self, shared_test_certs: dict) -> None:
         """
         Test that :authority and Host mismatch in HTTP/3 is rejected.
 
@@ -1014,7 +1015,9 @@ class TestHTTP3SNIHostMismatch:
         proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Create HTTP/3 config with echo service
             log_dir = os.path.join(temp_dir, "logs")

@@ -265,7 +265,7 @@ servers:
 class TestHTTP3PasswordAuth:
     """Test 7.3: HTTP/3 password authentication scenarios."""
 
-    def test_password_auth_config_starts(self) -> None:
+    def test_password_auth_config_starts(self, shared_test_certs) -> None:
         """
         TC-H3-AUTH-002: HTTP/3 listener with password auth starts successfully.
 
@@ -277,7 +277,8 @@ class TestHTTP3PasswordAuth:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
 
             config_path = create_http3_listener_config_with_password_auth(
                 proxy_port=proxy_port,
@@ -304,7 +305,7 @@ class TestHTTP3PasswordAuth:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_password_auth_valid_credentials(self) -> None:
+    def test_password_auth_valid_credentials(self, shared_test_certs) -> None:
         """
         TC-H3-AUTH-003: Password auth - valid credentials accepted.
 
@@ -318,7 +319,9 @@ class TestHTTP3PasswordAuth:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Use plaintext password
             password = "valid_password_123"
@@ -349,9 +352,6 @@ class TestHTTP3PasswordAuth:
             _, target_socket = create_target_server(
                 "127.0.0.1", target_port, echo_handler
             )
-
-            # Wait for target server to be ready
-            time.sleep(0.5)
 
             proxy_proc = start_proxy(config_path)
 
@@ -390,7 +390,7 @@ class TestHTTP3PasswordAuth:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_password_auth_invalid_credentials_returns_407(self) -> None:
+    def test_password_auth_invalid_credentials_returns_407(self, shared_test_certs) -> None:
         """
         TC-H3-AUTH-004: Password auth - invalid credentials return 407.
 
@@ -403,7 +403,9 @@ class TestHTTP3PasswordAuth:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Use plaintext password
             correct_password = "correct_password"
@@ -434,9 +436,6 @@ class TestHTTP3PasswordAuth:
             _, target_socket = create_target_server(
                 "127.0.0.1", target_port, echo_handler
             )
-
-            # Wait for target server to be ready
-            time.sleep(0.5)
 
             proxy_proc = start_proxy(config_path)
 
@@ -475,7 +474,7 @@ class TestHTTP3PasswordAuth:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_password_auth_empty_credentials_rejected(self) -> None:
+    def test_password_auth_empty_credentials_rejected(self, shared_test_certs) -> None:
         """
         TC-H3-AUTH-005: Password auth - empty credentials cause startup failure.
 
@@ -485,7 +484,8 @@ class TestHTTP3PasswordAuth:
         proxy_port = get_unique_port()
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
 
             # NEW config format: server-level TLS with empty users
             config_content = f"""worker_threads: 1
@@ -520,15 +520,13 @@ servers:
             )
 
             try:
-                return_code = proc.wait(timeout=10)
+                return_code = proc.wait(timeout=5)
+                assert return_code != 0, \
+                    f"Expected non-zero exit code for empty credentials, got {return_code}"
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-                return_code = -1
-
-            # Should exit with error code due to empty credentials
-            assert return_code != 0, \
-                f"Expected non-zero exit code for empty credentials, got {return_code}"
+                raise AssertionError("Process should have exited with error for empty credentials")
 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -542,7 +540,7 @@ servers:
 class TestHTTP3TLSClientCertAuth:
     """Test 7.3: HTTP/3 TLS client certificate authentication scenarios."""
 
-    def test_tls_client_cert_auth_config_starts(self) -> None:
+    def test_tls_client_cert_auth_config_starts(self, shared_test_certs) -> None:
         """
         TC-H3-AUTH-006: HTTP/3 listener with TLS client cert auth starts.
 
@@ -553,7 +551,9 @@ class TestHTTP3TLSClientCertAuth:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             config_path = create_http3_listener_config_with_tls_client_cert(
                 proxy_port=proxy_port,
@@ -577,7 +577,7 @@ class TestHTTP3TLSClientCertAuth:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_tls_client_cert_missing_ca_rejected(self) -> None:
+    def test_tls_client_cert_missing_ca_rejected(self, shared_test_certs) -> None:
         """
         TC-H3-AUTH-007: TLS client cert auth - missing CA causes startup failure.
 
@@ -588,7 +588,8 @@ class TestHTTP3TLSClientCertAuth:
         proxy_port = get_unique_port()
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
 
             # NEW config format: server-level TLS with non-existent client_ca_certs
             config_content = f"""worker_threads: 1
@@ -624,20 +625,18 @@ servers:
             )
 
             try:
-                return_code = proc.wait(timeout=10)
+                return_code = proc.wait(timeout=5)
+                assert return_code != 0, \
+                    f"Expected non-zero exit code for missing CA file, got {return_code}"
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-                return_code = -1
-
-            # Should exit with error code due to missing CA file
-            assert return_code != 0, \
-                f"Expected non-zero exit code for missing CA, got {return_code}"
+                raise AssertionError("Process should have exited with error for missing CA file")
 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_tls_client_cert_valid_config(self) -> None:
+    def test_tls_client_cert_valid_config(self, shared_test_certs) -> None:
         """
         TC-H3-AUTH-008: TLS client cert auth - valid configuration.
 
@@ -648,7 +647,9 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             config_path = create_http3_listener_config_with_tls_client_cert(
                 proxy_port=proxy_port,
@@ -676,7 +677,7 @@ servers:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_tls_client_cert_valid_cert_accepted(self) -> None:
+    def test_tls_client_cert_valid_cert_accepted(self, shared_test_certs, shared_client_cert) -> None:
         """
         TC-H3-AUTH-009: TLS client cert auth - valid certificate accepted.
 
@@ -688,13 +689,11 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            # Generate server certificates
-            cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
-
-            # Generate client certificate signed by the CA
-            client_cert_path, client_key_path = generate_client_certificate(
-                temp_dir, ca_path, ca_key_path
-            )
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
+            client_cert_path = shared_client_cert['client_cert_path']
+            client_key_path = shared_client_cert['client_key_path']
 
             config_path = create_http3_listener_config_with_tls_client_cert(
                 proxy_port=proxy_port,
@@ -735,7 +734,7 @@ servers:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_tls_client_cert_invalid_cert_rejected(self) -> None:
+    def test_tls_client_cert_invalid_cert_rejected(self, shared_test_certs) -> None:
         """
         TC-H3-AUTH-010: TLS client cert auth - invalid certificate handling.
 
@@ -752,10 +751,13 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            # Generate server certificates
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            # Use shared server certificates
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Generate a different CA and client cert (not signed by server's CA)
+            # This is intentionally NOT using shared certs - we need an invalid cert
             other_ca_cert_path = os.path.join(temp_dir, "other_ca.crt")
             other_ca_key_path = os.path.join(temp_dir, "other_ca.key")
             subprocess.run(
@@ -824,7 +826,7 @@ servers:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_tls_client_cert_no_cert_rejected(self) -> None:
+    def test_tls_client_cert_no_cert_rejected(self, shared_test_certs) -> None:
         """
         TC-H3-AUTH-011: TLS client cert auth - no certificate handling.
 
@@ -841,8 +843,9 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            # Generate server certificates
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             config_path = create_http3_listener_config_with_tls_client_cert(
                 proxy_port=proxy_port,
@@ -901,7 +904,7 @@ class TestHTTP3DualAuth:
     then application layer (password).
     """
 
-    def test_dual_auth_valid_cert_valid_password_accepted(self) -> None:
+    def test_dual_auth_valid_cert_valid_password_accepted(self, shared_test_certs, shared_client_cert) -> None:
         """
         TC-H3-DUAL-001: Both valid cert and valid password -> accepted.
 
@@ -915,10 +918,11 @@ class TestHTTP3DualAuth:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
-            client_cert_path, client_key_path = generate_client_certificate(
-                temp_dir, ca_path, ca_key_path
-            )
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
+            client_cert_path = shared_client_cert['client_cert_path']
+            client_key_path = shared_client_cert['client_key_path']
 
             password = "dual_auth_pass"
             config_path = create_http3_listener_config_with_mtls_and_password(
@@ -933,7 +937,6 @@ class TestHTTP3DualAuth:
             _, target_socket = create_target_server(
                 "127.0.0.1", target_port, echo_handler
             )
-            time.sleep(0.5)
 
             proxy_proc = start_proxy(config_path)
             assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
@@ -979,7 +982,7 @@ class TestHTTP3DualAuth:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_dual_auth_no_cert_with_password_rejected(self) -> None:
+    def test_dual_auth_no_cert_with_password_rejected(self, shared_test_certs) -> None:
         """
         TC-H3-DUAL-002: No client cert but valid password -> rejected at transport.
 
@@ -994,7 +997,9 @@ class TestHTTP3DualAuth:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             password = "dual_auth_pass"
             config_path = create_http3_listener_config_with_mtls_and_password(
@@ -1009,7 +1014,6 @@ class TestHTTP3DualAuth:
             _, target_socket = create_target_server(
                 "127.0.0.1", target_port, echo_handler
             )
-            time.sleep(0.5)
 
             proxy_proc = start_proxy(config_path)
             assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
@@ -1048,7 +1052,7 @@ class TestHTTP3DualAuth:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_dual_auth_valid_cert_wrong_password_returns_407(self) -> None:
+    def test_dual_auth_valid_cert_wrong_password_returns_407(self, shared_test_certs, shared_client_cert) -> None:
         """
         TC-H3-DUAL-003: Valid cert but wrong password -> 407.
 
@@ -1063,10 +1067,11 @@ class TestHTTP3DualAuth:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
-            client_cert_path, client_key_path = generate_client_certificate(
-                temp_dir, ca_path, ca_key_path
-            )
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
+            client_cert_path = shared_client_cert['client_cert_path']
+            client_key_path = shared_client_cert['client_key_path']
 
             config_path = create_http3_listener_config_with_mtls_and_password(
                 proxy_port=proxy_port,
@@ -1080,7 +1085,6 @@ class TestHTTP3DualAuth:
             _, target_socket = create_target_server(
                 "127.0.0.1", target_port, echo_handler
             )
-            time.sleep(0.5)
 
             proxy_proc = start_proxy(config_path)
             assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
@@ -1126,7 +1130,7 @@ class TestHTTP3DualAuth:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_dual_auth_valid_cert_no_password_returns_407(self) -> None:
+    def test_dual_auth_valid_cert_no_password_returns_407(self, shared_test_certs, shared_client_cert) -> None:
         """
         TC-H3-DUAL-004: Valid cert but no password header -> 407.
 
@@ -1141,10 +1145,11 @@ class TestHTTP3DualAuth:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
-            client_cert_path, client_key_path = generate_client_certificate(
-                temp_dir, ca_path, ca_key_path
-            )
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
+            client_cert_path = shared_client_cert['client_cert_path']
+            client_key_path = shared_client_cert['client_key_path']
 
             config_path = create_http3_listener_config_with_mtls_and_password(
                 proxy_port=proxy_port,
@@ -1158,7 +1163,6 @@ class TestHTTP3DualAuth:
             _, target_socket = create_target_server(
                 "127.0.0.1", target_port, echo_handler
             )
-            time.sleep(0.5)
 
             proxy_proc = start_proxy(config_path)
             assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
@@ -1203,7 +1207,7 @@ class TestHTTP3DualAuth:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_dual_auth_invalid_cert_rejected_at_transport(self) -> None:
+    def test_dual_auth_invalid_cert_rejected_at_transport(self, shared_test_certs) -> None:
         """
         TC-H3-DUAL-005: Invalid cert -> rejected at transport (no password fallback).
 
@@ -1216,9 +1220,12 @@ class TestHTTP3DualAuth:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Generate a DIFFERENT CA and client cert (not trusted by server)
+            # This is intentionally NOT using shared certs - we need an invalid cert
             other_ca_key_path = os.path.join(temp_dir, "other_ca.key")
             other_ca_cert_path = os.path.join(temp_dir, "other_ca.crt")
             subprocess.run(
@@ -1291,67 +1298,7 @@ class TestHTTP3DualAuth:
 class TestHTTP3AuthConfigValidation:
     """Test 7.7: HTTP/3 authentication configuration validation scenarios."""
 
-    def test_invalid_auth_type_rejected(self) -> None:
-        """
-        TC-H3-AUTH-CFG-001: Auth config with unknown field causes startup failure.
-
-        Target: Verify HTTP/3 listener fails when listener args contain
-        unrecognized fields (auth is no longer at listener level).
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-
-        try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
-
-            # NEW config format: test that listener-level auth is rejected
-            # (auth should be at server level, not listener level)
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
-
-services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
-
-servers:
-- name: http3_server
-  tls:
-    certificates:
-    - cert_path: "{cert_path}"
-      key_path: "{key_path}"
-  listeners:
-  - kind: http3
-    args:
-      addresses: ["0.0.0.0:{proxy_port}"]
-      auth:
-        some_unknown_field: true
-  service: connect_tcp
-"""
-            config_path = os.path.join(temp_dir, "invalid_auth_type.yaml")
-            with open(config_path, "w") as f:
-                f.write(config_content)
-
-            proc = subprocess.Popen(
-                [NEOPROXY_BINARY, "--config", config_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=False
-            )
-
-            try:
-                return_code = proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-                return_code = -1
-
-            assert return_code != 0, \
-                f"Expected non-zero exit code for invalid auth type, got {return_code}"
-
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_password_auth_missing_credentials_rejected(self) -> None:
+    def test_password_auth_missing_credentials_rejected(self, shared_test_certs) -> None:
         """
         TC-H3-AUTH-CFG-002: Password auth without credentials causes failure.
 
@@ -1362,7 +1309,8 @@ servers:
         proxy_port = get_unique_port()
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
 
             # NEW config format: server-level users with empty list
             config_content = f"""worker_threads: 1
@@ -1397,19 +1345,18 @@ servers:
             )
 
             try:
-                return_code = proc.wait(timeout=10)
+                return_code = proc.wait(timeout=5)
+                assert return_code != 0, \
+                    f"Expected non-zero exit code for missing credentials, got {return_code}"
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-                return_code = -1
-
-            assert return_code != 0, \
-                f"Expected non-zero exit code for missing credentials, got {return_code}"
+                raise AssertionError("Process should have exited with error for missing credentials")
 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_tls_client_cert_missing_ca_path_rejected(self) -> None:
+    def test_tls_client_cert_missing_ca_path_rejected(self, shared_test_certs) -> None:
         """
         TC-H3-AUTH-CFG-003: TLS client cert auth without CA path causes failure.
 
@@ -1420,7 +1367,8 @@ servers:
         proxy_port = get_unique_port()
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
 
             # NEW config format: server-level TLS with non-existent client_ca_certs
             config_content = f"""worker_threads: 1
@@ -1456,19 +1404,18 @@ servers:
             )
 
             try:
-                return_code = proc.wait(timeout=10)
+                return_code = proc.wait(timeout=5)
+                assert return_code != 0, \
+                    f"Expected non-zero exit code for missing CA path, got {return_code}"
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-                return_code = -1
-
-            assert return_code != 0, \
-                f"Expected non-zero exit code for missing CA path, got {return_code}"
+                raise AssertionError("Process should have exited with error for missing CA path")
 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_plaintext_password_accepted_in_config(self) -> None:
+    def test_plaintext_password_accepted_in_config(self, shared_test_certs) -> None:
         """
         TC-H3-AUTH-CFG-004: Plaintext password is accepted in configuration.
 
@@ -1479,7 +1426,8 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
 
             config_path = create_http3_listener_config_with_password_auth(
                 proxy_port=proxy_port,
@@ -1502,7 +1450,7 @@ servers:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_multiple_users_accepted(self) -> None:
+    def test_multiple_users_accepted(self, shared_test_certs) -> None:
         """
         TC-H3-AUTH-CFG-005: Multiple users are accepted in configuration.
 
@@ -1513,7 +1461,8 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
 
             config_path = create_http3_listener_config_with_password_auth(
                 proxy_port=proxy_port,

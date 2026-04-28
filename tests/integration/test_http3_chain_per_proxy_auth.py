@@ -41,12 +41,8 @@ from .utils.helpers import (
 from .conftest import get_unique_port
 
 from .test_http3_listener import (
-    generate_test_certificates,
-    generate_client_certificate,
     create_http3_listener_config,
 )
-
-# Alias for backward compatibility in this file
 
 from .test_http3_auth import (
     create_http3_listener_config_with_password_auth,
@@ -146,7 +142,7 @@ servers:
 class TestHTTP3ChainPerProxyPasswordAuth:
     """Test per-proxy password authentication scenarios."""
 
-    def test_chain_with_password_auth_only(self) -> None:
+    def test_chain_with_password_auth_only(self, shared_test_certs: dict) -> None:
         """
         TC-CHAIN-AUTH-001: HTTP/3 chain with password auth succeeds.
 
@@ -164,7 +160,9 @@ class TestHTTP3ChainPerProxyPasswordAuth:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
@@ -233,7 +231,7 @@ class TestHTTP3ChainPerProxyPasswordAuth:
 class TestHTTP3ChainPerProxyTlsCertAuth:
     """Test per-proxy TLS client certificate authentication scenarios."""
 
-    def test_chain_with_tls_cert_auth_only(self) -> None:
+    def test_chain_with_tls_cert_auth_only(self, shared_test_certs: dict, shared_client_cert: dict) -> None:
         """
         TC-CHAIN-AUTH-002: HTTP/3 chain with TLS client cert auth succeeds.
 
@@ -251,12 +249,12 @@ class TestHTTP3ChainPerProxyTlsCertAuth:
         target_socket: Optional[socket.socket] = None
 
         try:
-            # Generate CA, server cert, and client cert
-            server_cert_path, server_key_path, ca_cert_path, ca_key_path = \
-                generate_test_certificates(temp_dir1)
-            client_cert_path, client_key_path = generate_client_certificate(
-                temp_dir1, ca_cert_path, ca_key_path, "client1"
-            )
+            # Use session-scoped certs
+            server_cert_path = shared_test_certs['cert_path']
+            server_key_path = shared_test_certs['key_path']
+            ca_cert_path = shared_test_certs['ca_path']
+            client_cert_path = shared_client_cert['client_cert_path']
+            client_key_path = shared_client_cert['client_key_path']
 
             _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
@@ -325,7 +323,7 @@ class TestHTTP3ChainPerProxyTlsCertAuth:
 class TestHTTP3ChainAuthInheritance:
     """Test authentication inheritance scenarios."""
 
-    def test_chain_inherits_default_auth(self) -> None:
+    def test_chain_inherits_default_auth(self, shared_test_certs: dict) -> None:
         """
         TC-CHAIN-AUTH-004: Proxy inherits user from default_user.
 
@@ -343,7 +341,9 @@ class TestHTTP3ChainAuthInheritance:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
@@ -407,7 +407,7 @@ class TestHTTP3ChainAuthInheritance:
 class TestHTTP3ChainAuthNone:
     """Test explicit 'none' credential scenarios."""
 
-    def test_chain_explicit_none_no_auth(self) -> None:
+    def test_chain_explicit_none_no_auth(self, shared_test_certs: dict) -> None:
         """
         TC-CHAIN-AUTH-005: Proxy with credential: {} has no credential.
 
@@ -425,7 +425,9 @@ class TestHTTP3ChainAuthNone:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
@@ -488,7 +490,7 @@ class TestHTTP3ChainAuthNone:
 class TestHTTP3ChainAuthFailure:
     """Test authentication failure scenarios."""
 
-    def test_chain_all_auth_methods_fail(self) -> None:
+    def test_chain_all_auth_methods_fail(self, shared_test_certs: dict) -> None:
         """
         TC-CHAIN-AUTH-006: All auth methods fail returns error.
 
@@ -504,7 +506,9 @@ class TestHTTP3ChainAuthFailure:
         h3_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             h3_config = create_http3_listener_config_with_password_auth(
                 proxy_port=h3_port,
@@ -557,7 +561,7 @@ class TestHTTP3ChainAuthFailure:
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
-    def test_chain_non_auth_error_no_fallback(self) -> None:
+    def test_chain_non_auth_error_no_fallback(self, shared_test_certs: dict) -> None:
         """
         TC-CHAIN-AUTH-007: Non-auth error does NOT trigger fallback.
 
@@ -572,7 +576,9 @@ class TestHTTP3ChainAuthFailure:
         chain_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Configure user
             user_yaml = """

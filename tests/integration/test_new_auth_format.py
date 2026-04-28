@@ -26,12 +26,6 @@ from .utils.helpers import (
     create_target_server,
 )
 
-from .test_http3_listener import (
-    generate_test_certificates,
-)
-
-# Alias for convenience
-
 from .utils.http_echo import http_echo_handler
 
 
@@ -253,15 +247,16 @@ servers:
         finally:
             terminate_process(proc)
 
-    def test_http_listener_ignores_server_level_tls(self, temp_dir: str) -> None:
+    def test_http_listener_ignores_server_level_tls(self, temp_dir: str, shared_test_certs: dict) -> None:
         """
         TC-NEW-AUTH-005: HTTP listener ignores server-level TLS config.
 
         HTTP is a plaintext protocol and doesn't use TLS. When server-level TLS config
         is present, HTTP listener should simply ignore it and start normally.
         """
-        # Generate valid certificates for the test
-        cert_path, key_path, ca_path, _ca_key_path = generate_test_certificates(temp_dir)
+        cert_path = shared_test_certs['cert_path']
+        key_path = shared_test_certs['key_path']
+        ca_path = shared_test_certs['ca_path']
 
         port = get_unique_port()
         config = f"""
@@ -382,7 +377,7 @@ servers:
 """
         return write_config(temp_dir, config)
 
-    def test_http3_chain_default_tls_new_format(self, temp_dir: str) -> None:
+    def test_http3_chain_default_tls_new_format(self, temp_dir: str, shared_test_certs: dict) -> None:
         """
         TC-NEW-AUTH-007: http3_chain accepts new 'user' and 'tls' format
         with nested 'user' object for authentication and 'tls' for TLS config.
@@ -398,7 +393,9 @@ servers:
         Expected: proxy starts and the chain proxy can authenticate to upstream.
         """
         # Generate certs for the upstream HTTP/3 proxy
-        cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
+        cert_path = shared_test_certs['cert_path']
+        key_path = shared_test_certs['key_path']
+        ca_path = shared_test_certs['ca_path']
 
         upstream_port = get_unique_port()
         http_port = get_unique_port()
@@ -483,7 +480,7 @@ servers:
             terminate_process(upstream_proc)
             target_socket.close()
 
-    def test_http3_chain_per_proxy_credential_override(self, temp_dir: str) -> None:
+    def test_http3_chain_per_proxy_credential_override(self, temp_dir: str, shared_test_certs: dict) -> None:
         """
         TC-NEW-AUTH-008: http3_chain per-proxy user override with new format.
 
@@ -497,7 +494,9 @@ servers:
 
         Expected: proxy starts with per-proxy user override.
         """
-        cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
+        cert_path = shared_test_certs['cert_path']
+        key_path = shared_test_certs['key_path']
+        ca_path = shared_test_certs['ca_path']
 
         upstream_port = get_unique_port()
         http_port = get_unique_port()
@@ -580,7 +579,7 @@ servers:
             terminate_process(upstream_proc)
             target_socket.close()
 
-    def test_http3_chain_credential_user_format(self, temp_dir: str) -> None:
+    def test_http3_chain_credential_user_format(self, temp_dir: str, shared_test_certs: dict) -> None:
         """
         TC-NEW-AUTH-009: http3_chain accepts new 'user' nested format.
 
@@ -594,7 +593,9 @@ servers:
 
         Expected: proxy starts and the per-proxy user is used.
         """
-        cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
+        cert_path = shared_test_certs['cert_path']
+        key_path = shared_test_certs['key_path']
+        ca_path = shared_test_certs['ca_path']
 
         upstream_port = get_unique_port()
         http_port = get_unique_port()
@@ -678,7 +679,7 @@ servers:
             terminate_process(upstream_proc)
             target_socket.close()
 
-    def test_http3_chain_default_user_inheritance(self, temp_dir: str) -> None:
+    def test_http3_chain_default_user_inheritance(self, temp_dir: str, shared_test_certs: dict) -> None:
         """
         TC-NEW-AUTH-010: http3_chain proxy inherits from default_user.
 
@@ -694,7 +695,9 @@ servers:
         Expected: proxy starts and the chain proxy authenticates to upstream
         using the inherited default_user.
         """
-        cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
+        cert_path = shared_test_certs['cert_path']
+        key_path = shared_test_certs['key_path']
+        ca_path = shared_test_certs['ca_path']
 
         upstream_port = get_unique_port()
         http_port = get_unique_port()
@@ -777,7 +780,7 @@ servers:
             terminate_process(upstream_proc)
             target_socket.close()
 
-    def test_http3_chain_no_user_no_default(self, temp_dir: str) -> None:
+    def test_http3_chain_no_user_no_default(self, temp_dir: str, shared_test_certs: dict) -> None:
         """
         TC-NEW-AUTH-011: http3_chain proxy without 'user' or 'default_user' sends no auth.
 
@@ -790,7 +793,9 @@ servers:
         Expected: proxy starts. The proxy should NOT send
         any Proxy-Authorization header to upstream.
         """
-        cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir)
+        cert_path = shared_test_certs['cert_path']
+        key_path = shared_test_certs['key_path']
+        ca_path = shared_test_certs['ca_path']
 
         upstream_port = get_unique_port()
         http_port = get_unique_port()

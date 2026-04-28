@@ -31,12 +31,6 @@ from .utils.helpers import (
 
 from .utils.http_echo import http_echo_handler
 
-from .test_http3_listener import (
-    generate_test_certificates,
-)
-
-# Alias for convenience
-
 from .conftest import get_unique_port
 
 
@@ -177,7 +171,7 @@ servers:
 class TestHttp3ListenerNewFieldNames:
     """Verify http3 listener uses server-level TLS configuration."""
 
-    def test_listener_starts_with_new_field_names(self) -> None:
+    def test_listener_starts_with_new_field_names(self, shared_test_certs: dict) -> None:
         """
         TC-CERT-REFACTOR-001: HTTP/3 listener starts with server-level TLS config.
 
@@ -189,7 +183,8 @@ class TestHttp3ListenerNewFieldNames:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
 
             config_path = create_new_http3_listener_config(
                 proxy_port=h3_port,
@@ -221,7 +216,7 @@ class TestHttp3ListenerNewFieldNames:
 class TestHttp3ChainDefaultTlsServerCa:
     """Verify http3_chain accepts server_ca_path in default_tls."""
 
-    def test_chain_starts_with_default_tls_server_ca(self) -> None:
+    def test_chain_starts_with_default_tls_server_ca(self, shared_test_certs: dict) -> None:
         """
         TC-CERT-REFACTOR-002: http3_chain starts with server_ca_path in default_tls.
 
@@ -234,7 +229,9 @@ class TestHttp3ChainDefaultTlsServerCa:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             config_path = create_new_http3_chain_config(
                 http_port=http_port,
@@ -261,7 +258,7 @@ class TestHttp3ChainDefaultTlsServerCa:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_chain_starts_with_per_proxy_server_ca(self) -> None:
+    def test_chain_starts_with_per_proxy_server_ca(self, shared_test_certs: dict) -> None:
         """
         TC-CERT-REFACTOR-003: http3_chain starts with server_ca_path in per-proxy tls.
 
@@ -273,7 +270,9 @@ class TestHttp3ChainDefaultTlsServerCa:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             config_path = create_new_http3_chain_config(
                 http_port=http_port,
@@ -309,7 +308,7 @@ class TestHttp3ChainDefaultTlsServerCa:
 class TestTlsDeepMerge:
     """Verify deep merge behavior between proxy tls and default_tls."""
 
-    def test_data_through_chain_with_default_tls(self) -> None:
+    def test_data_through_chain_with_default_tls(self, shared_test_certs: dict) -> None:
         """
         TC-CERT-REFACTOR-004: Data transmission through chain using default_tls.
 
@@ -328,7 +327,9 @@ class TestTlsDeepMerge:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Start target echo server
             _, target_socket = create_target_server(
@@ -389,7 +390,7 @@ class TestTlsDeepMerge:
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
-    def test_per_proxy_ca_overrides_default(self) -> None:
+    def test_per_proxy_ca_overrides_default(self, shared_test_certs: dict) -> None:
         """
         TC-CERT-REFACTOR-005: Per-proxy server_ca_path overrides default_tls.
 
@@ -408,7 +409,9 @@ class TestTlsDeepMerge:
         target_socket: Optional[socket.socket] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Start target echo server
             _, target_socket = create_target_server(
@@ -473,7 +476,7 @@ class TestTlsDeepMerge:
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
-    def test_default_tls_inherited(self) -> None:
+    def test_default_tls_inherited(self, shared_test_certs: dict) -> None:
         """
         TC-CERT-REFACTOR-006: Proxy inherits TLS from default_tls via deep merge.
 
@@ -487,7 +490,9 @@ class TestTlsDeepMerge:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             config_path = create_new_http3_chain_config(
                 http_port=http_port,
@@ -526,7 +531,7 @@ class TestTlsDeepMerge:
 class TestOldFieldNamesRejected:
     """Verify old field names are no longer functional after refactoring."""
 
-    def test_old_ca_path_at_service_level_not_functional(self) -> None:
+    def test_old_ca_path_at_service_level_not_functional(self, shared_test_certs: dict) -> None:
         """
         TC-CERT-REFACTOR-007: Old ca_path at service level is rejected.
 
@@ -539,7 +544,7 @@ class TestOldFieldNamesRejected:
         temp_dir = tempfile.mkdtemp()
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            ca_path = shared_test_certs['ca_path']
 
             # Chain config uses OLD ca_path at service level (should be rejected)
             config_content = f"""worker_threads: 1

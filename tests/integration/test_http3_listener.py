@@ -361,7 +361,7 @@ def run_curl_http3_connect(
 class TestHTTP3BasicConnection:
     """Test 7.1: Basic HTTP/3 connection scenarios."""
 
-    def test_http3_listener_starts_successfully(self) -> None:
+    def test_http3_listener_starts_successfully(self, shared_test_certs: dict) -> None:
         """
         TC-H3-001: HTTP/3 Listener starts and binds to port.
 
@@ -372,7 +372,8 @@ class TestHTTP3BasicConnection:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -393,7 +394,7 @@ class TestHTTP3BasicConnection:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_http3_listener_graceful_shutdown(self) -> None:
+    def test_http3_listener_graceful_shutdown(self, shared_test_certs: dict) -> None:
         """
         TC-H3-002: HTTP/3 Listener graceful shutdown.
 
@@ -404,7 +405,8 @@ class TestHTTP3BasicConnection:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -444,7 +446,7 @@ class TestHTTP3BasicConnection:
 class TestHTTP3Authentication:
     """Test 7.3: HTTP/3 authentication scenarios."""
 
-    def test_no_auth_allows_all(self) -> None:
+    def test_no_auth_allows_all(self, shared_test_certs: dict) -> None:
         """
         TC-H3-AUTH-001: No authentication allows all connections.
 
@@ -455,7 +457,8 @@ class TestHTTP3Authentication:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
             # No auth config means no authentication
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
@@ -547,7 +550,7 @@ servers:
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_key_file_not_exist(self) -> None:
+    def test_key_file_not_exist(self, shared_test_certs: dict) -> None:
         """
         TC-H3-ERR-002: Private key file does not exist (NEW config format).
 
@@ -558,7 +561,7 @@ servers:
         proxy_port = get_unique_port()
 
         try:
-            cert_path, _, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
 
             # NEW config format: server-level TLS with non-existent key
             config_content = f"""worker_threads: 1
@@ -604,7 +607,7 @@ servers:
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_cert_key_mismatch(self) -> None:
+    def test_cert_key_mismatch(self, shared_test_certs: dict) -> None:
         """
         TC-H3-ERR-003: Certificate and key do not match (NEW config format).
 
@@ -615,8 +618,8 @@ servers:
         proxy_port = get_unique_port()
 
         try:
-            # Generate two different key pairs
-            cert_path1, _, _, _ = generate_test_certificates(temp_dir)
+            # Use shared cert but generate a mismatched key
+            cert_path1 = shared_test_certs['cert_path']
 
             # Generate another key
             key_path2 = os.path.join(temp_dir, "wrong.key")
@@ -686,7 +689,7 @@ class TestHTTP3ConfigValidation:
     - addresses (plural) field
     """
 
-    def test_invalid_quic_param_uses_default(self) -> None:
+    def test_invalid_quic_param_uses_default(self, shared_test_certs: dict) -> None:
         """
         TC-H3-CFG-001: Invalid QUIC parameter uses default value.
 
@@ -698,7 +701,8 @@ class TestHTTP3ConfigValidation:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
 
             # Invalid QUIC config: max_concurrent_bidi_streams = 0
             quic_config = """      max_concurrent_bidi_streams: 0
@@ -776,7 +780,7 @@ servers:
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_invalid_address_format(self) -> None:
+    def test_invalid_address_format(self, shared_test_certs: dict) -> None:
         """
         TC-H3-CFG-003: Invalid address format causes startup failure (NEW config format).
 
@@ -784,7 +788,8 @@ servers:
         using the new config format with server-level TLS.
         """
         temp_dir = tempfile.mkdtemp()
-        cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+        cert_path = shared_test_certs['cert_path']
+        key_path = shared_test_certs['key_path']
 
         try:
             # NEW config format: server-level TLS with invalid address format
@@ -840,7 +845,7 @@ servers:
 class TestHTTP3GracefulShutdown:
     """Test 7.4: HTTP/3 graceful shutdown scenarios."""
 
-    def test_shutdown_with_no_connections(self) -> None:
+    def test_shutdown_with_no_connections(self, shared_test_certs: dict) -> None:
         """
         TC-H3-SHUTDOWN-001: Shutdown with no connections completes quickly.
 
@@ -851,7 +856,8 @@ class TestHTTP3GracefulShutdown:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -880,7 +886,7 @@ class TestHTTP3GracefulShutdown:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_shutdown_with_multiple_workers(self) -> None:
+    def test_shutdown_with_multiple_workers(self, shared_test_certs: dict) -> None:
         """
         TC-H3-SHUTDOWN-002: Shutdown with multiple worker threads.
 
@@ -891,7 +897,8 @@ class TestHTTP3GracefulShutdown:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,
                 worker_threads=4
@@ -936,7 +943,7 @@ class TestHTTP3ServiceDelegation:
     This is a critical behavioral change from the monolithic H3 listener.
     """
 
-    def test_h3_listener_non_connect_method_handled_by_service(self) -> None:
+    def test_h3_listener_non_connect_method_handled_by_service(self, shared_test_certs: dict) -> None:
         """
         TC-H3-DELEGATION-001: Non-CONNECT method is forwarded to Service.
 
@@ -968,7 +975,9 @@ class TestHTTP3ServiceDelegation:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -1028,7 +1037,7 @@ class TestHTTP3ServiceDelegation:
 class TestHTTP3EchoService:
     """Test HTTP/3 listener with echo service for non-CONNECT requests."""
 
-    def test_h3_get_to_echo_service_no_upgrade_error(self) -> None:
+    def test_h3_get_to_echo_service_no_upgrade_error(self, shared_test_certs: dict) -> None:
         """
         TC-H3-ECHO-001: GET request to echo service should not cause upgrade error.
 
@@ -1060,7 +1069,9 @@ class TestHTTP3EchoService:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Create config with echo service
             config_content = f"""worker_threads: 1

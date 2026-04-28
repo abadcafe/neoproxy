@@ -42,7 +42,6 @@ from .utils.helpers import (
 )
 
 from .test_http3_listener import (
-    generate_test_certificates,
     create_http3_listener_config,
 )
 
@@ -492,7 +491,7 @@ class TestMonitoring:
 class TestHTTP3Monitoring:
     """Test 7.8: HTTP/3 monitoring scenarios."""
 
-    def test_http3_log_directory_created(self) -> None:
+    def test_http3_log_directory_created(self, shared_test_certs: dict) -> None:
         """
         TC-H3-MON-001: HTTP/3 listener creates log directory.
 
@@ -503,7 +502,8 @@ class TestHTTP3Monitoring:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -523,7 +523,7 @@ class TestHTTP3Monitoring:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_http3_startup_log_content(self) -> None:
+    def test_http3_startup_log_content(self, shared_test_certs: dict) -> None:
         """
         TC-H3-MON-002: HTTP/3 listener logs startup information.
 
@@ -534,7 +534,8 @@ class TestHTTP3Monitoring:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -571,7 +572,7 @@ class TestHTTP3Monitoring:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_http3_stream_count_logged(self) -> None:
+    def test_http3_stream_count_logged(self, shared_test_certs: dict) -> None:
         """
         TC-H3-MON-003: HTTP/3 stream count is logged.
 
@@ -582,7 +583,8 @@ class TestHTTP3Monitoring:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -727,7 +729,7 @@ servers: []
 class TestMonitoringLogCycle:
     """Test periodic monitoring log output."""
 
-    def test_http3_monitoring_log_cycle(self) -> None:
+    def test_http3_monitoring_log_cycle(self, shared_test_certs: dict) -> None:
         """
         TC-MON-CYCLE-001: HTTP/3 monitoring logs every 60 seconds.
 
@@ -748,7 +750,8 @@ class TestMonitoringLogCycle:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -809,7 +812,7 @@ class TestMonitoringLogCycle:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_http3_connection_count_accuracy(self) -> None:
+    def test_http3_connection_count_accuracy(self, shared_test_certs: dict) -> None:
         """
         TC-MON-CYCLE-002: HTTP/3 connection count is accurate.
 
@@ -821,7 +824,8 @@ class TestMonitoringLogCycle:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -1234,7 +1238,7 @@ class TestSocks5ListenerMonitoring:
 class TestMultiListenerMonitoring:
     """Test multi-listener monitoring scenarios."""
 
-    def test_multiple_listeners_monitoring_distinguishable(self) -> None:
+    def test_multiple_listeners_monitoring_distinguishable(self, shared_test_certs: dict) -> None:
         """
         TC-MULTI-MON-001: Multiple listeners can be distinguished by name.
 
@@ -1249,12 +1253,9 @@ class TestMultiListenerMonitoring:
 
         try:
             from .test_socks5 import create_socks5_config
-            from .test_http3_listener import (
-                generate_test_certificates,
-            )
 
-            # Generate certificates for HTTP/3
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
 
             # Create multi-listener config
             config_content = f"""worker_threads: 1

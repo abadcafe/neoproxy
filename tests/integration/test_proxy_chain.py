@@ -325,6 +325,8 @@ def run_proxy_chain_test(
     target_port: Optional[int],
     temp_dir1: str,
     temp_dir2: str,
+    shared_test_certs: Optional[dict] = None,
+    shared_client_cert: Optional[dict] = None,
 ) -> None:
     """
     Run a proxy chain test with the specified configuration.
@@ -340,6 +342,8 @@ def run_proxy_chain_test(
         target_port: Target server port (for mock tests)
         temp_dir1: Temp dir for upstream
         temp_dir2: Temp dir for entry
+        shared_test_certs: Optional session-scoped cert dict for cert reuse
+        shared_client_cert: Optional session-scoped client cert dict for cert reuse
     """
     upstream_proc: Optional[subprocess.Popen] = None
     entry_proc: Optional[subprocess.Popen] = None
@@ -347,15 +351,25 @@ def run_proxy_chain_test(
     target_thread: Optional[threading.Thread] = None
 
     try:
-        cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir1)
+        if shared_test_certs:
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
+            ca_key_path = shared_test_certs['ca_key_path']
+        else:
+            cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir1)
 
-        # Generate client certificate for TLS cert auth
+        # Get client certificate for TLS cert auth
         client_cert_path = None
         client_key_path = None
         if upstream_auth == "tls_cert":
-            client_cert_path, client_key_path = generate_client_certificate(
-                temp_dir1, ca_path, ca_key_path
-            )
+            if shared_client_cert:
+                client_cert_path = shared_client_cert['client_cert_path']
+                client_key_path = shared_client_cert['client_key_path']
+            else:
+                client_cert_path, client_key_path = generate_client_certificate(
+                    temp_dir1, ca_path, ca_key_path
+                )
 
         # Create upstream config
         if upstream_auth == "password":
@@ -453,7 +467,7 @@ def run_proxy_chain_test(
 class TestProxyChainHTTPToHTTP3Password:
     """HTTP(Password) -> HTTP/3(Password) -> Target"""
 
-    def test_to_baidu(self) -> None:
+    def test_to_baidu(self, shared_test_certs: dict) -> None:
         """TC-CHAIN-PWD-001: HTTP(password)->HTTP/3(password)->baidu.com."""
         run_proxy_chain_test(
             entry_type="http",
@@ -464,9 +478,10 @@ class TestProxyChainHTTPToHTTP3Password:
             target_port=None,
             temp_dir1=tempfile.mkdtemp(),
             temp_dir2=tempfile.mkdtemp(),
+            shared_test_certs=shared_test_certs,
         )
 
-    def test_to_mock(self) -> None:
+    def test_to_mock(self, shared_test_certs: dict) -> None:
         """TC-CHAIN-PWD-002: HTTP(password)->HTTP/3(password)->mock echo."""
         run_proxy_chain_test(
             entry_type="http",
@@ -477,6 +492,7 @@ class TestProxyChainHTTPToHTTP3Password:
             target_port=get_unique_port(),
             temp_dir1=tempfile.mkdtemp(),
             temp_dir2=tempfile.mkdtemp(),
+            shared_test_certs=shared_test_certs,
         )
 
 
@@ -488,7 +504,7 @@ class TestProxyChainHTTPToHTTP3Password:
 class TestProxyChainHTTPToHTTP3TlsCert:
     """HTTP(Password) -> HTTP/3(TLS Cert) -> Target"""
 
-    def test_to_baidu(self) -> None:
+    def test_to_baidu(self, shared_test_certs: dict, shared_client_cert: dict) -> None:
         """TC-CHAIN-TLS-001: HTTP(password)->HTTP/3(TLS cert)->baidu.com."""
         run_proxy_chain_test(
             entry_type="http",
@@ -499,9 +515,11 @@ class TestProxyChainHTTPToHTTP3TlsCert:
             target_port=None,
             temp_dir1=tempfile.mkdtemp(),
             temp_dir2=tempfile.mkdtemp(),
+            shared_test_certs=shared_test_certs,
+            shared_client_cert=shared_client_cert,
         )
 
-    def test_to_mock(self) -> None:
+    def test_to_mock(self, shared_test_certs: dict, shared_client_cert: dict) -> None:
         """TC-CHAIN-TLS-002: HTTP(password)->HTTP/3(TLS cert)->mock echo."""
         run_proxy_chain_test(
             entry_type="http",
@@ -512,6 +530,8 @@ class TestProxyChainHTTPToHTTP3TlsCert:
             target_port=get_unique_port(),
             temp_dir1=tempfile.mkdtemp(),
             temp_dir2=tempfile.mkdtemp(),
+            shared_test_certs=shared_test_certs,
+            shared_client_cert=shared_client_cert,
         )
 
 
@@ -523,7 +543,7 @@ class TestProxyChainHTTPToHTTP3TlsCert:
 class TestProxyChainSocks5ToHTTP3Password:
     """SOCKS5(Password) -> HTTP/3(Password) -> Target"""
 
-    def test_to_baidu(self) -> None:
+    def test_to_baidu(self, shared_test_certs: dict) -> None:
         """TC-CHAIN-S5-PWD-001: SOCKS5(password)->HTTP/3(password)->baidu.com."""
         run_proxy_chain_test(
             entry_type="socks5",
@@ -534,9 +554,10 @@ class TestProxyChainSocks5ToHTTP3Password:
             target_port=None,
             temp_dir1=tempfile.mkdtemp(),
             temp_dir2=tempfile.mkdtemp(),
+            shared_test_certs=shared_test_certs,
         )
 
-    def test_to_mock(self) -> None:
+    def test_to_mock(self, shared_test_certs: dict) -> None:
         """TC-CHAIN-S5-PWD-002: SOCKS5(password)->HTTP/3(password)->mock echo."""
         run_proxy_chain_test(
             entry_type="socks5",
@@ -547,6 +568,7 @@ class TestProxyChainSocks5ToHTTP3Password:
             target_port=get_unique_port(),
             temp_dir1=tempfile.mkdtemp(),
             temp_dir2=tempfile.mkdtemp(),
+            shared_test_certs=shared_test_certs,
         )
 
 
@@ -558,7 +580,7 @@ class TestProxyChainSocks5ToHTTP3Password:
 class TestProxyChainSocks5ToHTTP3TlsCert:
     """SOCKS5(Password) -> HTTP/3(TLS Cert) -> Target"""
 
-    def test_to_baidu(self) -> None:
+    def test_to_baidu(self, shared_test_certs: dict, shared_client_cert: dict) -> None:
         """TC-CHAIN-S5-TLS-001: SOCKS5(password)->HTTP/3(TLS cert)->baidu.com."""
         run_proxy_chain_test(
             entry_type="socks5",
@@ -569,9 +591,11 @@ class TestProxyChainSocks5ToHTTP3TlsCert:
             target_port=None,
             temp_dir1=tempfile.mkdtemp(),
             temp_dir2=tempfile.mkdtemp(),
+            shared_test_certs=shared_test_certs,
+            shared_client_cert=shared_client_cert,
         )
 
-    def test_to_mock(self) -> None:
+    def test_to_mock(self, shared_test_certs: dict, shared_client_cert: dict) -> None:
         """TC-CHAIN-S5-TLS-002: SOCKS5(password)->HTTP/3(TLS cert)->mock echo."""
         run_proxy_chain_test(
             entry_type="socks5",
@@ -582,6 +606,8 @@ class TestProxyChainSocks5ToHTTP3TlsCert:
             target_port=get_unique_port(),
             temp_dir1=tempfile.mkdtemp(),
             temp_dir2=tempfile.mkdtemp(),
+            shared_test_certs=shared_test_certs,
+            shared_client_cert=shared_client_cert,
         )
 
 
@@ -766,7 +792,7 @@ def _is_407_response(result: subprocess.CompletedProcess) -> bool:
 class TestNegativeAuthHTTPEntry:
     """Negative tests for HTTP entry proxy authentication."""
 
-    def test_http_entry_missing_auth_returns_407(self) -> None:
+    def test_http_entry_missing_auth_returns_407(self, shared_test_certs: dict) -> None:
         """TC-NEG-AUTH-001: HTTP entry without Proxy-Authorization returns 407.
 
         When a proxy requires password authentication and the client sends
@@ -783,7 +809,9 @@ class TestNegativeAuthHTTPEntry:
         entry_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Start upstream HTTP/3 without auth (entry auth is what we test)
             upstream_config = create_upstream_no_auth_config(
@@ -800,8 +828,6 @@ class TestNegativeAuthHTTPEntry:
             entry_proc = start_proxy(entry_config)
             assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
                 "Entry HTTP listener failed to start"
-
-            time.sleep(0.5)
 
             # Send CONNECT request without Proxy-Authorization.
             # For HTTPS through HTTP proxy (CONNECT tunnel), curl reports
@@ -831,7 +857,7 @@ class TestNegativeAuthHTTPEntry:
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
-    def test_http_entry_wrong_credentials_returns_407(self) -> None:
+    def test_http_entry_wrong_credentials_returns_407(self, shared_test_certs: dict) -> None:
         """TC-NEG-AUTH-002: HTTP entry with wrong credentials returns 407.
 
         When a proxy requires password authentication and the client sends
@@ -848,7 +874,9 @@ class TestNegativeAuthHTTPEntry:
         entry_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Start upstream HTTP/3 without auth (entry auth is what we test)
             upstream_config = create_upstream_no_auth_config(
@@ -865,8 +893,6 @@ class TestNegativeAuthHTTPEntry:
             entry_proc = start_proxy(entry_config)
             assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
                 "Entry HTTP listener failed to start"
-
-            time.sleep(0.5)
 
             # Send request with wrong credentials.
             # For CONNECT tunnels, curl reports exit code 56 + "response 407".
@@ -899,7 +925,7 @@ class TestNegativeAuthHTTPEntry:
 class TestNegativeAuthSOCKS5Entry:
     """Negative tests for SOCKS5 entry proxy authentication."""
 
-    def test_socks5_entry_wrong_credentials_fails(self) -> None:
+    def test_socks5_entry_wrong_credentials_fails(self, shared_test_certs: dict) -> None:
         """TC-NEG-AUTH-003: SOCKS5 entry with wrong credentials fails.
 
         When a SOCKS5 proxy requires password authentication and the client
@@ -915,7 +941,9 @@ class TestNegativeAuthSOCKS5Entry:
         entry_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Start upstream HTTP/3 without auth (entry auth is what we test)
             upstream_config = create_upstream_no_auth_config(
@@ -932,8 +960,6 @@ class TestNegativeAuthSOCKS5Entry:
             entry_proc = start_proxy(entry_config)
             assert wait_for_proxy("127.0.0.1", socks5_port, timeout=5.0), \
                 "Entry SOCKS5 listener failed to start"
-
-            time.sleep(0.5)
 
             # Send request with wrong SOCKS5 credentials
             result = subprocess.run(
@@ -968,7 +994,7 @@ class TestNegativeAuthSOCKS5Entry:
 class TestNegativeAuthUpstream:
     """Negative tests for upstream proxy authentication."""
 
-    def test_wrong_upstream_credentials_connection_fails(self) -> None:
+    def test_wrong_upstream_credentials_connection_fails(self, shared_test_certs: dict) -> None:
         """TC-NEG-AUTH-004: Wrong upstream credentials cause connection failure.
 
         When the http3_chain service is configured with wrong credentials for
@@ -985,7 +1011,9 @@ class TestNegativeAuthUpstream:
         entry_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir1)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
 
             # Start upstream HTTP/3 WITH password auth (user1:pass1)
             upstream_config = create_upstream_password_config(
@@ -1002,8 +1030,6 @@ class TestNegativeAuthUpstream:
             entry_proc = start_proxy(entry_config)
             assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
                 "Entry HTTP listener failed to start"
-
-            time.sleep(0.5)
 
             # Send request with correct entry credentials but wrong upstream creds.
             # The upstream should reject the CONNECT request with 407,

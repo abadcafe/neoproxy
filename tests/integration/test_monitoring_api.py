@@ -39,7 +39,6 @@ from .utils.helpers import (
 )
 
 from .test_http3_listener import (
-    generate_test_certificates,
     create_http3_listener_config,
 )
 
@@ -261,7 +260,7 @@ class TestMonitoringAPI:
 class TestHTTP3MonitoringAPI:
     """Test 7.8: HTTP/3 monitoring API scenarios."""
 
-    def test_http3_active_stream_count_in_logs(self) -> None:
+    def test_http3_active_stream_count_in_logs(self, shared_test_certs: dict) -> None:
         """
         TC-H3-MON-API-001: HTTP/3 active stream count appears in logs.
 
@@ -272,7 +271,8 @@ class TestHTTP3MonitoringAPI:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )
@@ -313,7 +313,7 @@ class TestHTTP3MonitoringAPI:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_http3_connection_metrics_logged(self) -> None:
+    def test_http3_connection_metrics_logged(self, shared_test_certs: dict) -> None:
         """
         TC-H3-MON-API-002: HTTP/3 connection metrics are logged.
 
@@ -324,7 +324,8 @@ class TestHTTP3MonitoringAPI:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            cert_path, key_path, _, _ = generate_test_certificates(temp_dir)
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir
             )

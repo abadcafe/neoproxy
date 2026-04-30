@@ -27,15 +27,18 @@ use tracing::warn;
 
 use crate::auth::UserPasswordAuth;
 use crate::config::ListenerAuthConfig;
-use crate::config_validator::{
+use crate::config::SerializedArgs;
+use crate::config::{
   ConfigErrorCollector, validate_listener_auth_config,
 };
 use crate::http_utils::{BytesBufBodyWrapper, RequestBody};
-use crate::plugin;
-use crate::shutdown::{ShutdownHandle, StreamTracker};
+use crate::listener::{BuildListener, Listener, Listening};
+use crate::service::Service as RuntimeService;
+use crate::shutdown::ShutdownHandle;
 use crate::stream::{
   Socks5UpgradeTrigger, http_status_to_socks5_error,
 };
+use crate::tracker::StreamTracker;
 use tower::Service;
 
 /// Listener shutdown timeout in seconds.
@@ -59,7 +62,7 @@ pub struct Socks5Listener {
   /// This also serves as the shutdown handle for the listener itself.
   connection_tracker: Rc<StreamTracker>,
   /// Associated service for handling connections.
-  service: plugin::Service,
+  service: RuntimeService,
   /// Graceful shutdown timeout.
   graceful_shutdown_timeout: Duration,
   /// Handshake timeout duration.
@@ -92,9 +95,9 @@ impl Socks5Listener {
   #[allow(clippy::new_ret_no_self)]
   pub fn new(
     args: Socks5ListenerArgs,
-    _svc: plugin::Service,
+    _svc: RuntimeService,
     server_routing_table: Vec<crate::server::Server>,
-  ) -> Result<plugin::Listener> {
+  ) -> Result<Listener> {
     // Resolve addresses, skipping invalid ones
     let addresses = resolve_addresses(&args.addresses);
 
@@ -121,7 +124,7 @@ impl Socks5Listener {
       .map(|e| e.service_name())
       .unwrap_or_default();
 
-    Ok(plugin::Listener::new(Self {
+    Ok(Listener::new(Self {
       addresses,
       connection_tracker: Rc::new(StreamTracker::new()),
       service,
@@ -152,7 +155,7 @@ impl Socks5Listener {
   fn serve_addr(
     &self,
     addr: SocketAddr,
-    service: plugin::Service,
+    service: RuntimeService,
     connection_tracker: Rc<StreamTracker>,
     shutdown_handle: ShutdownHandle,
     handshake_timeout: Duration,
@@ -477,7 +480,7 @@ impl Socks5Listener {
   }
 }
 
-impl plugin::Listening for Socks5Listener {
+impl Listening for Socks5Listener {
   /// Start the SOCKS5 listener.
   ///
   /// # Returns
@@ -1133,7 +1136,7 @@ impl Default for Socks5ListenerArgs {
 /// - Username length is not in range 1-255 bytes
 /// - Any other YAML parsing error occurs
 pub fn parse_config(
-  args: plugin::SerializedArgs,
+  args: SerializedArgs,
 ) -> Result<Socks5ListenerArgs> {
   #[derive(Deserialize, Debug)]
   struct ConfigYaml {
@@ -1342,9 +1345,9 @@ pub fn listener_name() -> &'static str {
 ///
 /// Returns a builder function that parses configuration and creates
 /// a Socks5Listener instance.
-pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
+pub fn create_listener_builder() -> Box<dyn BuildListener> {
   Box::new(
-    |args: plugin::SerializedArgs,
+    |args: SerializedArgs,
      server_routing_table: Vec<crate::server::Server>| {
       // Parse configuration
       let listener_args = parse_config(args)?;
@@ -1637,7 +1640,7 @@ addresses: []
 
   #[test]
   fn test_listening_trait_implementation() {
-    fn assert_listening<T: plugin::Listening>() {}
+    fn assert_listening<T: Listening>() {}
     assert_listening::<Socks5Listener>();
   }
 

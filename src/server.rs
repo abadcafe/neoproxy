@@ -6,12 +6,12 @@ use std::rc::Rc;
 use anyhow::Result;
 use tower::service_fn;
 
-use crate::plugin;
+use crate::service::Service;
 
 /// Create a placeholder service for routing table initialization.
 /// The actual service is selected at request time from the routing table.
-pub fn placeholder_service() -> plugin::Service {
-  plugin::Service::new(service_fn(|_req| {
+pub fn placeholder_service() -> Service {
+  Service::new(service_fn(|_req| {
     Box::pin(async {
       Err::<Response, _>(anyhow::anyhow!("placeholder"))
     }) as Pin<Box<dyn Future<Output = Result<Response>>>>
@@ -28,7 +28,7 @@ pub struct Server {
   /// Hostnames this server responds to
   pub hostnames: Vec<String>,
   /// The service to route requests to
-  pub service: plugin::Service,
+  pub service: Service,
   /// Service name for logging
   pub service_name: String,
   /// Server-level authentication
@@ -110,7 +110,7 @@ use crate::http_utils::Response;
 #[cfg(test)]
 mod shared_address_tests {
   use super::*;
-  use crate::config_validator::extract_addresses;
+  use crate::config::extract_addresses;
 
   #[test]
   fn test_extract_addresses_plural() {

@@ -23,14 +23,15 @@ use serde::Deserialize;
 use tokio::task;
 use tracing::{error, info, warn};
 
-use crate::config::UserCredential;
+use crate::config::{SerializedArgs, UserCredential};
 use crate::connect_utils::{self as utils, ConnectTargetError};
 use crate::h3_stream::H3ClientBidiStream;
 use crate::http_utils::{Request, Response};
 use crate::http_utils::{build_empty_response, build_error_response};
-use crate::plugin;
-use crate::shutdown::StreamTracker;
+use crate::plugin::Plugin;
+use crate::service::{BuildService, Service};
 use crate::stream::{ClientStream, H3OnUpgrade, Socks5OnUpgrade};
+use crate::tracker::StreamTracker;
 
 /// Error indicating proxy authentication failure (HTTP 407)
 #[derive(Debug)]
@@ -603,10 +604,10 @@ struct Http3ChainService {
 impl Http3ChainService {
   #[allow(clippy::new_ret_no_self)]
   fn new(
-    sargs: plugin::SerializedArgs,
+    sargs: SerializedArgs,
     stream_tracker: Rc<StreamTracker>,
     conn_tracker: ActiveConnectionTracker,
-  ) -> Result<plugin::Service> {
+  ) -> Result<Service> {
     let args: Http3ChainServiceArgs = serde_yaml::from_value(sargs)?;
     args.validate()?;
 
@@ -642,7 +643,7 @@ impl Http3ChainService {
 
     let proxy_group = ProxyGroup::new(proxy_addresses);
 
-    Ok(plugin::Service::new(Self {
+    Ok(Service::new(Self {
       proxy_group: Arc::new(Mutex::new(proxy_group)),
       stream_tracker,
       conn_tracker,
@@ -897,8 +898,7 @@ async fn complete_tunnel(
 }
 
 struct Http3ChainPlugin {
-  service_builders:
-    HashMap<&'static str, Box<dyn plugin::BuildService>>,
+  service_builders: HashMap<&'static str, Box<dyn BuildService>>,
   stream_tracker: Rc<StreamTracker>,
   conn_tracker: ActiveConnectionTracker,
   /// Flag to ensure uninstall is idempotent
@@ -911,7 +911,7 @@ impl Http3ChainPlugin {
     let conn_tracker = ActiveConnectionTracker::new();
     let st_clone = stream_tracker.clone();
     let ct_clone = conn_tracker.clone();
-    let builder: Box<dyn plugin::BuildService> = Box::new(move |a| {
+    let builder: Box<dyn BuildService> = Box::new(move |a| {
       Http3ChainService::new(a, st_clone.clone(), ct_clone.clone())
     });
     let service_builders = HashMap::from([("http3_chain", builder)]);
@@ -947,11 +947,11 @@ impl Http3ChainPlugin {
   }
 }
 
-impl plugin::Plugin for Http3ChainPlugin {
+impl Plugin for Http3ChainPlugin {
   fn service_builder(
     &self,
     name: &str,
-  ) -> Option<&Box<dyn plugin::BuildService>> {
+  ) -> Option<&Box<dyn BuildService>> {
     self.service_builders.get(name)
   }
 
@@ -1021,7 +1021,7 @@ pub fn plugin_name() -> &'static str {
   "http3_chain"
 }
 
-pub fn create_plugin() -> Box<dyn plugin::Plugin> {
+pub fn create_plugin() -> Box<dyn Plugin> {
   Box::new(Http3ChainPlugin::new())
 }
 

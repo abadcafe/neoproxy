@@ -15,12 +15,14 @@ use serde::Deserialize;
 use tower::Service;
 use tracing::{info, warn};
 
+use crate::config::SerializedArgs;
 use crate::http_utils::build_error_response;
 use crate::http_utils::{BytesBufBodyWrapper, RequestBody, Response};
-use crate::plugin;
-use crate::shutdown::{ShutdownHandle, StreamTracker};
+use crate::listener::{BuildListener, Listener, Listening};
+use crate::shutdown::ShutdownHandle;
 use crate::stream::H3UpgradeTrigger;
 use crate::tls::build_tls_server_config;
+use crate::tracker::StreamTracker;
 
 // ============================================================================
 // Constants
@@ -601,9 +603,9 @@ impl Http3Listener {
   /// Create a new HTTP/3 Listener
   #[allow(clippy::new_ret_no_self)]
   pub fn new(
-    sargs: plugin::SerializedArgs,
+    sargs: SerializedArgs,
     server_routing_table: Vec<crate::server::Server>,
-  ) -> Result<plugin::Listener> {
+  ) -> Result<Listener> {
     let args: Http3ListenerArgs = serde_yaml::from_value(sargs)?;
 
     // Parse addresses
@@ -636,7 +638,7 @@ impl Http3Listener {
       vec![H3_ALPN.to_vec()],
     )?;
 
-    Ok(plugin::Listener::new(Self {
+    Ok(Listener::new(Self {
       addresses,
       tls_config,
       quic_config,
@@ -647,7 +649,7 @@ impl Http3Listener {
   }
 }
 
-impl plugin::Listening for Http3Listener {
+impl Listening for Http3Listener {
   fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
     let addresses = self.addresses.clone();
     let tls_config = self.tls_config.clone();
@@ -855,7 +857,7 @@ pub fn listener_name() -> &'static str {
 }
 
 /// Create a listener builder
-pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
+pub fn create_listener_builder() -> Box<dyn BuildListener> {
   Box::new(Http3Listener::new)
 }
 
@@ -869,7 +871,7 @@ mod tests {
   use crate::auth::UserPasswordAuth;
   use crate::config::ListenerAuthConfig;
   use crate::config::UserCredential;
-  use crate::config_validator::{
+  use crate::config::{
     ConfigErrorCollector, validate_listener_auth_config,
   };
   use base64::{
@@ -1338,7 +1340,7 @@ quic:
 
   #[test]
   fn test_listening_trait_implementation() {
-    fn assert_listening<T: plugin::Listening>() {}
+    fn assert_listening<T: Listening>() {}
     assert_listening::<Http3Listener>();
   }
 

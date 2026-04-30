@@ -22,14 +22,15 @@ use tokio::{net, task, time::timeout};
 use tower::util as tower_util;
 use tracing::{error, info, warn};
 
+use crate::config::SerializedArgs;
 use crate::http_utils::{
   BytesBufBodyWrapper, Request, RequestBody, Response,
 };
+use crate::listener::{BuildListener, Listener, Listening};
 use crate::listeners::common::TokioLocalExecutor;
-use crate::plugin;
 use crate::server::{Server, ServerRouter};
-use crate::shutdown::StreamTracker;
 use crate::tls::build_tls_server_config;
+use crate::tracker::StreamTracker;
 
 /// Listener shutdown timeout in seconds.
 const LISTENER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -255,9 +256,9 @@ pub struct HttpsListener {
 impl HttpsListener {
   #[allow(clippy::new_ret_no_self)]
   pub fn new(
-    sargs: plugin::SerializedArgs,
+    sargs: SerializedArgs,
     server_routing_table: Vec<Server>,
-  ) -> Result<plugin::Listener> {
+  ) -> Result<Listener> {
     let args: HttpsListenerArgs = serde_yaml::from_value(sargs)?;
 
     // TLS config is required for https listener
@@ -282,7 +283,7 @@ impl HttpsListener {
       })
       .collect();
 
-    Ok(plugin::Listener::new(Self {
+    Ok(Listener::new(Self {
       addresses,
       tls_config,
       server_routing_table,
@@ -380,7 +381,7 @@ impl HttpsListener {
   }
 }
 
-impl plugin::Listening for HttpsListener {
+impl Listening for HttpsListener {
   fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
     let listening_set = self.listening_set.clone();
     for addr in &self.addresses {
@@ -440,7 +441,7 @@ pub fn listener_name() -> &'static str {
 }
 
 /// Create a listener builder
-pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
+pub fn create_listener_builder() -> Box<dyn BuildListener> {
   Box::new(HttpsListener::new)
 }
 
@@ -529,7 +530,7 @@ addresses:
 
   #[test]
   fn test_listening_trait_implementation() {
-    fn assert_listening<T: plugin::Listening>() {}
+    fn assert_listening<T: Listening>() {}
     assert_listening::<HttpsListener>();
   }
 
@@ -541,8 +542,7 @@ addresses:
 addresses:
   - "127.0.0.1:8443"
 "#;
-    let args: plugin::SerializedArgs =
-      serde_yaml::from_str(args_yaml).unwrap();
+    let args: SerializedArgs = serde_yaml::from_str(args_yaml).unwrap();
 
     let entry = Server {
       hostnames: vec![],

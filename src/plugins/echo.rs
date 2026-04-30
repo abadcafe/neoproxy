@@ -6,18 +6,20 @@ use std::task::{Context, Poll};
 use anyhow::Result;
 use http_body_util::{BodyExt, Full};
 
+use crate::config::SerializedArgs;
 use crate::http_utils::{
   BytesBufBodyWrapper, Request, Response, ResponseBody,
 };
-use crate::plugin;
+use crate::plugin::Plugin;
+use crate::service::{BuildService, Service};
 
 #[derive(Clone)]
 struct EchoService {}
 
 impl EchoService {
   #[allow(clippy::new_ret_no_self)]
-  fn new(_args: plugin::SerializedArgs) -> Result<plugin::Service> {
-    Ok(plugin::Service::new(Self {}))
+  fn new(_args: SerializedArgs) -> Result<Service> {
+    Ok(Service::new(Self {}))
   }
 }
 
@@ -49,24 +51,22 @@ impl tower::Service<Request> for EchoService {
 }
 
 struct EchoPlugin {
-  service_builders:
-    HashMap<&'static str, Box<dyn plugin::BuildService>>,
+  service_builders: HashMap<&'static str, Box<dyn BuildService>>,
 }
 
 impl EchoPlugin {
   fn new() -> Self {
-    let builder: Box<dyn plugin::BuildService> =
-      Box::new(EchoService::new);
+    let builder: Box<dyn BuildService> = Box::new(EchoService::new);
     let service_builders = HashMap::from([("echo", builder)]);
     Self { service_builders }
   }
 }
 
-impl plugin::Plugin for EchoPlugin {
+impl Plugin for EchoPlugin {
   fn service_builder(
     &self,
     name: &str,
-  ) -> Option<&Box<dyn plugin::BuildService>> {
+  ) -> Option<&Box<dyn BuildService>> {
     self.service_builders.get(name)
   }
 }
@@ -75,7 +75,7 @@ pub fn plugin_name() -> &'static str {
   "echo"
 }
 
-pub fn create_plugin() -> Box<dyn plugin::Plugin> {
+pub fn create_plugin() -> Box<dyn Plugin> {
   Box::new(EchoPlugin::new())
 }
 

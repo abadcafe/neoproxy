@@ -9,12 +9,13 @@ use tokio::{runtime, sync, task, time::timeout};
 use tracing::{info, warn};
 
 use crate::access_log::AccessLogWriter;
-use crate::config::{AccessLogConfig, Config};
+use crate::config::{AccessLogConfig, Config, SerializedArgs};
+use crate::listener::{Listener, Listening};
 use crate::listeners::ListenerBuilderSet;
-use crate::plugin;
-use crate::plugin::SerializedArgs;
+use crate::plugin::Plugin;
 use crate::plugins::PluginBuilderSet;
 use crate::server::Server;
+use crate::service::Service;
 
 /// Timeout for Phase 1: Listener shutdown.
 /// All listeners share this single timeout duration.
@@ -30,7 +31,7 @@ pub const PLUGIN_UNINSTALL_TIMEOUT: Duration = Duration::from_secs(5);
 /// independently of Config::global().
 pub struct ShutdownContext {
   /// Listeners to be stopped in Phase 1
-  pub listeners: Vec<Rc<plugin::Listener>>,
+  pub listeners: Vec<Rc<Listener>>,
   /// Listener futures currently running
   pub listener_join_set: task::JoinSet<Result<()>>,
   /// Plugins to be uninstalled in Phase 2
@@ -130,7 +131,7 @@ impl ShutdownContext {
 
 /// A set of plugins that can be managed and uninstalled together.
 pub struct PluginSet {
-  plugins: HashMap<&'static str, Box<dyn plugin::Plugin>>,
+  plugins: HashMap<&'static str, Box<dyn Plugin>>,
 }
 
 impl PluginSet {
@@ -146,7 +147,7 @@ impl PluginSet {
   pub fn get_or_create_plugin(
     &mut self,
     name: &'static str,
-  ) -> Option<&Box<dyn plugin::Plugin>> {
+  ) -> Option<&Box<dyn Plugin>> {
     let ent = self.plugins.entry(name);
     match ent {
       Entry::Vacant(ve) => {
@@ -166,7 +167,7 @@ impl PluginSet {
   #[cfg(test)]
   pub fn plugins_mut(
     &mut self,
-  ) -> &mut HashMap<&'static str, Box<dyn plugin::Plugin>> {
+  ) -> &mut HashMap<&'static str, Box<dyn Plugin>> {
     &mut self.plugins
   }
 
@@ -205,7 +206,7 @@ struct SharedListenerGroup {
 /// Group servers by (address, listener_name) for shared-address listener creation.
 fn group_servers_by_address_listener_name(
   servers: &[crate::config::Server],
-  services: &HashMap<&str, plugin::Service>,
+  services: &HashMap<&str, Service>,
   access_log_writers: &HashMap<
     &str,
     crate::access_log::AccessLogWriter,
@@ -225,8 +226,7 @@ fn group_servers_by_address_listener_name(
       access_log_writers.get(server.name.as_str()).cloned();
 
     for listener in &server.listeners {
-      let addresses =
-        crate::config_validator::extract_addresses(&listener.args);
+      let addresses = crate::config::extract_addresses(&listener.args);
 
       for addr_str in addresses {
         let key = (addr_str.clone(), listener.listener_name.clone());
@@ -336,7 +336,7 @@ async fn server_thread_main(shutdown: Arc<sync::Notify>) -> Result<()> {
     // Server routing table
     let server_routing_table = group.servers;
 
-    let l: plugin::Listener =
+    let l: Listener =
       builder(group.listener_args, server_routing_table)?;
     let l = Rc::new(l);
     ctx.listeners.push(Rc::clone(&l));
@@ -372,7 +372,7 @@ pub fn server_thread(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::config_validator::extract_addresses;
+  use crate::config::extract_addresses;
   use crate::server::placeholder_service;
   use crate::shutdown::ShutdownHandle;
   use std::cell::Cell;
@@ -507,7 +507,7 @@ mod tests {
     }
   }
 
-  impl plugin::Listening for MockListener {
+  impl Listening for MockListener {
     fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
       let stopped = self.stopped.clone();
       let shutdown = self.shutdown_handle.clone();
@@ -533,7 +533,7 @@ mod tests {
         let listener = MockListener::new(stopped.clone());
 
         let mut ctx = ShutdownContext::new();
-        let l = Rc::new(plugin::Listener::new(listener));
+        let l = Rc::new(Listener::new(listener));
         ctx.listeners.push(Rc::clone(&l));
         ctx.listener_join_set.spawn_local(l.start());
 
@@ -561,7 +561,7 @@ mod tests {
     }
   }
 
-  impl plugin::Listening for HangingListener {
+  impl Listening for HangingListener {
     fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
       let shutdown = self.shutdown_handle.clone();
       Box::pin(async move {
@@ -586,7 +586,7 @@ mod tests {
         let listener = HangingListener::new();
 
         let mut ctx = ShutdownContext::new();
-        let l = Rc::new(plugin::Listener::new(listener));
+        let l = Rc::new(Listener::new(listener));
         ctx.listeners.push(Rc::clone(&l));
         ctx.listener_join_set.spawn_local(l.start());
 
@@ -629,9 +629,9 @@ mod tests {
 
         let mut ctx = ShutdownContext::new();
 
-        let l1 = Rc::new(plugin::Listener::new(listener1));
-        let l2 = Rc::new(plugin::Listener::new(listener2));
-        let l3 = Rc::new(plugin::Listener::new(listener3));
+        let l1 = Rc::new(Listener::new(listener1));
+        let l2 = Rc::new(Listener::new(listener2));
+        let l3 = Rc::new(Listener::new(listener3));
 
         ctx.listeners.push(Rc::clone(&l1));
         ctx.listeners.push(Rc::clone(&l2));
@@ -671,7 +671,7 @@ mod tests {
         // Add multiple hanging listeners
         for _ in 0..3 {
           let listener = HangingListener::new();
-          let l = Rc::new(plugin::Listener::new(listener));
+          let l = Rc::new(Listener::new(listener));
           ctx.listeners.push(Rc::clone(&l));
           ctx.listener_join_set.spawn_local(l.start());
         }
@@ -715,13 +715,13 @@ mod tests {
 
         // One normal listener
         let normal_listener = MockListener::new(stopped.clone());
-        let l1 = Rc::new(plugin::Listener::new(normal_listener));
+        let l1 = Rc::new(Listener::new(normal_listener));
         ctx.listeners.push(Rc::clone(&l1));
         ctx.listener_join_set.spawn_local(l1.start());
 
         // One hanging listener
         let hanging_listener = HangingListener::new();
-        let l2 = Rc::new(plugin::Listener::new(hanging_listener));
+        let l2 = Rc::new(Listener::new(hanging_listener));
         ctx.listeners.push(Rc::clone(&l2));
         ctx.listener_join_set.spawn_local(l2.start());
 
@@ -764,7 +764,7 @@ mod tests {
     }
   }
 
-  impl plugin::Plugin for TestUninstallPlugin {
+  impl Plugin for TestUninstallPlugin {
     fn uninstall(&mut self) -> Pin<Box<dyn Future<Output = ()>>> {
       let flag = self.uninstalled.clone();
       Box::pin(async move {
@@ -862,7 +862,7 @@ mod tests {
     }
   }
 
-  impl plugin::Plugin for SlowUninstallPlugin {
+  impl Plugin for SlowUninstallPlugin {
     fn uninstall(&mut self) -> Pin<Box<dyn Future<Output = ()>>> {
       let delay = self.delay_ms;
       Box::pin(async move {
@@ -1017,7 +1017,7 @@ mod tests {
   /// A plugin that never completes uninstall (for timeout testing).
   struct HangingUninstallPlugin;
 
-  impl plugin::Plugin for HangingUninstallPlugin {
+  impl Plugin for HangingUninstallPlugin {
     fn uninstall(&mut self) -> Pin<Box<dyn Future<Output = ()>>> {
       Box::pin(async {
         // This will hang forever

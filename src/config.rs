@@ -1,19 +1,53 @@
-use std::collections::HashMap;
-use std::fs;
+//! Configuration types, parsing, and validation.
+//!
+//! This module provides:
+//! - Core configuration types (Config, Server, Service, Listener)
+//! - Configuration parsing from YAML files
+//! - Configuration validation with detailed error reporting
+//! - `SerializedArgs` type for configuration data
+
+mod access_log;
+mod auth;
+mod error;
+mod listener;
+mod service;
+mod tls;
+
 use std::sync::{LazyLock, OnceLock};
-use std::time::Duration;
 
 use anyhow::{Context, Result};
-use byte_unit::Byte;
 use clap::Parser;
 use serde::Deserialize;
 
-use crate::config_validator::ConfigErrorKind;
-use crate::plugin::SerializedArgs;
+// Re-export types from submodules
+pub use self::access_log::{
+  AccessLogConfig, AccessLogOverride, HumanDuration, LogFormat,
+  validate_access_log_config,
+};
+pub use self::auth::{
+  ListenerAuthConfig, UserConfig, UserCredential,
+  validate_listener_auth_config, validate_users,
+};
+pub use self::error::{ConfigErrorCollector, ConfigErrorKind};
+pub use self::listener::{
+  Listener, extract_addresses, validate_address_conflicts,
+  validate_hostname, validate_listener, validate_socks5_hostnames,
+};
+pub use self::service::{Layer, Service, ServiceRaw, validate_service};
+pub use self::tls::{
+  CertificateConfig, ServerTlsConfig, validate_server_tls,
+};
+
+/// Serialized configuration arguments.
+///
+/// A type alias for `serde_yaml::Value`, used to pass configuration
+/// data from YAML files to listener and service builders.
+pub type SerializedArgs = serde_yaml::Value;
 
 /// Global config instance, initialized via `Config::init_global()`.
 static GLOBAL_CONFIG: OnceLock<Config> = OnceLock::new();
 
+/// Command line options.
 #[derive(Parser, Debug)]
 pub struct CmdOpt {
   /// Sets a custom config file
@@ -37,42 +71,7 @@ impl CmdOpt {
   }
 }
 
-#[derive(Deserialize, Default, Clone, Debug)]
-#[serde(default)]
-pub struct Listener {
-  #[serde(rename = "kind")]
-  pub listener_name: String,
-  pub args: SerializedArgs,
-}
-
-/// Certificate configuration (cert + key pair)
-#[derive(Deserialize, Clone, Debug)]
-pub struct CertificateConfig {
-  /// Path to certificate file (PEM format)
-  pub cert_path: String,
-  /// Path to private key file (PEM format)
-  pub key_path: String,
-}
-
-/// Server-level TLS configuration
-#[derive(Deserialize, Clone, Debug)]
-pub struct ServerTlsConfig {
-  /// List of certificates (cert_path + key_path pairs)
-  pub certificates: Vec<CertificateConfig>,
-  /// Optional client CA certificates for mTLS
-  #[serde(default)]
-  pub client_ca_certs: Option<Vec<String>>,
-}
-
-/// User credential configuration
-#[derive(Deserialize, Clone, Debug)]
-pub struct UserConfig {
-  /// Username for authentication
-  pub username: String,
-  /// Password for authentication
-  pub password: String,
-}
-
+/// Server configuration.
 #[derive(Deserialize, Default, Clone, Debug)]
 #[serde(default)]
 pub struct Server {
@@ -91,38 +90,7 @@ pub struct Server {
   pub access_log: Option<AccessLogOverride>,
 }
 
-#[derive(Deserialize, Default, Clone, Debug)]
-#[serde(default)]
-struct LayerRaw {
-  pub kind: String,
-  pub args: SerializedArgs,
-}
-
-#[derive(Default, Clone, Debug)]
-pub struct Layer {
-  pub plugin_name: String,
-  pub layer_name: String,
-  pub args: SerializedArgs,
-}
-
-#[derive(Deserialize, Default, Clone, Debug)]
-#[serde(default)]
-struct ServiceRaw {
-  pub name: String,
-  pub kind: String,
-  pub args: SerializedArgs,
-  pub layers: Vec<LayerRaw>,
-}
-
-#[derive(Default, Clone, Debug)]
-pub struct Service {
-  pub name: String,
-  pub plugin_name: String,
-  pub service_name: String,
-  pub args: SerializedArgs,
-  pub layers: Vec<Layer>,
-}
-
+/// Configuration (raw, before kind parsing).
 #[derive(Deserialize, Default, Clone, Debug)]
 #[serde(default)]
 struct ConfigRaw {
@@ -134,6 +102,7 @@ struct ConfigRaw {
   pub servers: Vec<Server>,
 }
 
+/// Main configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
   pub worker_threads: usize,
@@ -151,179 +120,6 @@ impl Default for Config {
       access_log: None,
       services: vec![],
       servers: vec![],
-    }
-  }
-}
-
-// ============================================================================
-// Access Log Configuration Types
-// ============================================================================
-
-/// Log output format.
-#[derive(Debug, Clone, Copy, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum LogFormat {
-  #[default]
-  Text,
-  Json,
-}
-
-/// Human-readable duration (e.g., "1s", "5m", "1h30m").
-#[derive(Debug, Clone, Copy)]
-pub struct HumanDuration(pub Duration);
-
-impl<'de> Deserialize<'de> for HumanDuration {
-  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-  where
-    D: serde::Deserializer<'de>,
-  {
-    let s = String::deserialize(deserializer)?;
-    let duration = humantime::parse_duration(s.trim())
-      .map_err(|e| serde::de::Error::custom(e.to_string()))?;
-    Ok(HumanDuration(duration))
-  }
-}
-
-fn default_enabled() -> bool {
-  true
-}
-
-fn default_path_prefix() -> String {
-  "access.log".to_string()
-}
-
-fn default_format() -> LogFormat {
-  LogFormat::default()
-}
-
-fn default_buffer_size() -> Byte {
-  Byte::from_u64(32 * 1024)
-}
-
-fn default_flush_interval() -> HumanDuration {
-  HumanDuration(Duration::from_secs(1))
-}
-
-fn default_max_size() -> Byte {
-  Byte::from_u64(200 * 1024 * 1024)
-}
-
-/// Full access log config with all fields resolved (used as top-level config).
-#[derive(Debug, Clone, Deserialize)]
-pub struct AccessLogConfig {
-  #[serde(default = "default_enabled")]
-  pub enabled: bool,
-
-  #[serde(default = "default_path_prefix")]
-  pub path_prefix: String,
-
-  #[serde(default = "default_format")]
-  pub format: LogFormat,
-
-  #[serde(default = "default_buffer_size")]
-  pub buffer: Byte,
-
-  #[serde(default = "default_flush_interval")]
-  pub flush: HumanDuration,
-
-  #[serde(default = "default_max_size")]
-  pub max_size: Byte,
-}
-
-impl Default for AccessLogConfig {
-  fn default() -> Self {
-    Self {
-      enabled: default_enabled(),
-      path_prefix: default_path_prefix(),
-      format: default_format(),
-      buffer: default_buffer_size(),
-      flush: default_flush_interval(),
-      max_size: default_max_size(),
-    }
-  }
-}
-
-impl AccessLogConfig {
-  /// Merge with a server-level override config.
-  /// Only fields explicitly set in the override (Some) take precedence.
-  /// Fields not set in the override (None) are inherited from self.
-  pub fn merge(&self, override_config: &AccessLogOverride) -> Self {
-    Self {
-      enabled: override_config.enabled.unwrap_or(self.enabled),
-      path_prefix: override_config
-        .path_prefix
-        .clone()
-        .unwrap_or_else(|| self.path_prefix.clone()),
-      format: override_config.format.unwrap_or(self.format),
-      buffer: override_config.buffer.unwrap_or(self.buffer),
-      flush: override_config.flush.unwrap_or(self.flush),
-      max_size: override_config.max_size.unwrap_or(self.max_size),
-    }
-  }
-}
-
-/// Server-level access log override config.
-/// All fields are Option so that only explicitly set fields
-/// override the top-level config. Unset fields are inherited.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct AccessLogOverride {
-  pub enabled: Option<bool>,
-  pub path_prefix: Option<String>,
-  pub format: Option<LogFormat>,
-  pub buffer: Option<Byte>,
-  pub flush: Option<HumanDuration>,
-  pub max_size: Option<Byte>,
-}
-
-// ============================================================================
-// Listener Authentication Configuration Types
-// ============================================================================
-
-/// User credential for password authentication.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct UserCredential {
-  /// Username.
-  pub username: String,
-  /// Password (plaintext).
-  pub password: String,
-}
-
-/// Listener authentication configuration.
-///
-/// Field presence determines auth type:
-/// - `users` non-empty → password authentication
-/// - `client_ca_path` present → TLS client cert authentication
-/// - Both present → dual-factor AND authentication
-///
-/// At least one field must be configured. `auth: {}` (both empty) is invalid.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
-pub struct ListenerAuthConfig {
-  /// User credentials for password authentication.
-  /// Non-empty → password auth enabled.
-  /// Empty or missing → no password auth.
-  #[serde(default)]
-  pub users: Vec<UserCredential>,
-  /// Client CA certificate path for TLS client cert authentication.
-  /// Present → cert auth enabled.
-  #[serde(default)]
-  pub client_ca_path: Option<String>,
-}
-
-impl ListenerAuthConfig {
-  /// Get users as a HashMap for password lookup.
-  ///
-  /// Returns `None` if no users are configured (empty array).
-  pub fn users_map(&self) -> Option<HashMap<String, String>> {
-    if self.users.is_empty() {
-      None
-    } else {
-      Some(
-        self
-          .users
-          .iter()
-          .map(|u| (u.username.clone(), u.password.clone()))
-          .collect(),
-      )
     }
   }
 }
@@ -477,7 +273,7 @@ impl Config {
 
   /// Read and parse config from a file
   fn parse_file(&mut self, path: &str) -> Result<()> {
-    let s = fs::read_to_string(std::path::Path::new(path))
+    let s = std::fs::read_to_string(std::path::Path::new(path))
       .with_context(|| format!("read config file '{}'", path))?;
     self.parse_string(&s)?;
     Ok(())
@@ -504,10 +300,114 @@ impl Config {
   }
 }
 
+// =========================================================================
+// Validation logic
+// =========================================================================
+
+/// Validate worker_threads global setting.
+pub fn validate_worker_threads(
+  worker_threads: usize,
+  collector: &mut ConfigErrorCollector,
+) {
+  if worker_threads == 0 {
+    collector.add(
+      "worker_threads",
+      "must be at least 1".to_string(),
+      ConfigErrorKind::InvalidFormat,
+    );
+  }
+}
+
+/// Validate the entire configuration.
+///
+/// This function validates:
+/// - Global settings (worker_threads)
+/// - Kind format for all services and listeners
+/// - Service references in servers
+/// - Address parsing in listener args
+/// - Listener TLS requirements
+/// - Hostname patterns
+/// - User configurations
+/// - TLS configurations
+/// - HTTP/3 specific configurations
+/// - Address conflicts across servers
+pub fn validate_config(
+  config: &Config,
+  collector: &mut ConfigErrorCollector,
+) {
+  // Validate global settings
+  validate_worker_threads(config.worker_threads, collector);
+
+  // Validate access_log if present
+  if let Some(ref access_log) = config.access_log {
+    validate_access_log_config(access_log, collector);
+  }
+
+  // Collect all service names for reference validation
+  let service_names: std::collections::HashSet<&str> =
+    config.services.iter().map(|s| s.name.as_str()).collect();
+
+  // Validate servers
+  for (server_idx, server) in config.servers.iter().enumerate() {
+    let server_location = format!("servers[{}]", server_idx);
+
+    // Validate hostnames
+    for (idx, hostname) in server.hostnames.iter().enumerate() {
+      let hostname_location =
+        format!("{}.hostnames[{}]", server_location, idx);
+      validate_hostname(hostname, &hostname_location, collector);
+    }
+
+    // Validate users if present
+    if let Some(ref users) = server.users {
+      validate_users(
+        users,
+        &format!("{}.users", server_location),
+        collector,
+      );
+    }
+
+    // Validate TLS if present
+    if let Some(ref tls) = server.tls {
+      validate_server_tls(
+        tls,
+        &format!("{}.tls", server_location),
+        collector,
+      );
+    }
+
+    // Validate service reference
+    validate_service(
+      &service_names,
+      server_idx,
+      &server.service,
+      collector,
+    );
+
+    // Validate listeners
+    for (listener_idx, listener) in server.listeners.iter().enumerate()
+    {
+      let listener_location =
+        format!("{}.listeners[{}]", server_location, listener_idx);
+      validate_listener(
+        listener,
+        &listener_location,
+        server.tls.as_ref(),
+        collector,
+      );
+    }
+  }
+
+  // Validate SOCKS5 + hostnames semantic
+  validate_socks5_hostnames(config, collector);
+
+  // Validate address conflicts across all servers
+  validate_address_conflicts(config, collector);
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::config_validator::ConfigErrorCollector;
 
   /// Get the temporary directory for tests.
   /// Per constraint, we must use "tmp/" in the current directory instead of /tmp.
@@ -639,8 +539,6 @@ servers:
 
   #[test]
   fn test_load_valid_config() {
-    use crate::config_validator::validate_config;
-
     // Create a temporary valid config file
     let temp_dir = get_temp_dir();
     let temp_path = temp_dir.join("neoproxy_test_valid_config.yaml");
@@ -700,7 +598,7 @@ worker_threads: [
   }
 
   // =========================================================================
-  // Access Log Config Tests
+  // Access Log Config Integration Tests
   // =========================================================================
 
   #[test]
@@ -768,113 +666,13 @@ services:
       Some("http_access.log".to_string())
     );
     // format is explicitly set
-    assert!(matches!(server_al.format, Some(super::LogFormat::Json)));
+    assert!(matches!(server_al.format, Some(LogFormat::Json)));
     // buffer is NOT set, should be None (inherited from top-level at merge time)
     assert!(server_al.buffer.is_none());
   }
 
   // =========================================================================
-  // TLS Configuration Tests
-  // =========================================================================
-
-  #[test]
-  fn test_certificate_config_deserialize() {
-    let yaml = r#"
-cert_path: "/path/to/cert.pem"
-key_path: "/path/to/key.pem"
-"#;
-    let cert: CertificateConfig = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(cert.cert_path, "/path/to/cert.pem");
-    assert_eq!(cert.key_path, "/path/to/key.pem");
-  }
-
-  #[test]
-  fn test_server_tls_config_deserialize_single_cert() {
-    let yaml = r#"
-certificates:
-  - cert_path: "/path/to/cert.pem"
-    key_path: "/path/to/key.pem"
-"#;
-    let tls: ServerTlsConfig = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(tls.certificates.len(), 1);
-    assert_eq!(tls.certificates[0].cert_path, "/path/to/cert.pem");
-    assert_eq!(tls.certificates[0].key_path, "/path/to/key.pem");
-    assert!(tls.client_ca_certs.is_none());
-  }
-
-  #[test]
-  fn test_server_tls_config_deserialize_multiple_certs() {
-    let yaml = r#"
-certificates:
-  - cert_path: "/path/to/cert1.pem"
-    key_path: "/path/to/key1.pem"
-  - cert_path: "/path/to/cert2.pem"
-    key_path: "/path/to/key2.pem"
-"#;
-    let tls: ServerTlsConfig = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(tls.certificates.len(), 2);
-  }
-
-  #[test]
-  fn test_server_tls_config_deserialize_with_client_ca() {
-    let yaml = r#"
-certificates:
-  - cert_path: "/path/to/cert.pem"
-    key_path: "/path/to/key.pem"
-client_ca_certs:
-  - "/path/to/ca1.pem"
-  - "/path/to/ca2.pem"
-"#;
-    let tls: ServerTlsConfig = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(tls.certificates.len(), 1);
-    assert!(tls.client_ca_certs.is_some());
-    let client_cas = tls.client_ca_certs.unwrap();
-    assert_eq!(client_cas.len(), 2);
-    assert_eq!(client_cas[0], "/path/to/ca1.pem");
-    assert_eq!(client_cas[1], "/path/to/ca2.pem");
-  }
-
-  #[test]
-  fn test_server_tls_config_missing_certificates() {
-    let yaml = r#"{}"#;
-    let result: Result<ServerTlsConfig, _> = serde_yaml::from_str(yaml);
-    // certificates field is required
-    assert!(result.is_err());
-  }
-
-  #[test]
-  fn test_certificate_config_missing_fields() {
-    // Missing cert_path
-    let yaml = r#"key_path: "/path/to/key.pem""#;
-    let result: Result<CertificateConfig, _> =
-      serde_yaml::from_str(yaml);
-    assert!(result.is_err());
-
-    // Missing key_path
-    let yaml = r#"cert_path: "/path/to/cert.pem""#;
-    let result: Result<CertificateConfig, _> =
-      serde_yaml::from_str(yaml);
-    assert!(result.is_err());
-  }
-
-  // =========================================================================
-  // SOCKS5 Hostname Validation Tests
-  // =========================================================================
-
-  // =========================================================================
-  // Hostname Duplicate Detection Tests (Task 002)
-  // =========================================================================
-
-  // =========================================================================
-  // SOCKS5 Conflict via Default Server Check Tests (Task 003)
-  // =========================================================================
-
-  // =========================================================================
-  // Worker Threads Validation Tests
-  // =========================================================================
-
-  // =========================================================================
-  // Split Kind Fields Tests (Task 003)
+  // Split Kind Fields Tests
   // =========================================================================
 
   #[test]
@@ -1059,17 +857,11 @@ servers:
   }
 
   // =========================================================================
-  // TLS Required for HTTPS/HTTP3 Tests
-  // =========================================================================
-
-  // =========================================================================
-  // CR-010: Parse error carries ConfigErrorKind directly (not via string match)
+  // Parse error carries ConfigErrorKind directly
   // =========================================================================
 
   #[test]
   fn test_parse_string_invalid_kind_returns_config_error_with_kind() {
-    // CR-010: parse_string() errors from kind validation should carry
-    // ConfigErrorKind directly, not require string-based classification
     let yaml = r#"
 services:
   - name: test
@@ -1084,7 +876,7 @@ servers: []
     let err = result.unwrap_err();
     // Verify it's a ConfigParseError with InvalidFormat kind
     let config_err = err
-      .downcast_ref::<super::ConfigParseError>()
+      .downcast_ref::<ConfigParseError>()
       .expect("should be ConfigParseError");
     assert_eq!(
       config_err.kind,
@@ -1096,14 +888,13 @@ servers: []
   #[test]
   fn test_parse_string_yaml_error_returns_config_error_with_yaml_kind()
   {
-    // CR-010: YAML parse errors should carry YamlParse kind
     let yaml = "worker_threads: [";
     let mut config = Config::default();
     let result = config.parse_string(yaml);
     assert!(result.is_err());
     let err = result.unwrap_err();
     let config_err = err
-      .downcast_ref::<super::ConfigParseError>()
+      .downcast_ref::<ConfigParseError>()
       .expect("should be ConfigParseError");
     assert_eq!(
       config_err.kind,
@@ -1114,7 +905,6 @@ servers: []
 
   #[test]
   fn test_parse_string_listener_empty_kind_returns_config_error() {
-    // CR-010: Listener empty kind should also carry InvalidFormat kind
     let yaml = r#"
 services: []
 servers:
@@ -1130,7 +920,7 @@ servers:
     assert!(result.is_err());
     let err = result.unwrap_err();
     let config_err = err
-      .downcast_ref::<super::ConfigParseError>()
+      .downcast_ref::<ConfigParseError>()
       .expect("should be ConfigParseError");
     assert_eq!(
       config_err.kind,
@@ -1140,326 +930,139 @@ servers:
   }
 
   // =========================================================================
-  // CR-009: extract_addresses is a free function (no duplication)
-  // =========================================================================
-
-  // =========================================================================
-  // Access Log Config Tests (moved from access_log/config.rs)
+  // validate_config Tests
   // =========================================================================
 
   #[test]
-  fn test_parse_human_duration_ms() {
-    let hd: HumanDuration = serde_yaml::from_str("500ms").unwrap();
-    assert_eq!(hd.0, Duration::from_millis(500));
-  }
-
-  #[test]
-  fn test_parse_human_duration_s() {
-    let hd: HumanDuration = serde_yaml::from_str("1s").unwrap();
-    assert_eq!(hd.0, Duration::from_secs(1));
-  }
-
-  #[test]
-  fn test_parse_human_duration_m() {
-    let hd: HumanDuration = serde_yaml::from_str("5m").unwrap();
-    assert_eq!(hd.0, Duration::from_secs(300));
-  }
-
-  #[test]
-  fn test_parse_human_duration_h() {
-    let hd: HumanDuration = serde_yaml::from_str("1h").unwrap();
-    assert_eq!(hd.0, Duration::from_secs(3600));
-  }
-
-  #[test]
-  fn test_parse_human_duration_composite() {
-    let hd: HumanDuration = serde_yaml::from_str("1h30m").unwrap();
-    assert_eq!(hd.0, Duration::from_secs(3600 + 30 * 60));
-  }
-
-  #[test]
-  fn test_parse_human_duration_lowercase_only() {
-    let hd: HumanDuration = serde_yaml::from_str("1s").unwrap();
-    assert_eq!(hd.0, Duration::from_secs(1));
-    let result: Result<HumanDuration, _> = serde_yaml::from_str("1S");
-    assert!(result.is_err(), "Uppercase units should not be supported");
-  }
-
-  #[test]
-  fn test_parse_human_duration_invalid_unit() {
-    let result: Result<HumanDuration, _> = serde_yaml::from_str("1x");
-    assert!(result.is_err());
-  }
-
-  #[test]
-  fn test_parse_human_duration_no_number() {
-    let result: Result<HumanDuration, _> = serde_yaml::from_str("ms");
-    assert!(result.is_err());
-  }
-
-  #[test]
-  fn test_log_format_default_is_text() {
-    let fmt = LogFormat::default();
-    assert!(matches!(fmt, LogFormat::Text));
-  }
-
-  #[test]
-  fn test_log_format_deserialize_text() {
-    let fmt: LogFormat = serde_yaml::from_str("text").unwrap();
-    assert!(matches!(fmt, LogFormat::Text));
-  }
-
-  #[test]
-  fn test_log_format_deserialize_json() {
-    let fmt: LogFormat = serde_yaml::from_str("json").unwrap();
-    assert!(matches!(fmt, LogFormat::Json));
-  }
-
-  #[test]
-  fn test_access_log_config_defaults() {
-    let config = AccessLogConfig::default();
-    assert!(config.enabled);
-    assert_eq!(config.path_prefix, "access.log");
-    assert!(matches!(config.format, LogFormat::Text));
-    assert_eq!(config.buffer.as_u64(), 32 * 1024);
-    assert_eq!(config.flush.0, Duration::from_secs(1));
-    assert_eq!(config.max_size.as_u64(), 200 * 1024 * 1024);
-  }
-
-  #[test]
-  fn test_access_log_config_deserialize_full() {
-    let yaml = r#"
-enabled: true
-path_prefix: "http_access.log"
-format: json
-buffer: 64KiB
-flush: 3s
-max_size: 100MiB
-"#;
-    let config: AccessLogConfig = serde_yaml::from_str(yaml).unwrap();
-    assert!(config.enabled);
-    assert_eq!(config.path_prefix, "http_access.log");
-    assert!(matches!(config.format, LogFormat::Json));
-    assert_eq!(config.buffer.as_u64(), 64 * 1024);
-    assert_eq!(config.flush.0, Duration::from_secs(3));
-    assert_eq!(config.max_size.as_u64(), 100 * 1024 * 1024);
-  }
-
-  #[test]
-  fn test_access_log_config_deserialize_partial() {
-    let yaml = r#"
-path_prefix: "custom.log"
-format: json
-"#;
-    let config: AccessLogConfig = serde_yaml::from_str(yaml).unwrap();
-    assert!(config.enabled);
-    assert_eq!(config.path_prefix, "custom.log");
-    assert!(matches!(config.format, LogFormat::Json));
-    assert_eq!(config.buffer.as_u64(), 32 * 1024);
-  }
-
-  #[test]
-  fn test_access_log_config_deserialize_empty() {
-    let yaml = "{}";
-    let config: AccessLogConfig = serde_yaml::from_str(yaml).unwrap();
-    assert!(config.enabled);
-    assert_eq!(config.path_prefix, "access.log");
-  }
-
-  #[test]
-  fn test_access_log_config_merge_override_all() {
-    let base = AccessLogConfig::default();
-    let override_config = AccessLogOverride {
-      enabled: Some(false),
-      path_prefix: Some("override.log".to_string()),
-      format: Some(LogFormat::Json),
-      buffer: Some(Byte::from_u64(64 * 1024)),
-      flush: Some(HumanDuration(Duration::from_secs(5))),
-      max_size: Some(Byte::from_u64(500 * 1024 * 1024)),
+  fn test_validate_config_valid() {
+    let config = Config {
+      services: vec![Service {
+        name: "echo".to_string(),
+        plugin_name: "echo".to_string(),
+        service_name: "echo".to_string(),
+        args: serde_yaml::Value::Null,
+        layers: vec![],
+      }],
+      servers: vec![Server {
+        name: "server1".to_string(),
+        hostnames: vec![],
+        listeners: vec![Listener {
+          listener_name: "http".to_string(),
+          args: serde_yaml::from_str(
+            r#"{addresses: ["127.0.0.1:8080"]}"#,
+          )
+          .unwrap(),
+        }],
+        service: "echo".to_string(),
+        tls: None,
+        users: None,
+        access_log: None,
+      }],
+      ..Default::default()
     };
-    let merged = base.merge(&override_config);
-    assert!(!merged.enabled);
-    assert_eq!(merged.path_prefix, "override.log");
-    assert!(matches!(merged.format, LogFormat::Json));
-    assert_eq!(merged.buffer.as_u64(), 64 * 1024);
-    assert_eq!(merged.flush.0, Duration::from_secs(5));
-    assert_eq!(merged.max_size.as_u64(), 500 * 1024 * 1024);
-  }
-
-  #[test]
-  fn test_access_log_config_merge_partial_override() {
-    let base = AccessLogConfig {
-      enabled: true,
-      path_prefix: "base.log".to_string(),
-      format: LogFormat::Text,
-      buffer: Byte::from_u64(64 * 1024),
-      flush: HumanDuration(Duration::from_secs(3)),
-      max_size: Byte::from_u64(100 * 1024 * 1024),
-    };
-    let override_config = AccessLogOverride {
-      enabled: None,
-      path_prefix: Some("http_access.log".to_string()),
-      format: None,
-      buffer: None,
-      flush: None,
-      max_size: None,
-    };
-    let merged = base.merge(&override_config);
-    assert_eq!(merged.path_prefix, "http_access.log");
-    assert!(merged.enabled);
-    assert!(matches!(merged.format, LogFormat::Text));
-    assert_eq!(merged.buffer.as_u64(), 64 * 1024);
-    assert_eq!(merged.flush.0, Duration::from_secs(3));
-    assert_eq!(merged.max_size.as_u64(), 100 * 1024 * 1024);
-  }
-
-  #[test]
-  fn test_access_log_config_merge_empty_override() {
-    let base = AccessLogConfig {
-      enabled: true,
-      path_prefix: "base.log".to_string(),
-      format: LogFormat::Json,
-      buffer: Byte::from_u64(64 * 1024),
-      flush: HumanDuration(Duration::from_secs(5)),
-      max_size: Byte::from_u64(500 * 1024 * 1024),
-    };
-    let override_config = AccessLogOverride {
-      enabled: None,
-      path_prefix: None,
-      format: None,
-      buffer: None,
-      flush: None,
-      max_size: None,
-    };
-    let merged = base.merge(&override_config);
-    assert!(merged.enabled);
-    assert_eq!(merged.path_prefix, "base.log");
-    assert!(matches!(merged.format, LogFormat::Json));
-    assert_eq!(merged.buffer.as_u64(), 64 * 1024);
-    assert_eq!(merged.flush.0, Duration::from_secs(5));
-    assert_eq!(merged.max_size.as_u64(), 500 * 1024 * 1024);
-  }
-
-  #[test]
-  fn test_access_log_override_deserialize_partial() {
-    let yaml = r#"
-path_prefix: "http_access.log"
-format: json
-"#;
-    let override_config: AccessLogOverride =
-      serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(
-      override_config.path_prefix,
-      Some("http_access.log".to_string())
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(
+      !collector.has_errors(),
+      "Valid config should pass: {:?}",
+      collector.errors()
     );
-    assert!(matches!(override_config.format, Some(LogFormat::Json)));
-    assert!(override_config.enabled.is_none());
-    assert!(override_config.buffer.is_none());
-    assert!(override_config.flush.is_none());
-    assert!(override_config.max_size.is_none());
   }
 
   #[test]
-  fn test_access_log_override_deserialize_empty() {
-    let yaml = "{}";
-    let override_config: AccessLogOverride =
-      serde_yaml::from_str(yaml).unwrap();
-    assert!(override_config.enabled.is_none());
-    assert!(override_config.path_prefix.is_none());
-    assert!(override_config.format.is_none());
-    assert!(override_config.buffer.is_none());
-    assert!(override_config.flush.is_none());
-    assert!(override_config.max_size.is_none());
-  }
-
-  #[test]
-  fn test_access_log_config_validate_valid() {
-    use crate::config_validator::{
-      ConfigErrorCollector, validate_access_log_config,
-    };
-    let config = AccessLogConfig::default();
+  fn test_validate_config_empty() {
+    let config = Config::default();
     let mut collector = ConfigErrorCollector::new();
-    validate_access_log_config(&config, &mut collector);
-    assert!(!collector.has_errors(), "Default config should be valid");
+    validate_config(&config, &mut collector);
+    assert!(!collector.has_errors());
   }
 
   #[test]
-  fn test_access_log_config_validate_buffer_too_small() {
-    use crate::config_validator::{
-      ConfigErrorCollector, validate_access_log_config,
-    };
-    let config = AccessLogConfig {
-      buffer: Byte::from_u64(512), // Less than 1KB
-      ..Default::default()
-    };
+  fn test_validate_config_worker_threads_zero() {
+    let config = Config { worker_threads: 0, ..Default::default() };
     let mut collector = ConfigErrorCollector::new();
-    validate_access_log_config(&config, &mut collector);
+    validate_config(&config, &mut collector);
     assert!(collector.has_errors());
     let errors = collector.errors();
     let found = errors.iter().any(|e| {
-      e.location == "access_log.buffer"
-        && e.message.contains("at least 1KB")
+      e.location == "worker_threads" && e.message.contains("at least 1")
     });
-    assert!(found, "Should have buffer size validation error");
+    assert!(found, "Should have worker_threads validation error");
   }
 
   #[test]
-  fn test_access_log_config_validate_max_size_too_small() {
-    use crate::config_validator::{
-      ConfigErrorCollector, validate_access_log_config,
-    };
-    let config = AccessLogConfig {
-      max_size: Byte::from_u64(512 * 1024), // Less than 1MB
+  fn test_validate_config_service_reference_not_found() {
+    let config = Config {
+      services: vec![],
+      servers: vec![Server {
+        name: "test_server".to_string(),
+        listeners: vec![],
+        service: "nonexistent".to_string(),
+        ..Default::default()
+      }],
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    validate_access_log_config(&config, &mut collector);
+    validate_config(&config, &mut collector);
     assert!(collector.has_errors());
     let errors = collector.errors();
-    let found = errors.iter().any(|e| {
-      e.location == "access_log.max_size"
-        && e.message.contains("at least 1MB")
-    });
-    assert!(found, "Should have max_size validation error");
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].kind, ConfigErrorKind::NotFound);
+    assert!(
+      errors[0].message.contains("service 'nonexistent' not found")
+    );
   }
 
   #[test]
-  fn test_access_log_config_validate_flush_too_short() {
-    use crate::config_validator::{
-      ConfigErrorCollector, validate_access_log_config,
-    };
-    let config = AccessLogConfig {
-      flush: HumanDuration(Duration::from_millis(50)), // Less than 100ms
+  fn test_validate_config_invalid_listener_address() {
+    let config = Config {
+      servers: vec![Server {
+        name: "test".to_string(),
+        listeners: vec![Listener {
+          listener_name: "http".to_string(),
+          args: serde_yaml::from_str(
+            r#"{addresses: ["invalid:address"]}"#,
+          )
+          .unwrap(),
+        }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    validate_access_log_config(&config, &mut collector);
+    validate_config(&config, &mut collector);
     assert!(collector.has_errors());
     let errors = collector.errors();
-    let found = errors.iter().any(|e| {
-      e.location == "access_log.flush"
-        && e.message.contains("at least 100ms")
-    });
-    assert!(found, "Should have flush interval validation error");
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].kind, ConfigErrorKind::InvalidAddress);
   }
 
   #[test]
-  fn test_access_log_config_validate_empty_path_prefix() {
-    use crate::config_validator::{
-      ConfigErrorCollector, validate_access_log_config,
-    };
-    let config = AccessLogConfig {
-      path_prefix: String::new(),
+  fn test_validate_config_https_without_tls() {
+    let config = Config {
+      servers: vec![Server {
+        name: "https_server".to_string(),
+        listeners: vec![Listener {
+          listener_name: "https".to_string(),
+          args: serde_yaml::from_str(
+            r#"{addresses: ["127.0.0.1:8443"]}"#,
+          )
+          .unwrap(),
+        }],
+        service: "".to_string(),
+        tls: None,
+        ..Default::default()
+      }],
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    validate_access_log_config(&config, &mut collector);
+    validate_config(&config, &mut collector);
     assert!(collector.has_errors());
     let errors = collector.errors();
     let found = errors.iter().any(|e| {
-      e.location == "access_log.path_prefix"
-        && e.message.contains("cannot be empty")
+      e.message.contains("requires server-level 'tls' configuration")
     });
-    assert!(found, "Should have empty path_prefix validation error");
+    assert!(found, "Should have TLS required error for https");
   }
 }

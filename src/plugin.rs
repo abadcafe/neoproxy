@@ -1,138 +1,41 @@
-#![allow(clippy::borrowed_box)]
+//! Plugin trait and factory types.
+//!
+//! This module provides:
+//! - `Plugin` trait - interface for plugins to provide service builders
+//! - `BuildPlugin` - factory trait for creating plugins
+
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll};
 
-use anyhow::Result;
+use crate::service::BuildService;
 
-use crate::http_utils::{Request, Response};
-
-/// To add `clone()` function to the `Service`. The `Clone` trait can
-/// not be added into the type definition of the `Service` directly, in
-/// rust only auto traits like `Send`, `Sync` etc can be added into type
-/// definitions.
-trait CloneService:
-  tower::Service<
-    Request,
-    Error = anyhow::Error,
-    Response = Response,
-    Future = Pin<Box<dyn Future<Output = Result<Response>>>>,
-  >
-{
-  fn clone_boxed(&self) -> Box<dyn CloneService>;
-}
-
-impl<S> CloneService for S
-where
-  S: tower::Service<
-      Request,
-      Error = anyhow::Error,
-      Response = Response,
-      Future = Pin<Box<dyn Future<Output = Result<Response>>>>,
-    > + Clone
-    + 'static,
-{
-  fn clone_boxed(&self) -> Box<dyn CloneService> {
-    Box::new(self.clone())
-  }
-}
-
-/// The `Service` that plugins should implement.
-/// It is non-`Sync` and `Clone`. Plugins should implement a
-/// `tower::Service` and wrap it in this struct.
-/// Note: `Service` is a lightweight object that can be cloned and
-/// created temporarily, even for each request.
-pub struct Service(Box<dyn CloneService>);
-
-impl Service {
-  pub fn new<S>(inner: S) -> Self
-  where
-    S: tower::Service<
-        Request,
-        Response = Response,
-        Error = anyhow::Error,
-        Future = Pin<Box<dyn Future<Output = Result<Response>>>>,
-      > + Clone
-      + 'static,
-  {
-    Self(Box::new(inner))
-  }
-}
-
-impl tower::Service<Request> for Service {
-  type Error = anyhow::Error;
-  type Future = Pin<Box<dyn Future<Output = Result<Self::Response>>>>;
-  type Response = Response;
-
-  fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
-    self.0.poll_ready(cx)
-  }
-
-  fn call(&mut self, req: Request) -> Self::Future {
-    self.0.call(req)
-  }
-}
-
-impl Clone for Service {
-  fn clone(&self) -> Self {
-    Self(self.0.clone_boxed())
-  }
-}
-
-impl std::fmt::Debug for Service {
-  fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
-    fmt.debug_struct("Service").finish()
-  }
-}
-
-pub trait Listening {
-  fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>>;
-  fn stop(&self);
-}
-
-pub struct Listener(Box<dyn Listening>);
-
-impl Listener {
-  pub fn new<L>(l: L) -> Self
-  where
-    L: Listening + 'static,
-  {
-    Self(Box::new(l))
-  }
-
-  pub fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-    self.0.start()
-  }
-
-  pub fn stop(&self) {
-    self.0.stop()
-  }
-}
-
-pub type SerializedArgs = serde_yaml::Value;
-
-/// an alias for shorten complex trait definition.
-pub trait BuildService: Fn(SerializedArgs) -> Result<Service> {}
-
-impl<F> BuildService for F where F: Fn(SerializedArgs) -> Result<Service>
-{}
-
-/// an alias for shorten complex trait definition.
-pub trait BuildListener:
-  Fn(SerializedArgs, Vec<crate::server::Server>) -> Result<Listener>
-  + Sync
-  + Send
-{
-}
-
-impl<F> BuildListener for F where
-  F: Fn(SerializedArgs, Vec<crate::server::Server>) -> Result<Listener>
-    + Sync
-    + Send
-{
-}
-
+/// Trait for plugin implementations.
+///
+/// Plugins provide service builders for handling requests.
+/// Each plugin can provide multiple services by name.
+///
+/// # Example
+///
+/// ```ignore
+/// struct MyPlugin {
+///   service_builders: HashMap<&'static str, Box<dyn BuildService>>,
+/// }
+///
+/// impl Plugin for MyPlugin {
+///   fn service_builder(&self, name: &str) -> Option<&Box<dyn BuildService>> {
+///     self.service_builders.get(name)
+///   }
+///
+///   fn uninstall(&mut self) -> Pin<Box<dyn Future<Output = ()>>> {
+///     // Cleanup resources
+///     Box::pin(async {})
+///   }
+/// }
+/// ```
 pub trait Plugin {
+  /// Get a service builder by name.
+  ///
+  /// Returns `None` if the plugin doesn't provide a service with that name.
   fn service_builder(
     &self,
     _name: &str,
@@ -140,12 +43,21 @@ pub trait Plugin {
     None
   }
 
+  /// Uninstall the plugin.
+  ///
+  /// Called when the plugin is being unloaded. Use this to
+  /// release resources, close connections, etc.
+  ///
+  /// The default implementation does nothing.
   fn uninstall(&mut self) -> Pin<Box<dyn Future<Output = ()>>> {
     Box::pin(async {})
   }
 }
 
-/// an alias for shorten complex trait definition.
+/// Factory trait for creating plugins.
+///
+/// A `BuildPlugin` is a zero-argument function that returns a boxed `Plugin`.
+/// Must be `Sync + Send` for concurrent access.
 pub trait BuildPlugin: Fn() -> Box<dyn Plugin> + Sync + Send {}
 
 impl<F> BuildPlugin for F where F: Fn() -> Box<dyn Plugin> + Sync + Send {}
@@ -153,9 +65,6 @@ impl<F> BuildPlugin for F where F: Fn() -> Box<dyn Plugin> + Sync + Send {}
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::sync::Arc;
-  use std::sync::atomic::{AtomicBool, Ordering};
-  use std::time::Duration;
 
   /// A simple test plugin that uses the default uninstall implementation.
   struct TestPlugin;
@@ -178,15 +87,21 @@ mod tests {
   /// A test plugin with a custom uninstall implementation that completes
   /// immediately with a marker to verify it was called.
   struct CustomUninstallPlugin {
-    uninstalled: Arc<AtomicBool>,
+    uninstalled: std::sync::Arc<std::sync::atomic::AtomicBool>,
   }
 
   impl CustomUninstallPlugin {
     fn new() -> Self {
-      Self { uninstalled: Arc::new(AtomicBool::new(false)) }
+      Self {
+        uninstalled: std::sync::Arc::new(
+          std::sync::atomic::AtomicBool::new(false),
+        ),
+      }
     }
 
-    fn get_uninstalled_flag(&self) -> Arc<AtomicBool> {
+    fn get_uninstalled_flag(
+      &self,
+    ) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
       self.uninstalled.clone()
     }
   }
@@ -202,7 +117,7 @@ mod tests {
     fn uninstall(&mut self) -> Pin<Box<dyn Future<Output = ()>>> {
       let flag = self.uninstalled.clone();
       Box::pin(async move {
-        flag.store(true, Ordering::SeqCst);
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
       })
     }
   }
@@ -229,7 +144,8 @@ mod tests {
     fn uninstall(&mut self) -> Pin<Box<dyn Future<Output = ()>>> {
       let delay = self.delay_ms;
       Box::pin(async move {
-        tokio::time::sleep(Duration::from_millis(delay)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(delay))
+          .await;
       })
     }
   }
@@ -241,7 +157,8 @@ mod tests {
     let future = plugin.uninstall();
 
     let result =
-      tokio::time::timeout(Duration::from_millis(1), future).await;
+      tokio::time::timeout(std::time::Duration::from_millis(1), future)
+        .await;
     assert!(
       result.is_ok(),
       "Default uninstall should complete immediately"
@@ -301,11 +218,11 @@ mod tests {
     let mut plugin = CustomUninstallPlugin::new();
     let flag = plugin.get_uninstalled_flag();
 
-    assert!(!flag.load(Ordering::SeqCst));
+    assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
 
     plugin.uninstall().await;
 
-    assert!(flag.load(Ordering::SeqCst));
+    assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
   }
 
   #[tokio::test]
@@ -314,13 +231,13 @@ mod tests {
     let flag = plugin.get_uninstalled_flag();
 
     let result = tokio::time::timeout(
-      Duration::from_millis(100),
+      std::time::Duration::from_millis(100),
       plugin.uninstall(),
     )
     .await;
 
     assert!(result.is_ok(), "Custom uninstall should complete");
-    assert!(flag.load(Ordering::SeqCst));
+    assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
   }
 
   #[tokio::test]
@@ -328,7 +245,7 @@ mod tests {
     let mut plugin = DelayedUninstallPlugin::new(50);
 
     let result_short = tokio::time::timeout(
-      Duration::from_millis(10),
+      std::time::Duration::from_millis(10),
       plugin.uninstall(),
     )
     .await;
@@ -340,7 +257,7 @@ mod tests {
     let mut plugin2 = DelayedUninstallPlugin::new(50);
 
     let result_long = tokio::time::timeout(
-      Duration::from_millis(200),
+      std::time::Duration::from_millis(200),
       plugin2.uninstall(),
     )
     .await;
@@ -365,12 +282,12 @@ mod tests {
     let flag = plugin.get_uninstalled_flag();
 
     plugin.uninstall().await;
-    assert!(flag.load(Ordering::SeqCst));
+    assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
 
-    flag.store(false, Ordering::SeqCst);
+    flag.store(false, std::sync::atomic::Ordering::SeqCst);
 
     plugin.uninstall().await;
-    assert!(flag.load(Ordering::SeqCst));
+    assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
   }
 
   #[test]
@@ -391,7 +308,7 @@ mod tests {
     let mut plugin = DefaultOnlyPlugin;
 
     let result = tokio::time::timeout(
-      Duration::from_millis(1),
+      std::time::Duration::from_millis(1),
       plugin.uninstall(),
     )
     .await;
@@ -400,50 +317,5 @@ mod tests {
       result.is_ok(),
       "Default uninstall should complete immediately"
     );
-  }
-
-  // ============== BuildListener Tests ==============
-
-  fn test_listener_builder(
-    _args: SerializedArgs,
-    _server_routing_table: Vec<crate::server::Server>,
-  ) -> Result<Listener> {
-    struct DummyListener;
-    impl Listening for DummyListener {
-      fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-        Box::pin(async { Ok(()) })
-      }
-      fn stop(&self) {}
-    }
-    Ok(Listener::new(DummyListener))
-  }
-
-  #[test]
-  fn test_build_listener_trait_with_context() {
-    let builder: Box<dyn BuildListener> =
-      Box::new(test_listener_builder);
-    let result = builder(SerializedArgs::Null, vec![]);
-    assert!(result.is_ok());
-  }
-
-  #[test]
-  fn test_build_listener_with_empty_context() {
-    fn builder(
-      _args: SerializedArgs,
-      _server_routing_table: Vec<crate::server::Server>,
-    ) -> Result<Listener> {
-      struct DummyListener;
-      impl Listening for DummyListener {
-        fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-          Box::pin(async { Ok(()) })
-        }
-        fn stop(&self) {}
-      }
-      Ok(Listener::new(DummyListener))
-    }
-
-    let builder: Box<dyn BuildListener> = Box::new(builder);
-    let result = builder(SerializedArgs::Null, vec![]);
-    assert!(result.is_ok());
   }
 }

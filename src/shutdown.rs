@@ -1,14 +1,14 @@
-use std::cell::RefCell;
-use std::future::Future;
-use std::rc::Rc;
+//! Shutdown notification primitive.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use tokio::sync;
-use tokio::task::JoinSet;
 
-/// Shutdown Handle for `Listener`s.
+/// Shutdown Handle for listeners and services.
+///
+/// Provides a simple shutdown notification mechanism using a boolean flag
+/// and async notification. Clones share the same underlying state.
 pub struct ShutdownHandle {
   notify: Arc<sync::Notify>,
   is_shutdown: Arc<AtomicBool>,
@@ -22,16 +22,20 @@ impl ShutdownHandle {
     }
   }
 
+  /// Trigger shutdown notification.
+  ///
+  /// Sets the shutdown flag and notifies all waiters.
   pub fn shutdown(&self) {
     self.is_shutdown.store(true, Ordering::SeqCst);
     self.notify.notify_waiters()
   }
 
+  /// Wait for shutdown notification.
   pub async fn notified(&self) {
     self.notify.notified().await
   }
 
-  /// Check if shutdown has been triggered
+  /// Check if shutdown has been triggered.
   pub fn is_shutdown(&self) -> bool {
     self.is_shutdown.load(Ordering::SeqCst)
   }
@@ -46,81 +50,7 @@ impl Clone for ShutdownHandle {
   }
 }
 
-/// Stream task tracker for graceful shutdown
-///
-/// Tracks all active stream tasks and provides graceful shutdown
-/// capabilities. Supports dual-layer tracking (connections + streams)
-/// for protocols like QUIC that have both concepts.
-///
-/// For listeners that only need single-layer tracking (hyper, socks5),
-/// use `register()` + `active_count()` only. The `connections` layer
-/// remains empty with zero overhead.
-pub struct StreamTracker {
-  streams: Rc<RefCell<JoinSet<()>>>,
-  connections: Rc<RefCell<JoinSet<()>>>,
-  shutdown_handle: ShutdownHandle,
-}
-
-impl StreamTracker {
-  pub fn new() -> Self {
-    Self {
-      streams: Rc::new(RefCell::new(JoinSet::new())),
-      connections: Rc::new(RefCell::new(JoinSet::new())),
-      shutdown_handle: ShutdownHandle::new(),
-    }
-  }
-
-  pub fn register(
-    &self,
-    stream_future: impl Future<Output = ()> + 'static,
-  ) {
-    self.streams.borrow_mut().spawn_local(stream_future);
-  }
-
-  pub fn register_connection(
-    &self,
-    conn_future: impl Future<Output = ()> + 'static,
-  ) {
-    self.connections.borrow_mut().spawn_local(conn_future);
-  }
-
-  pub fn shutdown(&self) {
-    self.shutdown_handle.shutdown();
-  }
-
-  pub fn abort_all(&self) {
-    self.streams.borrow_mut().abort_all();
-    self.connections.borrow_mut().abort_all();
-  }
-
-  pub async fn wait_shutdown(&self) {
-    while self.streams.borrow_mut().join_next().await.is_some() {}
-    while self.connections.borrow_mut().join_next().await.is_some() {}
-  }
-
-  pub async fn wait_shutdown_with_timeout(
-    &self,
-    timeout: Duration,
-  ) -> std::result::Result<(), ()> {
-    tokio::time::timeout(timeout, self.wait_shutdown())
-      .await
-      .map_err(|_| ())
-  }
-
-  pub fn shutdown_handle(&self) -> ShutdownHandle {
-    self.shutdown_handle.clone()
-  }
-
-  pub fn active_count(&self) -> usize {
-    self.streams.borrow().len()
-  }
-
-  pub fn connection_count(&self) -> usize {
-    self.connections.borrow().len()
-  }
-}
-
-impl Default for StreamTracker {
+impl Default for ShutdownHandle {
   fn default() -> Self {
     Self::new()
   }
@@ -138,19 +68,6 @@ mod tests {
       !handle.is_shutdown(),
       "New ShutdownHandle should not be in shutdown state"
     );
-  }
-
-  #[test]
-  fn test_stream_tracker_new() {
-    let tracker = StreamTracker::new();
-    assert_eq!(tracker.active_count(), 0);
-    assert_eq!(tracker.connection_count(), 0);
-  }
-
-  #[test]
-  fn test_stream_tracker_default() {
-    let tracker = StreamTracker::default();
-    assert_eq!(tracker.active_count(), 0);
   }
 
   #[test]
@@ -223,103 +140,5 @@ mod tests {
       result.unwrap().unwrap(),
       "notified() should have completed"
     );
-  }
-
-  #[tokio::test]
-  async fn test_stream_tracker_register() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        tracker.register(async {});
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.active_count(), 1);
-      })
-      .await;
-  }
-
-  #[tokio::test]
-  async fn test_stream_tracker_register_multiple() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        tracker.register(async {});
-        tracker.register(async {});
-        tracker.register(async {});
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.active_count(), 3);
-      })
-      .await;
-  }
-
-  #[tokio::test]
-  async fn test_stream_tracker_shutdown() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        let shutdown_handle = tracker.shutdown_handle();
-
-        let notified = Rc::new(std::cell::Cell::new(false));
-        let notified_clone = notified.clone();
-        tracker.register(async move {
-          shutdown_handle.notified().await;
-          notified_clone.set(true);
-        });
-        tokio::task::yield_now().await;
-
-        tracker.shutdown();
-        tracker.wait_shutdown().await;
-        assert_eq!(tracker.active_count(), 0);
-        assert!(notified.get());
-      })
-      .await;
-  }
-
-  #[tokio::test]
-  async fn test_stream_tracker_abort_all() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        tracker.register(async {
-          std::future::pending::<()>().await;
-        });
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.active_count(), 1);
-
-        tracker.abort_all();
-        tracker.wait_shutdown().await;
-        assert_eq!(tracker.active_count(), 0);
-      })
-      .await;
-  }
-
-  #[test]
-  fn test_stream_tracker_abort_all_empty() {
-    let tracker = StreamTracker::new();
-    tracker.abort_all();
-    assert_eq!(tracker.active_count(), 0);
-  }
-
-  #[test]
-  fn test_stream_tracker_shutdown_handle() {
-    let tracker = StreamTracker::new();
-    let _handle = tracker.shutdown_handle();
-  }
-
-  #[tokio::test]
-  async fn test_stream_tracker_connection_count() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        tracker.register_connection(async {});
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.connection_count(), 1);
-        assert_eq!(tracker.active_count(), 0);
-      })
-      .await;
   }
 }

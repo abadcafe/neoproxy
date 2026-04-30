@@ -15,13 +15,15 @@ use tokio::{net, task, time::timeout};
 use tower::util as tower_util;
 use tracing::{error, info, warn};
 
+use crate::config::SerializedArgs;
 use crate::http_utils::{
   BytesBufBodyWrapper, Request, RequestBody, Response,
 };
+use crate::listener::{BuildListener, Listener, Listening};
 use crate::listeners::common::TokioLocalExecutor;
-use crate::plugin;
 use crate::server::{Server, ServerRouter};
-use crate::shutdown::StreamTracker;
+use crate::service::Service;
+use crate::tracker::StreamTracker;
 
 /// Listener shutdown timeout in seconds.
 /// This is the timeout for Phase 1 of graceful shutdown.
@@ -234,22 +236,16 @@ impl HttpListener {
 
   #[allow(clippy::new_ret_no_self)]
   fn new(
-    sargs: plugin::SerializedArgs,
+    sargs: SerializedArgs,
     server_routing_table: Vec<Server>,
-  ) -> Result<plugin::Listener> {
+  ) -> Result<Listener> {
     let args: HttpListenerArgs = serde_yaml::from_value(sargs)?;
-    Ok(plugin::Listener::new(Self::from_args(
-      args,
-      server_routing_table,
-    )?))
+    Ok(Listener::new(Self::from_args(args, server_routing_table)?))
   }
 
   /// Create an HttpListener directly for testing purposes.
   #[cfg(test)]
-  fn new_for_test(
-    sargs: plugin::SerializedArgs,
-    svc: plugin::Service,
-  ) -> Result<Self> {
+  fn new_for_test(sargs: SerializedArgs, svc: Service) -> Result<Self> {
     let args: HttpListenerArgs = serde_yaml::from_value(sargs)?;
     let entry = Server {
       hostnames: vec![],
@@ -338,7 +334,7 @@ impl HttpListener {
   }
 }
 
-impl plugin::Listening for HttpListener {
+impl Listening for HttpListener {
   fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
     let listening_set = self.listening_set.clone();
     for addr in &self.addresses {
@@ -401,7 +397,7 @@ pub fn listener_name() -> &'static str {
   "http"
 }
 
-pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
+pub fn create_listener_builder() -> Box<dyn BuildListener> {
   Box::new(HttpListener::new)
 }
 
@@ -414,7 +410,6 @@ mod tests {
     TokioLocalExecutor, build_505_response, check_http_version,
     record_http_access_log,
   };
-  use crate::plugin::Listening;
   use crate::shutdown::ShutdownHandle;
   use base64::{Engine, engine::general_purpose::STANDARD};
 
@@ -443,12 +438,11 @@ addresses:
     assert_eq!(args.addresses[0], "127.0.0.1:8080");
   }
 
-  fn create_test_listener_args() -> plugin::SerializedArgs {
+  fn create_test_listener_args() -> SerializedArgs {
     serde_yaml::from_str(r#"{addresses: ["127.0.0.1:0"]}"#).unwrap()
   }
 
-  fn create_test_listener_args_with_invalid() -> plugin::SerializedArgs
-  {
+  fn create_test_listener_args_with_invalid() -> SerializedArgs {
     serde_yaml::from_str(r#"{addresses: ["invalid", "127.0.0.1:0"]}"#)
       .unwrap()
   }
@@ -496,7 +490,7 @@ addresses:
 
   #[test]
   fn test_http_listener_new_missing_addresses() {
-    let args: plugin::SerializedArgs =
+    let args: SerializedArgs =
       serde_yaml::from_str(r#"{protocols: [], hostnames: []}"#)
         .unwrap();
     let result =
@@ -587,7 +581,7 @@ addresses:
   #[test]
   fn test_listening_trait_implementation() {
     // Verify HttpListener implements Listening
-    fn assert_listening<T: plugin::Listening>() {}
+    fn assert_listening<T: Listening>() {}
     assert_listening::<HttpListener>();
   }
 

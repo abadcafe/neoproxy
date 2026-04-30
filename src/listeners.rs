@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use crate::plugin;
+use crate::listener;
 
 pub mod common;
 pub mod http;
@@ -11,7 +11,7 @@ pub mod https;
 pub mod socks5;
 
 pub struct ListenerBuilderSet {
-  builders: HashMap<&'static str, Box<dyn plugin::BuildListener>>,
+  builders: HashMap<&'static str, Box<dyn listener::BuildListener>>,
 }
 
 impl ListenerBuilderSet {
@@ -42,7 +42,7 @@ impl ListenerBuilderSet {
   pub fn listener_builder(
     &self,
     name: &str,
-  ) -> Option<&Box<dyn plugin::BuildListener>> {
+  ) -> Option<&Box<dyn listener::BuildListener>> {
     self.builders.get(name)
   }
 

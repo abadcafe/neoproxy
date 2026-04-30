@@ -12,24 +12,26 @@ use tokio::{runtime, sync, task};
 use tracing::{debug, error, info, warn};
 
 use crate::config::{CmdOpt, Config};
-use crate::config_validator::{ConfigErrorCollector, validate_config};
+use crate::config::{ConfigErrorCollector, validate_config};
 
 mod access_log;
 mod auth;
 mod config;
-mod config_validator;
 mod connect_utils;
 mod h3_stream;
 mod http_utils;
+mod listener;
 mod listeners;
 mod plugin;
 mod plugins;
 mod routing;
 mod server;
 mod server_thread;
+mod service;
 mod shutdown;
 mod stream;
 mod tls;
+mod tracker;
 
 /// Thread check interval for detecting worker thread exit.
 const THREAD_CHECK_INTERVAL: Duration = Duration::from_millis(100);

@@ -69,8 +69,7 @@ servers:
       key_path: "{key_path}"{users_section}
   listeners:
   - kind: http3
-    args:
-      addresses: ["0.0.0.0:{proxy_port}"]
+    addresses: ["0.0.0.0:{proxy_port}"]
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "new_http3_config.yaml")
@@ -153,8 +152,7 @@ servers:
 - name: http_proxy
   listeners:
   - kind: http
-    args:
-      addresses: [ "0.0.0.0:{http_port}" ]
+    addresses: [ "0.0.0.0:{http_port}" ]
   service: http3_chain
 """
     config_path = os.path.join(temp_dir, "new_http3_chain_config.yaml")
@@ -564,8 +562,7 @@ servers:
 - name: http_proxy
   listeners:
   - kind: http
-    args:
-      addresses: [ "0.0.0.0:30589" ]
+    addresses: [ "0.0.0.0:30589" ]
   service: http3_chain
 """
             config_path = os.path.join(temp_dir, "old_format.yaml")

@@ -53,9 +53,8 @@ servers:
 - name: socks5_server
   listeners:
   - kind: socks5
-    args:
-      addresses:
-        - "127.0.0.1:{proxy_port}"
+    addresses:
+      - "127.0.0.1:{proxy_port}"
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "config.yaml")

@@ -26,7 +26,7 @@ use crate::config::SerializedArgs;
 use crate::http_utils::{
   BytesBufBodyWrapper, Request, RequestBody, Response,
 };
-use crate::listener::{BuildListener, Listener, Listening};
+use crate::listener::{BuildListener, Listener, ListenerProps, Listening, TransportLayer};
 use crate::listeners::common::TokioLocalExecutor;
 use crate::server::{Server, ServerRouter};
 use crate::tls::build_tls_server_config;
@@ -40,10 +40,7 @@ const MONITORING_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 /// HTTPS Listener configuration arguments.
 #[derive(Deserialize, Default, Clone, Debug)]
-pub struct HttpsListenerArgs {
-  /// Listening addresses
-  pub addresses: Vec<String>,
-}
+pub struct HttpsListenerArgs {}
 
 /// Load TLS server configuration from server routing table.
 ///
@@ -256,10 +253,11 @@ pub struct HttpsListener {
 impl HttpsListener {
   #[allow(clippy::new_ret_no_self)]
   pub fn new(
+    addresses: Vec<String>,
     sargs: SerializedArgs,
     server_routing_table: Vec<Server>,
   ) -> Result<Listener> {
-    let args: HttpsListenerArgs = serde_yaml::from_value(sargs)?;
+    let _args: HttpsListenerArgs = serde_yaml::from_value(sargs)?;
 
     // TLS config is required for https listener
     // Check that at least one server has TLS configured
@@ -273,8 +271,7 @@ impl HttpsListener {
       load_tls_config_from_servers(&server_routing_table)?;
 
     // Parse addresses
-    let addresses: Vec<SocketAddr> = args
-      .addresses
+    let addresses: Vec<SocketAddr> = addresses
       .iter()
       .filter_map(|s| {
         s.parse()
@@ -440,6 +437,14 @@ pub fn listener_name() -> &'static str {
   "https"
 }
 
+/// Get listener properties for conflict detection.
+pub fn props() -> ListenerProps {
+  ListenerProps {
+    transport_layer: TransportLayer::Tcp,
+    supports_hostname_routing: true,
+  }
+}
+
 /// Create a listener builder
 pub fn create_listener_builder() -> Box<dyn BuildListener> {
   Box::new(HttpsListener::new)
@@ -508,19 +513,16 @@ mod tests {
 
   #[test]
   fn test_https_listener_args_deserialize() {
-    let yaml = r#"
-addresses:
-  - "127.0.0.1:8443"
-"#;
+    // HttpsListenerArgs is now empty - addresses passed separately
+    let yaml = r#"{}"#;
     let args: HttpsListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(args.addresses.len(), 1);
-    assert_eq!(args.addresses[0], "127.0.0.1:8443");
+    drop(args);
   }
 
   #[test]
   fn test_https_listener_args_default() {
     let args = HttpsListenerArgs::default();
-    assert!(args.addresses.is_empty());
+    drop(args);
   }
 
   #[test]
@@ -538,11 +540,7 @@ addresses:
   fn test_https_listener_requires_tls_in_context() {
     ensure_crypto_provider();
     // HTTPS listener should fail to build if no TLS in routing table
-    let args_yaml = r#"
-addresses:
-  - "127.0.0.1:8443"
-"#;
-    let args: SerializedArgs = serde_yaml::from_str(args_yaml).unwrap();
+    let args: SerializedArgs = serde_yaml::from_str(r#"{}"#).unwrap();
 
     let entry = Server {
       hostnames: vec![],
@@ -554,7 +552,11 @@ addresses:
     };
 
     // This should return an error because tls is required for https
-    let result = HttpsListener::new(args, vec![entry]);
+    let result = HttpsListener::new(
+      vec!["127.0.0.1:8443".to_string()],
+      args,
+      vec![entry],
+    );
     assert!(
       result.is_err(),
       "HTTPS listener should fail without TLS config"

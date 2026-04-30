@@ -215,6 +215,7 @@ def create_http3_listener_config(
     quic_section = ""
     if quic_config:
         quic_section = f"""
+    args:
       quic:
 {quic_config}"""
 
@@ -241,8 +242,7 @@ servers:
 {users_section}
   listeners:
   - kind: http3
-    args:
-      addresses: ["0.0.0.0:{proxy_port}"]{quic_section}
+    addresses: ["0.0.0.0:{proxy_port}"]{quic_section}
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "http3_config.yaml")
@@ -293,8 +293,7 @@ servers:
 - name: http_proxy
   listeners:
   - kind: http
-    args:
-      addresses: [ "0.0.0.0:{http_port}" ]
+    addresses: [ "0.0.0.0:{http_port}" ]
   service: http3_chain
 """
     config_path = os.path.join(temp_dir, "http3_chain_config.yaml")
@@ -521,8 +520,7 @@ servers:
       key_path: "/nonexistent/path/to/key.pem"
   listeners:
   - kind: http3
-    args:
-      addresses: ["0.0.0.0:{proxy_port}"]
+    addresses: ["0.0.0.0:{proxy_port}"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "invalid_config.yaml")
@@ -579,8 +577,7 @@ servers:
       key_path: "/nonexistent/path/to/key.pem"
   listeners:
   - kind: http3
-    args:
-      addresses: ["0.0.0.0:{proxy_port}"]
+    addresses: ["0.0.0.0:{proxy_port}"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "invalid_config.yaml")
@@ -645,8 +642,7 @@ servers:
       key_path: "{key_path2}"
   listeners:
   - kind: http3
-    args:
-      addresses: ["0.0.0.0:{proxy_port}"]
+    addresses: ["0.0.0.0:{proxy_port}"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "mismatch_config.yaml")
@@ -752,8 +748,7 @@ servers:
 - name: http3_server
   listeners:
   - kind: http3
-    args:
-      addresses: ["0.0.0.0:{proxy_port}"]
+    addresses: ["0.0.0.0:{proxy_port}"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "missing_fields.yaml")
@@ -808,8 +803,7 @@ servers:
       key_path: "{key_path}"
   listeners:
   - kind: http3
-    args:
-      addresses: ["invalid_address_format"]
+    addresses: ["invalid_address_format"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "invalid_addr.yaml")
@@ -1089,8 +1083,7 @@ servers:
       key_path: "{key_path}"
   listeners:
   - kind: http3
-    args:
-      addresses: ["0.0.0.0:{proxy_port}"]
+    addresses: ["0.0.0.0:{proxy_port}"]
   service: echo
 """
             config_path = os.path.join(temp_dir, "echo_config.yaml")

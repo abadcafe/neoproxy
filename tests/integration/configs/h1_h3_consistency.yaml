@@ -24,8 +24,7 @@ servers:
         password: "secret"
     listeners:
       - kind: http
-        args:
-          addresses: ["127.0.0.1:18080"]
+        addresses: ["127.0.0.1:18080"]
     service: echo
 
   # Server with new https listener kind
@@ -37,8 +36,7 @@ servers:
           key_path: conf/certs/server.key
     listeners:
       - kind: https
-        args:
-          addresses: ["127.0.0.1:18443"]
+        addresses: ["127.0.0.1:18443"]
     service: echo
 
   # Server with http3 listener (multi-address)
@@ -50,8 +48,8 @@ servers:
           key_path: conf/certs/server.key
     listeners:
       - kind: http3
+        addresses: ["127.0.0.1:18444"]
         args:
-          addresses: ["127.0.0.1:18444"]
           quic:
             max_concurrent_bidi_streams: 100
     service: echo
@@ -60,6 +58,5 @@ servers:
   - name: default_server
     listeners:
       - kind: http
-        args:
-          addresses: ["127.0.0.1:18081"]
+        addresses: ["127.0.0.1:18081"]
     service: echo

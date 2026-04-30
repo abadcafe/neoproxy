@@ -126,8 +126,7 @@ servers:
   hostnames: ["api.example.com"]
   listeners:
   - kind: socks5
-    args:
-      addresses: ["127.0.0.1:{socks_port}"]
+    addresses: ["127.0.0.1:{socks_port}"]
   service: echo
 """
         try:
@@ -135,8 +134,8 @@ servers:
             assert returncode == 1, \
                 f"Expected exit code 1, got {returncode}"
 
-            assert "hostnames cannot be configured with SOCKS5" in stderr, \
-                f"Expected SOCKS5 hostname error in stderr, got: {stderr}"
+            assert "does not support hostname routing" in stderr, \
+                f"Expected hostname routing compatibility error in stderr, got: {stderr}"
         except subprocess.TimeoutExpired:
             # Feature not implemented - server started instead of failing
             pytest.fail(
@@ -166,21 +165,20 @@ servers:
   hostnames: []
   listeners:
   - kind: socks5
-    args:
-      addresses: ["127.0.0.1:{socks_port}"]
+    addresses: ["127.0.0.1:{socks_port}"]
   service: connect_tcp
 """
         proc, stdout, stderr = start_neoproxy_and_check_running(config)
         try:
             if proc is None:
                 # Process exited unexpectedly
-                assert "hostnames cannot be configured with SOCKS5" not in stderr, \
-                    f"Should not have SOCKS5 hostname error, got: {stderr}"
+                assert "does not support hostname routing" not in stderr, \
+                    f"Should not have hostname routing error, got: {stderr}"
                 pytest.fail(
                     f"Process exited unexpectedly with code. stderr: {stderr}"
                 )
             # Process is running — valid config accepted
-            assert "hostnames cannot be configured with SOCKS5" not in stderr
+            assert "does not support hostname routing" not in stderr
         finally:
             if proc is not None:
                 proc.terminate()
@@ -211,16 +209,14 @@ servers:
   hostnames: ["api.example.com"]
   listeners:
   - kind: http
-    args:
-      addresses: ["127.0.0.1:{http_port}"]
+    addresses: ["127.0.0.1:{http_port}"]
   service: echo
 
 - name: server_b
   hostnames: ["api.example.com"]
   listeners:
   - kind: http
-    args:
-      addresses: ["127.0.0.1:{http_port}"]
+    addresses: ["127.0.0.1:{http_port}"]
   service: echo
 """
         try:
@@ -259,16 +255,14 @@ servers:
   hostnames: ["API.EXAMPLE.COM"]
   listeners:
   - kind: http
-    args:
-      addresses: ["127.0.0.1:{http_port}"]
+    addresses: ["127.0.0.1:{http_port}"]
   service: echo
 
 - name: server_b
   hostnames: ["api.example.com"]
   listeners:
   - kind: http
-    args:
-      addresses: ["127.0.0.1:{http_port}"]
+    addresses: ["127.0.0.1:{http_port}"]
   service: echo
 """
         try:
@@ -311,16 +305,14 @@ servers:
   hostnames: ["*.example.com"]
   listeners:
   - kind: http
-    args:
-      addresses: ["127.0.0.1:{http_port}"]
+    addresses: ["127.0.0.1:{http_port}"]
   service: echo
 
 - name: server_b
   hostnames: ["*.example.com"]
   listeners:
   - kind: http
-    args:
-      addresses: ["127.0.0.1:{http_port}"]
+    addresses: ["127.0.0.1:{http_port}"]
   service: echo
 """
         try:
@@ -359,16 +351,14 @@ servers:
   hostnames: ["*.example.com"]
   listeners:
   - kind: http
-    args:
-      addresses: ["127.0.0.1:{http_port}"]
+    addresses: ["127.0.0.1:{http_port}"]
   service: echo
 
 - name: specific
   hostnames: ["api.example.com"]
   listeners:
   - kind: http
-    args:
-      addresses: ["127.0.0.1:{http_port}"]
+    addresses: ["127.0.0.1:{http_port}"]
   service: echo
 """
         proc, stdout, stderr = start_neoproxy_and_check_running(config)
@@ -413,16 +403,14 @@ servers:
   hostnames: []
   listeners:
   - kind: socks5
-    args:
-      addresses: ["127.0.0.1:{socks_port}"]
+    addresses: ["127.0.0.1:{socks_port}"]
   service: connect_tcp
 
 - name: socks_b
   hostnames: []
   listeners:
   - kind: socks5
-    args:
-      addresses: ["127.0.0.1:{socks_port}"]
+    addresses: ["127.0.0.1:{socks_port}"]
   service: connect_tcp
 """
         returncode, stdout, stderr = run_neoproxy_with_config(config)
@@ -430,8 +418,8 @@ servers:
         assert returncode == 1, \
             f"Expected exit code 1, got {returncode}"
 
-        assert "multiple default servers" in stderr, \
-            f"Expected multiple default servers error in stderr, got: {stderr}"
+        assert "without hostname routing support" in stderr, \
+            f"Expected 'without hostname routing support' error in stderr, got: {stderr}"
 
         # Verify the error mentions both server names
         assert "socks_a" in stderr or "socks_b" in stderr, \
@@ -463,16 +451,14 @@ servers:
   hostnames: ["api.example.com"]
   listeners:
   - kind: http
-    args:
-      addresses: ["127.0.0.1:{http_port}"]
+    addresses: ["127.0.0.1:{http_port}"]
   service: echo
 
 - name: server_b
   hostnames: ["web.example.com"]
   listeners:
   - kind: http
-    args:
-      addresses: ["127.0.0.1:{http_port}"]
+    addresses: ["127.0.0.1:{http_port}"]
   service: echo
 """
         proc, stdout, stderr = start_neoproxy_and_check_running(config)

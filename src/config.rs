@@ -30,8 +30,9 @@ pub use self::auth::{
 };
 pub use self::error::{ConfigErrorCollector, ConfigErrorKind};
 pub use self::listener::{
-  Listener, extract_addresses, validate_address_conflicts,
-  validate_hostname, validate_listener, validate_socks5_hostnames,
+  Listener, validate_address_conflicts,
+  validate_hostname, validate_hostname_routing_compatibility,
+  validate_listener,
 };
 pub use self::service::{Layer, Service, ServiceRaw, validate_service};
 pub use self::tls::{
@@ -214,7 +215,7 @@ impl Config {
       for (listener_idx, listener) in
         server.listeners.iter().enumerate()
       {
-        if listener.listener_name.is_empty() {
+        if listener.kind.is_empty() {
           return Err(ConfigParseError {
             message: format!(
               "servers[{}].listeners[{}].kind: invalid format '', expected 'protocol_name'",
@@ -252,7 +253,7 @@ impl Config {
 
             Ok(Layer {
               plugin_name: lp.to_string(),
-              layer_name: ln.to_string(),
+              kind: ln.to_string(),
               args: raw_layer.args,
             })
           })
@@ -261,7 +262,7 @@ impl Config {
         Ok(Service {
           name: raw_svc.name,
           plugin_name: plugin_name.to_string(),
-          service_name: service_name.to_string(),
+          kind: service_name.to_string(),
           args: raw_svc.args,
           layers,
         })
@@ -398,8 +399,8 @@ pub fn validate_config(
     }
   }
 
-  // Validate SOCKS5 + hostnames semantic
-  validate_socks5_hostnames(config, collector);
+  // Validate hostname routing compatibility
+  validate_hostname_routing_compatibility(config, collector);
 
   // Validate address conflicts across all servers
   validate_address_conflicts(config, collector);
@@ -467,30 +468,31 @@ worker_threads: [
     let service = Service::default();
     assert!(service.name.is_empty());
     assert!(service.plugin_name.is_empty());
-    assert!(service.service_name.is_empty());
+    assert!(service.kind.is_empty());
     assert!(service.layers.is_empty());
   }
 
   #[test]
   fn test_listener_default() {
     let listener = Listener::default();
-    assert!(listener.listener_name.is_empty());
+    assert!(listener.kind.is_empty());
+    assert!(listener.addresses.is_empty());
   }
 
   #[test]
-  fn test_listener_field_is_listener_name() {
+  fn test_listener_field_is_kind() {
     let yaml = r#"
 servers:
   - name: server1
     listeners:
       - kind: http
-        args:
-          addresses: ["127.0.0.1:8080"]
+        addresses: ["127.0.0.1:8080"]
     service: ""
 "#;
     let mut config = Config::default();
     config.parse_string(yaml).unwrap();
-    assert_eq!(config.servers[0].listeners[0].listener_name, "http");
+    assert_eq!(config.servers[0].listeners[0].kind, "http");
+    assert_eq!(config.servers[0].listeners[0].addresses, vec!["127.0.0.1:8080"]);
   }
 
   #[test]
@@ -505,7 +507,7 @@ servers:
   fn test_layer_default() {
     let layer = Layer::default();
     assert!(layer.plugin_name.is_empty());
-    assert!(layer.layer_name.is_empty());
+    assert!(layer.kind.is_empty());
   }
 
   #[test]
@@ -554,8 +556,8 @@ servers:
   - name: "server1"
     listeners:
       - kind: "http"
-        args:
-          addresses: ["127.0.0.1:8080"]
+        addresses: ["127.0.0.1:8080"]
+        args: null
     service: "echo_svc"
 "#;
     std::fs::write(&temp_path, config_content).unwrap();
@@ -688,7 +690,7 @@ servers: []
     let mut config = Config::default();
     config.parse_string(yaml).unwrap();
     assert_eq!(config.services[0].plugin_name, "echo");
-    assert_eq!(config.services[0].service_name, "echo");
+    assert_eq!(config.services[0].kind, "echo");
   }
 
   #[test]
@@ -706,7 +708,7 @@ servers: []
     let mut config = Config::default();
     config.parse_string(yaml).unwrap();
     assert_eq!(config.services[0].layers[0].plugin_name, "echo");
-    assert_eq!(config.services[0].layers[0].layer_name, "echo");
+    assert_eq!(config.services[0].layers[0].kind, "echo");
   }
 
   #[test]
@@ -939,7 +941,7 @@ servers:
       services: vec![Service {
         name: "echo".to_string(),
         plugin_name: "echo".to_string(),
-        service_name: "echo".to_string(),
+        kind: "echo".to_string(),
         args: serde_yaml::Value::Null,
         layers: vec![],
       }],
@@ -947,11 +949,9 @@ servers:
         name: "server1".to_string(),
         hostnames: vec![],
         listeners: vec![Listener {
-          listener_name: "http".to_string(),
-          args: serde_yaml::from_str(
-            r#"{addresses: ["127.0.0.1:8080"]}"#,
-          )
-          .unwrap(),
+          kind: "http".to_string(),
+          addresses: vec!["127.0.0.1:8080".to_string()],
+          args: serde_yaml::Value::Null,
         }],
         service: "echo".to_string(),
         tls: None,
@@ -1019,11 +1019,9 @@ servers:
       servers: vec![Server {
         name: "test".to_string(),
         listeners: vec![Listener {
-          listener_name: "http".to_string(),
-          args: serde_yaml::from_str(
-            r#"{addresses: ["invalid:address"]}"#,
-          )
-          .unwrap(),
+          kind: "http".to_string(),
+          addresses: vec!["invalid:address".to_string()],
+          args: serde_yaml::Value::Null,
         }],
         service: "".to_string(),
         ..Default::default()
@@ -1044,11 +1042,9 @@ servers:
       servers: vec![Server {
         name: "https_server".to_string(),
         listeners: vec![Listener {
-          listener_name: "https".to_string(),
-          args: serde_yaml::from_str(
-            r#"{addresses: ["127.0.0.1:8443"]}"#,
-          )
-          .unwrap(),
+          kind: "https".to_string(),
+          addresses: vec!["127.0.0.1:8443".to_string()],
+          args: serde_yaml::Value::Null,
         }],
         service: "".to_string(),
         tls: None,

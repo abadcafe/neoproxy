@@ -216,8 +216,8 @@ servers:
 - name: http_proxy
   listeners:
   - kind: http
+    addresses: [ "0.0.0.0:{http_port}" ]
     args:
-      addresses: [ "0.0.0.0:{http_port}" ]
       protocols: [ http ]
       hostnames: []
       certificates: []

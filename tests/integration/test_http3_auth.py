@@ -94,6 +94,7 @@ def create_http3_listener_config_with_password_auth(
     quic_section = ""
     if quic_config:
         quic_section = f"""
+    args:
       quic:
 {quic_config}"""
 
@@ -114,8 +115,7 @@ servers:
 {users_section}
   listeners:
   - kind: http3
-    args:
-      addresses: ["0.0.0.0:{proxy_port}"]{quic_section}
+    addresses: ["0.0.0.0:{proxy_port}"]{quic_section}
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "http3_auth_config.yaml")
@@ -153,6 +153,7 @@ def create_http3_listener_config_with_tls_client_cert(
     quic_section = ""
     if quic_config:
         quic_section = f"""
+    args:
       quic:
 {quic_config}"""
 
@@ -173,8 +174,7 @@ servers:
     - "{client_ca_path}"
   listeners:
   - kind: http3
-    args:
-      addresses: ["0.0.0.0:{proxy_port}"]{quic_section}
+    addresses: ["0.0.0.0:{proxy_port}"]{quic_section}
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "http3_tls_auth_config.yaml")
@@ -225,6 +225,7 @@ def create_http3_listener_config_with_mtls_and_password(
     quic_section = ""
     if quic_config:
         quic_section = f"""
+    args:
       quic:
 {quic_config}"""
 
@@ -247,8 +248,7 @@ servers:
 {users_section}
   listeners:
   - kind: http3
-    args:
-      addresses: ["0.0.0.0:{proxy_port}"]{quic_section}
+    addresses: ["0.0.0.0:{proxy_port}"]{quic_section}
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "http3_mtls_password_auth_config.yaml")
@@ -504,8 +504,7 @@ servers:
   users: []
   listeners:
   - kind: http3
-    args:
-      addresses: ["0.0.0.0:{proxy_port}"]
+    addresses: ["0.0.0.0:{proxy_port}"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "empty_creds.yaml")
@@ -609,8 +608,7 @@ servers:
     - "/nonexistent/ca.pem"
   listeners:
   - kind: http3
-    args:
-      addresses: ["0.0.0.0:{proxy_port}"]
+    addresses: ["0.0.0.0:{proxy_port}"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "missing_ca.yaml")
@@ -1329,8 +1327,7 @@ servers:
   users: []
   listeners:
   - kind: http3
-    args:
-      addresses: ["0.0.0.0:{proxy_port}"]
+    addresses: ["0.0.0.0:{proxy_port}"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "missing_creds.yaml")
@@ -1388,8 +1385,7 @@ servers:
     - "/nonexistent/ca.pem"
   listeners:
   - kind: http3
-    args:
-      addresses: ["0.0.0.0:{proxy_port}"]
+    addresses: ["0.0.0.0:{proxy_port}"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "missing_ca_path.yaml")

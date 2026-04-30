@@ -14,90 +14,19 @@ use super::{
 #[derive(Deserialize, Default, Clone, Debug)]
 #[serde(default)]
 pub struct Listener {
-  #[serde(rename = "kind")]
-  pub listener_name: String,
+  /// Listener type (http, https, http3, socks5)
+  pub kind: String,
+  /// Network addresses to listen on (framework field)
+  pub addresses: Vec<String>,
+  /// Listener-specific configuration arguments
   pub args: SerializedArgs,
-}
-
-/// Transport layer type for address conflict detection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TransportLayer {
-  Tcp,
-  Udp,
-}
-
-/// Listener kind category for conflict detection.
-/// Includes whether the listener supports hostname-based routing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ListenerCategory {
-  Http,   // http listener - TCP, supports hostname routing
-  Https,  // https listener - TCP, supports hostname routing
-  Http3,  // http3 listener - UDP, supports hostname routing
-  Socks5, // socks5 listener - TCP, NO hostname routing
-}
-
-impl ListenerCategory {
-  pub fn from_kind(kind: &str) -> Option<Self> {
-    match kind {
-      "http" => Some(Self::Http),
-      "https" => Some(Self::Https),
-      "http3" => Some(Self::Http3),
-      "socks5" => Some(Self::Socks5),
-      _ => None,
-    }
-  }
-
-  pub fn transport_layer(&self) -> TransportLayer {
-    match self {
-      Self::Http | Self::Https | Self::Socks5 => TransportLayer::Tcp,
-      Self::Http3 => TransportLayer::Udp,
-    }
-  }
-}
-
-/// Address usage info for conflict detection.
-pub struct AddressUsage {
-  pub server_name: String,
-  pub listener_kind: String,
-  pub listener_category: ListenerCategory,
-  /// Hostnames for this server (empty = default server)
-  pub hostnames: Vec<String>,
-}
-
-/// Extract addresses from listener args.
-///
-/// Tries 'addresses' (plural) first, then 'address' (singular) for
-/// backward compatibility.
-pub fn extract_addresses(args: &SerializedArgs) -> Vec<String> {
-  let mut addresses = Vec::new();
-
-  // Try 'addresses' (plural) field first
-  if let Some(addrs) = args.get("addresses")
-    && let Some(addr_list) = addrs.as_sequence()
-  {
-    for addr in addr_list {
-      if let Some(addr_str) = addr.as_str() {
-        addresses.push(addr_str.to_string());
-      }
-    }
-  }
-
-  // Try 'address' (singular) field for backward compatibility
-  if addresses.is_empty()
-    && let Some(addr) = args.get("address")
-    && let Some(addr_str) = addr.as_str()
-  {
-    addresses.push(addr_str.to_string());
-  }
-
-  addresses
 }
 
 /// Validate a single listener configuration.
 ///
 /// Validates:
 /// - TLS requirement for https and http3 listeners
-/// - Address parsing in listener args
+/// - Address parsing
 /// - HTTP/3 specific configuration
 pub fn validate_listener(
   listener: &Listener,
@@ -106,14 +35,14 @@ pub fn validate_listener(
   collector: &mut ConfigErrorCollector,
 ) {
   // Check TLS requirement for https and http3 listeners
-  match listener.listener_name.as_str() {
+  match listener.kind.as_str() {
     "https" | "http3" => {
       if server_tls.is_none() {
         collector.add(
           location.to_string(),
           format!(
             "listener kind '{}' requires server-level 'tls' configuration",
-            listener.listener_name
+            listener.kind
           ),
           ConfigErrorKind::InvalidFormat,
         );
@@ -123,51 +52,34 @@ pub fn validate_listener(
     _ => {}
   }
 
-  // Validate addresses in listener args if present
-  validate_listener_addresses(&listener.args, location, collector);
+  // Validate addresses
+  validate_listener_addresses(&listener.addresses, location, collector);
 
   // Validate HTTP/3 listener specific configuration
-  if listener.listener_name == "http3" {
+  if listener.kind == "http3" {
     validate_http3_listener_args(&listener.args, location, collector);
   }
 }
 
-/// Validate addresses in listener args.
+/// Validate listener addresses.
 pub fn validate_listener_addresses(
-  args: &SerializedArgs,
+  addresses: &[String],
   location: &str,
   collector: &mut ConfigErrorCollector,
 ) {
-  // Check if args has an "addresses" field
-  match args.get("addresses") {
-    Some(addresses) => {
-      if let Some(addrs) = addresses.as_sequence() {
-        if addrs.is_empty() {
-          collector.add(
-            format!("{}.args.addresses", location),
-            "addresses list cannot be empty".to_string(),
-            ConfigErrorKind::InvalidAddress,
-          );
-          return;
-        }
-        for (addr_idx, addr) in addrs.iter().enumerate() {
-          if let Some(addr_str) = addr.as_str()
-            && addr_str.parse::<std::net::SocketAddr>().is_err()
-          {
-            collector.add(
-              format!("{}.args.addresses[{}]", location, addr_idx),
-              format!("invalid address '{}'", addr_str),
-              ConfigErrorKind::InvalidAddress,
-            );
-          }
-        }
-      }
-    }
-    None => {
-      // addresses field is missing - this is an error
+  if addresses.is_empty() {
+    collector.add(
+      format!("{}.addresses", location),
+      "addresses list cannot be empty".to_string(),
+      ConfigErrorKind::InvalidAddress,
+    );
+    return;
+  }
+  for (addr_idx, addr_str) in addresses.iter().enumerate() {
+    if addr_str.parse::<std::net::SocketAddr>().is_err() {
       collector.add(
-        format!("{}.args", location),
-        "addresses field is required".to_string(),
+        format!("{}.addresses[{}]", location, addr_idx),
+        format!("invalid address '{}'", addr_str),
         ConfigErrorKind::InvalidAddress,
       );
     }
@@ -219,24 +131,48 @@ pub fn validate_hostname(
   }
 }
 
-/// Validate that SOCKS5 listeners are not configured with hostnames.
-pub fn validate_socks5_hostnames(
+/// Validate that listeners without hostname routing support
+/// are not configured with hostnames.
+///
+/// If a listener doesn't support hostname routing (e.g., socks5),
+/// the server's hostnames field must be empty.
+pub fn validate_hostname_routing_compatibility(
   config: &super::Config,
   collector: &mut ConfigErrorCollector,
 ) {
+  use crate::listeners::ListenerBuilderSet;
+
+  let registry = ListenerBuilderSet::global();
+
   for (server_idx, server) in config.servers.iter().enumerate() {
-    if !server.hostnames.is_empty() {
-      let has_socks5 =
-        server.listeners.iter().any(|l| l.listener_name == "socks5");
-      if has_socks5 {
-        collector.add(
-          format!("servers[{}]", server_idx),
-          "hostnames cannot be configured with SOCKS5 listener (SOCKS5 does not support hostname routing)".to_string(),
-          ConfigErrorKind::InvalidFormat,
-        );
+    if server.hostnames.is_empty() {
+      continue;
+    }
+
+    for (listener_idx, listener) in server.listeners.iter().enumerate() {
+      if let Some(props) = registry.props(&listener.kind) {
+        if !props.supports_hostname_routing {
+          collector.add(
+            format!("servers[{}].listeners[{}]", server_idx, listener_idx),
+            format!(
+              "listener kind '{}' does not support hostname routing, \
+               but server '{}' has hostnames configured",
+              listener.kind, server.name
+            ),
+            ConfigErrorKind::InvalidFormat,
+          );
+        }
       }
     }
   }
+}
+
+/// Address usage info for conflict detection.
+pub struct AddressUsage {
+  pub server_name: String,
+  pub listener_kind: String,
+  /// Hostnames for this server (empty = default server)
+  pub hostnames: Vec<String>,
 }
 
 /// Validate address conflicts across all servers and listeners.
@@ -251,25 +187,25 @@ pub fn validate_address_conflicts(
   config: &super::Config,
   collector: &mut ConfigErrorCollector,
 ) {
+  use crate::listener::TransportLayer;
+  use crate::listeners::ListenerBuilderSet;
+
+  let registry = ListenerBuilderSet::global();
   let mut address_map: HashMap<SocketAddr, Vec<AddressUsage>> =
     HashMap::new();
 
   for server in &config.servers {
     for listener in &server.listeners {
-      let category =
-        match ListenerCategory::from_kind(&listener.listener_name) {
-          Some(c) => c,
-          None => continue,
-        };
+      let _props = match registry.props(&listener.kind) {
+        Some(p) => p,
+        None => continue,
+      };
 
-      let addresses = extract_addresses(&listener.args);
-
-      for addr_str in addresses {
+      for addr_str in &listener.addresses {
         if let Ok(addr) = addr_str.parse::<SocketAddr>() {
           let usage = AddressUsage {
             server_name: server.name.clone(),
-            listener_kind: listener.listener_name.clone(),
-            listener_category: category,
+            listener_kind: listener.kind.clone(),
             hostnames: server.hostnames.clone(),
           };
           address_map.entry(addr).or_default().push(usage);
@@ -290,13 +226,19 @@ pub fn validate_address_conflicts(
     let tcp_usages: Vec<_> = usages
       .iter()
       .filter(|u| {
-        u.listener_category.transport_layer() == TransportLayer::Tcp
+        registry
+          .props(&u.listener_kind)
+          .map(|p| p.transport_layer == TransportLayer::Tcp)
+          .unwrap_or(false)
       })
       .collect();
     let udp_usages: Vec<_> = usages
       .iter()
       .filter(|u| {
-        u.listener_category.transport_layer() == TransportLayer::Udp
+        registry
+          .props(&u.listener_kind)
+          .map(|p| p.transport_layer == TransportLayer::Udp)
+          .unwrap_or(false)
       })
       .collect();
 
@@ -321,7 +263,7 @@ pub fn validate_address_conflicts(
           ConfigErrorKind::AddressConflict,
         );
       } else {
-        check_hostname_routing_conflicts(&tcp_usages, addr, collector);
+        check_hostname_routing_conflicts(&tcp_usages, addr, registry, collector);
       }
     }
 
@@ -346,7 +288,7 @@ pub fn validate_address_conflicts(
           ConfigErrorKind::AddressConflict,
         );
       } else {
-        check_hostname_routing_conflicts(&udp_usages, addr, collector);
+        check_hostname_routing_conflicts(&udp_usages, addr, registry, collector);
       }
     }
   }
@@ -356,8 +298,33 @@ pub fn validate_address_conflicts(
 pub fn check_hostname_routing_conflicts(
   usages: &[&AddressUsage],
   addr: SocketAddr,
+  registry: &crate::listeners::ListenerBuilderSet,
   collector: &mut ConfigErrorCollector,
 ) {
+  let kind = usages[0].listener_kind.as_str();
+  let supports_hostname_routing = registry
+    .props(kind)
+    .map(|p| p.supports_hostname_routing)
+    .unwrap_or(false);
+
+  if !supports_hostname_routing {
+    // Doesn't support hostname routing - multiple instances is a conflict
+    if usages.len() > 1 {
+      let servers: Vec<_> =
+        usages.iter().map(|u| u.server_name.as_str()).collect();
+      collector.add(
+        format!("address conflict on {}", addr),
+        format!(
+          "multiple {} listeners on same address without hostname routing support (servers: {})",
+          kind,
+          servers.join(", ")
+        ),
+        ConfigErrorKind::AddressConflict,
+      );
+    }
+    return;
+  }
+
   let mut default_servers: Vec<&str> = Vec::new();
   let mut hostname_map: HashMap<String, Vec<&str>> = HashMap::new();
 
@@ -488,48 +455,8 @@ mod tests {
   #[test]
   fn test_listener_default() {
     let listener = Listener::default();
-    assert!(listener.listener_name.is_empty());
-  }
-
-  #[test]
-  fn test_listener_category_from_kind() {
-    assert_eq!(
-      ListenerCategory::from_kind("http"),
-      Some(ListenerCategory::Http)
-    );
-    assert_eq!(
-      ListenerCategory::from_kind("https"),
-      Some(ListenerCategory::Https)
-    );
-    assert_eq!(
-      ListenerCategory::from_kind("http3"),
-      Some(ListenerCategory::Http3)
-    );
-    assert_eq!(
-      ListenerCategory::from_kind("socks5"),
-      Some(ListenerCategory::Socks5)
-    );
-    assert_eq!(ListenerCategory::from_kind("unknown"), None);
-  }
-
-  #[test]
-  fn test_listener_category_transport_layer() {
-    assert_eq!(
-      ListenerCategory::Http.transport_layer(),
-      TransportLayer::Tcp
-    );
-    assert_eq!(
-      ListenerCategory::Https.transport_layer(),
-      TransportLayer::Tcp
-    );
-    assert_eq!(
-      ListenerCategory::Socks5.transport_layer(),
-      TransportLayer::Tcp
-    );
-    assert_eq!(
-      ListenerCategory::Http3.transport_layer(),
-      TransportLayer::Udp
-    );
+    assert!(listener.kind.is_empty());
+    assert!(listener.addresses.is_empty());
   }
 
   // =========================================================================
@@ -538,21 +465,17 @@ mod tests {
 
   #[test]
   fn test_validate_valid_address() {
-    let args =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-        .unwrap();
+    let addresses = vec!["127.0.0.1:8080".to_string()];
     let mut collector = ConfigErrorCollector::new();
-    validate_listener_addresses(&args, "test", &mut collector);
+    validate_listener_addresses(&addresses, "test", &mut collector);
     assert!(!collector.has_errors());
   }
 
   #[test]
   fn test_validate_invalid_address() {
-    let args =
-      serde_yaml::from_str(r#"{addresses: ["invalid:address"]}"#)
-        .unwrap();
+    let addresses = vec!["invalid:address".to_string()];
     let mut collector = ConfigErrorCollector::new();
-    validate_listener_addresses(&args, "test", &mut collector);
+    validate_listener_addresses(&addresses, "test", &mut collector);
     assert!(collector.has_errors());
     let errors = collector.errors();
     assert_eq!(errors.len(), 1);
@@ -561,39 +484,27 @@ mod tests {
 
   #[test]
   fn test_validate_multiple_invalid_addresses() {
-    let args = serde_yaml::from_str(
-      r#"{addresses: ["invalid1", "127.0.0.1:8080", "invalid2"]}"#,
-    )
-    .unwrap();
+    let addresses = vec![
+      "invalid1".to_string(),
+      "127.0.0.1:8080".to_string(),
+      "invalid2".to_string(),
+    ];
     let mut collector = ConfigErrorCollector::new();
-    validate_listener_addresses(&args, "test", &mut collector);
+    validate_listener_addresses(&addresses, "test", &mut collector);
     assert!(collector.has_errors());
     assert_eq!(collector.errors().len(), 2);
   }
 
   #[test]
   fn test_validate_addresses_empty_array() {
-    let args = serde_yaml::from_str(r#"{addresses: []}"#).unwrap();
+    let addresses: Vec<String> = vec![];
     let mut collector = ConfigErrorCollector::new();
-    validate_listener_addresses(&args, "test", &mut collector);
+    validate_listener_addresses(&addresses, "test", &mut collector);
     assert!(collector.has_errors());
     let found = collector
       .errors()
       .iter()
       .any(|e| e.message.contains("addresses list cannot be empty"));
-    assert!(found);
-  }
-
-  #[test]
-  fn test_validate_addresses_missing_field() {
-    let args = serde_yaml::from_str(r#"{}"#).unwrap();
-    let mut collector = ConfigErrorCollector::new();
-    validate_listener_addresses(&args, "test", &mut collector);
-    assert!(collector.has_errors());
-    let found = collector
-      .errors()
-      .iter()
-      .any(|e| e.message.contains("addresses field is required"));
     assert!(found);
   }
 
@@ -681,11 +592,11 @@ mod tests {
 
   #[test]
   fn test_validate_https_without_tls_is_error() {
-    let args: serde_yaml::Value =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8443"]}"#)
-        .unwrap();
-    let listener =
-      Listener { listener_name: "https".to_string(), args };
+    let listener = Listener {
+      kind: "https".to_string(),
+      addresses: vec!["127.0.0.1:8443".to_string()],
+      args: serde_yaml::Value::Null,
+    };
     let mut collector = ConfigErrorCollector::new();
     validate_listener(&listener, "test", None, &mut collector);
     assert!(collector.has_errors());
@@ -697,11 +608,11 @@ mod tests {
 
   #[test]
   fn test_validate_http3_without_tls_is_error() {
-    let args: serde_yaml::Value =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8443"]}"#)
-        .unwrap();
-    let listener =
-      Listener { listener_name: "http3".to_string(), args };
+    let listener = Listener {
+      kind: "http3".to_string(),
+      addresses: vec!["127.0.0.1:8443".to_string()],
+      args: serde_yaml::Value::Null,
+    };
     let mut collector = ConfigErrorCollector::new();
     validate_listener(&listener, "test", None, &mut collector);
     assert!(collector.has_errors());
@@ -713,10 +624,11 @@ mod tests {
 
   #[test]
   fn test_validate_http_without_tls_is_valid() {
-    let args: serde_yaml::Value =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-        .unwrap();
-    let listener = Listener { listener_name: "http".to_string(), args };
+    let listener = Listener {
+      kind: "http".to_string(),
+      addresses: vec!["127.0.0.1:8080".to_string()],
+      args: serde_yaml::Value::Null,
+    };
     let mut collector = ConfigErrorCollector::new();
     validate_listener(&listener, "test", None, &mut collector);
     let found = collector.errors().iter().any(|e| {
@@ -957,21 +869,20 @@ mod tests {
   }
 
   // =========================================================================
-  // validate_socks5_hostnames Tests
+  // validate_hostname_routing_compatibility Tests
   // =========================================================================
 
   #[test]
-  fn test_validate_socks5_with_hostnames_error() {
-    let args: serde_yaml::Value =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#)
-        .unwrap();
+  fn test_validate_hostname_routing_socks5_with_hostnames_error() {
+    // Negative: socks5 does NOT support hostname routing
     let config = super::super::Config {
       servers: vec![super::super::Server {
         name: "socks_server".to_string(),
         hostnames: vec!["api.example.com".to_string()],
         listeners: vec![Listener {
-          listener_name: "socks5".to_string(),
-          args,
+          kind: "socks5".to_string(),
+          addresses: vec!["127.0.0.1:1080".to_string()],
+          args: serde_yaml::Value::Null,
         }],
         service: "".to_string(),
         ..Default::default()
@@ -979,26 +890,25 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    validate_socks5_hostnames(&config, &mut collector);
+    validate_hostname_routing_compatibility(&config, &mut collector);
     assert!(collector.has_errors());
     let found = collector.errors().iter().any(|e| {
-      e.message.contains("hostnames cannot be configured with SOCKS5")
+      e.message.contains("does not support hostname routing")
     });
     assert!(found);
   }
 
   #[test]
-  fn test_validate_socks5_without_hostnames_ok() {
-    let args: serde_yaml::Value =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#)
-        .unwrap();
+  fn test_validate_hostname_routing_socks5_empty_hostnames_ok() {
+    // Positive: socks5 with empty hostnames is valid
     let config = super::super::Config {
       servers: vec![super::super::Server {
         name: "socks_server".to_string(),
         hostnames: vec![],
         listeners: vec![Listener {
-          listener_name: "socks5".to_string(),
-          args,
+          kind: "socks5".to_string(),
+          addresses: vec!["127.0.0.1:1080".to_string()],
+          args: serde_yaml::Value::Null,
         }],
         service: "".to_string(),
         ..Default::default()
@@ -1006,11 +916,244 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    validate_socks5_hostnames(&config, &mut collector);
-    let found = collector.errors().iter().any(|e| {
-      e.message.contains("hostnames cannot be configured with SOCKS5")
-    });
-    assert!(!found);
+    validate_hostname_routing_compatibility(&config, &mut collector);
+    assert!(!collector.has_errors());
+  }
+
+  #[test]
+  fn test_validate_hostname_routing_http_with_hostnames_ok() {
+    // Positive: http supports hostname routing
+    let config = super::super::Config {
+      servers: vec![super::super::Server {
+        name: "http_server".to_string(),
+        hostnames: vec!["api.example.com".to_string()],
+        listeners: vec![Listener {
+          kind: "http".to_string(),
+          addresses: vec!["127.0.0.1:8080".to_string()],
+          args: serde_yaml::Value::Null,
+        }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_hostname_routing_compatibility(&config, &mut collector);
+    assert!(!collector.has_errors());
+  }
+
+  #[test]
+  fn test_validate_hostname_routing_https_with_hostnames_ok() {
+    // Positive: https supports hostname routing
+    let config = super::super::Config {
+      servers: vec![super::super::Server {
+        name: "https_server".to_string(),
+        hostnames: vec!["api.example.com".to_string()],
+        listeners: vec![Listener {
+          kind: "https".to_string(),
+          addresses: vec!["127.0.0.1:8443".to_string()],
+          args: serde_yaml::Value::Null,
+        }],
+        service: "".to_string(),
+        tls: Some(super::super::ServerTlsConfig {
+          certificates: vec![],
+          client_ca_certs: None,
+        }),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_hostname_routing_compatibility(&config, &mut collector);
+    assert!(!collector.has_errors());
+  }
+
+  #[test]
+  fn test_validate_hostname_routing_http3_with_hostnames_ok() {
+    // Positive: http3 supports hostname routing
+    let config = super::super::Config {
+      servers: vec![super::super::Server {
+        name: "http3_server".to_string(),
+        hostnames: vec!["api.example.com".to_string()],
+        listeners: vec![Listener {
+          kind: "http3".to_string(),
+          addresses: vec!["127.0.0.1:443".to_string()],
+          args: serde_yaml::Value::Null,
+        }],
+        service: "".to_string(),
+        tls: Some(super::super::ServerTlsConfig {
+          certificates: vec![],
+          client_ca_certs: None,
+        }),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_hostname_routing_compatibility(&config, &mut collector);
+    assert!(!collector.has_errors());
+  }
+
+  #[test]
+  fn test_validate_hostname_routing_mixed_listeners_error() {
+    // Negative: one server with http + socks5, hostnames configured
+    // socks5 doesn't support hostname routing, should error
+    let config = super::super::Config {
+      servers: vec![super::super::Server {
+        name: "mixed_server".to_string(),
+        hostnames: vec!["api.example.com".to_string()],
+        listeners: vec![
+          Listener {
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
+          },
+          Listener {
+            kind: "socks5".to_string(),
+            addresses: vec!["127.0.0.1:1080".to_string()],
+            args: serde_yaml::Value::Null,
+          },
+        ],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_hostname_routing_compatibility(&config, &mut collector);
+    assert!(collector.has_errors());
+    // Should have exactly one error for the socks5 listener
+    let errors: Vec<_> = collector.errors().iter()
+      .filter(|e| e.message.contains("does not support hostname routing"))
+      .collect();
+    assert_eq!(errors.len(), 1);
+    // Error should point to the socks5 listener
+    assert!(errors[0].location.contains("listeners[1]"));
+  }
+
+  #[test]
+  fn test_validate_hostname_routing_multiple_servers_partial_error() {
+    // Multiple servers: one valid, one invalid
+    let config = super::super::Config {
+      servers: vec![
+        super::super::Server {
+          name: "http_server".to_string(),
+          hostnames: vec!["api.example.com".to_string()],
+          listeners: vec![Listener {
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+        super::super::Server {
+          name: "socks_server".to_string(),
+          hostnames: vec!["api.example.com".to_string()],
+          listeners: vec![Listener {
+            kind: "socks5".to_string(),
+            addresses: vec!["127.0.0.1:1080".to_string()],
+            args: serde_yaml::Value::Null,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+      ],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_hostname_routing_compatibility(&config, &mut collector);
+    assert!(collector.has_errors());
+    // Only socks_server should have error (servers[1])
+    let errors: Vec<_> = collector.errors().iter()
+      .filter(|e| e.message.contains("does not support hostname routing"))
+      .collect();
+    assert_eq!(errors.len(), 1);
+    // Error location should reference the second server
+    assert!(errors[0].location.contains("servers[1]"));
+  }
+
+  #[test]
+  fn test_validate_hostname_routing_unknown_listener_kind_skipped() {
+    // Unknown listener kind should be skipped (no error)
+    let config = super::super::Config {
+      servers: vec![super::super::Server {
+        name: "unknown_server".to_string(),
+        hostnames: vec!["api.example.com".to_string()],
+        listeners: vec![Listener {
+          kind: "unknown_kind".to_string(),
+          addresses: vec!["127.0.0.1:9999".to_string()],
+          args: serde_yaml::Value::Null,
+        }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_hostname_routing_compatibility(&config, &mut collector);
+    // Unknown listener kind is skipped, no error
+    assert!(!collector.has_errors());
+  }
+
+  #[test]
+  fn test_validate_hostname_routing_no_hostnames_skipped() {
+    // Server without hostnames should be skipped entirely
+    let config = super::super::Config {
+      servers: vec![super::super::Server {
+        name: "default_server".to_string(),
+        hostnames: vec![], // empty hostnames
+        listeners: vec![Listener {
+          kind: "socks5".to_string(),
+          addresses: vec!["127.0.0.1:1080".to_string()],
+          args: serde_yaml::Value::Null,
+        }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_hostname_routing_compatibility(&config, &mut collector);
+    assert!(!collector.has_errors());
+  }
+
+  #[test]
+  fn test_validate_hostname_routing_all_supported_listeners_ok() {
+    // Server with http + https + http3, all support hostname routing
+    let config = super::super::Config {
+      servers: vec![super::super::Server {
+        name: "all_supported".to_string(),
+        hostnames: vec!["api.example.com".to_string()],
+        listeners: vec![
+          Listener {
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
+          },
+          Listener {
+            kind: "https".to_string(),
+            addresses: vec!["127.0.0.1:8443".to_string()],
+            args: serde_yaml::Value::Null,
+          },
+          Listener {
+            kind: "http3".to_string(),
+            addresses: vec!["127.0.0.1:443".to_string()],
+            args: serde_yaml::Value::Null,
+          },
+        ],
+        service: "".to_string(),
+        tls: Some(super::super::ServerTlsConfig {
+          certificates: vec![],
+          client_ca_certs: None,
+        }),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_hostname_routing_compatibility(&config, &mut collector);
+    assert!(!collector.has_errors());
   }
 
   // =========================================================================
@@ -1028,13 +1171,6 @@ mod tests {
   fn test_address_conflict_tcp_vs_tcp_different_kind() {
     use crate::config::{Server, Service};
 
-    let args1 =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-        .unwrap();
-    let args2 =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-        .unwrap();
-
     let config = super::super::Config {
       worker_threads: 1,
       log_directory: "logs/".to_string(),
@@ -1042,7 +1178,7 @@ mod tests {
       services: vec![Service {
         name: "echo".to_string(),
         plugin_name: "echo".to_string(),
-        service_name: "echo".to_string(),
+        kind: "echo".to_string(),
         args: serde_yaml::Value::Null,
         layers: vec![],
       }],
@@ -1053,8 +1189,9 @@ mod tests {
           tls: None,
           users: None,
           listeners: vec![Listener {
-            listener_name: "http".to_string(),
-            args: args1,
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
           }],
           service: "echo".to_string(),
           access_log: None,
@@ -1065,8 +1202,9 @@ mod tests {
           tls: None,
           users: None,
           listeners: vec![Listener {
-            listener_name: "socks5".to_string(),
-            args: args2,
+            kind: "socks5".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
           }],
           service: "echo".to_string(),
           access_log: None,
@@ -1084,10 +1222,6 @@ mod tests {
   fn test_address_same_kind_can_share_with_hostnames() {
     use crate::config::{Server, Service};
 
-    let args: serde_yaml::Value =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-        .unwrap();
-
     let config = super::super::Config {
       worker_threads: 1,
       log_directory: "logs/".to_string(),
@@ -1095,7 +1229,7 @@ mod tests {
       services: vec![Service {
         name: "echo".to_string(),
         plugin_name: "echo".to_string(),
-        service_name: "echo".to_string(),
+        kind: "echo".to_string(),
         args: serde_yaml::Value::Null,
         layers: vec![],
       }],
@@ -1106,8 +1240,9 @@ mod tests {
           tls: None,
           users: None,
           listeners: vec![Listener {
-            listener_name: "http".to_string(),
-            args: args.clone(),
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
           }],
           service: "echo".to_string(),
           access_log: None,
@@ -1118,8 +1253,9 @@ mod tests {
           tls: None,
           users: None,
           listeners: vec![Listener {
-            listener_name: "http".to_string(),
-            args,
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
           }],
           service: "echo".to_string(),
           access_log: None,
@@ -1136,13 +1272,6 @@ mod tests {
   fn test_address_multiple_default_servers_conflict() {
     use crate::config::{Server, Service};
 
-    let args1 =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-        .unwrap();
-    let args2 =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-        .unwrap();
-
     let config = super::super::Config {
       worker_threads: 1,
       log_directory: "logs/".to_string(),
@@ -1150,7 +1279,7 @@ mod tests {
       services: vec![Service {
         name: "echo".to_string(),
         plugin_name: "echo".to_string(),
-        service_name: "echo".to_string(),
+        kind: "echo".to_string(),
         args: serde_yaml::Value::Null,
         layers: vec![],
       }],
@@ -1161,8 +1290,9 @@ mod tests {
           tls: None,
           users: None,
           listeners: vec![Listener {
-            listener_name: "http".to_string(),
-            args: args1,
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
           }],
           service: "echo".to_string(),
           access_log: None,
@@ -1173,8 +1303,9 @@ mod tests {
           tls: None,
           users: None,
           listeners: vec![Listener {
-            listener_name: "http".to_string(),
-            args: args2,
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
           }],
           service: "echo".to_string(),
           access_log: None,
@@ -1195,13 +1326,6 @@ mod tests {
   fn test_hostname_exact_duplicate_conflict() {
     use crate::config::{Server, Service};
 
-    let args1: serde_yaml::Value =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-        .unwrap();
-    let args2: serde_yaml::Value =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-        .unwrap();
-
     let config = super::super::Config {
       worker_threads: 1,
       log_directory: "logs/".to_string(),
@@ -1209,7 +1333,7 @@ mod tests {
       services: vec![Service {
         name: "echo".to_string(),
         plugin_name: "echo".to_string(),
-        service_name: "echo".to_string(),
+        kind: "echo".to_string(),
         args: serde_yaml::Value::Null,
         layers: vec![],
       }],
@@ -1218,8 +1342,9 @@ mod tests {
           name: "server_a".to_string(),
           hostnames: vec!["api.example.com".to_string()],
           listeners: vec![Listener {
-            listener_name: "http".to_string(),
-            args: args1,
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
           }],
           service: "".to_string(),
           ..Default::default()
@@ -1228,8 +1353,9 @@ mod tests {
           name: "server_b".to_string(),
           hostnames: vec!["api.example.com".to_string()],
           listeners: vec![Listener {
-            listener_name: "http".to_string(),
-            args: args2,
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
           }],
           service: "".to_string(),
           ..Default::default()
@@ -1251,13 +1377,6 @@ mod tests {
   fn test_hostname_wildcard_duplicate_conflict() {
     use crate::config::{Server, Service};
 
-    let args1: serde_yaml::Value =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-        .unwrap();
-    let args2: serde_yaml::Value =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-        .unwrap();
-
     let config = super::super::Config {
       worker_threads: 1,
       log_directory: "logs/".to_string(),
@@ -1265,7 +1384,7 @@ mod tests {
       services: vec![Service {
         name: "echo".to_string(),
         plugin_name: "echo".to_string(),
-        service_name: "echo".to_string(),
+        kind: "echo".to_string(),
         args: serde_yaml::Value::Null,
         layers: vec![],
       }],
@@ -1274,8 +1393,9 @@ mod tests {
           name: "server_a".to_string(),
           hostnames: vec!["*.example.com".to_string()],
           listeners: vec![Listener {
-            listener_name: "http".to_string(),
-            args: args1,
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
           }],
           service: "".to_string(),
           ..Default::default()
@@ -1284,8 +1404,9 @@ mod tests {
           name: "server_b".to_string(),
           hostnames: vec!["*.example.com".to_string()],
           listeners: vec![Listener {
-            listener_name: "http".to_string(),
-            args: args2,
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
           }],
           service: "".to_string(),
           ..Default::default()
@@ -1307,13 +1428,6 @@ mod tests {
   fn test_hostname_case_insensitive_conflict() {
     use crate::config::{Server, Service};
 
-    let args1: serde_yaml::Value =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-        .unwrap();
-    let args2: serde_yaml::Value =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-        .unwrap();
-
     let config = super::super::Config {
       worker_threads: 1,
       log_directory: "logs/".to_string(),
@@ -1321,7 +1435,7 @@ mod tests {
       services: vec![Service {
         name: "echo".to_string(),
         plugin_name: "echo".to_string(),
-        service_name: "echo".to_string(),
+        kind: "echo".to_string(),
         args: serde_yaml::Value::Null,
         layers: vec![],
       }],
@@ -1330,8 +1444,9 @@ mod tests {
           name: "server_a".to_string(),
           hostnames: vec!["API.EXAMPLE.COM".to_string()],
           listeners: vec![Listener {
-            listener_name: "http".to_string(),
-            args: args1,
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
           }],
           service: "".to_string(),
           ..Default::default()
@@ -1340,8 +1455,9 @@ mod tests {
           name: "server_b".to_string(),
           hostnames: vec!["api.example.com".to_string()],
           listeners: vec![Listener {
-            listener_name: "http".to_string(),
-            args: args2,
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
           }],
           service: "".to_string(),
           ..Default::default()
@@ -1363,13 +1479,6 @@ mod tests {
   fn test_different_hostnames_no_conflict() {
     use crate::config::{Server, Service};
 
-    let args1: serde_yaml::Value =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-        .unwrap();
-    let args2: serde_yaml::Value =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-        .unwrap();
-
     let config = super::super::Config {
       worker_threads: 1,
       log_directory: "logs/".to_string(),
@@ -1377,7 +1486,7 @@ mod tests {
       services: vec![Service {
         name: "echo".to_string(),
         plugin_name: "echo".to_string(),
-        service_name: "echo".to_string(),
+        kind: "echo".to_string(),
         args: serde_yaml::Value::Null,
         layers: vec![],
       }],
@@ -1386,8 +1495,9 @@ mod tests {
           name: "server_a".to_string(),
           hostnames: vec!["api.example.com".to_string()],
           listeners: vec![Listener {
-            listener_name: "http".to_string(),
-            args: args1,
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
           }],
           service: "".to_string(),
           ..Default::default()
@@ -1396,8 +1506,9 @@ mod tests {
           name: "server_b".to_string(),
           hostnames: vec!["web.example.com".to_string()],
           listeners: vec![Listener {
-            listener_name: "http".to_string(),
-            args: args2,
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
           }],
           service: "".to_string(),
           ..Default::default()
@@ -1419,13 +1530,6 @@ mod tests {
   fn test_wildcard_and_exact_no_conflict() {
     use crate::config::{Server, Service};
 
-    let args1: serde_yaml::Value =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-        .unwrap();
-    let args2: serde_yaml::Value =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
-        .unwrap();
-
     let config = super::super::Config {
       worker_threads: 1,
       log_directory: "logs/".to_string(),
@@ -1433,7 +1537,7 @@ mod tests {
       services: vec![Service {
         name: "echo".to_string(),
         plugin_name: "echo".to_string(),
-        service_name: "echo".to_string(),
+        kind: "echo".to_string(),
         args: serde_yaml::Value::Null,
         layers: vec![],
       }],
@@ -1442,8 +1546,9 @@ mod tests {
           name: "wildcard".to_string(),
           hostnames: vec!["*.example.com".to_string()],
           listeners: vec![Listener {
-            listener_name: "http".to_string(),
-            args: args1,
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
           }],
           service: "".to_string(),
           ..Default::default()
@@ -1452,8 +1557,9 @@ mod tests {
           name: "specific".to_string(),
           hostnames: vec!["api.example.com".to_string()],
           listeners: vec![Listener {
-            listener_name: "http".to_string(),
-            args: args2,
+            kind: "http".to_string(),
+            addresses: vec!["127.0.0.1:8080".to_string()],
+            args: serde_yaml::Value::Null,
           }],
           service: "".to_string(),
           ..Default::default()

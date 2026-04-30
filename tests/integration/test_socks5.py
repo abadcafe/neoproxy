@@ -98,17 +98,18 @@ def create_socks5_config(
     auth_section = ""
     if auth_type == "password" and users:
         users_yaml = "\n".join([
-            f"          - username: \"{u['username']}\"\n            password: \"{u['password']}\""
+            f"        - username: \"{u['username']}\"\n          password: \"{u['password']}\""
             for u in users
         ])
         auth_section = f"""
-      auth:
-        users:
+      users:
 {users_yaml}"""
 
     timeout_section = ""
     if handshake_timeout:
         timeout_section = f"\n      handshake_timeout: \"{handshake_timeout}\""
+
+    addresses_yaml = "\n".join([f'    - "{a}"' for a in addresses])
 
     config_content = f"""worker_threads: {worker_threads}
 log_directory: "{temp_dir}/logs"
@@ -121,9 +122,9 @@ servers:
 - name: socks5_server
   listeners:
   - kind: socks5
-    args:
-      addresses:
-{chr(10).join([f'        - "{a}"' for a in addresses])}{timeout_section}{auth_section}
+    addresses:
+{addresses_yaml}
+    args:{timeout_section}{auth_section}
   service: connect_tcp
 """
 
@@ -1766,9 +1767,8 @@ servers:
 - name: socks5_server
   listeners:
   - kind: socks5
-    args:
-      addresses: [
-        - "0.0.0.0:{proxy_port}"
+    addresses: [
+      - "0.0.0.0:{proxy_port}"
 """
             config_path = os.path.join(temp_dir, "invalid_config.yaml")
             with open(config_path, "w") as f:
@@ -1808,10 +1808,9 @@ servers:
   listeners:
   - kind: socks5
     args:
-      auth:
-        users:
-          - username: "test"
-            password: "test"
+      users:
+        - username: "test"
+          password: "test"
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "config.yaml")
@@ -1851,8 +1850,7 @@ servers:
 - name: socks5_server
   listeners:
   - kind: socks5
-    args:
-      addresses: []
+    addresses: []
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "config.yaml")
@@ -1874,12 +1872,14 @@ servers:
 
     def test_password_mode_empty_users(self) -> None:
         """
-        TC-S5-030: Password mode with empty users
+        TC-S5-030: Empty users list means no auth
 
-        Test that proxy fails to start when type is password but users is empty.
+        Test that proxy starts successfully with empty users list.
+        In the new format, `users: []` is equivalent to no auth (no users field).
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
+        proxy_proc: Optional[subprocess.Popen] = None
 
         try:
             config_content = f"""worker_threads: 1
@@ -1893,11 +1893,10 @@ servers:
 - name: socks5_server
   listeners:
   - kind: socks5
+    addresses:
+      - "0.0.0.0:{proxy_port}"
     args:
-      addresses:
-        - "0.0.0.0:{proxy_port}"
-      auth:
-        users: []
+      users: []
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "config.yaml")
@@ -1905,16 +1904,21 @@ servers:
                 f.write(config_content)
 
             proxy_proc = start_proxy(config_path)
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+                "Proxy should start with empty users (no auth mode)"
+
+            # Verify no-auth connection works
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5.0)
             try:
-                exit_code = proxy_proc.wait(timeout=5.0)
-                assert exit_code != 0, \
-                    "Expected non-zero exit code for password mode with empty users"
-            except subprocess.TimeoutExpired:
-                proxy_proc.kill()
-                proxy_proc.wait()
-                raise AssertionError("Process should have exited")
+                sock.connect(("127.0.0.1", proxy_port))
+                assert socks5_handshake_no_auth(sock), "No-auth handshake should succeed"
+            finally:
+                sock.close()
 
         finally:
+            if proxy_proc:
+                terminate_process(proxy_proc)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_invalid_auth_type(self) -> None:
@@ -1939,11 +1943,10 @@ servers:
 - name: socks5_server
   listeners:
   - kind: socks5
+    addresses:
+      - "0.0.0.0:{proxy_port}"
     args:
-      addresses:
-        - "0.0.0.0:{proxy_port}"
-      auth:
-        some_unknown_field: true
+      some_unknown_field: true
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "config.yaml")
@@ -1984,9 +1987,9 @@ servers:
 - name: socks5_server
   listeners:
   - kind: socks5
+    addresses:
+      - "0.0.0.0:{proxy_port}"
     args:
-      addresses:
-        - "0.0.0.0:{proxy_port}"
       handshake_timeout: "invalid"
   service: connect_tcp
 """
@@ -2296,6 +2299,8 @@ class TestSocks5TlsClientCertRejected:
         proxy_port = get_unique_port()
 
         try:
+            # client_ca_path is not a valid field in socks5 args
+            # (SOCKS5 only supports password auth via 'users' field)
             config_content = f"""worker_threads: 1
 log_directory: "{temp_dir}/logs"
 
@@ -2307,11 +2312,10 @@ servers:
 - name: socks5_server
   listeners:
   - kind: socks5
+    addresses:
+      - "0.0.0.0:{proxy_port}"
     args:
-      addresses:
-        - "0.0.0.0:{proxy_port}"
-      auth:
-        client_ca_path: "/path/to/ca.pem"
+      client_ca_path: "/path/to/ca.pem"
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "config.yaml")

@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use crate::access_log::AccessLogWriter;
 use crate::config::{AccessLogConfig, Config, SerializedArgs};
-use crate::listener::{Listener, Listening};
+use crate::listener::Listener;
 use crate::listeners::ListenerBuilderSet;
 use crate::plugin::Plugin;
 use crate::plugins::PluginBuilderSet;
@@ -197,6 +197,8 @@ impl PluginSet {
 struct SharedListenerGroup {
   /// The listener name (http, https, http3, socks5)
   pub listener_name: String,
+  /// Addresses to listen on (framework field)
+  pub addresses: Vec<String>,
   /// Server entries that share this address+listener_name
   pub servers: Vec<Server>,
   /// Listener args (protocol-specific)
@@ -226,10 +228,8 @@ fn group_servers_by_address_listener_name(
       access_log_writers.get(server.name.as_str()).cloned();
 
     for listener in &server.listeners {
-      let addresses = crate::config::extract_addresses(&listener.args);
-
-      for addr_str in addresses {
-        let key = (addr_str.clone(), listener.listener_name.clone());
+      for addr_str in &listener.addresses {
+        let key = (addr_str.clone(), listener.kind.clone());
 
         let entry = Server {
           hostnames: server.hostnames.clone(),
@@ -243,7 +243,8 @@ fn group_servers_by_address_listener_name(
         groups
           .entry(key.clone())
           .or_insert_with(|| SharedListenerGroup {
-            listener_name: listener.listener_name.clone(),
+            listener_name: listener.kind.clone(),
+            addresses: listener.addresses.clone(),
             servers: Vec::new(),
             listener_args: listener.args.clone(),
           })
@@ -277,14 +278,14 @@ async fn server_thread_main(shutdown: Arc<sync::Notify>) -> Result<()> {
       continue; // Skip unreferenced services
     }
     let plugin_name = &sc.plugin_name;
-    let service_name = &sc.service_name;
+    let kind = &sc.kind;
     let plugin = ctx
       .plugins
       .get_or_create_plugin(plugin_name)
       .expect("plugin should exist (validated)");
 
     let builder = plugin
-      .service_builder(service_name)
+      .service_builder(kind)
       .expect("service builder should exist (validated)");
 
     let svc = builder(sc.args.clone())?;
@@ -337,7 +338,7 @@ async fn server_thread_main(shutdown: Arc<sync::Notify>) -> Result<()> {
     let server_routing_table = group.servers;
 
     let l: Listener =
-      builder(group.listener_args, server_routing_table)?;
+      builder(group.addresses, group.listener_args, server_routing_table)?;
     let l = Rc::new(l);
     ctx.listeners.push(Rc::clone(&l));
     ctx.listener_join_set.spawn_local(l.start());
@@ -372,7 +373,7 @@ pub fn server_thread(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::config::extract_addresses;
+  use crate::listener::Listening;
   use crate::server::placeholder_service;
   use crate::shutdown::ShutdownHandle;
   use std::cell::Cell;
@@ -1105,48 +1106,6 @@ mod tests {
     assert!(listener_builder.is_none());
   }
 
-  // ============== extract_addresses Tests ==============
-
-  #[test]
-  fn test_extract_addresses_plural() {
-    let args = serde_yaml::from_str(
-      r#"{addresses: ["127.0.0.1:8080", "127.0.0.1:8081"]}"#,
-    )
-    .unwrap();
-    let addresses = extract_addresses(&args);
-    assert_eq!(addresses.len(), 2);
-    assert_eq!(addresses[0], "127.0.0.1:8080");
-    assert_eq!(addresses[1], "127.0.0.1:8081");
-  }
-
-  #[test]
-  fn test_extract_addresses_singular() {
-    let args =
-      serde_yaml::from_str(r#"{address: "127.0.0.1:8080"}"#).unwrap();
-    let addresses = extract_addresses(&args);
-    assert_eq!(addresses.len(), 1);
-    assert_eq!(addresses[0], "127.0.0.1:8080");
-  }
-
-  #[test]
-  fn test_extract_addresses_priority() {
-    // When both are present, plural takes priority
-    let args = serde_yaml::from_str(
-      r#"{addresses: ["127.0.0.1:8080"], address: "127.0.0.1:9090"}"#,
-    )
-    .unwrap();
-    let addresses = extract_addresses(&args);
-    assert_eq!(addresses.len(), 1);
-    assert_eq!(addresses[0], "127.0.0.1:8080");
-  }
-
-  #[test]
-  fn test_extract_addresses_empty() {
-    let args = serde_yaml::from_str(r#"{}"#).unwrap();
-    let addresses = extract_addresses(&args);
-    assert!(addresses.is_empty());
-  }
-
   // ============== group_servers_by_address_listener_name Tests ==============
 
   #[test]
@@ -1155,11 +1114,9 @@ mod tests {
       name: "default".to_string(),
       hostnames: vec![],
       listeners: vec![crate::config::Listener {
-        listener_name: "http".to_string(),
-        args: serde_yaml::from_str(
-          r#"{addresses: ["127.0.0.1:8080"]}"#,
-        )
-        .unwrap(),
+        kind: "http".to_string(),
+        addresses: vec!["127.0.0.1:8080".to_string()],
+        args: serde_yaml::Value::Null,
       }],
       service: "echo".to_string(),
       tls: None,
@@ -1195,11 +1152,9 @@ mod tests {
         name: "default".to_string(),
         hostnames: vec![],
         listeners: vec![crate::config::Listener {
-          listener_name: "http".to_string(),
-          args: serde_yaml::from_str(
-            r#"{addresses: ["127.0.0.1:8080"]}"#,
-          )
-          .unwrap(),
+          kind: "http".to_string(),
+          addresses: vec!["127.0.0.1:8080".to_string()],
+          args: serde_yaml::Value::Null,
         }],
         service: "echo".to_string(),
         tls: None,
@@ -1210,11 +1165,9 @@ mod tests {
         name: "api".to_string(),
         hostnames: vec!["api.example.com".to_string()],
         listeners: vec![crate::config::Listener {
-          listener_name: "http".to_string(),
-          args: serde_yaml::from_str(
-            r#"{addresses: ["127.0.0.1:8080"]}"#,
-          )
-          .unwrap(),
+          kind: "http".to_string(),
+          addresses: vec!["127.0.0.1:8080".to_string()],
+          args: serde_yaml::Value::Null,
         }],
         service: "api_service".to_string(),
         tls: None,
@@ -1254,11 +1207,9 @@ mod tests {
         name: "http_server".to_string(),
         hostnames: vec![],
         listeners: vec![crate::config::Listener {
-          listener_name: "http".to_string(),
-          args: serde_yaml::from_str(
-            r#"{addresses: ["127.0.0.1:8080"]}"#,
-          )
-          .unwrap(),
+          kind: "http".to_string(),
+          addresses: vec!["127.0.0.1:8080".to_string()],
+          args: serde_yaml::Value::Null,
         }],
         service: "echo".to_string(),
         tls: None,
@@ -1269,11 +1220,9 @@ mod tests {
         name: "https_server".to_string(),
         hostnames: vec![],
         listeners: vec![crate::config::Listener {
-          listener_name: "https".to_string(),
-          args: serde_yaml::from_str(
-            r#"{addresses: ["127.0.0.1:8080"]}"#,
-          )
-          .unwrap(),
+          kind: "https".to_string(),
+          addresses: vec!["127.0.0.1:8080".to_string()],
+          args: serde_yaml::Value::Null,
         }],
         service: "echo".to_string(),
         tls: Some(crate::config::ServerTlsConfig {

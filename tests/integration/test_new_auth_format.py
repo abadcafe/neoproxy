@@ -76,8 +76,7 @@ servers:
         password: testpass
     listeners:
       - kind: http
-        args:
-          addresses: ["127.0.0.1:{port}"]
+        addresses: ["127.0.0.1:{port}"]
     service: connect_tcp
 """
         config_path = write_config(temp_dir, config)
@@ -142,12 +141,11 @@ servers:
   - name: test
     listeners:
       - kind: socks5
+        addresses: ["127.0.0.1:{port}"]
         args:
-          addresses: ["127.0.0.1:{port}"]
-          auth:
-            users:
-              - username: socks_user
-                password: socks_pass
+          users:
+            - username: socks_user
+              password: socks_pass
     service: connect_tcp
 """
         config_path = write_config(temp_dir, config)
@@ -201,8 +199,7 @@ servers:
       - username: testuser
     listeners:
       - kind: http
-        args:
-          addresses: ["127.0.0.1:{port}"]
+        addresses: ["127.0.0.1:{port}"]
     service: connect_tcp
 """
         config_path = write_config(temp_dir, config)
@@ -234,8 +231,7 @@ servers:
     users: []
     listeners:
       - kind: http
-        args:
-          addresses: ["127.0.0.1:{port}"]
+        addresses: ["127.0.0.1:{port}"]
     service: connect_tcp
 """
         config_path = write_config(temp_dir, config)
@@ -277,8 +273,7 @@ servers:
         - "{ca_path}"
     listeners:
       - kind: http
-        args:
-          addresses: ["127.0.0.1:{port}"]
+        addresses: ["127.0.0.1:{port}"]
     service: connect_tcp
 """
         config_path = write_config(temp_dir, config)
@@ -311,10 +306,9 @@ servers:
   - name: test
     listeners:
       - kind: socks5
+        addresses: ["127.0.0.1:{port}"]
         args:
-          addresses: ["127.0.0.1:{port}"]
-          auth:
-            client_ca_path: /some/ca.pem
+          client_ca_path: /some/ca.pem
     service: connect_tcp
 """
         config_path = write_config(temp_dir, config)
@@ -371,8 +365,7 @@ servers:
           key_path: "{key_path}"
     listeners:
       - kind: http3
-        args:
-          addresses: ["127.0.0.1:{udp_port}"]
+        addresses: ["127.0.0.1:{udp_port}"]
     service: connect_tcp
 """
         return write_config(temp_dir, config)
@@ -437,8 +430,8 @@ servers:
   - name: chain
     listeners:
       - kind: http
+        addresses: ["127.0.0.1:{http_port}"]
         args:
-          addresses: ["127.0.0.1:{http_port}"]
           protocols: [http]
           hostnames: []
     service: proxy_chain
@@ -536,8 +529,8 @@ servers:
   - name: chain
     listeners:
       - kind: http
+        addresses: ["127.0.0.1:{http_port}"]
         args:
-          addresses: ["127.0.0.1:{http_port}"]
           protocols: [http]
           hostnames: []
     service: proxy_chain
@@ -636,8 +629,8 @@ servers:
   - name: chain
     listeners:
       - kind: http
+        addresses: ["127.0.0.1:{http_port}"]
         args:
-          addresses: ["127.0.0.1:{http_port}"]
           protocols: [http]
           hostnames: []
     service: proxy_chain
@@ -737,8 +730,8 @@ servers:
   - name: chain
     listeners:
       - kind: http
+        addresses: ["127.0.0.1:{http_port}"]
         args:
-          addresses: ["127.0.0.1:{http_port}"]
           protocols: [http]
           hostnames: []
     service: proxy_chain
@@ -833,8 +826,8 @@ servers:
   - name: chain
     listeners:
       - kind: http
+        addresses: ["127.0.0.1:{http_port}"]
         args:
-          addresses: ["127.0.0.1:{http_port}"]
           protocols: [http]
           hostnames: []
     service: proxy_chain

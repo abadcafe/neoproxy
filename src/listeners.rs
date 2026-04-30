@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use crate::listener;
+use crate::listener::{BuildListener, ListenerProps};
 
 pub mod common;
 pub mod http;
@@ -10,40 +10,43 @@ pub mod http3;
 pub mod https;
 pub mod socks5;
 
+/// Registry for listener builders and their properties.
+///
+/// Provides access to:
+/// - `BuildListener` functions for creating listener instances
+/// - `ListenerProps` for conflict detection
 pub struct ListenerBuilderSet {
-  builders: HashMap<&'static str, Box<dyn listener::BuildListener>>,
+  builders: HashMap<&'static str, Box<dyn BuildListener>>,
+  props: HashMap<&'static str, ListenerProps>,
 }
 
 impl ListenerBuilderSet {
   fn new() -> Self {
-    let mut listener_manager = Self { builders: HashMap::new() };
-    let builders = &mut listener_manager.builders;
-
-    builders.insert(
-      http::listener_name(),
-      Box::new(http::create_listener_builder()),
-    );
-    builders.insert(
-      https::listener_name(),
-      Box::new(https::create_listener_builder()),
-    );
-    builders.insert(
-      http3::listener_name(),
-      Box::new(http3::create_listener_builder()),
-    );
-    builders.insert(
-      socks5::listener_name(),
-      Box::new(socks5::create_listener_builder()),
-    );
-
-    listener_manager
+    let builders = HashMap::from([
+      (http::listener_name(), Box::new(http::create_listener_builder()) as Box<dyn BuildListener>),
+      (https::listener_name(), Box::new(https::create_listener_builder()) as Box<dyn BuildListener>),
+      (http3::listener_name(), Box::new(http3::create_listener_builder()) as Box<dyn BuildListener>),
+      (socks5::listener_name(), Box::new(socks5::create_listener_builder()) as Box<dyn BuildListener>),
+    ]);
+    let props = HashMap::from([
+      (http::listener_name(), http::props()),
+      (https::listener_name(), https::props()),
+      (http3::listener_name(), http3::props()),
+      (socks5::listener_name(), socks5::props()),
+    ]);
+    Self { builders, props }
   }
 
-  pub fn listener_builder(
-    &self,
-    name: &str,
-  ) -> Option<&Box<dyn listener::BuildListener>> {
-    self.builders.get(name)
+  /// Get a listener builder by kind.
+  pub fn listener_builder(&self, kind: &str) -> Option<&Box<dyn BuildListener>> {
+    self.builders.get(kind)
+  }
+
+  /// Get listener properties by kind.
+  ///
+  /// Used for address conflict detection.
+  pub fn props(&self, kind: &str) -> Option<&ListenerProps> {
+    self.props.get(kind)
   }
 
   pub fn global() -> &'static LazyLock<ListenerBuilderSet> {

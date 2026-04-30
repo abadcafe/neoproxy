@@ -4,6 +4,8 @@
 //! - `Listener` - A wrapper type for any listener implementation
 //! - `Listening` - Trait for listener lifecycle (start/stop)
 //! - `BuildListener` - Factory trait for creating listeners
+//! - `ListenerProps` - Metadata for listener conflict detection
+//! - `TransportLayer` - Transport protocol type (TCP/UDP)
 
 use std::future::Future;
 use std::pin::Pin;
@@ -12,6 +14,33 @@ use anyhow::Result;
 
 use crate::config::SerializedArgs;
 use crate::server::Server;
+
+/// Transport layer protocol type.
+///
+/// Used for address conflict detection - listeners on different
+/// transport layers can share the same address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportLayer {
+  /// TCP protocol
+  Tcp,
+  /// UDP protocol
+  Udp,
+}
+
+/// Listener metadata for conflict detection.
+///
+/// Each listener exports its properties via `props()` function,
+/// allowing the framework to detect configuration conflicts
+/// without hardcoding listener-specific logic.
+#[derive(Debug, Clone)]
+pub struct ListenerProps {
+  /// Transport layer (TCP or UDP)
+  pub transport_layer: TransportLayer,
+  /// Whether the listener supports hostname-based routing.
+  /// If true, multiple listeners of the same kind can share
+  /// an address if they have different hostnames configured.
+  pub supports_hostname_routing: bool,
+}
 
 /// Trait for listener lifecycle management.
 ///
@@ -57,17 +86,21 @@ impl Listener {
 
 /// Factory trait for building listeners.
 ///
-/// A `BuildListener` is a function that takes configuration arguments
-/// and a list of servers (for routing), and returns a `Listener`.
+/// A `BuildListener` is a function that takes:
+/// - `addresses` - Network addresses to listen on (framework field)
+/// - `args` - Listener-specific configuration arguments
+/// - `servers` - List of servers for routing
+///
+/// Returns a `Listener` instance.
 ///
 /// Must be `Sync + Send` to allow concurrent access from multiple threads.
 pub trait BuildListener:
-  Fn(SerializedArgs, Vec<Server>) -> Result<Listener> + Sync + Send
+  Fn(Vec<String>, SerializedArgs, Vec<Server>) -> Result<Listener> + Sync + Send
 {
 }
 
 impl<F> BuildListener for F where
-  F: Fn(SerializedArgs, Vec<Server>) -> Result<Listener> + Sync + Send
+  F: Fn(Vec<String>, SerializedArgs, Vec<Server>) -> Result<Listener> + Sync + Send
 {
 }
 
@@ -76,6 +109,7 @@ mod tests {
   use super::*;
 
   fn test_listener_builder(
+    _addresses: Vec<String>,
     _args: SerializedArgs,
     _server_routing_table: Vec<Server>,
   ) -> Result<Listener> {
@@ -93,13 +127,14 @@ mod tests {
   fn test_build_listener_trait_with_context() {
     let builder: Box<dyn BuildListener> =
       Box::new(test_listener_builder);
-    let result = builder(SerializedArgs::Null, vec![]);
+    let result = builder(vec![], SerializedArgs::Null, vec![]);
     assert!(result.is_ok());
   }
 
   #[test]
   fn test_build_listener_with_empty_context() {
     fn builder(
+      _addresses: Vec<String>,
       _args: SerializedArgs,
       _server_routing_table: Vec<Server>,
     ) -> Result<Listener> {
@@ -114,7 +149,7 @@ mod tests {
     }
 
     let builder: Box<dyn BuildListener> = Box::new(builder);
-    let result = builder(SerializedArgs::Null, vec![]);
+    let result = builder(vec![], SerializedArgs::Null, vec![]);
     assert!(result.is_ok());
   }
 

@@ -19,11 +19,13 @@ use crate::config::SerializedArgs;
 use crate::http_utils::{
   BytesBufBodyWrapper, Request, RequestBody, Response,
 };
-use crate::listener::{BuildListener, Listener, Listening};
+use crate::listener::{BuildListener, Listener, ListenerProps, Listening, TransportLayer};
 use crate::listeners::common::TokioLocalExecutor;
 use crate::server::{Server, ServerRouter};
-use crate::service::Service;
 use crate::tracker::StreamTracker;
+
+#[cfg(test)]
+use crate::service::Service;
 
 /// Listener shutdown timeout in seconds.
 /// This is the timeout for Phase 1 of graceful shutdown.
@@ -189,10 +191,7 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
 
 /// HTTP Listener configuration arguments.
 #[derive(Deserialize, Default, Clone, Debug)]
-struct HttpListenerArgs {
-  /// Listening addresses
-  addresses: Vec<String>,
-}
+struct HttpListenerArgs {}
 
 /// HTTP Listener implementation with shared-address routing support.
 struct HttpListener {
@@ -211,12 +210,11 @@ struct HttpListener {
 impl HttpListener {
   /// Create an HttpListener from parsed configuration.
   fn from_args(
-    args: HttpListenerArgs,
+    addresses: Vec<String>,
     server_routing_table: Vec<Server>,
   ) -> Result<Self> {
     // Parse addresses, filtering out invalid ones
-    let addresses: Vec<SocketAddr> = args
-      .addresses
+    let addresses: Vec<SocketAddr> = addresses
       .iter()
       .filter_map(|s| {
         s.parse()
@@ -236,17 +234,17 @@ impl HttpListener {
 
   #[allow(clippy::new_ret_no_self)]
   fn new(
+    addresses: Vec<String>,
     sargs: SerializedArgs,
     server_routing_table: Vec<Server>,
   ) -> Result<Listener> {
-    let args: HttpListenerArgs = serde_yaml::from_value(sargs)?;
-    Ok(Listener::new(Self::from_args(args, server_routing_table)?))
+    let _args: HttpListenerArgs = serde_yaml::from_value(sargs)?;
+    Ok(Listener::new(Self::from_args(addresses, server_routing_table)?))
   }
 
   /// Create an HttpListener directly for testing purposes.
   #[cfg(test)]
-  fn new_for_test(sargs: SerializedArgs, svc: Service) -> Result<Self> {
-    let args: HttpListenerArgs = serde_yaml::from_value(sargs)?;
+  fn new_for_test(addresses: Vec<String>, svc: Service) -> Result<Self> {
     let entry = Server {
       hostnames: vec![],
       service: svc,
@@ -255,7 +253,7 @@ impl HttpListener {
       tls: None,
       access_log_writer: None,
     };
-    Self::from_args(args, vec![entry])
+    Self::from_args(addresses, vec![entry])
   }
 
   fn serve_addr(
@@ -397,6 +395,14 @@ pub fn listener_name() -> &'static str {
   "http"
 }
 
+/// Get listener properties for conflict detection.
+pub fn props() -> ListenerProps {
+  ListenerProps {
+    transport_layer: TransportLayer::Tcp,
+    supports_hostname_routing: true,
+  }
+}
+
 pub fn create_listener_builder() -> Box<dyn BuildListener> {
   Box::new(HttpListener::new)
 }
@@ -418,33 +424,23 @@ mod tests {
   #[test]
   fn test_http_listener_args_no_auth_field() {
     // Auth should no longer be at listener level
-    let yaml = r#"
-addresses:
-  - "127.0.0.1:8080"
-"#;
+    // HttpListenerArgs now has no fields - addresses are passed separately
+    let yaml = r#"{}"#;
     let args: HttpListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert!(args.addresses.len() == 1);
-    // Auth should not be part of listener args
+    // Args should parse successfully without addresses field
+    drop(args);
   }
 
-  #[test]
-  fn test_http_listener_args_protocols_removed() {
-    // The protocols field is no longer needed with new architecture
-    let yaml = r#"
-addresses:
-  - "127.0.0.1:8080"
-"#;
-    let args: HttpListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(args.addresses[0], "127.0.0.1:8080");
+  fn create_test_addresses() -> Vec<String> {
+    vec!["127.0.0.1:0".to_string()]
   }
 
-  fn create_test_listener_args() -> SerializedArgs {
-    serde_yaml::from_str(r#"{addresses: ["127.0.0.1:0"]}"#).unwrap()
+  fn create_test_addresses_with_invalid() -> Vec<String> {
+    vec!["invalid".to_string(), "127.0.0.1:0".to_string()]
   }
 
-  fn create_test_listener_args_with_invalid() -> SerializedArgs {
-    serde_yaml::from_str(r#"{addresses: ["invalid", "127.0.0.1:0"]}"#)
-      .unwrap()
+  fn create_test_args() -> SerializedArgs {
+    serde_yaml::from_str(r#"{}"#).unwrap()
   }
 
   fn create_test_routing_entry() -> Server {
@@ -466,44 +462,32 @@ addresses:
   #[test]
   fn test_create_listener_builder() {
     let builder = create_listener_builder();
-    let args = create_test_listener_args();
-    let result = builder(args, vec![create_test_routing_entry()]);
+    let args = create_test_args();
+    let result = builder(create_test_addresses(), args, vec![create_test_routing_entry()]);
     assert!(result.is_ok());
   }
 
   #[test]
   fn test_http_listener_new_valid() {
-    let args = create_test_listener_args();
+    let args = create_test_args();
     let result =
-      HttpListener::new(args, vec![create_test_routing_entry()]);
+      HttpListener::new(create_test_addresses(), args, vec![create_test_routing_entry()]);
     assert!(result.is_ok());
   }
 
   #[test]
   fn test_http_listener_new_invalid_address() {
-    let args = create_test_listener_args_with_invalid();
+    let args = create_test_args();
     let result =
-      HttpListener::new(args, vec![create_test_routing_entry()]);
+      HttpListener::new(create_test_addresses_with_invalid(), args, vec![create_test_routing_entry()]);
     // Invalid addresses are filtered out, so it should still succeed
     assert!(result.is_ok());
   }
 
   #[test]
-  fn test_http_listener_new_missing_addresses() {
-    let args: SerializedArgs =
-      serde_yaml::from_str(r#"{protocols: [], hostnames: []}"#)
-        .unwrap();
-    let result =
-      HttpListener::new(args, vec![create_test_routing_entry()]);
-    // Missing required field should fail
-    assert!(result.is_err());
-  }
-
-  #[test]
   fn test_active_connections_initial() {
-    let args = create_test_listener_args();
     let svc = crate::server::placeholder_service();
-    let listener = HttpListener::new_for_test(args, svc).unwrap();
+    let listener = HttpListener::new_for_test(create_test_addresses(), svc).unwrap();
     // active_connections should be 0 initially
     assert_eq!(listener.connection_tracker.active_count(), 0);
   }
@@ -529,28 +513,14 @@ addresses:
   #[test]
   fn test_http_listener_args_default() {
     let args = HttpListenerArgs::default();
-    assert!(args.addresses.is_empty());
-  }
-
-  #[test]
-  fn test_http_listener_args_deserialize() {
-    let yaml = r#"
-addresses:
-  - "127.0.0.1:8080"
-  - "0.0.0.0:8081"
-"#;
-    let args: HttpListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(args.addresses.len(), 2);
-    assert_eq!(args.addresses[0], "127.0.0.1:8080");
-    assert_eq!(args.addresses[1], "0.0.0.0:8081");
+    drop(args);
   }
 
   #[test]
   fn test_listener_stop_and_start() {
     // This test verifies the listener can be created and stopped
-    let args = create_test_listener_args();
     let svc = crate::server::placeholder_service();
-    let listener = HttpListener::new_for_test(args, svc).unwrap();
+    let listener = HttpListener::new_for_test(create_test_addresses(), svc).unwrap();
 
     // Stop should work even without start
     listener.stop();
@@ -570,9 +540,9 @@ addresses:
   #[test]
   fn test_http_listener_struct_fields() {
     // Verify struct has all expected fields
-    let args = create_test_listener_args();
+    let args = create_test_args();
     let listener =
-      HttpListener::new(args, vec![create_test_routing_entry()]);
+      HttpListener::new(create_test_addresses(), args, vec![create_test_routing_entry()]);
 
     // This test verifies the constructor succeeds
     assert!(listener.is_ok());
@@ -602,11 +572,9 @@ addresses:
   #[test]
   fn test_monitoring_log_format() {
     // Test that the monitoring log format is correct
-    let args = create_test_listener_args();
     let svc = crate::server::placeholder_service();
-    let listener = HttpListener::new_for_test(args, svc).unwrap();
+    let listener = HttpListener::new_for_test(create_test_addresses(), svc).unwrap();
 
-    // Simulate the monitoring log format string
     let expected_format = format!(
       "[http] active_connections={}",
       listener.connection_tracker.active_count()
@@ -632,8 +600,6 @@ addresses:
     // Auth should come from server-level users via routing table
     use crate::config::UserConfig;
 
-    let args: HttpListenerArgs =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:0"]}"#).unwrap();
     let entry = Server {
       hostnames: vec![],
       service: crate::server::placeholder_service(),
@@ -645,7 +611,7 @@ addresses:
       tls: None,
       access_log_writer: None,
     };
-    let listener = HttpListener::from_args(args, vec![entry]).unwrap();
+    let listener = HttpListener::from_args(create_test_addresses(), vec![entry]).unwrap();
     // Verify routing table contains the users config
     assert!(
       listener.server_routing_table[0].users.is_some(),
@@ -749,10 +715,10 @@ addresses:
         access_log_writer: None,
       },
     ];
-    let args: serde_yaml::Value =
-      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:0"]}"#).unwrap();
+    let args: serde_yaml::Value = serde_yaml::from_str(r#"{}"#).unwrap();
     // The builder should accept Vec<Server> and set up routing
-    let result = super::create_listener_builder()(args, servers);
+    let addresses = vec!["127.0.0.1:0".to_string()];
+    let result = super::create_listener_builder()(addresses, args, servers);
     assert!(
       result.is_ok(),
       "Listener builder should accept Vec<Server>"
@@ -941,9 +907,9 @@ addresses:
 
   #[test]
   fn test_http_listener_stores_access_log_writer() {
-    let args = create_test_listener_args();
+    let args = create_test_args();
     let listener =
-      HttpListener::new(args, vec![create_test_routing_entry()])
+      HttpListener::new(create_test_addresses(), args, vec![create_test_routing_entry()])
         .unwrap();
     // Should compile and create without error
     drop(listener);
@@ -967,7 +933,6 @@ addresses:
       &config,
     );
 
-    let args = create_test_listener_args();
     let entry = Server {
       hostnames: vec![],
       service: crate::server::placeholder_service(),
@@ -976,7 +941,7 @@ addresses:
       tls: None,
       access_log_writer: Some(writer),
     };
-    let listener = HttpListener::new(args, vec![entry]).unwrap();
+    let listener = HttpListener::new(create_test_addresses(), create_test_args(), vec![entry]).unwrap();
     // Should compile and create without error
     drop(listener);
   }

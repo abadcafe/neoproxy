@@ -71,6 +71,22 @@ impl UserPasswordAuth {
     }
   }
 
+  /// Build from a slice of UserCredential.
+  ///
+  /// Creates a verifier with the configured users.
+  /// Pure memory operation, cannot fail.
+  pub fn from_users(users: &[crate::config::UserCredential]) -> Self {
+    if users.is_empty() {
+      Self::none()
+    } else {
+      let map = users
+        .iter()
+        .map(|u| (u.username.clone(), u.password.clone()))
+        .collect();
+      Self { users: Some(map) }
+    }
+  }
+
   /// Verify credentials and return the username on success.
   ///
   /// Combines verification and username extraction in a single pass,

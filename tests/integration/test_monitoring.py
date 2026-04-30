@@ -1282,14 +1282,11 @@ servers:
         key_path: "{key_path}"
   listeners:
   - kind: http
-    args:
-      addresses: [ "0.0.0.0:{http_port}" ]
+    addresses: [ "0.0.0.0:{http_port}" ]
   - kind: socks5
-    args:
-      addresses: [ "0.0.0.0:{socks5_port}" ]
+    addresses: [ "0.0.0.0:{socks5_port}" ]
   - kind: http3
-    args:
-      addresses: [ "0.0.0.0:{http3_port}" ]
+    addresses: [ "0.0.0.0:{http3_port}" ]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "multi_listener_config.yaml")

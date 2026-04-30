@@ -811,8 +811,7 @@ servers:
       key_path: "{key_path}"
   listeners:
   - kind: http3
-    args:
-      addresses: ["0.0.0.0:{proxy_port}"]
+    addresses: ["0.0.0.0:{proxy_port}"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "valid_password.yaml")

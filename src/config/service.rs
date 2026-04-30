@@ -17,7 +17,7 @@ pub struct LayerRaw {
 #[derive(Default, Clone, Debug)]
 pub struct Layer {
   pub plugin_name: String,
-  pub layer_name: String,
+  pub kind: String,
   pub args: SerializedArgs,
 }
 
@@ -36,7 +36,7 @@ pub struct ServiceRaw {
 pub struct Service {
   pub name: String,
   pub plugin_name: String,
-  pub service_name: String,
+  pub kind: String,
   pub args: SerializedArgs,
   pub layers: Vec<Layer>,
 }
@@ -116,7 +116,7 @@ mod tests {
   fn test_layer_default() {
     let layer = Layer::default();
     assert!(layer.plugin_name.is_empty());
-    assert!(layer.layer_name.is_empty());
+    assert!(layer.kind.is_empty());
   }
 
   #[test]
@@ -124,7 +124,7 @@ mod tests {
     let service = Service::default();
     assert!(service.name.is_empty());
     assert!(service.plugin_name.is_empty());
-    assert!(service.service_name.is_empty());
+    assert!(service.kind.is_empty());
     assert!(service.layers.is_empty());
   }
 }

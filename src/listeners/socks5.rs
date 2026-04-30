@@ -26,13 +26,9 @@ use serde::Deserialize;
 use tracing::warn;
 
 use crate::auth::UserPasswordAuth;
-use crate::config::ListenerAuthConfig;
 use crate::config::SerializedArgs;
-use crate::config::{
-  ConfigErrorCollector, validate_listener_auth_config,
-};
 use crate::http_utils::{BytesBufBodyWrapper, RequestBody};
-use crate::listener::{BuildListener, Listener, Listening};
+use crate::listener::{BuildListener, Listener, ListenerProps, Listening, TransportLayer};
 use crate::service::Service as RuntimeService;
 use crate::shutdown::ShutdownHandle;
 use crate::stream::{
@@ -80,8 +76,9 @@ impl Socks5Listener {
   ///
   /// # Arguments
   ///
+  /// * `addresses` - Network addresses to listen on
   /// * `args` - Parsed listener configuration
-  /// * `svc` - Associated service for handling connections
+  /// * `server_routing_table` - Server routing table
   ///
   /// # Returns
   ///
@@ -94,12 +91,12 @@ impl Socks5Listener {
   /// - Configuration validation fails
   #[allow(clippy::new_ret_no_self)]
   pub fn new(
+    addresses: Vec<String>,
     args: Socks5ListenerArgs,
-    _svc: RuntimeService,
     server_routing_table: Vec<crate::server::Server>,
   ) -> Result<Listener> {
     // Resolve addresses, skipping invalid ones
-    let addresses = resolve_addresses(&args.addresses);
+    let addresses = resolve_addresses(&addresses);
 
     // Check if all addresses are invalid
     if addresses.is_empty() {
@@ -113,7 +110,7 @@ impl Socks5Listener {
     let service = server_routing_table
       .first()
       .map(|e| e.service.clone())
-      .unwrap_or(_svc);
+      .unwrap_or_else(crate::server::placeholder_service);
 
     let access_log_writer = server_routing_table
       .first()
@@ -1095,8 +1092,6 @@ pub async fn perform_handshake(
 /// SOCKS5 listener configuration arguments.
 #[derive(Clone, Debug)]
 pub struct Socks5ListenerArgs {
-  /// List of listening addresses as strings.
-  pub addresses: Vec<String>,
   /// Handshake timeout duration.
   pub handshake_timeout: Duration,
   /// User password authentication.
@@ -1106,7 +1101,6 @@ pub struct Socks5ListenerArgs {
 impl Default for Socks5ListenerArgs {
   fn default() -> Self {
     Self {
-      addresses: Vec::new(),
       handshake_timeout: Duration::from_secs(
         DEFAULT_HANDSHAKE_TIMEOUT_SECS,
       ),
@@ -1119,7 +1113,7 @@ impl Default for Socks5ListenerArgs {
 ///
 /// # Arguments
 ///
-/// * `args` - The serialized YAML configuration
+/// * `args` - The serialized YAML configuration (addresses are passed separately)
 ///
 /// # Returns
 ///
@@ -1129,9 +1123,7 @@ impl Default for Socks5ListenerArgs {
 /// # Errors
 ///
 /// Returns an error if:
-/// - `addresses` field is missing or empty
-/// - `auth` includes `client_ca_path` (SOCKS5 only supports password auth)
-/// - `auth` is "password" but `users` is empty
+/// - `users` is empty (must have at least one user if specified)
 /// - `handshake_timeout` is not a valid string format (e.g., "10s")
 /// - Username length is not in range 1-255 bytes
 /// - Any other YAML parsing error occurs
@@ -1139,56 +1131,47 @@ pub fn parse_config(
   args: SerializedArgs,
 ) -> Result<Socks5ListenerArgs> {
   #[derive(Deserialize, Debug)]
+  #[serde(deny_unknown_fields)]
   struct ConfigYaml {
-    addresses: Vec<String>,
     #[serde(default)]
     handshake_timeout: Option<String>,
     #[serde(default)]
-    auth: Option<serde_yaml::Value>,
+    users: Option<Vec<crate::config::UserCredential>>,
   }
 
   let config: ConfigYaml = serde_yaml::from_value(args)
     .context("failed to parse SOCKS5 listener config")?;
 
-  // Validate addresses
-  if config.addresses.is_empty() {
-    bail!("addresses field is missing or empty");
-  }
-
   // Parse handshake timeout (string format like "10s")
   let handshake_timeout =
     parse_handshake_timeout(config.handshake_timeout)?;
 
-  // Parse auth - SOCKS5 only supports password type (users field)
-  let user_password_auth = match config.auth {
+  // Parse users directly (no nested auth layer)
+  let user_password_auth = match config.users {
     None => UserPasswordAuth::none(),
-    Some(yaml) => {
-      let auth_config: ListenerAuthConfig =
-        serde_yaml::from_value(yaml)
-          .context("failed to parse auth config")?;
-
-      // Validate the auth config
-      let mut collector = ConfigErrorCollector::new();
-      validate_listener_auth_config(&auth_config, &mut collector);
-      if collector.has_errors() {
-        let errors: Vec<String> =
-          collector.errors().iter().map(|e| format!("{}", e)).collect();
-        bail!("auth config validation failed: {}", errors.join("; "));
+    Some(users) if users.is_empty() => UserPasswordAuth::none(),
+    Some(users) => {
+      // Validate users: username and password must be non-empty
+      for (idx, user) in users.iter().enumerate() {
+        if user.username.is_empty() {
+          bail!("users[{}].username cannot be empty", idx);
+        }
+        if user.username.len() > 255 {
+          bail!(
+            "users[{}].username exceeds 255 bytes (got {})",
+            idx,
+            user.username.len()
+          );
+        }
+        if user.password.is_empty() {
+          bail!("users[{}].password cannot be empty", idx);
+        }
       }
-
-      // SOCKS5 only supports password auth, reject client_ca_path
-      if auth_config.client_ca_path.is_some() {
-        bail!(
-          "client_ca_path is not supported for SOCKS5 listener; only password authentication is supported"
-        );
-      }
-
-      UserPasswordAuth::from_config(&auth_config)
+      UserPasswordAuth::from_users(&users)
     }
   };
 
   Ok(Socks5ListenerArgs {
-    addresses: config.addresses,
     handshake_timeout,
     user_password_auth,
   })
@@ -1341,23 +1324,28 @@ pub fn listener_name() -> &'static str {
   "socks5"
 }
 
+/// Get listener properties for conflict detection.
+pub fn props() -> ListenerProps {
+  ListenerProps {
+    transport_layer: TransportLayer::Tcp,
+    supports_hostname_routing: false,
+  }
+}
+
 /// Creates a listener builder.
 ///
 /// Returns a builder function that parses configuration and creates
 /// a Socks5Listener instance.
 pub fn create_listener_builder() -> Box<dyn BuildListener> {
   Box::new(
-    |args: SerializedArgs,
+    |addresses: Vec<String>,
+     args: SerializedArgs,
      server_routing_table: Vec<crate::server::Server>| {
       // Parse configuration
       let listener_args = parse_config(args)?;
 
       // Create listener
-      Socks5Listener::new(
-        listener_args,
-        crate::server::placeholder_service(),
-        server_routing_table,
-      )
+      Socks5Listener::new(addresses, listener_args, server_routing_table)
     },
   )
 }
@@ -1460,19 +1448,17 @@ mod tests {
   #[test]
   fn test_socks5_listener_args_default() {
     let args = Socks5ListenerArgs::default();
-    assert!(args.addresses.is_empty());
     assert_eq!(args.handshake_timeout, Duration::from_secs(10));
+    assert!(args.user_password_auth.verify_credentials("", "").is_ok());
   }
 
   #[test]
   fn test_socks5_listener_args_clone() {
     let args = Socks5ListenerArgs {
-      addresses: vec!["127.0.0.1:1080".to_string()],
       handshake_timeout: Duration::from_secs(5),
       user_password_auth: UserPasswordAuth::none(),
     };
     let cloned = args.clone();
-    assert_eq!(args.addresses, cloned.addresses);
     assert_eq!(args.handshake_timeout, cloned.handshake_timeout);
   }
 
@@ -1480,16 +1466,9 @@ mod tests {
 
   #[test]
   fn test_parse_config_valid_minimal() {
-    let yaml = serde_yaml::from_str(
-      r#"
-addresses:
-  - "127.0.0.1:1080"
-"#,
-    )
-    .unwrap();
+    let yaml = serde_yaml::from_str(r#"{}"#).unwrap();
 
     let args = parse_config(yaml).unwrap();
-    assert_eq!(args.addresses, vec!["127.0.0.1:1080"]);
     assert_eq!(args.handshake_timeout, Duration::from_secs(10));
   }
 
@@ -1497,8 +1476,6 @@ addresses:
   fn test_parse_config_valid_with_timeout() {
     let yaml = serde_yaml::from_str(
       r#"
-addresses:
-  - "127.0.0.1:1080"
 handshake_timeout: "5s"
 "#,
     )
@@ -1512,12 +1489,9 @@ handshake_timeout: "5s"
   fn test_parse_config_with_password_auth() {
     let yaml = serde_yaml::from_str(
       r#"
-addresses:
-  - "127.0.0.1:1080"
-auth:
-  users:
-    - username: alice
-      password: secret123
+users:
+  - username: alice
+    password: secret123
 "#,
     )
     .unwrap();
@@ -1539,45 +1513,33 @@ auth:
   }
 
   #[test]
-  fn test_parse_config_rejects_client_ca_path() {
+  fn test_parse_config_rejects_empty_username() {
     let yaml = serde_yaml::from_str(
       r#"
-addresses:
-  - "127.0.0.1:1080"
-auth:
-  client_ca_path: /path/to/ca.pem
+users:
+  - username: ""
+    password: secret
 "#,
     )
     .unwrap();
 
     let result = parse_config(yaml);
-    assert!(result.is_err(), "Should reject client_ca_path for SOCKS5");
+    assert!(result.is_err(), "Should reject empty username");
   }
 
   #[test]
-  fn test_parse_config_missing_addresses() {
+  fn test_parse_config_rejects_empty_password() {
     let yaml = serde_yaml::from_str(
       r#"
-handshake_timeout: "5s"
+users:
+  - username: alice
+    password: ""
 "#,
     )
     .unwrap();
 
     let result = parse_config(yaml);
-    assert!(result.is_err());
-  }
-
-  #[test]
-  fn test_parse_config_empty_addresses() {
-    let yaml = serde_yaml::from_str(
-      r#"
-addresses: []
-"#,
-    )
-    .unwrap();
-
-    let result = parse_config(yaml);
-    assert!(result.is_err());
+    assert!(result.is_err(), "Should reject empty password");
   }
 
   // ========== Helper function tests ==========

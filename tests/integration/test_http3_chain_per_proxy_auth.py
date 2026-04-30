@@ -124,8 +124,7 @@ servers:
 - name: http_proxy
   listeners:
   - kind: http
-    args:
-      addresses: [ "0.0.0.0:{http_port}" ]
+    addresses: [ "0.0.0.0:{http_port}" ]
   service: http3_chain
 """
     config_path = os.path.join(temp_dir, "http3_chain_auth_config.yaml")

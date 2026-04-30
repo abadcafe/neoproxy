@@ -110,47 +110,6 @@ use crate::http_utils::Response;
 #[cfg(test)]
 mod shared_address_tests {
   use super::*;
-  use crate::config::extract_addresses;
-
-  #[test]
-  fn test_extract_addresses_plural() {
-    let args = serde_yaml::from_str(
-      r#"{addresses: ["127.0.0.1:8080", "127.0.0.1:8081"]}"#,
-    )
-    .unwrap();
-    let addresses = extract_addresses(&args);
-    assert_eq!(addresses.len(), 2);
-    assert_eq!(addresses[0], "127.0.0.1:8080");
-    assert_eq!(addresses[1], "127.0.0.1:8081");
-  }
-
-  #[test]
-  fn test_extract_addresses_singular() {
-    let args =
-      serde_yaml::from_str(r#"{address: "127.0.0.1:8080"}"#).unwrap();
-    let addresses = extract_addresses(&args);
-    assert_eq!(addresses.len(), 1);
-    assert_eq!(addresses[0], "127.0.0.1:8080");
-  }
-
-  #[test]
-  fn test_extract_addresses_priority() {
-    // When both are present, plural takes priority
-    let args = serde_yaml::from_str(
-      r#"{addresses: ["127.0.0.1:8080"], address: "127.0.0.1:9090"}"#,
-    )
-    .unwrap();
-    let addresses = extract_addresses(&args);
-    assert_eq!(addresses.len(), 1);
-    assert_eq!(addresses[0], "127.0.0.1:8080");
-  }
-
-  #[test]
-  fn test_extract_addresses_empty() {
-    let args = serde_yaml::from_str(r#"{}"#).unwrap();
-    let addresses = extract_addresses(&args);
-    assert!(addresses.is_empty());
-  }
 
   #[test]
   fn test_routing_with_server_router() {

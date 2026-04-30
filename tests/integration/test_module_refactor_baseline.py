@@ -27,8 +27,7 @@ servers:
 - name: server1
   listeners:
   - kind: http
-    args:
-      addresses: [ "127.0.0.1:{port}" ]
+    addresses: [ "127.0.0.1:{port}" ]
   service: echo_svc
 """
     config_path = os.path.join(temp_dir, "config.yaml")

@@ -18,7 +18,7 @@ use tracing::{info, warn};
 use crate::config::SerializedArgs;
 use crate::http_utils::build_error_response;
 use crate::http_utils::{BytesBufBodyWrapper, RequestBody, Response};
-use crate::listener::{BuildListener, Listener, Listening};
+use crate::listener::{BuildListener, Listener, ListenerProps, Listening, TransportLayer};
 use crate::shutdown::ShutdownHandle;
 use crate::stream::H3UpgradeTrigger;
 use crate::tls::build_tls_server_config;
@@ -59,24 +59,11 @@ const H3_NO_ERROR_CODE: u32 = 0x100;
 // ============================================================================
 
 /// HTTP/3 Listener configuration arguments
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, Default)]
 pub struct Http3ListenerArgs {
-  /// Listening addresses in "host:port" format
-  #[serde(default)]
-  pub addresses: Vec<String>,
   /// QUIC protocol parameters (optional)
   #[serde(default)]
   pub quic: Option<QuicConfigArgs>,
-}
-
-impl Http3ListenerArgs {
-  /// Get addresses, returns error if empty.
-  pub fn get_addresses(&self) -> Result<&[String]> {
-    if self.addresses.is_empty() {
-      bail!("'addresses' must be specified and non-empty");
-    }
-    Ok(&self.addresses)
-  }
 }
 
 /// QUIC protocol configuration arguments
@@ -603,14 +590,14 @@ impl Http3Listener {
   /// Create a new HTTP/3 Listener
   #[allow(clippy::new_ret_no_self)]
   pub fn new(
+    addresses: Vec<String>,
     sargs: SerializedArgs,
     server_routing_table: Vec<crate::server::Server>,
   ) -> Result<Listener> {
     let args: Http3ListenerArgs = serde_yaml::from_value(sargs)?;
 
     // Parse addresses
-    let addresses: Vec<SocketAddr> = args
-      .get_addresses()?
+    let addresses: Vec<SocketAddr> = addresses
       .iter()
       .map(|addr| {
         addr
@@ -856,6 +843,14 @@ pub fn listener_name() -> &'static str {
   "http3"
 }
 
+/// Get listener properties for conflict detection.
+pub fn props() -> ListenerProps {
+  ListenerProps {
+    transport_layer: TransportLayer::Udp,
+    supports_hostname_routing: true,
+  }
+}
+
 /// Create a listener builder
 pub fn create_listener_builder() -> Box<dyn BuildListener> {
   Box::new(Http3Listener::new)
@@ -1037,11 +1032,10 @@ mod tests {
   fn test_auth_config_none() {
     // No auth at listener level - it's now at server level
     let args = Http3ListenerArgs {
-      addresses: vec!["0.0.0.0:443".to_string()],
       quic: None,
     };
     // ListenerArgs no longer has auth field - auth is at server level
-    assert_eq!(args.addresses.len(), 1);
+    assert!(args.quic.is_none());
   }
 
   #[test]
@@ -1269,13 +1263,8 @@ client_ca_path: /path/to/ca.pem
 
   #[test]
   fn test_http3_listener_args_deserialize_minimal() {
-    let yaml = r#"
-addresses:
-  - "0.0.0.0:443"
-"#;
+    let yaml = r#"{}"#;
     let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(args.addresses.len(), 1);
-    assert_eq!(args.addresses[0], "0.0.0.0:443");
     assert!(args.quic.is_none());
   }
 
@@ -1284,8 +1273,6 @@ addresses:
     // TLS and auth are no longer at listener level
     // Only QUIC config remains as listener-specific
     let yaml = r#"
-addresses:
-  - "0.0.0.0:443"
 quic:
   max_concurrent_bidi_streams: 200
   max_idle_timeout_ms: 60000
@@ -1294,8 +1281,6 @@ quic:
   receive_window: 20971520
 "#;
     let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(args.addresses.len(), 1);
-    assert_eq!(args.addresses[0], "0.0.0.0:443");
     assert!(args.quic.is_some());
     let quic = args.quic.unwrap();
     assert_eq!(quic.max_concurrent_bidi_streams, Some(200));
@@ -1304,15 +1289,12 @@ quic:
 
   #[test]
   fn test_http3_listener_args_no_required_fields() {
-    // addresses are optional at parse time, validation happens in get_addresses()
+    // addresses are passed separately, args is optional
     let yaml = r#"{}"#;
     let result: Result<Http3ListenerArgs, _> =
       serde_yaml::from_str(yaml);
     // Parsing should succeed (no required fields)
     assert!(result.is_ok());
-    let args = result.unwrap();
-    // But get_addresses() should fail
-    assert!(args.get_addresses().is_err());
   }
 
   // ============== Constants Tests ==============
@@ -1662,39 +1644,28 @@ quic:
 
   #[test]
   fn test_http3_listener_args_addresses_field() {
-    // Test that addresses (plural) field is accepted
-    // TLS and auth are now at server level, not listener level
-    let yaml = r#"
-addresses:
-  - "127.0.0.1:8443"
-  - "127.0.0.1:8444"
-"#;
+    // Addresses are now passed separately, not in args
+    // This test verifies the args struct has no addresses field
+    let yaml = r#"{}"#;
     let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(args.addresses.len(), 2);
-    assert_eq!(args.addresses[0], "127.0.0.1:8443");
-    assert_eq!(args.addresses[1], "127.0.0.1:8444");
+    assert!(args.quic.is_none());
   }
 
   #[test]
   fn test_http3_listener_args_single_address() {
-    let yaml = r#"
-addresses:
-  - "127.0.0.1:8443"
-"#;
+    // Addresses are now passed separately at the config level
+    let yaml = r#"{}"#;
     let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(args.addresses.len(), 1);
-    assert_eq!(args.addresses[0], "127.0.0.1:8443");
+    assert!(args.quic.is_none());
   }
 
   #[test]
   fn test_http3_listener_args_no_address_error() {
-    // When addresses is empty, get_addresses should return error
+    // Addresses are now validated at config level, not in listener args
+    // This test just verifies the args struct can be empty
     let yaml = r#"{}"#;
     let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    let result = args.get_addresses();
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(err.contains("addresses"));
+    assert!(args.quic.is_none());
   }
 
   // ============== Task 011: Remove TLS/Auth from Listener Args Tests ==============
@@ -1702,34 +1673,26 @@ addresses:
   #[test]
   fn test_http3_listener_args_no_tls_fields() {
     // TLS should no longer be at listener level
-    let yaml = r#"
-addresses:
-  - "127.0.0.1:8443"
-"#;
+    let yaml = r#"{}"#;
     let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert!(args.addresses.len() == 1);
     // TLS should not be part of listener args
+    assert!(args.quic.is_none());
   }
 
   #[test]
   fn test_http3_listener_args_no_auth_field() {
     // Auth should no longer be at listener level
     // The struct no longer has an auth field, so parsing without it should work
-    let yaml = r#"
-addresses:
-  - "127.0.0.1:8443"
-"#;
+    let yaml = r#"{}"#;
     let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
     // Auth is now at server level, not listener level
-    assert!(args.addresses.len() == 1);
+    assert!(args.quic.is_none());
   }
 
   #[test]
   fn test_http3_listener_args_quic_optional() {
     // QUIC config is still at listener level (protocol-specific)
     let yaml = r#"
-addresses:
-  - "127.0.0.1:8443"
 quic:
   max_concurrent_bidi_streams: 200
 "#;

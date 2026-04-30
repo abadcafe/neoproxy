@@ -95,8 +95,7 @@ servers:
 - name: http_connect
   listeners:
   - kind: http
-    args:
-      addresses: [ "0.0.0.0:{proxy_port}" ]
+    addresses: [ "0.0.0.0:{proxy_port}" ]
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "test_config.yaml")
@@ -132,8 +131,7 @@ servers:
 - name: echo_server
   listeners:
   - kind: http
-    args:
-      addresses: [ "0.0.0.0:{proxy_port}" ]
+    addresses: [ "0.0.0.0:{proxy_port}" ]
   service: echo
 """
     config_path = os.path.join(temp_dir, "echo_config.yaml")

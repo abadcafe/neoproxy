@@ -15,10 +15,8 @@ use serde::Deserialize;
 use tower::Service;
 use tracing::{info, warn};
 
-use crate::http_utils::{
-  BytesBufBodyWrapper, RequestBody, Response,
-};
 use crate::http_utils::build_error_response;
+use crate::http_utils::{BytesBufBodyWrapper, RequestBody, Response};
 use crate::plugin;
 use crate::shutdown::{ShutdownHandle, StreamTracker};
 use crate::stream::H3UpgradeTrigger;
@@ -317,7 +315,8 @@ async fn handle_h3_stream(
   };
 
   // Phase 3: Authentication using routing_entry's users
-  let user_password_auth = super::common::build_user_password_auth(&routing_entry.users);
+  let user_password_auth =
+    super::common::build_user_password_auth(&routing_entry.users);
   let auth_result =
     user_password_auth.verify_and_extract_username(&req);
   let (user, auth_type) = match auth_result {
@@ -632,8 +631,10 @@ impl Http3Listener {
     }
 
     // Build TLS config from all servers' certificates (SNI-based selection)
-    let tls_config =
-      build_tls_server_config(&server_routing_table, vec![H3_ALPN.to_vec()])?;
+    let tls_config = build_tls_server_config(
+      &server_routing_table,
+      vec![H3_ALPN.to_vec()],
+    )?;
 
     Ok(plugin::Listener::new(Self {
       addresses,
@@ -865,9 +866,9 @@ pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::auth::ListenerAuthConfig;
-  use crate::auth::UserCredential;
   use crate::auth::UserPasswordAuth;
+  use crate::config::ListenerAuthConfig;
+  use crate::config::UserCredential;
   use crate::config_validator::{
     ConfigErrorCollector, validate_listener_auth_config,
   };
@@ -1429,12 +1430,12 @@ quic:
   #[test]
   fn test_record_access_log_writes_entry() {
     let dir = tempfile::tempdir().unwrap();
-    let config = crate::access_log::AccessLogConfig {
+    let config = crate::config::AccessLogConfig {
       enabled: true,
       path_prefix: "h3test.log".to_string(),
-      format: crate::access_log::LogFormat::Text,
+      format: crate::config::LogFormat::Text,
       buffer: byte_unit::Byte::from_u64(64),
-      flush: crate::access_log::config::HumanDuration(
+      flush: crate::config::HumanDuration(
         std::time::Duration::from_millis(100),
       ),
       max_size: byte_unit::Byte::from_u64(1024 * 1024),

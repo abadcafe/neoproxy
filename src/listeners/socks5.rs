@@ -25,7 +25,8 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use tracing::warn;
 
-use crate::auth::{ListenerAuthConfig, UserPasswordAuth};
+use crate::auth::UserPasswordAuth;
+use crate::config::ListenerAuthConfig;
 use crate::config_validator::{
   ConfigErrorCollector, validate_listener_auth_config,
 };
@@ -1167,15 +1168,9 @@ pub fn parse_config(
       let mut collector = ConfigErrorCollector::new();
       validate_listener_auth_config(&auth_config, &mut collector);
       if collector.has_errors() {
-        let errors: Vec<String> = collector
-          .errors()
-          .iter()
-          .map(|e| format!("{}", e))
-          .collect();
-        bail!(
-          "auth config validation failed: {}",
-          errors.join("; ")
-        );
+        let errors: Vec<String> =
+          collector.errors().iter().map(|e| format!("{}", e)).collect();
+        bail!("auth config validation failed: {}", errors.join("; "));
       }
 
       // SOCKS5 only supports password auth, reject client_ca_path
@@ -1651,12 +1646,12 @@ addresses: []
   #[test]
   fn test_record_access_log_writes_entry() {
     let dir = tempfile::tempdir().unwrap();
-    let config = crate::access_log::AccessLogConfig {
+    let config = crate::config::AccessLogConfig {
       enabled: true,
       path_prefix: "socks5test.log".to_string(),
-      format: crate::access_log::LogFormat::Text,
+      format: crate::config::LogFormat::Text,
       buffer: byte_unit::Byte::from_u64(64),
-      flush: crate::access_log::config::HumanDuration(
+      flush: crate::config::HumanDuration(
         std::time::Duration::from_millis(100),
       ),
       max_size: byte_unit::Byte::from_u64(1024 * 1024),

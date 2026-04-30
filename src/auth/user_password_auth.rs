@@ -12,7 +12,7 @@ use subtle::ConstantTimeEq;
 use tracing::debug;
 
 use crate::auth::AuthError;
-use crate::auth::ListenerAuthConfig;
+use crate::config::ListenerAuthConfig;
 
 /// Verify password against stored credentials using constant-time comparison.
 ///
@@ -173,16 +173,13 @@ mod tests {
 
   #[test]
   fn test_verify_credentials_valid() {
-    let config =
-      crate::auth::ListenerAuthConfig {
-        users: vec![
-          crate::auth::UserCredential {
-            username: "socks_user".to_string(),
-            password: "socks_pass".to_string(),
-          },
-        ],
-        client_ca_path: None,
-      };
+    let config = crate::config::ListenerAuthConfig {
+      users: vec![crate::config::UserCredential {
+        username: "socks_user".to_string(),
+        password: "socks_pass".to_string(),
+      }],
+      client_ca_path: None,
+    };
     let auth = UserPasswordAuth::from_config(&config);
     assert!(
       auth.verify_credentials("socks_user", "socks_pass").is_ok()
@@ -191,16 +188,13 @@ mod tests {
 
   #[test]
   fn test_verify_credentials_invalid() {
-    let config =
-      crate::auth::ListenerAuthConfig {
-        users: vec![
-          crate::auth::UserCredential {
-            username: "socks_user".to_string(),
-            password: "socks_pass".to_string(),
-          },
-        ],
-        client_ca_path: None,
-      };
+    let config = crate::config::ListenerAuthConfig {
+      users: vec![crate::config::UserCredential {
+        username: "socks_user".to_string(),
+        password: "socks_pass".to_string(),
+      }],
+      client_ca_path: None,
+    };
     let auth = UserPasswordAuth::from_config(&config);
     assert!(auth.verify_credentials("socks_user", "wrong").is_err());
   }
@@ -216,16 +210,13 @@ mod tests {
 
   #[test]
   fn test_verify_and_extract_username_valid() {
-    let config =
-      crate::auth::ListenerAuthConfig {
-        users: vec![
-          crate::auth::UserCredential {
-            username: "admin".to_string(),
-            password: "secret123".to_string(),
-          },
-        ],
-        client_ca_path: None,
-      };
+    let config = crate::config::ListenerAuthConfig {
+      users: vec![crate::config::UserCredential {
+        username: "admin".to_string(),
+        password: "secret123".to_string(),
+      }],
+      client_ca_path: None,
+    };
     let auth = UserPasswordAuth::from_config(&config);
 
     let credentials = BASE64_STANDARD.encode("admin:secret123");
@@ -243,16 +234,13 @@ mod tests {
 
   #[test]
   fn test_verify_and_extract_username_invalid_credentials() {
-    let config =
-      crate::auth::ListenerAuthConfig {
-        users: vec![
-          crate::auth::UserCredential {
-            username: "admin".to_string(),
-            password: "secret123".to_string(),
-          },
-        ],
-        client_ca_path: None,
-      };
+    let config = crate::config::ListenerAuthConfig {
+      users: vec![crate::config::UserCredential {
+        username: "admin".to_string(),
+        password: "secret123".to_string(),
+      }],
+      client_ca_path: None,
+    };
     let auth = UserPasswordAuth::from_config(&config);
 
     let credentials = BASE64_STANDARD.encode("admin:wrongpassword");
@@ -284,16 +272,13 @@ mod tests {
 
   #[test]
   fn test_verify_and_extract_username_missing_header() {
-    let config =
-      crate::auth::ListenerAuthConfig {
-        users: vec![
-          crate::auth::UserCredential {
-            username: "admin".to_string(),
-            password: "secret123".to_string(),
-          },
-        ],
-        client_ca_path: None,
-      };
+    let config = crate::config::ListenerAuthConfig {
+      users: vec![crate::config::UserCredential {
+        username: "admin".to_string(),
+        password: "secret123".to_string(),
+      }],
+      client_ca_path: None,
+    };
     let auth = UserPasswordAuth::from_config(&config);
 
     let req = http::Request::builder()

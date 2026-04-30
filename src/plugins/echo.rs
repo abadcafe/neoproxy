@@ -7,7 +7,7 @@ use anyhow::Result;
 use http_body_util::{BodyExt, Full};
 
 use crate::http_utils::{
-  BytesBufBodyWrapper, Request,  Response, ResponseBody,
+  BytesBufBodyWrapper, Request, Response, ResponseBody,
 };
 use crate::plugin;
 

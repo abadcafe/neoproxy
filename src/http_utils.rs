@@ -66,8 +66,12 @@ pub fn build_empty_response(status: http::StatusCode) -> Response {
 }
 
 /// Build an error response with the given status code and message.
-pub fn build_error_response(status: http::StatusCode, message: &str) -> Response {
-  let full = http_body_util::Full::new(bytes::Bytes::from(message.to_string()));
+pub fn build_error_response(
+  status: http::StatusCode,
+  message: &str,
+) -> Response {
+  let full =
+    http_body_util::Full::new(bytes::Bytes::from(message.to_string()));
   let bytes_buf = BytesBufBodyWrapper::new(full);
   let body = ResponseBody::new(bytes_buf);
   let mut resp = Response::new(body);
@@ -91,7 +95,8 @@ mod tests {
 
   #[test]
   fn test_build_error_response_with_message() {
-    let resp = build_error_response(http::StatusCode::BAD_REQUEST, "test error");
+    let resp =
+      build_error_response(http::StatusCode::BAD_REQUEST, "test error");
     assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
   }
 }

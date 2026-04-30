@@ -23,7 +23,7 @@ use serde::Deserialize;
 use tokio::task;
 use tracing::{error, info, warn};
 
-use crate::auth::UserCredential;
+use crate::config::UserCredential;
 use crate::connect_utils::{self as utils, ConnectTargetError};
 use crate::h3_stream::H3ClientBidiStream;
 use crate::http_utils::{Request, Response};
@@ -409,7 +409,11 @@ impl ProxyGroup {
     // Use configured hostname for SNI, or fall back to IP address
     let host: &str = match &self.proxies[proxy_idx].hostname {
       Some(h) => h.as_str(),
-      None => return Err(anyhow!("hostname is required for SNI, configure it in proxy_group")),
+      None => {
+        return Err(anyhow!(
+          "hostname is required for SNI, configure it in proxy_group"
+        ));
+      }
     };
     let conn = cli_endpoint.connect(addr, host)?.await?;
 
@@ -486,9 +490,7 @@ impl ProxyGroup {
 /// Build a 200 OK tunnel response with ServiceMetrics attached.
 ///
 /// Extracted to enable unit testing of the metrics insertion logic.
-fn build_tunnel_response_with_metrics(
-  connect_ms: u64,
-) -> Response {
+fn build_tunnel_response_with_metrics(connect_ms: u64) -> Response {
   let mut resp = build_empty_response(http::StatusCode::OK);
   let mut metrics = crate::access_log::ServiceMetrics::new();
   metrics.add("connect_ms", connect_ms);
@@ -533,7 +535,8 @@ impl Http3ChainServiceArgs {
         bail!("proxy_group[{}].weight must be > 0", idx);
       }
       if let Some(ref tls) = proxy.tls {
-        tls.validate_if_non_empty()
+        tls
+          .validate_if_non_empty()
           .with_context(|| format!("proxy_group[{}].tls", idx))?;
       }
     }
@@ -547,9 +550,11 @@ impl Http3ChainServiceArgs {
     &self,
     proxy_user: &Option<UserCredential>,
     proxy_tls: &Option<ClientTlsConfig>,
-  ) -> (UserPasswordCredential, ClientCertCredential, Option<String>) {
+  ) -> (UserPasswordCredential, ClientCertCredential, Option<String>)
+  {
     // Resolve user credential with default inheritance
-    let effective_user = proxy_user.clone().or_else(|| self.default_user.clone());
+    let effective_user =
+      proxy_user.clone().or_else(|| self.default_user.clone());
     let upc = match effective_user {
       Some(user) => UserPasswordCredential { user: Some(user) },
       None => UserPasswordCredential::none(),
@@ -625,7 +630,8 @@ impl Http3ChainService {
           tls,
         } = e;
 
-        let (upc, ccc, server_ca) = args.resolve_credential(&user, &tls);
+        let (upc, ccc, server_ca) =
+          args.resolve_credential(&user, &tls);
 
         s.parse()
           .inspect_err(|e| error!("address '{s}' invalid: {e}"))
@@ -1262,8 +1268,7 @@ server_ca_path: /path/to/ca.pem
       }),
     };
     // None means inherit default_tls
-    let (_upc, _ccc, server_ca) =
-      args.resolve_credential(&None, &None);
+    let (_upc, _ccc, server_ca) = args.resolve_credential(&None, &None);
     assert_eq!(
       server_ca,
       Some("/default/ca.pem".to_string()),
@@ -1308,8 +1313,7 @@ server_ca_path: /path/to/ca.pem
       default_tls: None,
     };
     // None means inherit, but no default → no credential
-    let (upc, ccc, server_ca) =
-      args.resolve_credential(&None, &None);
+    let (upc, ccc, server_ca) = args.resolve_credential(&None, &None);
     assert!(
       upc.user.is_none(),
       "No default means no password credential"
@@ -1388,13 +1392,14 @@ server_ca_path: /path/to/ca.pem
       username: "proxy_user".to_string(),
       password: "proxy_pass".to_string(),
     });
-    let (upc, _ccc, _server_ca) = args.resolve_credential(&proxy_user, &None);
-    assert!(
-      upc.user.is_some(),
-      "Should have user credential"
-    );
+    let (upc, _ccc, _server_ca) =
+      args.resolve_credential(&proxy_user, &None);
+    assert!(upc.user.is_some(), "Should have user credential");
     let user = upc.user.unwrap();
-    assert_eq!(user.username, "proxy_user", "Proxy user should override default");
+    assert_eq!(
+      user.username, "proxy_user",
+      "Proxy user should override default"
+    );
     assert_eq!(user.password, "proxy_pass");
   }
 

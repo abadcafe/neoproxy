@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 
-use crate::access_log::LogFormat;
 use crate::access_log::context::{AccessLogEntry, AuthType};
+use crate::config::LogFormat;
 
 /// Pre-parsed format description for text format (nginx-style timestamp)
 static TEXT_TIME_FORMAT: LazyLock<

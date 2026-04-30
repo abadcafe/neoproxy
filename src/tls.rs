@@ -12,7 +12,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
+use rustls::server::{
+  ClientHello, ResolvesServerCert, WebPkiClientVerifier,
+};
 use rustls::sign::CertifiedKey;
 use tracing::{info, warn};
 
@@ -38,10 +40,7 @@ pub struct SniResolver {
 impl SniResolver {
   /// Create a new empty resolver.
   pub fn new() -> Self {
-    Self {
-      exact_certs: HashMap::new(),
-      wildcard_certs: Vec::new(),
-    }
+    Self { exact_certs: HashMap::new(), wildcard_certs: Vec::new() }
   }
 
   /// Add an exact domain mapping.
@@ -50,7 +49,11 @@ impl SniResolver {
   }
 
   /// Add a wildcard domain mapping.
-  pub fn add_wildcard(&mut self, pattern: String, cert: Arc<CertifiedKey>) {
+  pub fn add_wildcard(
+    &mut self,
+    pattern: String,
+    cert: Arc<CertifiedKey>,
+  ) {
     self.wildcard_certs.push((pattern, cert));
   }
 }
@@ -62,7 +65,10 @@ impl Default for SniResolver {
 }
 
 impl ResolvesServerCert for SniResolver {
-  fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+  fn resolve(
+    &self,
+    client_hello: ClientHello<'_>,
+  ) -> Option<Arc<CertifiedKey>> {
     let sni = client_hello.server_name()?;
 
     // 1. Exact match
@@ -239,7 +245,10 @@ pub fn build_sni_resolver(
     };
 
     if tls.certificates.is_empty() {
-      warn!("Server '{}' has TLS config but no certificates", server.service_name);
+      warn!(
+        "Server '{}' has TLS config but no certificates",
+        server.service_name
+      );
       continue;
     }
 
@@ -316,7 +325,9 @@ pub fn build_tls_server_config(
         let ca_certs: Vec<CertificateDer> =
           rustls_pemfile::certs(&mut ca_reader)
             .collect::<Result<Vec<_>, _>>()
-            .with_context(|| "Failed to parse client CA certificates")?;
+            .with_context(
+              || "Failed to parse client CA certificates",
+            )?;
         for cert in ca_certs {
           roots.add(cert)?;
         }

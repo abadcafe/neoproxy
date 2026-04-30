@@ -410,7 +410,9 @@ pub fn create_plugin() -> Box<dyn plugin::Plugin> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::http_utils::{BytesBufBodyWrapper, RequestBody, ResponseBody};
+  use crate::http_utils::{
+    BytesBufBodyWrapper, RequestBody, ResponseBody,
+  };
   use crate::plugin::Plugin;
   use bytes::Bytes;
   use futures::task::noop_waker;
@@ -693,10 +695,7 @@ mod tests {
     assert!(builder.is_none());
   }
 
-  fn make_connect_request(
-    method: http::Method,
-    uri: &str,
-  ) -> Request {
+  fn make_connect_request(method: http::Method, uri: &str) -> Request {
     http::Request::builder()
       .method(method)
       .uri(uri)

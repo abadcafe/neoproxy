@@ -126,10 +126,7 @@ pub trait BuildListener:
 }
 
 impl<F> BuildListener for F where
-  F: Fn(
-      SerializedArgs,
-      Vec<crate::server::Server>,
-    ) -> Result<Listener>
+  F: Fn(SerializedArgs, Vec<crate::server::Server>) -> Result<Listener>
     + Sync
     + Send
 {

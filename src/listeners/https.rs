@@ -71,8 +71,7 @@ impl HttpsServiceAdaptor {
     client_addr: Option<SocketAddr>,
     sni: Option<String>,
   ) -> Self {
-    let server_router =
-      ServerRouter::build(server_routing_table);
+    let server_router = ServerRouter::build(server_routing_table);
     Self { server_router, client_addr, sni }
   }
 
@@ -107,8 +106,12 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
 
     // Step 1: Check HTTP version FIRST
     // HTTP/1.0 is not supported - return 505 HTTP Version Not Supported
-    if let Err(_status) = super::common::check_http_version(req.version()) {
-      return Box::pin(async { Ok(super::common::build_505_response()) });
+    if let Err(_status) =
+      super::common::check_http_version(req.version())
+    {
+      return Box::pin(async {
+        Ok(super::common::build_505_response())
+      });
     }
 
     // Step 2: Check SNI vs Host header mismatch
@@ -155,7 +158,8 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
     };
 
     // Step 5: Check authentication using routing_entry's users
-    let user_password_auth = super::common::build_user_password_auth(&routing_entry.users);
+    let user_password_auth =
+      super::common::build_user_password_auth(&routing_entry.users);
     let verify_result =
       user_password_auth.verify_and_extract_username(&auth_req);
     let (user, auth_type) = match verify_result {
@@ -264,7 +268,8 @@ impl HttpsListener {
     }
 
     // Build TLS config from all servers' certificates (SNI-based selection)
-    let tls_config = load_tls_config_from_servers(&server_routing_table)?;
+    let tls_config =
+      load_tls_config_from_servers(&server_routing_table)?;
 
     // Parse addresses
     let addresses: Vec<SocketAddr> = args
@@ -626,7 +631,10 @@ addresses:
 
     // Should succeed but resolver will have no certificates
     let result = load_tls_config_from_servers(&[entry]);
-    assert!(result.is_ok(), "Should succeed with empty certificates list");
+    assert!(
+      result.is_ok(),
+      "Should succeed with empty certificates list"
+    );
   }
 
   #[test]

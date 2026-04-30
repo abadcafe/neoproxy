@@ -124,11 +124,11 @@ fn run_server_threads(
   server_thread_handles
 }
 
-fn init_log(log_directory: &str) -> tracing_appender::non_blocking::WorkerGuard {
-  let log_appender = tracing_appender::rolling::daily(
-    log_directory,
-    "neoproxy.log",
-  );
+fn init_log(
+  log_directory: &str,
+) -> tracing_appender::non_blocking::WorkerGuard {
+  let log_appender =
+    tracing_appender::rolling::daily(log_directory, "neoproxy.log");
 
   let config = LogWriterConfig::default();
   let (writer, guard) = config.build(log_appender);

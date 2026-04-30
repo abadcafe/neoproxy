@@ -8,8 +8,8 @@ use anyhow::Result;
 use tokio::{runtime, sync, task, time::timeout};
 use tracing::{info, warn};
 
-use crate::access_log::{AccessLogConfig, AccessLogWriter};
-use crate::config::Config;
+use crate::access_log::AccessLogWriter;
+use crate::config::{AccessLogConfig, Config};
 use crate::listeners::ListenerBuilderSet;
 use crate::plugin;
 use crate::plugin::SerializedArgs;
@@ -170,6 +170,16 @@ impl PluginSet {
     &mut self.plugins
   }
 
+  /// Check if the plugin set is empty.
+  pub fn is_empty(&self) -> bool {
+    self.plugins.is_empty()
+  }
+
+  /// Get the number of plugins in the set.
+  pub fn len(&self) -> usize {
+    self.plugins.len()
+  }
+
   /// Call uninstall() on all plugins and collect the futures.
   /// Returns a JoinSet containing all uninstall futures.
   pub fn uninstall_all(&mut self) -> task::JoinSet<()> {
@@ -215,7 +225,8 @@ fn group_servers_by_address_listener_name(
       access_log_writers.get(server.name.as_str()).cloned();
 
     for listener in &server.listeners {
-      let addresses = crate::config_validator::extract_addresses(&listener.args);
+      let addresses =
+        crate::config_validator::extract_addresses(&listener.args);
 
       for addr_str in addresses {
         let key = (addr_str.clone(), listener.listener_name.clone());
@@ -1235,7 +1246,8 @@ mod tests {
   }
 
   #[test]
-  fn test_group_servers_by_address_listener_name_different_listener_names() {
+  fn test_group_servers_by_address_listener_name_different_listener_names()
+   {
     // Two servers with same address but different listener names
     let servers = vec![
       crate::config::Server {

@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::access_log::{AccessLogConfig, LogFormat};
 use crate::access_log::context::AccessLogEntry;
 use crate::access_log::formatter;
+use crate::config::{AccessLogConfig, LogFormat};
 
 /// Access log writer with buffering and file rotation.
 ///
@@ -204,8 +204,8 @@ impl AccessLogWriterInner {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::access_log::config::HumanDuration;
   use crate::access_log::context::{AuthType, ServiceMetrics};
+  use crate::config::HumanDuration;
   use byte_unit::Byte;
   use std::time::Duration;
   use time::OffsetDateTime;

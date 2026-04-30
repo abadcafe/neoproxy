@@ -12,8 +12,9 @@ use crate::plugin;
 /// The actual service is selected at request time from the routing table.
 pub fn placeholder_service() -> plugin::Service {
   plugin::Service::new(service_fn(|_req| {
-    Box::pin(async { Err::<Response, _>(anyhow::anyhow!("placeholder")) })
-      as Pin<Box<dyn Future<Output = Result<Response>>>>
+    Box::pin(async {
+      Err::<Response, _>(anyhow::anyhow!("placeholder"))
+    }) as Pin<Box<dyn Future<Output = Result<Response>>>>
   }))
 }
 
@@ -60,7 +61,8 @@ impl ServerRouter {
   ///
   /// Each server is wrapped in `Rc` for cheap cloning during routing.
   pub fn build(servers: Vec<Server>) -> Self {
-    let servers: Vec<Rc<Server>> = servers.into_iter().map(Rc::new).collect();
+    let servers: Vec<Rc<Server>> =
+      servers.into_iter().map(Rc::new).collect();
     Self { servers }
   }
 
@@ -96,9 +98,9 @@ impl ServerRouter {
         }
         wildcard_match.or(default_server)
       }
-      None => self.servers.iter()
-        .find(|s| s.hostnames.is_empty())
-        .cloned(),
+      None => {
+        self.servers.iter().find(|s| s.hostnames.is_empty()).cloned()
+      }
     }
   }
 }
@@ -239,23 +241,22 @@ mod server_router_tests {
       },
     ];
     let router = ServerRouter::build(servers);
-    let result: Option<Rc<Server>> = router.route(Some("api.example.com"));
+    let result: Option<Rc<Server>> =
+      router.route(Some("api.example.com"));
     assert!(result.is_some());
     assert_eq!(result.unwrap().service_name, "api");
   }
 
   #[test]
   fn test_server_router_default_fallback() {
-    let servers = vec![
-      Server {
-        hostnames: vec![],
-        service: placeholder_service(),
-        service_name: "default".to_string(),
-        users: None,
-        tls: None,
-        access_log_writer: None,
-      },
-    ];
+    let servers = vec![Server {
+      hostnames: vec![],
+      service: placeholder_service(),
+      service_name: "default".to_string(),
+      users: None,
+      tls: None,
+      access_log_writer: None,
+    }];
     let router = ServerRouter::build(servers);
     let result: Option<Rc<Server>> =
       router.route(Some("unknown.example.com"));
@@ -290,7 +291,8 @@ mod server_router_tests {
       access_log_writer: None,
     }];
     let router = ServerRouter::build(servers);
-    let result: Option<Rc<Server>> = router.route(Some("foo.example.com"));
+    let result: Option<Rc<Server>> =
+      router.route(Some("foo.example.com"));
     assert!(result.is_some());
     assert_eq!(result.unwrap().service_name, "wildcard");
   }
@@ -346,7 +348,8 @@ mod server_router_tests {
     let router = ServerRouter::build(servers);
 
     // Exact match takes priority over wildcard
-    let result: Option<Rc<Server>> = router.route(Some("api.example.com"));
+    let result: Option<Rc<Server>> =
+      router.route(Some("api.example.com"));
     assert!(result.is_some());
     assert_eq!(result.unwrap().service_name, "api");
 

@@ -6,11 +6,10 @@
 use std::future::Future;
 use std::net::SocketAddr;
 
-use crate::auth::{ListenerAuthConfig, UserPasswordAuth};
+use crate::auth::UserPasswordAuth;
+use crate::config::ListenerAuthConfig;
 use crate::config::UserConfig;
-use crate::http_utils::{
-  BytesBufBodyWrapper, Response, ResponseBody,
-};
+use crate::http_utils::{BytesBufBodyWrapper, Response, ResponseBody};
 
 /// Executor for spawning tasks on the current tokio LocalSet.
 #[derive(Clone)]
@@ -246,7 +245,7 @@ pub fn build_user_password_auth(
       let config = ListenerAuthConfig {
         users: users
           .iter()
-          .map(|u| crate::auth::UserCredential {
+          .map(|u| crate::config::UserCredential {
             username: u.username.clone(),
             password: u.password.clone(),
           })
@@ -268,12 +267,12 @@ mod tests {
   #[test]
   fn test_record_http_access_log_writes_entry() {
     let dir = tempfile::tempdir().unwrap();
-    let config = crate::access_log::AccessLogConfig {
+    let config = crate::config::AccessLogConfig {
       enabled: true,
       path_prefix: "commonhtest.log".to_string(),
-      format: crate::access_log::LogFormat::Text,
+      format: crate::config::LogFormat::Text,
       buffer: byte_unit::Byte::from_u64(64),
-      flush: crate::access_log::config::HumanDuration(
+      flush: crate::config::HumanDuration(
         std::time::Duration::from_millis(100),
       ),
       max_size: byte_unit::Byte::from_u64(1024 * 1024),

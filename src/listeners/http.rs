@@ -47,8 +47,7 @@ impl HyperServiceAdaptor {
     server_routing_table: Vec<Server>,
     client_addr: Option<SocketAddr>,
   ) -> Self {
-    let server_router =
-      ServerRouter::build(server_routing_table);
+    let server_router = ServerRouter::build(server_routing_table);
     Self { server_router, client_addr }
   }
 
@@ -83,8 +82,12 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
 
     // Step 1: Check HTTP version FIRST
     // HTTP/1.0 is not supported - return 505 HTTP Version Not Supported
-    if let Err(_status) = super::common::check_http_version(req.version()) {
-      return Box::pin(async { Ok(super::common::build_505_response()) });
+    if let Err(_status) =
+      super::common::check_http_version(req.version())
+    {
+      return Box::pin(async {
+        Ok(super::common::build_505_response())
+      });
     }
 
     // Step 2: Route FIRST - get the correct server entry
@@ -97,7 +100,9 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
     let routing_entry = match self.route_request(&req) {
       Some(entry) => entry,
       None => {
-        return Box::pin(async { Ok(super::common::build_404_response()) });
+        return Box::pin(async {
+          Ok(super::common::build_404_response())
+        });
       }
     };
 
@@ -115,17 +120,18 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
     // Step 4: Check authentication using routing_entry's users
     let user_password_auth =
       super::common::build_user_password_auth(&routing_entry.users);
-    let (user, auth_type) = match user_password_auth
-      .verify_and_extract_username(&auth_req)
-    {
-      Ok(Some(username)) => {
-        (Some(username), crate::access_log::AuthType::Password)
-      }
-      Ok(None) => (None, crate::access_log::AuthType::None),
-      Err(_) => {
-        return Box::pin(async { Ok(super::common::build_407_response()) });
-      }
-    };
+    let (user, auth_type) =
+      match user_password_auth.verify_and_extract_username(&auth_req) {
+        Ok(Some(username)) => {
+          (Some(username), crate::access_log::AuthType::Password)
+        }
+        Ok(None) => (None, crate::access_log::AuthType::None),
+        Err(_) => {
+          return Box::pin(async {
+            Ok(super::common::build_407_response())
+          });
+        }
+      };
 
     // Step 5: Prepare values for async block
     let access_log_writer = routing_entry.access_log_writer.clone();
@@ -232,7 +238,10 @@ impl HttpListener {
     server_routing_table: Vec<Server>,
   ) -> Result<plugin::Listener> {
     let args: HttpListenerArgs = serde_yaml::from_value(sargs)?;
-    Ok(plugin::Listener::new(Self::from_args(args, server_routing_table)?))
+    Ok(plugin::Listener::new(Self::from_args(
+      args,
+      server_routing_table,
+    )?))
   }
 
   /// Create an HttpListener directly for testing purposes.
@@ -289,8 +298,7 @@ impl HttpListener {
               server_routing_table.clone(),
               Some(raddr),
             );
-            let builder =
-              conn_util::Builder::new(TokioLocalExecutor);
+            let builder = conn_util::Builder::new(TokioLocalExecutor);
             connection_tracker.register(async move {
               // Do not need any graceful shutdown actions here for
               // connections. The `Service`s should do this instead.
@@ -400,7 +408,8 @@ pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::auth::{ListenerAuthConfig, UserPasswordAuth};
+  use crate::auth::UserPasswordAuth;
+  use crate::config::ListenerAuthConfig;
   use crate::listeners::common::{
     TokioLocalExecutor, build_505_response, check_http_version,
     record_http_access_log,
@@ -471,14 +480,16 @@ addresses:
   #[test]
   fn test_http_listener_new_valid() {
     let args = create_test_listener_args();
-    let result = HttpListener::new(args, vec![create_test_routing_entry()]);
+    let result =
+      HttpListener::new(args, vec![create_test_routing_entry()]);
     assert!(result.is_ok());
   }
 
   #[test]
   fn test_http_listener_new_invalid_address() {
     let args = create_test_listener_args_with_invalid();
-    let result = HttpListener::new(args, vec![create_test_routing_entry()]);
+    let result =
+      HttpListener::new(args, vec![create_test_routing_entry()]);
     // Invalid addresses are filtered out, so it should still succeed
     assert!(result.is_ok());
   }
@@ -488,7 +499,8 @@ addresses:
     let args: plugin::SerializedArgs =
       serde_yaml::from_str(r#"{protocols: [], hostnames: []}"#)
         .unwrap();
-    let result = HttpListener::new(args, vec![create_test_routing_entry()]);
+    let result =
+      HttpListener::new(args, vec![create_test_routing_entry()]);
     // Missing required field should fail
     assert!(result.is_err());
   }
@@ -565,7 +577,8 @@ addresses:
   fn test_http_listener_struct_fields() {
     // Verify struct has all expected fields
     let args = create_test_listener_args();
-    let listener = HttpListener::new(args, vec![create_test_routing_entry()]);
+    let listener =
+      HttpListener::new(args, vec![create_test_routing_entry()]);
 
     // This test verifies the constructor succeeds
     assert!(listener.is_ok());
@@ -665,7 +678,7 @@ addresses:
   #[test]
   fn test_check_auth_missing_header_returns_407() {
     // Test that requests without auth header return 407 when auth is configured
-    use crate::auth::UserCredential;
+    use crate::config::UserCredential;
 
     let config = ListenerAuthConfig {
       users: vec![UserCredential {
@@ -692,7 +705,7 @@ addresses:
 
   #[test]
   fn test_check_auth_wrong_credentials_returns_407() {
-    use crate::auth::UserCredential;
+    use crate::config::UserCredential;
 
     let config = ListenerAuthConfig {
       users: vec![UserCredential {
@@ -775,8 +788,7 @@ addresses:
       },
     ];
 
-    let adaptor =
-      HyperServiceAdaptor::new(servers, None);
+    let adaptor = HyperServiceAdaptor::new(servers, None);
 
     // Request with Host header matching api.example.com
     let req_api = http::Request::builder()
@@ -834,7 +846,7 @@ addresses:
 
   #[test]
   fn test_check_auth_valid_credentials_passes() {
-    use crate::auth::UserCredential;
+    use crate::config::UserCredential;
 
     let config = ListenerAuthConfig {
       users: vec![UserCredential {
@@ -864,12 +876,12 @@ addresses:
   #[test]
   fn test_record_access_log_writes_entry() {
     let dir = tempfile::tempdir().unwrap();
-    let config = crate::access_log::AccessLogConfig {
+    let config = crate::config::AccessLogConfig {
       enabled: true,
       path_prefix: "hypertest.log".to_string(),
-      format: crate::access_log::LogFormat::Text,
+      format: crate::config::LogFormat::Text,
       buffer: byte_unit::Byte::from_u64(64),
-      flush: crate::access_log::config::HumanDuration(
+      flush: crate::config::HumanDuration(
         std::time::Duration::from_millis(100),
       ),
       max_size: byte_unit::Byte::from_u64(1024 * 1024),
@@ -936,7 +948,9 @@ addresses:
   #[test]
   fn test_http_listener_stores_access_log_writer() {
     let args = create_test_listener_args();
-    let listener = HttpListener::new(args, vec![create_test_routing_entry()]).unwrap();
+    let listener =
+      HttpListener::new(args, vec![create_test_routing_entry()])
+        .unwrap();
     // Should compile and create without error
     drop(listener);
   }
@@ -944,12 +958,12 @@ addresses:
   #[test]
   fn test_http_listener_with_access_log_writer() {
     let dir = tempfile::tempdir().unwrap();
-    let config = crate::access_log::AccessLogConfig {
+    let config = crate::config::AccessLogConfig {
       enabled: true,
       path_prefix: "test.log".to_string(),
-      format: crate::access_log::LogFormat::Text,
+      format: crate::config::LogFormat::Text,
       buffer: byte_unit::Byte::from_u64(256),
-      flush: crate::access_log::config::HumanDuration(
+      flush: crate::config::HumanDuration(
         std::time::Duration::from_millis(100),
       ),
       max_size: byte_unit::Byte::from_u64(1024 * 1024),

@@ -139,16 +139,6 @@ impl PluginSet {
     Self { plugins: HashMap::new() }
   }
 
-  /// Returns the number of plugins in the set.
-  pub fn len(&self) -> usize {
-    self.plugins.len()
-  }
-
-  /// Returns true if the plugin set is empty.
-  pub fn is_empty(&self) -> bool {
-    self.plugins.is_empty()
-  }
-
   /// Get or create a plugin by name.
   ///
   /// If the plugin already exists in the set, returns a reference to it.

@@ -10,23 +10,6 @@ use crate::config::{
 };
 use crate::plugin::SerializedArgs;
 
-/// Configuration error kind
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfigErrorKind {
-  /// File read failed
-  FileRead,
-  /// YAML parsing failed
-  YamlParse,
-  /// Invalid field format
-  InvalidFormat,
-  /// Reference not found
-  NotFound,
-  /// Address parsing failed
-  InvalidAddress,
-  /// Address conflict between listeners
-  AddressConflict,
-}
-
 /// Configuration validation error
 #[derive(Debug, Clone)]
 pub struct ConfigError {
@@ -34,8 +17,6 @@ pub struct ConfigError {
   pub location: String,
   /// Error message
   pub message: String,
-  /// Error kind
-  pub kind: ConfigErrorKind,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -62,12 +43,10 @@ impl ConfigErrorCollector {
     &mut self,
     location: impl Into<String>,
     message: impl Into<String>,
-    kind: ConfigErrorKind,
   ) {
     self.errors.push(ConfigError {
       location: location.into(),
       message: message.into(),
-      kind,
     });
   }
 
@@ -123,7 +102,6 @@ pub fn validate_worker_threads(
     collector.add(
       "worker_threads",
       "must be at least 1".to_string(),
-      ConfigErrorKind::InvalidFormat,
     );
   }
 }
@@ -344,7 +322,6 @@ fn validate_socks5_hostnames(
         collector.add(
           format!("servers[{}]", server_idx),
           "hostnames cannot be configured with SOCKS5 listener (SOCKS5 does not support hostname routing)".to_string(),
-          ConfigErrorKind::InvalidFormat,
         );
       }
     }
@@ -373,7 +350,6 @@ pub fn validate_listener(
             "listener kind '{}' requires server-level 'tls' configuration",
             listener.listener_name
           ),
-          ConfigErrorKind::InvalidFormat,
         );
         return;
       }
@@ -404,7 +380,6 @@ pub fn validate_listener_addresses(
           collector.add(
             format!("{}.args.addresses", location),
             "addresses list cannot be empty".to_string(),
-            ConfigErrorKind::InvalidFormat,
           );
           return;
         }
@@ -415,7 +390,6 @@ pub fn validate_listener_addresses(
             collector.add(
               format!("{}.args.addresses[{}]", location, addr_idx),
               format!("invalid address '{}'", addr_str),
-              ConfigErrorKind::InvalidAddress,
             );
           }
         }
@@ -426,7 +400,6 @@ pub fn validate_listener_addresses(
       collector.add(
         format!("{}.args", location),
         "addresses field is required".to_string(),
-        ConfigErrorKind::InvalidFormat,
       );
     }
   }
@@ -451,7 +424,6 @@ pub fn validate_hostname(
     collector.add(
       location.to_string(),
       "hostname cannot be empty".to_string(),
-      ConfigErrorKind::InvalidFormat,
     );
     return;
   }
@@ -466,7 +438,6 @@ pub fn validate_hostname(
       collector.add(
         location.to_string(),
         format!("invalid wildcard hostname '{}'", hostname),
-        ConfigErrorKind::InvalidFormat,
       );
     } else {
       // after_star starts with ".", check suffix after dot
@@ -476,7 +447,6 @@ pub fn validate_hostname(
         collector.add(
           location.to_string(),
           format!("invalid wildcard hostname '{}'", hostname),
-          ConfigErrorKind::InvalidFormat,
         );
       }
     }
@@ -493,7 +463,6 @@ pub fn validate_users(
     collector.add(
       location.to_string(),
       "users cannot be an empty array".to_string(),
-      ConfigErrorKind::InvalidFormat,
     );
     return;
   }
@@ -505,7 +474,6 @@ pub fn validate_users(
       collector.add(
         format!("{}.username", user_location),
         "username cannot be empty".to_string(),
-        ConfigErrorKind::InvalidFormat,
       );
     }
 
@@ -513,7 +481,6 @@ pub fn validate_users(
       collector.add(
         format!("{}.password", user_location),
         "password cannot be empty".to_string(),
-        ConfigErrorKind::InvalidFormat,
       );
     }
   }
@@ -529,7 +496,6 @@ pub fn validate_server_tls(
     collector.add(
       format!("{}.certificates", location),
       "at least one certificate is required".to_string(),
-      ConfigErrorKind::InvalidFormat,
     );
     return;
   }
@@ -549,7 +515,6 @@ pub fn validate_server_tls(
               "certificate file '{}' is not in PEM format",
               cert.cert_path
             ),
-            ConfigErrorKind::InvalidFormat,
           );
         }
       }
@@ -560,7 +525,6 @@ pub fn validate_server_tls(
             "certificate file '{}' cannot be read: {}",
             cert.cert_path, e
           ),
-          ConfigErrorKind::FileRead,
         );
       }
     }
@@ -580,7 +544,6 @@ pub fn validate_server_tls(
               "private key file '{}' is not in PEM format",
               cert.key_path
             ),
-            ConfigErrorKind::InvalidFormat,
           );
         }
       }
@@ -591,7 +554,6 @@ pub fn validate_server_tls(
             "private key file '{}' cannot be read: {}",
             cert.key_path, e
           ),
-          ConfigErrorKind::FileRead,
         );
       }
     }
@@ -640,7 +602,6 @@ pub fn validate_quic_config(
     collector.add(
       format!("{}.max_concurrent_bidi_streams", location),
       format!("invalid value {}, expected range 1-10000", n),
-      ConfigErrorKind::InvalidFormat,
     );
   }
 
@@ -652,7 +613,6 @@ pub fn validate_quic_config(
     collector.add(
       format!("{}.max_idle_timeout_ms", location),
       "invalid value 0, expected value > 0".to_string(),
-      ConfigErrorKind::InvalidFormat,
     );
   }
 
@@ -664,7 +624,6 @@ pub fn validate_quic_config(
     collector.add(
       format!("{}.initial_mtu", location),
       format!("invalid value {}, expected range 1200-9000", n),
-      ConfigErrorKind::InvalidFormat,
     );
   }
 
@@ -676,7 +635,6 @@ pub fn validate_quic_config(
     collector.add(
       format!("{}.send_window", location),
       "invalid value 0, expected value > 0".to_string(),
-      ConfigErrorKind::InvalidFormat,
     );
   }
 
@@ -688,7 +646,6 @@ pub fn validate_quic_config(
     collector.add(
       format!("{}.receive_window", location),
       "invalid value 0, expected value > 0".to_string(),
-      ConfigErrorKind::InvalidFormat,
     );
   }
 }
@@ -713,7 +670,6 @@ pub fn validate_service(
     collector.add(
       format!("servers[{}].service", server_idx),
       format!("service '{}' not found", service),
-      ConfigErrorKind::NotFound,
     );
   }
 }
@@ -740,7 +696,6 @@ pub fn validate_plugin_exists(
       collector.add(
         format!("{}.kind", location),
         format!("plugin '{}' not found", plugin_name),
-        ConfigErrorKind::NotFound,
       );
       return;
     }
@@ -754,7 +709,6 @@ pub fn validate_plugin_exists(
     collector.add(
       format!("{}.kind", location),
       format!("service builder '{}' not found", service_name),
-      ConfigErrorKind::NotFound,
     );
   }
 }
@@ -778,7 +732,6 @@ pub fn validate_listener_builder_exists(
         "listener builder '{}' not found",
         listener_name
       ),
-      ConfigErrorKind::NotFound,
     );
   }
 }
@@ -862,7 +815,6 @@ pub fn validate_address_conflicts(
             "TCP address conflict: different listener kinds ({}) on same address",
             details.join(", ")
           ),
-          ConfigErrorKind::AddressConflict,
         );
       } else {
         // Same TCP kind - check for multiple default servers (CR-003)
@@ -893,7 +845,6 @@ pub fn validate_address_conflicts(
             "UDP address conflict: different listener kinds ({}) on same address",
             details.join(", ")
           ),
-          ConfigErrorKind::AddressConflict,
         );
       } else {
         // Same UDP kind - check for multiple default servers (CR-003)
@@ -942,7 +893,6 @@ pub fn check_hostname_routing_conflicts(
         "multiple default servers ({}) on same address (only one server per address can have empty hostnames)",
         default_servers.join(", ")
       ),
-      ConfigErrorKind::AddressConflict,
     );
   }
 
@@ -956,7 +906,6 @@ pub fn check_hostname_routing_conflicts(
           hostname,
           servers.join(", ")
         ),
-        ConfigErrorKind::AddressConflict,
       );
     }
   }
@@ -977,7 +926,6 @@ pub fn validate_access_log_config(
         "buffer size must be at least 1KB, got {} bytes",
         access_log.buffer.as_u64()
       ),
-      ConfigErrorKind::InvalidFormat,
     );
   }
 
@@ -989,7 +937,6 @@ pub fn validate_access_log_config(
         "max_size must be at least 1MB, got {} bytes",
         access_log.max_size.as_u64()
       ),
-      ConfigErrorKind::InvalidFormat,
     );
   }
 
@@ -1001,7 +948,6 @@ pub fn validate_access_log_config(
         "flush interval must be at least 100ms, got {:?}",
         access_log.flush.0
       ),
-      ConfigErrorKind::InvalidFormat,
     );
   }
 
@@ -1010,7 +956,6 @@ pub fn validate_access_log_config(
     collector.add(
       "access_log.path_prefix",
       "path_prefix cannot be empty".to_string(),
-      ConfigErrorKind::InvalidFormat,
     );
   }
 }
@@ -1031,7 +976,6 @@ pub fn validate_listener_auth_config(
       "auth",
       "auth config must have at least 'users' or 'client_ca_path'"
         .to_string(),
-      ConfigErrorKind::InvalidFormat,
     );
     return;
   }
@@ -1045,7 +989,6 @@ pub fn validate_listener_auth_config(
       collector.add(
         format!("{}.username", user_location),
         "username cannot be empty".to_string(),
-        ConfigErrorKind::InvalidFormat,
       );
     }
 
@@ -1056,7 +999,6 @@ pub fn validate_listener_auth_config(
           "username '{}' is too long (max 255 bytes)",
           user.username
         ),
-        ConfigErrorKind::InvalidFormat,
       );
     }
 
@@ -1067,7 +1009,6 @@ pub fn validate_listener_auth_config(
           "duplicate username '{}' found in users list",
           user.username
         ),
-        ConfigErrorKind::InvalidFormat,
       );
     }
   }
@@ -1121,7 +1062,6 @@ mod tests {
     collector.add(
       "services[0].kind",
       "plugin 'unknown_plugin' not found",
-      ConfigErrorKind::NotFound,
     );
 
     assert!(collector.has_errors());
@@ -1140,12 +1080,10 @@ mod tests {
     collector.add(
       "services[0].kind",
       "plugin 'unknown_plugin' not found",
-      ConfigErrorKind::NotFound,
     );
     collector.add(
       "servers[0].listeners[0].kind",
       "listener builder 'http' not found",
-      ConfigErrorKind::NotFound,
     );
 
     assert!(collector.has_errors());
@@ -1158,7 +1096,7 @@ mod tests {
     let location = String::from("services[0].kind");
     let message = String::from("error message");
 
-    collector.add(location, message, ConfigErrorKind::InvalidFormat);
+    collector.add(location, message);
 
     assert!(collector.has_errors());
     assert_eq!(collector.errors()[0].location, "services[0].kind");
@@ -1168,8 +1106,8 @@ mod tests {
   #[test]
   fn test_error_collector_errors_slice() {
     let mut collector = ConfigErrorCollector::new();
-    collector.add("loc1", "msg1", ConfigErrorKind::InvalidAddress);
-    collector.add("loc2", "msg2", ConfigErrorKind::InvalidFormat);
+    collector.add("loc1", "msg1");
+    collector.add("loc2", "msg2");
 
     let errors = collector.errors();
     assert_eq!(errors.len(), 2);
@@ -1188,7 +1126,6 @@ mod tests {
     let error = ConfigError {
       location: "test".to_string(),
       message: "test message".to_string(),
-      kind: ConfigErrorKind::InvalidFormat,
     };
     let debug_str = format!("{:?}", error);
     assert!(debug_str.contains("ConfigError"));
@@ -1206,12 +1143,12 @@ mod tests {
   fn test_error_collector_all_error_kinds() {
     let mut collector = ConfigErrorCollector::new();
 
-    collector.add("loc1", "msg1", ConfigErrorKind::FileRead);
-    collector.add("loc2", "msg2", ConfigErrorKind::YamlParse);
-    collector.add("loc3", "msg3", ConfigErrorKind::InvalidFormat);
-    collector.add("loc4", "msg4", ConfigErrorKind::NotFound);
-    collector.add("loc5", "msg5", ConfigErrorKind::InvalidAddress);
-    collector.add("loc6", "msg6", ConfigErrorKind::AddressConflict);
+    collector.add("loc1", "msg1");
+    collector.add("loc2", "msg2");
+    collector.add("loc3", "msg3");
+    collector.add("loc4", "msg4");
+    collector.add("loc5", "msg5");
+    collector.add("loc6", "msg6");
 
     assert_eq!(collector.errors().len(), 6);
     assert!(collector.has_errors());

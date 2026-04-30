@@ -6,7 +6,6 @@ use clap::Parser;
 use serde::Deserialize;
 
 use crate::access_log::{AccessLogConfig, AccessLogOverride};
-use crate::config_validator::ConfigErrorKind;
 use crate::plugin::SerializedArgs;
 
 /// Global config instance, initialized via `Config::init_global()`.
@@ -167,7 +166,6 @@ fn validate_and_split_kind<'a>(
         "{}: invalid format '', expected 'plugin_name.service_name'",
         location
       ),
-      kind: ConfigErrorKind::InvalidFormat,
     }
     .into());
   }
@@ -179,7 +177,6 @@ fn validate_and_split_kind<'a>(
         "{}: invalid format '{}', expected 'plugin_name.service_name'",
         location, kind
       ),
-      kind: ConfigErrorKind::InvalidFormat,
     }
     .into());
   }
@@ -194,7 +191,6 @@ fn validate_and_split_kind<'a>(
         "{}: invalid format '{}', expected 'plugin_name.service_name'",
         location, kind
       ),
-      kind: ConfigErrorKind::InvalidFormat,
     }
     .into());
   }
@@ -209,7 +205,6 @@ fn validate_and_split_kind<'a>(
 #[derive(Debug)]
 pub struct ConfigParseError {
   pub message: String,
-  pub kind: ConfigErrorKind,
 }
 
 impl std::fmt::Display for ConfigParseError {
@@ -226,7 +221,6 @@ impl Config {
     let raw: ConfigRaw = serde_yaml::from_str(s).map_err(|e| {
       ConfigParseError {
         message: format!("parse config text failed: {}", e),
-        kind: ConfigErrorKind::YamlParse,
       }
     })?;
 
@@ -248,7 +242,6 @@ impl Config {
               "servers[{}].listeners[{}].kind: invalid format '', expected 'protocol_name'",
               server_idx, listener_idx
             ),
-            kind: ConfigErrorKind::InvalidFormat,
           }
           .into());
         }

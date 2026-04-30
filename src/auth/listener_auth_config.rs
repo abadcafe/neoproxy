@@ -9,8 +9,6 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
-use crate::auth::AuthError;
-
 /// User credential for password authentication.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct UserCredential {
@@ -42,46 +40,6 @@ pub struct ListenerAuthConfig {
 }
 
 impl ListenerAuthConfig {
-  /// Validate the configuration.
-  ///
-  /// Rules:
-  /// - `users` and `client_ca_path` at least one must be configured
-  /// - Each username must be non-empty, <= 255 bytes, and unique
-  pub fn validate(&self) -> Result<(), AuthError> {
-    // At least one auth method must be configured
-    if self.users.is_empty() && self.client_ca_path.is_none() {
-      return Err(AuthError::ConfigError(
-        "auth config must have at least 'users' or 'client_ca_path'"
-          .to_string(),
-      ));
-    }
-
-    // Validate users
-    let mut seen_users = std::collections::HashSet::new();
-    for user in &self.users {
-      if user.username.is_empty() {
-        return Err(AuthError::ConfigError(
-          "username cannot be empty".to_string(),
-        ));
-      }
-      if user.username.len() > 255 {
-        return Err(AuthError::ConfigError(format!(
-          "username '{}' is too long (max 255 bytes)",
-          user.username
-        )));
-      }
-      if seen_users.contains(&user.username) {
-        return Err(AuthError::ConfigError(format!(
-          "duplicate username '{}' found in users list",
-          user.username
-        )));
-      }
-      seen_users.insert(user.username.clone());
-    }
-
-    Ok(())
-  }
-
   /// Get users as a HashMap for password lookup.
   ///
   /// Returns `None` if no users are configured (empty array).
@@ -103,6 +61,9 @@ impl ListenerAuthConfig {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::config_validator::{
+    ConfigErrorCollector, validate_listener_auth_config,
+  };
 
   // ============== UserCredential Tests ==============
 
@@ -184,14 +145,17 @@ client_ca_path: /path/to/ca.pem
       serde_yaml::from_str(yaml).expect("parse failed");
     assert!(config.users.is_empty());
     assert!(config.client_ca_path.is_some());
-    assert!(config.validate().is_ok(), "Empty users with TLS should be valid");
+    let mut collector = ConfigErrorCollector::new();
+    validate_listener_auth_config(&config, &mut collector);
+    assert!(!collector.has_errors(), "Empty users with TLS should be valid");
   }
 
   #[test]
   fn test_listener_auth_config_validate_empty_is_error() {
     let config = ListenerAuthConfig::default();
-    let result = config.validate();
-    assert!(result.is_err(), "Empty auth config should be invalid");
+    let mut collector = ConfigErrorCollector::new();
+    validate_listener_auth_config(&config, &mut collector);
+    assert!(collector.has_errors(), "Empty auth config should be invalid");
   }
 
   #[test]
@@ -209,8 +173,9 @@ client_ca_path: /path/to/ca.pem
       ],
       client_ca_path: None,
     };
-    let result = config.validate();
-    assert!(result.is_err(), "Duplicate usernames should be invalid");
+    let mut collector = ConfigErrorCollector::new();
+    validate_listener_auth_config(&config, &mut collector);
+    assert!(collector.has_errors(), "Duplicate usernames should be invalid");
   }
 
   #[test]
@@ -222,8 +187,9 @@ client_ca_path: /path/to/ca.pem
       }],
       client_ca_path: None,
     };
-    let result = config.validate();
-    assert!(result.is_err(), "Empty username should be invalid");
+    let mut collector = ConfigErrorCollector::new();
+    validate_listener_auth_config(&config, &mut collector);
+    assert!(collector.has_errors(), "Empty username should be invalid");
   }
 
   #[test]
@@ -235,8 +201,9 @@ client_ca_path: /path/to/ca.pem
       }],
       client_ca_path: None,
     };
-    let result = config.validate();
-    assert!(result.is_err(), "Username > 255 bytes should be invalid");
+    let mut collector = ConfigErrorCollector::new();
+    validate_listener_auth_config(&config, &mut collector);
+    assert!(collector.has_errors(), "Username > 255 bytes should be invalid");
   }
 
   #[test]
@@ -248,7 +215,9 @@ client_ca_path: /path/to/ca.pem
       }],
       client_ca_path: None,
     };
-    assert!(config.validate().is_ok());
+    let mut collector = ConfigErrorCollector::new();
+    validate_listener_auth_config(&config, &mut collector);
+    assert!(!collector.has_errors());
   }
 
   #[test]
@@ -257,7 +226,9 @@ client_ca_path: /path/to/ca.pem
       users: vec![],
       client_ca_path: Some("/path/to/ca.pem".to_string()),
     };
-    assert!(config.validate().is_ok());
+    let mut collector = ConfigErrorCollector::new();
+    validate_listener_auth_config(&config, &mut collector);
+    assert!(!collector.has_errors());
   }
 
   #[test]
@@ -269,7 +240,9 @@ client_ca_path: /path/to/ca.pem
       }],
       client_ca_path: Some("/path/to/ca.pem".to_string()),
     };
-    assert!(config.validate().is_ok());
+    let mut collector = ConfigErrorCollector::new();
+    validate_listener_auth_config(&config, &mut collector);
+    assert!(!collector.has_errors());
   }
 
   #[test]

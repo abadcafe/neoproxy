@@ -8,10 +8,9 @@ use std::net::SocketAddr;
 
 use crate::auth::{ListenerAuthConfig, UserPasswordAuth};
 use crate::config::UserConfig;
-use crate::http_types::{
+use crate::http_utils::{
   BytesBufBodyWrapper, Response, ResponseBody,
 };
-use crate::server::ServerRoutingEntry;
 
 /// Executor for spawning tasks on the current tokio LocalSet.
 #[derive(Clone)]
@@ -23,75 +22,6 @@ where
 {
   fn execute(&self, fut: F) {
     tokio::task::spawn_local(fut);
-  }
-}
-
-/// Build an empty response with the given status code.
-pub fn build_empty_response(status: http::StatusCode) -> Response {
-  let empty = http_body_util::Empty::new();
-  let bytes_buf = BytesBufBodyWrapper::new(empty);
-  let body = ResponseBody::new(bytes_buf);
-  let mut resp = Response::new(body);
-  *resp.status_mut() = status;
-  resp
-}
-
-/// Build an error response with the given status code and message.
-pub fn build_error_response(status: http::StatusCode, message: &str) -> Response {
-  let full = http_body_util::Full::new(bytes::Bytes::from(message.to_string()));
-  let bytes_buf = BytesBufBodyWrapper::new(full);
-  let body = ResponseBody::new(bytes_buf);
-  let mut resp = Response::new(body);
-  *resp.status_mut() = status;
-  resp.headers_mut().insert(
-    http::header::CONTENT_TYPE,
-    http::HeaderValue::from_static("text/plain"),
-  );
-  resp
-}
-
-/// Route a request to the correct service based on hostname.
-///
-/// Returns the matching ServerRoutingEntry or None if no match found.
-/// Uses the routing_info for fast hostname matching, with fallback
-/// to default server (empty hostnames).
-///
-/// # Arguments
-///
-/// * `server_routing_table` - The table of server routing entries
-/// * `hostname` - Optional hostname to match (None routes to default)
-pub fn route_request_by_hostname<'a>(
-  server_routing_table: &'a [ServerRoutingEntry],
-  hostname: Option<&str>,
-) -> Option<&'a ServerRoutingEntry> {
-  match hostname {
-    Some(h) => {
-      let mut wildcard_match: Option<&ServerRoutingEntry> = None;
-      let mut default_server: Option<&ServerRoutingEntry> = None;
-
-      for entry in server_routing_table {
-        if entry.hostnames.is_empty() {
-          if default_server.is_none() {
-            default_server = Some(entry);
-          }
-          continue;
-        }
-
-        for pattern in &entry.hostnames {
-          if crate::routing::matches_hostname(pattern, h) {
-            if pattern.starts_with("*.") {
-              if wildcard_match.is_none() {
-                wildcard_match = Some(entry);
-              }
-            } else {
-              return Some(entry); // Exact match
-            }
-          }
-        }
-      }
-      wildcard_match.or(default_server)
-    }
-    None => server_routing_table.iter().find(|e| e.hostnames.is_empty()),
   }
 }
 
@@ -332,136 +262,6 @@ pub fn build_user_password_auth(
 #[cfg(test)]
 mod tests {
   use super::*;
-
-  // ============== route_request_by_hostname Tests ==============
-
-  #[test]
-  fn test_route_request_by_hostname_exact_match() {
-    let server_routing_table = vec![
-      crate::server::ServerRoutingEntry {
-        hostnames: vec![],
-        service: crate::server::placeholder_service(),
-        service_name: "default_service".to_string(),
-        users: None,
-        tls: None,
-        access_log_writer: None,
-      },
-      crate::server::ServerRoutingEntry {
-        hostnames: vec!["api.example.com".to_string()],
-        service: crate::server::placeholder_service(),
-        service_name: "api_service".to_string(),
-        users: None,
-        tls: None,
-        access_log_writer: None,
-      },
-    ];
-
-    let result = route_request_by_hostname(&server_routing_table, Some("api.example.com"));
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().service_name, "api_service");
-  }
-
-  #[test]
-  fn test_route_request_by_hostname_default() {
-    let server_routing_table = vec![
-      crate::server::ServerRoutingEntry {
-        hostnames: vec![],
-        service: crate::server::placeholder_service(),
-        service_name: "default_service".to_string(),
-        users: None,
-        tls: None,
-        access_log_writer: None,
-      },
-      crate::server::ServerRoutingEntry {
-        hostnames: vec!["api.example.com".to_string()],
-        service: crate::server::placeholder_service(),
-        service_name: "api_service".to_string(),
-        users: None,
-        tls: None,
-        access_log_writer: None,
-      },
-    ];
-
-    // No hostname = route to default
-    let result = route_request_by_hostname(&server_routing_table, None);
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().service_name, "default_service");
-  }
-
-  #[test]
-  fn test_route_request_by_hostname_no_match() {
-    let server_routing_table = vec![crate::server::ServerRoutingEntry {
-      hostnames: vec!["api.example.com".to_string()],
-      service: crate::server::placeholder_service(),
-      service_name: "api_service".to_string(),
-      users: None,
-      tls: None,
-      access_log_writer: None,
-    }];
-
-    // Unknown hostname = no match
-    let result = route_request_by_hostname(&server_routing_table, Some("unknown.example.com"));
-    assert!(result.is_none());
-  }
-
-  #[test]
-  fn test_route_request_by_hostname_wildcard_match() {
-    let server_routing_table = vec![
-      crate::server::ServerRoutingEntry {
-        hostnames: vec![],
-        service: crate::server::placeholder_service(),
-        service_name: "default_service".to_string(),
-        users: None,
-        tls: None,
-        access_log_writer: None,
-      },
-      crate::server::ServerRoutingEntry {
-        hostnames: vec!["*.example.com".to_string()],
-        service: crate::server::placeholder_service(),
-        service_name: "wildcard_service".to_string(),
-        users: None,
-        tls: None,
-        access_log_writer: None,
-      },
-    ];
-
-    // Wildcard match - foo.example.com matches *.example.com
-    let result = route_request_by_hostname(&server_routing_table, Some("foo.example.com"));
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().service_name, "wildcard_service");
-  }
-
-  #[test]
-  fn test_route_request_by_hostname_wildcard_vs_exact_priority() {
-    let server_routing_table = vec![
-      crate::server::ServerRoutingEntry {
-        hostnames: vec!["*.example.com".to_string()],
-        service: crate::server::placeholder_service(),
-        service_name: "wildcard_service".to_string(),
-        users: None,
-        tls: None,
-        access_log_writer: None,
-      },
-      crate::server::ServerRoutingEntry {
-        hostnames: vec!["api.example.com".to_string()],
-        service: crate::server::placeholder_service(),
-        service_name: "api_service".to_string(),
-        users: None,
-        tls: None,
-        access_log_writer: None,
-      },
-    ];
-
-    // Exact match takes priority over wildcard
-    let result = route_request_by_hostname(&server_routing_table, Some("api.example.com"));
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().service_name, "api_service");
-
-    // Wildcard match for non-exact hostname
-    let result = route_request_by_hostname(&server_routing_table, Some("other.example.com"));
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().service_name, "wildcard_service");
-  }
 
   // ============== Access Log Tests ==============
 

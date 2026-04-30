@@ -17,7 +17,7 @@ use rustls::sign::CertifiedKey;
 use tracing::{info, warn};
 
 use crate::config::CertificateConfig;
-use crate::server::ServerRoutingEntry;
+use crate::server::Server;
 
 /// SNI resolver that supports exact and wildcard domain matching.
 ///
@@ -229,7 +229,7 @@ pub fn extract_san_dns_names(
 ///
 /// No default certificate is used - unknown SNI will cause TLS handshake failure.
 pub fn build_sni_resolver(
-  servers: &[ServerRoutingEntry],
+  servers: &[Server],
 ) -> Result<Arc<SniResolver>> {
   let mut resolver = SniResolver::new();
 
@@ -295,7 +295,7 @@ pub fn build_sni_resolver(
 ///
 /// Note: This takes the full routing table to support multi-server certificate selection.
 pub fn build_tls_server_config(
-  servers: &[ServerRoutingEntry],
+  servers: &[Server],
   alpn_protocols: Vec<Vec<u8>>,
 ) -> Result<Arc<rustls::ServerConfig>> {
   let sni_resolver = build_sni_resolver(servers)?;
@@ -550,7 +550,7 @@ mod tests {
       generate_test_cert_with_san(vec!["app2.example.com".to_string()]);
 
     let servers = vec![
-      ServerRoutingEntry {
+      Server {
         hostnames: vec!["app1.example.com".to_string()],
         service: crate::server::placeholder_service(),
         service_name: "server1".to_string(),
@@ -564,7 +564,7 @@ mod tests {
         }),
         access_log_writer: None,
       },
-      ServerRoutingEntry {
+      Server {
         hostnames: vec!["app2.example.com".to_string()],
         service: crate::server::placeholder_service(),
         service_name: "server2".to_string(),
@@ -594,7 +594,7 @@ mod tests {
     ensure_crypto_provider();
 
     // Empty servers list
-    let servers: Vec<ServerRoutingEntry> = vec![];
+    let servers: Vec<Server> = vec![];
 
     let result =
       build_tls_server_config(&servers, vec![b"http/1.1".to_vec()]);

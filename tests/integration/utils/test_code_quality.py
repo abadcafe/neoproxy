@@ -73,6 +73,16 @@ class TestCodeQualityTestMonitoring:
         assert len(unused) == 0, f"Unused imports from helpers: {unused}"
 
 
+class TestCodeQualityTestMonitoringApi:
+    """Tests for code quality in test_monitoring_api.py."""
+
+    def test_no_unused_imports_from_helpers(self) -> None:
+        """Should not have unused imports from helpers module (YAGNI)."""
+        test_monitoring_api_path = Path(__file__).parent.parent / "test_monitoring_api.py"
+        unused = get_unused_imports(str(test_monitoring_api_path))
+        assert len(unused) == 0, f"Unused imports from helpers: {unused}"
+
+
 class TestGetUnusedImports:
     """Tests for the get_unused_imports helper function."""
 

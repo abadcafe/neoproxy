@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 use anyhow::Result;
 use http_body_util::{BodyExt, Full};
 
-use crate::http_types::{
+use crate::http_utils::{
   BytesBufBodyWrapper, Request,  Response, ResponseBody,
 };
 use crate::plugin;
@@ -82,7 +82,7 @@ pub fn create_plugin() -> Box<dyn plugin::Plugin> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::http_types::RequestBody;
+  use crate::http_utils::RequestBody;
   use crate::plugin::Plugin;
   use bytes::Bytes;
   use futures::task::noop_waker;

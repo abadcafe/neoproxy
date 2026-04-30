@@ -34,7 +34,6 @@ from .utils.helpers import (
     wait_for_proxy,
     create_test_config,
     create_target_server,
-    terminate_process,
     wait_for_udp_port_bound,
 )
 
@@ -178,21 +177,23 @@ class TestMonitoringAPI:
             # Verify log has content
             assert len(log_content) > 0, "Logs should have content"
 
-            # Verify log contains server-related info with specific metrics
+            # Verify log contains proxy startup and shutdown lifecycle
             log_lower = log_content.lower()
-            has_connection_info = "connection" in log_lower
-            has_active_info = "active" in log_lower
-            has_stream_info = "stream" in log_lower
-            has_server_info = "server" in log_lower
+            has_server_started = "server started" in log_lower
+            has_listener_started = "listener started" in log_lower
+            has_shutdown = "shutdown" in log_lower
 
-            assert (has_connection_info or has_active_info or
-                    has_stream_info or has_server_info), \
-                "Logs should contain connection-related information with metrics"
+            assert has_server_started, \
+                f"Logs should contain 'server started'. Got: {log_content[:500]}"
+            assert has_listener_started, \
+                f"Logs should contain 'listener started'. Got: {log_content[:500]}"
+            assert has_shutdown, \
+                f"Logs should contain 'shutdown'. Got: {log_content[:500]}"
 
             # Try to parse monitoring entries to verify format
             monitoring_entries = parse_monitoring_entries(log_content)
             # Note: entries may be empty if format is different, but we still
-            # validated that connection-related keywords exist above
+            # validated that the proxy lifecycle is properly logged above
 
         finally:
             if client_sock:
@@ -236,19 +237,18 @@ class TestMonitoringAPI:
             # Verify log has some content (not empty)
             assert len(log_content) > 0, "Logs should have content"
 
-            # Verify log contains shutdown-related information
+            # Verify specific shutdown lifecycle messages are present
             log_lower = log_content.lower()
-            has_shutdown_info = (
-                "shutdown" in log_lower or
-                "stop" in log_lower or
-                "close" in log_lower or
-                "exit" in log_lower or
-                "terminate" in log_lower
+            has_received_shutdown = "received shutdown signal" in log_lower
+            has_shutdown_completed = (
+                "shutdown completed" in log_lower or
+                "shutdown complete" in log_lower
             )
 
-            # Either has shutdown info or just has content
-            assert has_shutdown_info or len(log_content) > 0, \
-                "Logs should contain shutdown-related information"
+            assert has_received_shutdown, \
+                f"Logs should contain 'received shutdown signal'. Got: {log_content[:500]}"
+            assert has_shutdown_completed, \
+                f"Logs should contain 'shutdown completed' or 'shutdown complete'. Got: {log_content[:500]}"
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
@@ -297,15 +297,15 @@ class TestHTTP3MonitoringAPI:
                 with open(log_path, "r", errors="ignore") as f:
                     log_content += f.read()
 
-            # Verify log has HTTP/3 related content
+            # Verify log has HTTP/3 specific content
             log_lower = log_content.lower()
-            http3_keywords = ["http3", "quic", "stream", "listener", "udp"]
-            found_keywords = [kw for kw in http3_keywords if kw in log_lower]
+            has_http3_listener_started = "http/3 listener started" in log_lower
+            has_shutdown_signal = "received shutdown signal" in log_lower
 
-            # Either find keywords or have content
-            assert len(found_keywords) > 0 or len(log_content) > 0, \
-                f"Logs should contain HTTP/3 listener information. " \
-                f"Found keywords: {found_keywords}"
+            assert has_http3_listener_started, \
+                f"Logs should contain 'HTTP/3 Listener started'. Got: {log_content[:500]}"
+            assert has_shutdown_signal, \
+                f"Logs should contain 'received shutdown signal'. Got: {log_content[:500]}"
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
@@ -616,7 +616,10 @@ services:
 - name: test
   kind: nonexistent.service
 
-servers: []
+servers:
+- name: test_server
+  listeners: []
+  service: test
 """
             config_path = os.path.join(temp_dir, "invalid_config.yaml")
             with open(config_path, "w") as f:

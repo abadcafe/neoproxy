@@ -15,10 +15,10 @@ use serde::Deserialize;
 use tower::Service;
 use tracing::{info, warn};
 
-use crate::http_types::{
+use crate::http_utils::{
   BytesBufBodyWrapper, RequestBody, Response,
 };
-use crate::listeners::common::build_error_response;
+use crate::http_utils::build_error_response;
 use crate::plugin;
 use crate::shutdown::{ShutdownHandle, StreamTracker};
 use crate::stream::H3UpgradeTrigger;
@@ -275,7 +275,7 @@ fn record_access_log(
 async fn handle_h3_stream(
   req: http::Request<()>,
   stream: server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
-  server_routing_table: Vec<crate::server::ServerRoutingEntry>,
+  server_router: crate::server::ServerRouter,
   _shutdown_handle: ShutdownHandle,
   client_addr: SocketAddr,
 ) -> () {
@@ -299,10 +299,7 @@ async fn handle_h3_stream(
 
   // Phase 2: Route FIRST based on :authority
   let hostname = req.uri().authority().map(|a| a.host());
-  let routing_entry = super::common::route_request_by_hostname(
-    &server_routing_table,
-    hostname,
-  );
+  let routing_entry = server_router.route(hostname);
 
   let routing_entry = match routing_entry {
     Some(entry) => entry,
@@ -506,11 +503,15 @@ async fn send_h3_response(
 /// Handle a single HTTP/3 connection
 async fn handle_h3_connection(
   conn: quinn::Connection,
-  server_routing_table: Vec<crate::server::ServerRoutingEntry>,
+  server_routing_table: Vec<crate::server::Server>,
   stream_tracker: Rc<StreamTracker>,
   shutdown_handle: ShutdownHandle,
 ) {
   let client_addr = conn.remote_address();
+
+  // Build ServerRouter once for the entire connection
+  let server_router =
+    crate::server::ServerRouter::build(server_routing_table);
 
   // Create H3 connection
   let mut h3_conn = match h3::server::builder()
@@ -536,7 +537,7 @@ async fn handle_h3_connection(
 
     match accept_result {
       Ok(Some(resolver)) => {
-        let server_routing_table = server_routing_table.clone();
+        let server_router = server_router.clone();
         let stream_shutdown = stream_tracker.shutdown_handle();
         stream_tracker.register(async move {
           match resolver.resolve_request().await {
@@ -544,7 +545,7 @@ async fn handle_h3_connection(
               handle_h3_stream(
                 req,
                 stream,
-                server_routing_table,
+                server_router,
                 stream_shutdown,
                 client_addr,
               )
@@ -590,7 +591,7 @@ pub struct Http3Listener {
   /// QUIC configuration
   quic_config: QuicConfig,
   /// Routing table for hostname-based routing
-  server_routing_table: Vec<crate::server::ServerRoutingEntry>,
+  server_routing_table: Vec<crate::server::Server>,
   /// Stream tracker
   stream_tracker: Rc<StreamTracker>,
   /// Shutdown handle
@@ -602,7 +603,7 @@ impl Http3Listener {
   #[allow(clippy::new_ret_no_self)]
   pub fn new(
     sargs: plugin::SerializedArgs,
-    server_routing_table: Vec<crate::server::ServerRoutingEntry>,
+    server_routing_table: Vec<crate::server::Server>,
   ) -> Result<plugin::Listener> {
     let args: Http3ListenerArgs = serde_yaml::from_value(sargs)?;
 
@@ -867,6 +868,9 @@ mod tests {
   use crate::auth::ListenerAuthConfig;
   use crate::auth::UserCredential;
   use crate::auth::UserPasswordAuth;
+  use crate::config_validator::{
+    ConfigErrorCollector, validate_listener_auth_config,
+  };
   use base64::{
     Engine, engine::general_purpose::STANDARD as BASE64_STANDARD,
   };
@@ -1049,7 +1053,9 @@ users:
       serde_yaml::from_str(yaml).expect("parse yaml");
     let config: ListenerAuthConfig =
       serde_yaml::from_value(yaml_value).unwrap();
-    config.validate().unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_listener_auth_config(&config, &mut collector);
+    assert!(!collector.has_errors());
     assert!(!config.users.is_empty());
     let users = config.users_map().expect("users should exist");
     assert_eq!(
@@ -1068,7 +1074,9 @@ client_ca_path: /path/to/ca.pem
       serde_yaml::from_str(yaml).expect("parse yaml");
     let config: ListenerAuthConfig =
       serde_yaml::from_value(yaml_value).unwrap();
-    config.validate().unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_listener_auth_config(&config, &mut collector);
+    assert!(!collector.has_errors());
     assert_eq!(
       config.client_ca_path,
       Some("/path/to/ca.pem".to_string())
@@ -1088,7 +1096,9 @@ client_ca_path: /path/to/ca.pem
       serde_yaml::from_str(yaml).expect("parse yaml");
     let config: ListenerAuthConfig =
       serde_yaml::from_value(yaml_value).unwrap();
-    config.validate().unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_listener_auth_config(&config, &mut collector);
+    assert!(!collector.has_errors());
     assert!(!config.users.is_empty());
     assert!(config.client_ca_path.is_some());
   }
@@ -1101,7 +1111,9 @@ client_ca_path: /path/to/ca.pem
       serde_yaml::from_str(yaml).expect("parse yaml");
     let config: ListenerAuthConfig =
       serde_yaml::from_value(yaml_value).unwrap();
-    assert!(config.validate().is_err());
+    let mut collector = ConfigErrorCollector::new();
+    validate_listener_auth_config(&config, &mut collector);
+    assert!(collector.has_errors());
   }
 
   // ============== Error Response Tests ==============

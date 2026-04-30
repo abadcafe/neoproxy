@@ -642,7 +642,9 @@ class TestErrorLogging:
         """
         TC-ERR-LOG-001: Configuration error is logged.
 
-        Target: Verify configuration errors are properly logged
+        Target: Verify configuration errors are properly logged.
+        Note: Only services referenced by servers are validated for
+        plugin existence.
         """
         temp_dir = tempfile.mkdtemp()
 
@@ -654,7 +656,10 @@ services:
 - name: test
   kind: nonexistent.service
 
-servers: []
+servers:
+- name: test_server
+  listeners: []
+  service: test
 """
 
             config_path = os.path.join(temp_dir, "bad_config.yaml")
@@ -669,6 +674,10 @@ servers: []
             )
 
             proc.wait(timeout=10)
+
+            # Process should exit with non-zero code for config error
+            assert proc.returncode != 0, \
+                f"Process should exit with non-zero code for bad config, got: {proc.returncode}"
 
             # Error should be in stderr
             stderr = proc.stderr.read().decode('utf-8', errors='ignore')

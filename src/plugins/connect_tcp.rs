@@ -14,8 +14,8 @@ use tokio::{self, net};
 use tracing::{error, warn};
 
 use crate::connect_utils::{self as utils, ConnectTargetError};
-use crate::http_types::{Request, Response};
-use crate::listeners::common::{build_empty_response, build_error_response};
+use crate::http_utils::{Request, Response};
+use crate::http_utils::{build_empty_response, build_error_response};
 use crate::plugin;
 use crate::shutdown::ShutdownHandle;
 use crate::stream::{ClientStream, H3OnUpgrade, Socks5OnUpgrade};
@@ -410,7 +410,7 @@ pub fn create_plugin() -> Box<dyn plugin::Plugin> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::http_types::{BytesBufBodyWrapper, RequestBody, ResponseBody};
+  use crate::http_utils::{BytesBufBodyWrapper, RequestBody, ResponseBody};
   use crate::plugin::Plugin;
   use bytes::Bytes;
   use futures::task::noop_waker;

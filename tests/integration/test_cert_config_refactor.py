@@ -591,9 +591,18 @@ servers:
                 f"Service should reject old ca_path at service level, got exit code {return_code}"
 
             # Verify the error message mentions the unknown field
-            stderr_output = proc.stderr.read().decode("utf-8", errors="replace")
-            assert "ca_path" in stderr_output, \
-                f"Error message should mention 'ca_path', got: {stderr_output}"
+            # Error is logged to log file (not stderr) since it occurs
+            # during service construction in the worker thread
+            log_dir = os.path.join(temp_dir, "logs")
+            log_content = ""
+            if os.path.isdir(log_dir):
+                for log_file in os.listdir(log_dir):
+                    log_path = os.path.join(log_dir, log_file)
+                    if os.path.isfile(log_path):
+                        with open(log_path, "r", errors="replace") as f:
+                            log_content += f.read()
+            assert "ca_path" in log_content, \
+                f"Error message should mention 'ca_path', got log: {log_content[:500]}"
 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)

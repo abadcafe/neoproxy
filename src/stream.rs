@@ -7,7 +7,7 @@ use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::h3_stream::H3ServerBidiStream;
-use crate::http_types::RequestBody;
+use crate::http_utils::RequestBody;
 
 /// H3 upgrade error.
 #[derive(Debug)]
@@ -687,7 +687,7 @@ pub fn http_status_to_socks5_error(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::http_types::{BytesBufBodyWrapper, RequestBody};
+  use crate::http_utils::{BytesBufBodyWrapper, RequestBody};
   use std::sync::Mutex;
 
   #[tokio::test]

@@ -1,4 +1,14 @@
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::net::SocketAddr;
 use std::process;
+
+use crate::access_log::AccessLogConfig;
+use crate::auth::ListenerAuthConfig;
+use crate::config::{
+  Config, Listener, ServerTlsConfig, UserConfig,
+};
+use crate::plugin::SerializedArgs;
 
 /// Configuration error kind
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +77,6 @@ impl ConfigErrorCollector {
   }
 
   /// Get all errors
-  #[cfg(test)]
   pub fn errors(&self) -> &[ConfigError] {
     &self.errors
   }
@@ -101,95 +110,974 @@ impl Default for ConfigErrorCollector {
   }
 }
 
-/// Get expected format string based on location context
-///
-/// Returns 'protocol_name' for listener contexts (e.g., "http", "https", "http3", "socks5")
-/// and 'plugin_name.service_name' for service contexts
-fn get_expected_format(location: &str) -> &'static str {
-  if location.contains("listeners") {
-    "'protocol_name' (e.g., http, https, http3, socks5)"
-  } else {
-    "'plugin_name.service_name'"
+// =========================================================================
+// Validation logic (moved from config.rs)
+// =========================================================================
+
+/// Validate worker_threads global setting.
+pub fn validate_worker_threads(
+  worker_threads: usize,
+  collector: &mut ConfigErrorCollector,
+) {
+  if worker_threads == 0 {
+    collector.add(
+      "worker_threads",
+      "must be at least 1".to_string(),
+      ConfigErrorKind::InvalidFormat,
+    );
   }
 }
 
-/// Check if location is a listener context
-fn is_listener_context(location: &str) -> bool {
-  location.contains("listeners")
+/// Transport layer type for address conflict detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransportLayer {
+  Tcp,
+  Udp,
 }
 
-/// Parse kind string into (plugin_name, item_name)
-///
-/// # Arguments
-/// * `kind` - Kind string like "echo.echo" for services or "http" for listeners
-/// * `location` - Error location context for error reporting
-///
-/// # Returns
-/// * `Ok((plugin, name))` - Successfully parsed
-/// * `Err(ConfigError)` - Invalid format
-///
-/// # Format
-/// - For listeners: just the protocol name (e.g., "http", "https", "http3", "socks5")
-/// - For services: "plugin_name.service_name" format (e.g., "echo.echo")
-pub fn parse_kind<'a>(
-  kind: &'a str,
-  location: &str,
-) -> Result<(&'a str, &'a str), ConfigError> {
-  let expected_format = get_expected_format(location);
+/// Listener kind category for conflict detection.
+/// Includes whether the listener supports hostname-based routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ListenerCategory {
+  Http,   // http listener - TCP, supports hostname routing
+  Https,  // https listener - TCP, supports hostname routing
+  Http3,  // http3 listener - UDP, supports hostname routing
+  Socks5, // socks5 listener - TCP, NO hostname routing
+}
 
-  // For listener contexts, accept simple protocol names without dots
-  if is_listener_context(location) {
-    // Listener kinds are simple protocol names like "http", "https", "http3", "socks5"
-    if kind.is_empty() {
-      return Err(ConfigError {
-        location: location.to_string(),
-        message: format!(
-          "invalid format '{}', expected {}",
-          kind, expected_format
-        ),
-        kind: ConfigErrorKind::InvalidFormat,
-      });
+impl ListenerCategory {
+  pub fn from_kind(kind: &str) -> Option<Self> {
+    match kind {
+      "http" => Some(Self::Http),
+      "https" => Some(Self::Https),
+      "http3" => Some(Self::Http3),
+      "socks5" => Some(Self::Socks5),
+      _ => None,
     }
-    // Return the kind as both plugin and name for consistency
-    // The actual validation happens when checking if the builder exists
-    return Ok((kind, kind));
   }
 
-  // For service contexts, require "plugin_name.service_name" format
-  let dot_count = kind.matches('.').count();
-  if dot_count != 1 {
-    return Err(ConfigError {
-      location: location.to_string(),
-      message: format!(
-        "invalid format '{}', expected {}",
-        kind, expected_format
+  pub fn transport_layer(&self) -> TransportLayer {
+    match self {
+      Self::Http | Self::Https | Self::Socks5 => TransportLayer::Tcp,
+      Self::Http3 => TransportLayer::Udp,
+    }
+  }
+}
+
+/// Address usage info for conflict detection.
+pub struct AddressUsage {
+  pub server_name: String,
+  pub listener_kind: String,
+  pub listener_category: ListenerCategory,
+  /// Hostnames for this server (empty = default server)
+  pub hostnames: Vec<String>,
+}
+
+/// Extract addresses from listener args.
+///
+/// Tries 'addresses' (plural) first, then 'address' (singular) for
+/// backward compatibility.
+pub fn extract_addresses(args: &SerializedArgs) -> Vec<String> {
+  let mut addresses = Vec::new();
+
+  // Try 'addresses' (plural) field first
+  if let Some(addrs) = args.get("addresses")
+    && let Some(addr_list) = addrs.as_sequence()
+  {
+    for addr in addr_list {
+      if let Some(addr_str) = addr.as_str() {
+        addresses.push(addr_str.to_string());
+      }
+    }
+  }
+
+  // Try 'address' (singular) field for backward compatibility
+  if addresses.is_empty()
+    && let Some(addr) = args.get("address")
+    && let Some(addr_str) = addr.as_str()
+  {
+    addresses.push(addr_str.to_string());
+  }
+
+  addresses
+}
+
+/// Validate the entire configuration.
+///
+/// This function validates:
+/// - Global settings (worker_threads)
+/// - Kind format for all services and listeners
+/// - Service references in servers
+/// - Address parsing in listener args
+/// - Listener TLS requirements
+/// - Hostname patterns
+/// - User configurations
+/// - TLS configurations
+/// - HTTP/3 specific configurations
+/// - Address conflicts across servers
+pub fn validate_config(
+  config: &Config,
+  collector: &mut ConfigErrorCollector,
+) {
+  // Validate global settings
+  validate_worker_threads(config.worker_threads, collector);
+
+  // Validate access_log if present
+  if let Some(ref access_log) = config.access_log {
+    validate_access_log_config(access_log, collector);
+  }
+
+  // Collect all service names for reference validation
+  let service_names: HashSet<&str> =
+    config.services.iter().map(|s| s.name.as_str()).collect();
+
+  // Validate servers
+  for (server_idx, server) in config.servers.iter().enumerate() {
+    let server_location = format!("servers[{}]", server_idx);
+
+    // Validate hostnames
+    for (idx, hostname) in server.hostnames.iter().enumerate() {
+      let hostname_location =
+        format!("{}.hostnames[{}]", server_location, idx);
+      validate_hostname(hostname, &hostname_location, collector);
+    }
+
+    // Validate users if present
+    if let Some(ref users) = server.users {
+      validate_users(
+        users,
+        &format!("{}.users", server_location),
+        collector,
+      );
+    }
+
+    // Validate TLS if present
+    if let Some(ref tls) = server.tls {
+      validate_server_tls(
+        tls,
+        &format!("{}.tls", server_location),
+        collector,
+      );
+    }
+
+    // Validate service reference
+    validate_service(
+      &service_names,
+      server_idx,
+      &server.service,
+      collector,
+    );
+
+    // Validate listeners
+    for (listener_idx, listener) in
+      server.listeners.iter().enumerate()
+    {
+      let listener_location =
+        format!("{}.listeners[{}]", server_location, listener_idx);
+      validate_listener(
+        listener,
+        &listener_location,
+        server.tls.as_ref(),
+        collector,
+      );
+    }
+  }
+
+  // Collect service names referenced by servers
+  let referenced_services: HashSet<&str> = config
+    .servers
+    .iter()
+    .map(|s| s.service.as_str())
+    .filter(|s| !s.is_empty())
+    .collect();
+
+  // Validate plugin and service builder existence for referenced services only
+  for (service_idx, service) in config.services.iter().enumerate() {
+    // Only validate services that are actually referenced by at least one server
+    if !referenced_services.contains(service.name.as_str()) {
+      continue;
+    }
+    let service_location = format!("services[{}]", service_idx);
+    validate_plugin_exists(
+      &service.plugin_name,
+      &service.service_name,
+      &service_location,
+      collector,
+    );
+  }
+
+  // Validate listener builder existence for each listener
+  for (server_idx, server) in config.servers.iter().enumerate() {
+    for (listener_idx, listener) in
+      server.listeners.iter().enumerate()
+    {
+      let listener_location = format!(
+        "servers[{}].listeners[{}]",
+        server_idx, listener_idx
+      );
+      validate_listener_builder_exists(
+        &listener.listener_name,
+        &listener_location,
+        collector,
+      );
+    }
+  }
+
+  // Validate SOCKS5 + hostnames semantic
+  validate_socks5_hostnames(config, collector);
+
+  // Validate address conflicts across all servers
+  validate_address_conflicts(config, collector);
+}
+
+/// Validate that SOCKS5 listeners are not configured with hostnames.
+fn validate_socks5_hostnames(
+  config: &Config,
+  collector: &mut ConfigErrorCollector,
+) {
+  for (server_idx, server) in config.servers.iter().enumerate() {
+    if !server.hostnames.is_empty() {
+      // Check if any listener is SOCKS5 (report error once per server)
+      let has_socks5 =
+        server.listeners.iter().any(|l| l.listener_name == "socks5");
+      if has_socks5 {
+        collector.add(
+          format!("servers[{}]", server_idx),
+          "hostnames cannot be configured with SOCKS5 listener (SOCKS5 does not support hostname routing)".to_string(),
+          ConfigErrorKind::InvalidFormat,
+        );
+      }
+    }
+  }
+}
+
+/// Validate a single listener configuration.
+///
+/// Validates:
+/// - TLS requirement for https and http3 listeners
+/// - Address parsing in listener args
+/// - HTTP/3 specific configuration
+pub fn validate_listener(
+  listener: &Listener,
+  location: &str,
+  server_tls: Option<&ServerTlsConfig>,
+  collector: &mut ConfigErrorCollector,
+) {
+  // Check TLS requirement for https and http3 listeners
+  match listener.listener_name.as_str() {
+    "https" | "http3" => {
+      if server_tls.is_none() {
+        collector.add(
+          location.to_string(),
+          format!(
+            "listener kind '{}' requires server-level 'tls' configuration",
+            listener.listener_name
+          ),
+          ConfigErrorKind::InvalidFormat,
+        );
+        return;
+      }
+    }
+    _ => {}
+  }
+
+  // Validate addresses in listener args if present
+  validate_listener_addresses(&listener.args, location, collector);
+
+  // Validate HTTP/3 listener specific configuration
+  if listener.listener_name == "http3" {
+    validate_http3_listener_args(&listener.args, location, collector);
+  }
+}
+
+/// Validate addresses in listener args.
+pub fn validate_listener_addresses(
+  args: &SerializedArgs,
+  location: &str,
+  collector: &mut ConfigErrorCollector,
+) {
+  // Check if args has an "addresses" field
+  match args.get("addresses") {
+    Some(addresses) => {
+      if let Some(addrs) = addresses.as_sequence() {
+        if addrs.is_empty() {
+          collector.add(
+            format!("{}.args.addresses", location),
+            "addresses list cannot be empty".to_string(),
+            ConfigErrorKind::InvalidFormat,
+          );
+          return;
+        }
+        for (addr_idx, addr) in addrs.iter().enumerate() {
+          if let Some(addr_str) = addr.as_str()
+            && addr_str.parse::<std::net::SocketAddr>().is_err()
+          {
+            collector.add(
+              format!("{}.args.addresses[{}]", location, addr_idx),
+              format!("invalid address '{}'", addr_str),
+              ConfigErrorKind::InvalidAddress,
+            );
+          }
+        }
+      }
+    }
+    None => {
+      // addresses field is missing - this is an error
+      collector.add(
+        format!("{}.args", location),
+        "addresses field is required".to_string(),
+        ConfigErrorKind::InvalidFormat,
+      );
+    }
+  }
+}
+
+/// Validate a single hostname pattern.
+///
+/// Valid patterns:
+/// - Exact hostname: "api.example.com"
+/// - Wildcard pattern: "*.example.com" (must have at least one dot after *)
+///
+/// Invalid patterns:
+/// - Empty string
+/// - Wildcard without domain: "*"
+/// - Wildcard without dot: "*example.com"
+pub fn validate_hostname(
+  hostname: &str,
+  location: &str,
+  collector: &mut ConfigErrorCollector,
+) {
+  if hostname.is_empty() {
+    collector.add(
+      location.to_string(),
+      "hostname cannot be empty".to_string(),
+      ConfigErrorKind::InvalidFormat,
+    );
+    return;
+  }
+
+  // Check for wildcard patterns
+  if let Some(after_star) = hostname.strip_prefix('*') {
+    // Valid: "*.example.com" (must have dot after *)
+    // Invalid: "*" (bare wildcard)
+    // Invalid: "*example.com" (wildcard without dot separator)
+    if !after_star.starts_with('.') || after_star.is_empty() {
+      // bare "*" or "*" at end
+      collector.add(
+        location.to_string(),
+        format!("invalid wildcard hostname '{}'", hostname),
+        ConfigErrorKind::InvalidFormat,
+      );
+    } else {
+      // after_star starts with ".", check suffix after dot
+      let suffix = &after_star[1..];
+      if suffix.is_empty() || !suffix.contains('.') {
+        // "*.com" or "*.example" - need at least one more dot
+        collector.add(
+          location.to_string(),
+          format!("invalid wildcard hostname '{}'", hostname),
+          ConfigErrorKind::InvalidFormat,
+        );
+      }
+    }
+  }
+}
+
+/// Validate server-level users configuration.
+pub fn validate_users(
+  users: &[UserConfig],
+  location: &str,
+  collector: &mut ConfigErrorCollector,
+) {
+  if users.is_empty() {
+    collector.add(
+      location.to_string(),
+      "users cannot be an empty array".to_string(),
+      ConfigErrorKind::InvalidFormat,
+    );
+    return;
+  }
+
+  for (idx, user) in users.iter().enumerate() {
+    let user_location = format!("{}[{}]", location, idx);
+
+    if user.username.is_empty() {
+      collector.add(
+        format!("{}.username", user_location),
+        "username cannot be empty".to_string(),
+        ConfigErrorKind::InvalidFormat,
+      );
+    }
+
+    if user.password.is_empty() {
+      collector.add(
+        format!("{}.password", user_location),
+        "password cannot be empty".to_string(),
+        ConfigErrorKind::InvalidFormat,
+      );
+    }
+  }
+}
+
+/// Validate server-level TLS configuration.
+pub fn validate_server_tls(
+  tls: &ServerTlsConfig,
+  location: &str,
+  collector: &mut ConfigErrorCollector,
+) {
+  if tls.certificates.is_empty() {
+    collector.add(
+      format!("{}.certificates", location),
+      "at least one certificate is required".to_string(),
+      ConfigErrorKind::InvalidFormat,
+    );
+    return;
+  }
+
+  for (idx, cert) in tls.certificates.iter().enumerate() {
+    let cert_location = format!("{}.certificates[{}]", location, idx);
+
+    // Validate cert path exists and is readable
+    match fs::read_to_string(std::path::Path::new(&cert.cert_path)) {
+      Ok(content) => {
+        if !content.contains("-----BEGIN CERTIFICATE-----")
+          && !content.contains("-----BEGIN TRUSTED CERTIFICATE-----")
+        {
+          collector.add(
+            format!("{}.cert_path", cert_location),
+            format!(
+              "certificate file '{}' is not in PEM format",
+              cert.cert_path
+            ),
+            ConfigErrorKind::InvalidFormat,
+          );
+        }
+      }
+      Err(e) => {
+        collector.add(
+          format!("{}.cert_path", cert_location),
+          format!(
+            "certificate file '{}' cannot be read: {}",
+            cert.cert_path, e
+          ),
+          ConfigErrorKind::FileRead,
+        );
+      }
+    }
+
+    // Validate key path exists and is readable
+    match fs::read_to_string(std::path::Path::new(&cert.key_path)) {
+      Ok(content) => {
+        if !content.contains("-----BEGIN PRIVATE KEY-----")
+          && !content.contains("-----BEGIN RSA PRIVATE KEY-----")
+          && !content.contains("-----BEGIN EC PRIVATE KEY-----")
+          && !content
+            .contains("-----BEGIN ENCRYPTED PRIVATE KEY-----")
+        {
+          collector.add(
+            format!("{}.key_path", cert_location),
+            format!(
+              "private key file '{}' is not in PEM format",
+              cert.key_path
+            ),
+            ConfigErrorKind::InvalidFormat,
+          );
+        }
+      }
+      Err(e) => {
+        collector.add(
+          format!("{}.key_path", cert_location),
+          format!(
+            "private key file '{}' cannot be read: {}",
+            cert.key_path, e
+          ),
+          ConfigErrorKind::FileRead,
+        );
+      }
+    }
+  }
+}
+
+/// Validate HTTP/3 listener specific configuration.
+///
+/// Validates:
+/// - QUIC parameters validity
+///
+/// Note: Address validation is handled by validate_listener_addresses.
+/// Note: TLS and auth are now at server level, not listener level.
+pub fn validate_http3_listener_args(
+  args: &SerializedArgs,
+  location: &str,
+  collector: &mut ConfigErrorCollector,
+) {
+  // Validate QUIC parameters
+  if let Some(quic) = args.get("quic") {
+    validate_quic_config(
+      quic,
+      &format!("{}.args.quic", location),
+      collector,
+    );
+  }
+
+  // Note: TLS and auth are no longer validated at listener level.
+  // They are now at server level and validated in validate_server_tls and validate_users.
+}
+
+/// Validate QUIC configuration parameters.
+///
+/// Validates QUIC parameters and reports errors for invalid values.
+/// Invalid parameters will cause startup to fail.
+pub fn validate_quic_config(
+  quic: &SerializedArgs,
+  location: &str,
+  collector: &mut ConfigErrorCollector,
+) {
+  // Validate max_concurrent_bidi_streams
+  if let Some(v) = quic.get("max_concurrent_bidi_streams")
+    && let Some(n) = v.as_u64()
+    && (!(1..=10000).contains(&n))
+  {
+    collector.add(
+      format!("{}.max_concurrent_bidi_streams", location),
+      format!("invalid value {}, expected range 1-10000", n),
+      ConfigErrorKind::InvalidFormat,
+    );
+  }
+
+  // Validate max_idle_timeout_ms
+  if let Some(v) = quic.get("max_idle_timeout_ms")
+    && let Some(n) = v.as_u64()
+    && n == 0
+  {
+    collector.add(
+      format!("{}.max_idle_timeout_ms", location),
+      "invalid value 0, expected value > 0".to_string(),
+      ConfigErrorKind::InvalidFormat,
+    );
+  }
+
+  // Validate initial_mtu
+  if let Some(v) = quic.get("initial_mtu")
+    && let Some(n) = v.as_u64()
+    && (!(1200..=9000).contains(&n))
+  {
+    collector.add(
+      format!("{}.initial_mtu", location),
+      format!("invalid value {}, expected range 1200-9000", n),
+      ConfigErrorKind::InvalidFormat,
+    );
+  }
+
+  // Validate send_window
+  if let Some(v) = quic.get("send_window")
+    && let Some(n) = v.as_u64()
+    && n == 0
+  {
+    collector.add(
+      format!("{}.send_window", location),
+      "invalid value 0, expected value > 0".to_string(),
+      ConfigErrorKind::InvalidFormat,
+    );
+  }
+
+  // Validate receive_window
+  if let Some(v) = quic.get("receive_window")
+    && let Some(n) = v.as_u64()
+    && n == 0
+  {
+    collector.add(
+      format!("{}.receive_window", location),
+      "invalid value 0, expected value > 0".to_string(),
+      ConfigErrorKind::InvalidFormat,
+    );
+  }
+}
+
+/// Validate a server's service reference.
+///
+/// Checks that the server's service field references an existing service.
+/// Empty service names are allowed (for servers without a service).
+///
+/// Note: This function validates the service *reference* from a server,
+/// not the service configuration itself. Service configuration validation
+/// (kind format, plugin existence) is handled at parse time and runtime.
+pub fn validate_service(
+  service_names: &std::collections::HashSet<&str>,
+  server_idx: usize,
+  service: &str,
+  collector: &mut ConfigErrorCollector,
+) {
+  if !service.is_empty()
+    && !service_names.contains(service)
+  {
+    collector.add(
+      format!("servers[{}].service", server_idx),
+      format!("service '{}' not found", service),
+      ConfigErrorKind::NotFound,
+    );
+  }
+}
+
+/// Validate that a plugin and service builder exist.
+///
+/// Checks:
+/// - Plugin name refers to a registered plugin
+/// - Service name refers to a valid service builder in the plugin
+pub fn validate_plugin_exists(
+  plugin_name: &str,
+  service_name: &str,
+  location: &str,
+  collector: &mut ConfigErrorCollector,
+) {
+  use crate::plugins::PluginBuilderSet;
+
+  let plugin_builders = PluginBuilderSet::global();
+
+  // Check if plugin exists
+  let plugin_builder = match plugin_builders.plugin_builder(plugin_name) {
+    Some(b) => b,
+    None => {
+      collector.add(
+        format!("{}.kind", location),
+        format!("plugin '{}' not found", plugin_name),
+        ConfigErrorKind::NotFound,
+      );
+      return;
+    }
+  };
+
+  // Create temporary plugin instance to check service builder
+  let plugin = plugin_builder();
+
+  // Check if service builder exists
+  if plugin.service_builder(service_name).is_none() {
+    collector.add(
+      format!("{}.kind", location),
+      format!("service builder '{}' not found", service_name),
+      ConfigErrorKind::NotFound,
+    );
+  }
+}
+
+/// Validate that a listener builder exists.
+///
+/// Checks that the listener name refers to a registered listener builder.
+pub fn validate_listener_builder_exists(
+  listener_name: &str,
+  location: &str,
+  collector: &mut ConfigErrorCollector,
+) {
+  use crate::listeners::ListenerBuilderSet;
+
+  let listener_builders = ListenerBuilderSet::global();
+
+  if listener_builders.listener_builder(listener_name).is_none() {
+    collector.add(
+      format!("{}.kind", location),
+      format!(
+        "listener builder '{}' not found",
+        listener_name
       ),
-      kind: ConfigErrorKind::InvalidFormat,
-    });
+      ConfigErrorKind::NotFound,
+    );
+  }
+}
+
+/// Validate address conflicts across all servers and listeners.
+///
+/// Rules:
+/// - Different transport layer (TCP vs UDP): NO CONFLICT
+/// - Same transport layer, different kind: CONFLICT
+/// - Same kind, supports hostname routing: ALLOWED (Task 020 handles routing)
+/// - Same kind, NO hostname routing support (socks5): CONFLICT
+/// - Multiple default servers (empty hostnames) on same address+kind: CONFLICT (CR-003)
+pub fn validate_address_conflicts(
+  config: &Config,
+  collector: &mut ConfigErrorCollector,
+) {
+  let mut address_map: HashMap<SocketAddr, Vec<AddressUsage>> =
+    HashMap::new();
+
+  for server in &config.servers {
+    for listener in &server.listeners {
+      let category = match ListenerCategory::from_kind(&listener.listener_name)
+      {
+        Some(c) => c,
+        None => continue, // Unknown kind - already validated elsewhere
+      };
+
+      // Get addresses from listener args
+      let addresses = extract_addresses(&listener.args);
+
+      for addr_str in addresses {
+        if let Ok(addr) = addr_str.parse::<SocketAddr>() {
+          let usage = AddressUsage {
+            server_name: server.name.clone(),
+            listener_kind: listener.listener_name.clone(),
+            listener_category: category,
+            hostnames: server.hostnames.clone(),
+          };
+          address_map.entry(addr).or_default().push(usage);
+        }
+      }
+    }
   }
 
-  let mut parts = kind.splitn(2, '.');
+  // Check for conflicts
+  for (addr, usages) in address_map {
+    if usages.len() <= 1 {
+      continue; // No conflict possible
+    }
 
-  let plugin_name = parts.next().unwrap_or("");
-  let item_name = parts.next().unwrap_or("");
+    // Group by transport layer
+    let tcp_usages: Vec<_> = usages
+      .iter()
+      .filter(|u| {
+        u.listener_category.transport_layer() == TransportLayer::Tcp
+      })
+      .collect();
+    let udp_usages: Vec<_> = usages
+      .iter()
+      .filter(|u| {
+        u.listener_category.transport_layer() == TransportLayer::Udp
+      })
+      .collect();
 
-  if plugin_name.is_empty() || item_name.is_empty() {
-    return Err(ConfigError {
-      location: location.to_string(),
-      message: format!(
-        "invalid format '{}', expected {}",
-        kind, expected_format
+    // Check TCP conflicts: different kinds = conflict
+    if tcp_usages.len() > 1 {
+      let kinds: HashSet<_> =
+        tcp_usages.iter().map(|u| u.listener_kind.as_str()).collect();
+
+      if kinds.len() > 1 {
+        // Different TCP kinds on same address = conflict
+        let details: Vec<_> = tcp_usages
+          .iter()
+          .map(|u| {
+            format!("{} (server: {})", u.listener_kind, u.server_name)
+          })
+          .collect();
+        collector.add(
+          format!("address conflict on {}", addr),
+          format!(
+            "TCP address conflict: different listener kinds ({}) on same address",
+            details.join(", ")
+          ),
+          ConfigErrorKind::AddressConflict,
+        );
+      } else {
+        // Same TCP kind - check for multiple default servers (CR-003)
+        check_hostname_routing_conflicts(
+          &tcp_usages,
+          addr,
+          collector,
+        );
+      }
+    }
+
+    // Check UDP conflicts: different kinds = conflict
+    if udp_usages.len() > 1 {
+      let kinds: HashSet<_> =
+        udp_usages.iter().map(|u| u.listener_kind.as_str()).collect();
+
+      if kinds.len() > 1 {
+        // Different UDP kinds on same address = conflict
+        let details: Vec<_> = udp_usages
+          .iter()
+          .map(|u| {
+            format!("{} (server: {})", u.listener_kind, u.server_name)
+          })
+          .collect();
+        collector.add(
+          format!("address conflict on {}", addr),
+          format!(
+            "UDP address conflict: different listener kinds ({}) on same address",
+            details.join(", ")
+          ),
+          ConfigErrorKind::AddressConflict,
+        );
+      } else {
+        // Same UDP kind - check for multiple default servers (CR-003)
+        check_hostname_routing_conflicts(
+          &udp_usages,
+          addr,
+          collector,
+        );
+      }
+    }
+  }
+}
+
+/// Check for hostname routing conflicts sharing the same address+kind.
+///
+/// CR-003: Multiple default servers on same (address, kind) causes routing ambiguity.
+/// Also detects exact hostname duplicates (case-insensitive, DNS rules).
+pub fn check_hostname_routing_conflicts(
+  usages: &[&AddressUsage],
+  addr: SocketAddr,
+  collector: &mut ConfigErrorCollector,
+) {
+  let mut default_servers: Vec<&str> = Vec::new();
+  let mut hostname_map: HashMap<String, Vec<&str>> = HashMap::new();
+
+  // Single pass to collect both conflict types
+  for usage in usages {
+    if usage.hostnames.is_empty() {
+      default_servers.push(&usage.server_name);
+    } else {
+      for hostname in &usage.hostnames {
+        let normalized = hostname.to_lowercase(); // DNS is case-insensitive
+        hostname_map
+          .entry(normalized)
+          .or_default()
+          .push(&usage.server_name);
+      }
+    }
+  }
+
+  // Check multiple default servers
+  if default_servers.len() > 1 {
+    collector.add(
+      format!("address conflict on {}", addr),
+      format!(
+        "multiple default servers ({}) on same address (only one server per address can have empty hostnames)",
+        default_servers.join(", ")
       ),
-      kind: ConfigErrorKind::InvalidFormat,
-    });
+      ConfigErrorKind::AddressConflict,
+    );
   }
 
-  Ok((plugin_name, item_name))
+  // Check hostname duplicates
+  for (hostname, servers) in hostname_map {
+    if servers.len() > 1 {
+      collector.add(
+        format!("hostname conflict on {}", addr),
+        format!(
+          "'{}' defined in multiple servers ({})",
+          hostname,
+          servers.join(", ")
+        ),
+        ConfigErrorKind::AddressConflict,
+      );
+    }
+  }
+}
+
+/// Validate access log configuration (moved from AccessLogConfig::validate).
+pub fn validate_access_log_config(
+  access_log: &AccessLogConfig,
+  collector: &mut ConfigErrorCollector,
+) {
+  use std::time::Duration;
+
+  // Validate buffer minimum size (at least 1KB)
+  if access_log.buffer.as_u64() < 1024 {
+    collector.add(
+      "access_log.buffer",
+      format!(
+        "buffer size must be at least 1KB, got {} bytes",
+        access_log.buffer.as_u64()
+      ),
+      ConfigErrorKind::InvalidFormat,
+    );
+  }
+
+  // Validate max_size minimum size (at least 1MB)
+  if access_log.max_size.as_u64() < 1024 * 1024 {
+    collector.add(
+      "access_log.max_size",
+      format!(
+        "max_size must be at least 1MB, got {} bytes",
+        access_log.max_size.as_u64()
+      ),
+      ConfigErrorKind::InvalidFormat,
+    );
+  }
+
+  // Validate flush interval (at least 100ms)
+  if access_log.flush.0 < Duration::from_millis(100) {
+    collector.add(
+      "access_log.flush",
+      format!(
+        "flush interval must be at least 100ms, got {:?}",
+        access_log.flush.0
+      ),
+      ConfigErrorKind::InvalidFormat,
+    );
+  }
+
+  // Validate path_prefix not empty
+  if access_log.path_prefix.is_empty() {
+    collector.add(
+      "access_log.path_prefix",
+      "path_prefix cannot be empty".to_string(),
+      ConfigErrorKind::InvalidFormat,
+    );
+  }
+}
+
+/// Validate listener authentication configuration (moved from
+/// ListenerAuthConfig::validate).
+///
+/// Rules:
+/// - At least one auth method (`users` or `client_ca_path`) must be configured
+/// - Each username must be non-empty, <= 255 bytes, and unique
+pub fn validate_listener_auth_config(
+  auth: &ListenerAuthConfig,
+  collector: &mut ConfigErrorCollector,
+) {
+  // At least one auth method must be configured
+  if auth.users.is_empty() && auth.client_ca_path.is_none() {
+    collector.add(
+      "auth",
+      "auth config must have at least 'users' or 'client_ca_path'"
+        .to_string(),
+      ConfigErrorKind::InvalidFormat,
+    );
+    return;
+  }
+
+  // Validate users
+  let mut seen_users = std::collections::HashSet::new();
+  for (idx, user) in auth.users.iter().enumerate() {
+    let user_location = format!("auth.users[{}]", idx);
+
+    if user.username.is_empty() {
+      collector.add(
+        format!("{}.username", user_location),
+        "username cannot be empty".to_string(),
+        ConfigErrorKind::InvalidFormat,
+      );
+    }
+
+    if user.username.len() > 255 {
+      collector.add(
+        format!("{}.username", user_location),
+        format!(
+          "username '{}' is too long (max 255 bytes)",
+          user.username
+        ),
+        ConfigErrorKind::InvalidFormat,
+      );
+    }
+
+    if !seen_users.insert(user.username.clone()) {
+      collector.add(
+        format!("{}.username", user_location),
+        format!(
+          "duplicate username '{}' found in users list",
+          user.username
+        ),
+        ConfigErrorKind::InvalidFormat,
+      );
+    }
+  }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::auth::{ListenerAuthConfig, UserCredential};
+  use crate::config::{Server, Service};
 
   #[test]
   fn test_config_error_display() {
@@ -290,272 +1178,6 @@ mod tests {
   }
 
   #[test]
-  fn test_parse_kind_valid() {
-    let result = parse_kind("echo.echo", "services[0].kind");
-    assert!(result.is_ok());
-
-    let (plugin, name) = result.unwrap();
-    assert_eq!(plugin, "echo");
-    assert_eq!(name, "echo");
-  }
-
-  #[test]
-  fn test_parse_kind_valid_listener_simple() {
-    // New listener format: simple protocol name without dots
-    let result = parse_kind("http", "servers[0].listeners[0].kind");
-    assert!(result.is_ok());
-
-    let (plugin, name) = result.unwrap();
-    assert_eq!(plugin, "http");
-    assert_eq!(name, "http");
-  }
-
-  #[test]
-  fn test_parse_kind_valid_listener_https() {
-    let result = parse_kind("https", "servers[0].listeners[0].kind");
-    assert!(result.is_ok());
-
-    let (plugin, name) = result.unwrap();
-    assert_eq!(plugin, "https");
-    assert_eq!(name, "https");
-  }
-
-  #[test]
-  fn test_parse_kind_valid_listener_http3() {
-    let result = parse_kind("http3", "servers[0].listeners[0].kind");
-    assert!(result.is_ok());
-
-    let (plugin, name) = result.unwrap();
-    assert_eq!(plugin, "http3");
-    assert_eq!(name, "http3");
-  }
-
-  #[test]
-  fn test_parse_kind_valid_listener_socks5() {
-    let result = parse_kind("socks5", "servers[0].listeners[0].kind");
-    assert!(result.is_ok());
-
-    let (plugin, name) = result.unwrap();
-    assert_eq!(plugin, "socks5");
-    assert_eq!(name, "socks5");
-  }
-
-  #[test]
-  fn test_parse_kind_valid_listener_with_dot() {
-    // With the new naming convention, listener kinds accept any non-empty string
-    // A legacy format like "hyper.listener" would be treated as a simple name
-    // (The actual validation happens when checking if the builder exists)
-    let result =
-      parse_kind("legacy.old_name", "servers[0].listeners[0].kind");
-    // This passes parse_kind (format validation) but will fail at builder lookup
-    assert!(result.is_ok());
-
-    let (plugin, name) = result.unwrap();
-    assert_eq!(plugin, "legacy.old_name");
-    assert_eq!(name, "legacy.old_name");
-  }
-
-  #[test]
-  fn test_parse_kind_valid_with_underscore() {
-    let result =
-      parse_kind("connect_tcp.connect_tcp", "services[0].kind");
-    assert!(result.is_ok());
-
-    let (plugin, name) = result.unwrap();
-    assert_eq!(plugin, "connect_tcp");
-    assert_eq!(name, "connect_tcp");
-  }
-
-  #[test]
-  fn test_parse_kind_missing_dot() {
-    let result = parse_kind("echo", "services[0].kind");
-    assert!(result.is_err());
-
-    let error = result.unwrap_err();
-    assert_eq!(error.location, "services[0].kind");
-    assert_eq!(error.kind, ConfigErrorKind::InvalidFormat);
-    assert!(error.message.contains("invalid format"));
-    assert!(error.message.contains("service_name"));
-  }
-
-  #[test]
-  fn test_parse_kind_missing_dot_listener_context() {
-    // Listener kinds now accept simple names without dots
-    let result = parse_kind("hyper", "servers[0].listeners[0].kind");
-    assert!(result.is_ok());
-
-    let (plugin, name) = result.unwrap();
-    assert_eq!(plugin, "hyper");
-    assert_eq!(name, "hyper");
-  }
-
-  #[test]
-  fn test_parse_kind_multiple_dots() {
-    let result = parse_kind("echo.echo.echo", "services[0].kind");
-    assert!(result.is_err());
-
-    let error = result.unwrap_err();
-    assert_eq!(error.location, "services[0].kind");
-    assert_eq!(error.kind, ConfigErrorKind::InvalidFormat);
-    assert!(error.message.contains("service_name"));
-  }
-
-  #[test]
-  fn test_parse_kind_multiple_dots_listener_context() {
-    // Listener kinds now accept simple names without dots
-    // Multiple dots should fail for services but pass for listeners (just returns the name)
-    let result = parse_kind("http", "servers[0].listeners[0].kind");
-    assert!(result.is_ok());
-
-    let (plugin, name) = result.unwrap();
-    assert_eq!(plugin, "http");
-    assert_eq!(name, "http");
-  }
-
-  #[test]
-  fn test_parse_kind_empty_plugin() {
-    let result = parse_kind(".echo", "services[0].kind");
-    assert!(result.is_err());
-
-    let error = result.unwrap_err();
-    assert_eq!(error.kind, ConfigErrorKind::InvalidFormat);
-    assert!(error.message.contains("service_name"));
-  }
-
-  #[test]
-  fn test_parse_kind_empty_plugin_listener_context() {
-    // For listener contexts, we accept any non-empty string
-    // Even strings with dots are accepted (they're returned as-is)
-    let result = parse_kind(".hyper", "servers[0].listeners[0].kind");
-    assert!(result.is_ok());
-
-    let (plugin, name) = result.unwrap();
-    assert_eq!(plugin, ".hyper");
-    assert_eq!(name, ".hyper");
-  }
-
-  #[test]
-  fn test_parse_kind_empty_item() {
-    let result = parse_kind("echo.", "services[0].kind");
-    assert!(result.is_err());
-
-    let error = result.unwrap_err();
-    assert_eq!(error.kind, ConfigErrorKind::InvalidFormat);
-    assert!(error.message.contains("service_name"));
-  }
-
-  #[test]
-  fn test_parse_kind_empty_item_listener_context() {
-    // For listener contexts, we accept any non-empty string
-    // Even strings with dots are accepted (they're returned as-is)
-    let result = parse_kind("hyper.", "servers[0].listeners[0].kind");
-    assert!(result.is_ok());
-
-    let (plugin, name) = result.unwrap();
-    assert_eq!(plugin, "hyper.");
-    assert_eq!(name, "hyper.");
-  }
-
-  #[test]
-  fn test_parse_kind_empty_string() {
-    let result = parse_kind("", "services[0].kind");
-    assert!(result.is_err());
-
-    let error = result.unwrap_err();
-    assert_eq!(error.kind, ConfigErrorKind::InvalidFormat);
-    assert!(error.message.contains("service_name"));
-  }
-
-  #[test]
-  fn test_parse_kind_empty_string_listener_context() {
-    // Empty string should fail even for listeners
-    let result = parse_kind("", "servers[0].listeners[0].kind");
-    assert!(result.is_err());
-
-    let error = result.unwrap_err();
-    assert_eq!(error.kind, ConfigErrorKind::InvalidFormat);
-    assert!(error.message.contains("protocol_name"));
-  }
-
-  #[test]
-  fn test_parse_kind_only_dot() {
-    let result = parse_kind(".", "services[0].kind");
-    assert!(result.is_err());
-
-    let error = result.unwrap_err();
-    assert_eq!(error.kind, ConfigErrorKind::InvalidFormat);
-    assert!(error.message.contains("service_name"));
-  }
-
-  #[test]
-  fn test_parse_kind_only_dot_listener_context() {
-    // For listener contexts, we accept any non-empty string
-    // Even a single dot is accepted
-    let result = parse_kind(".", "servers[0].listeners[0].kind");
-    assert!(result.is_ok());
-
-    let (plugin, name) = result.unwrap();
-    assert_eq!(plugin, ".");
-    assert_eq!(name, ".");
-  }
-
-  #[test]
-  fn test_get_expected_format_service_context() {
-    assert_eq!(
-      get_expected_format("services[0].kind"),
-      "'plugin_name.service_name'"
-    );
-    assert_eq!(
-      get_expected_format("services[5].kind"),
-      "'plugin_name.service_name'"
-    );
-  }
-
-  #[test]
-  fn test_get_expected_format_listener_context() {
-    assert_eq!(
-      get_expected_format("servers[0].listeners[0].kind"),
-      "'protocol_name' (e.g., http, https, http3, socks5)"
-    );
-    assert_eq!(
-      get_expected_format("listeners[0].kind"),
-      "'protocol_name' (e.g., http, https, http3, socks5)"
-    );
-  }
-
-  #[test]
-  fn test_get_expected_format_default_context() {
-    // Unknown contexts default to service_name
-    assert_eq!(
-      get_expected_format("unknown.kind"),
-      "'plugin_name.service_name'"
-    );
-    assert_eq!(
-      get_expected_format("custom.location"),
-      "'plugin_name.service_name'"
-    );
-  }
-
-  #[test]
-  fn test_parse_kind_error_location_preserved() {
-    let result = parse_kind("invalid", "custom.location.path");
-    assert!(result.is_err());
-
-    let error = result.unwrap_err();
-    assert_eq!(error.location, "custom.location.path");
-  }
-
-  #[test]
-  fn test_parse_kind_valid_location_preserved() {
-    let result = parse_kind("plugin.service", "test.location");
-    assert!(result.is_ok());
-
-    let (plugin, name) = result.unwrap();
-    assert_eq!(plugin, "plugin");
-    assert_eq!(name, "service");
-  }
-
-  #[test]
   fn test_config_error_is_error() {
     fn assert_error<E: std::error::Error>() {}
     assert_error::<ConfigError>();
@@ -612,6 +1234,146 @@ mod tests {
   }
 
   // =========================================================================
+  // validate_config Tests
+  // =========================================================================
+
+  #[test]
+  fn test_validate_config_valid() {
+    let config = Config {
+      services: vec![Service {
+        name: "echo".to_string(),
+        plugin_name: "echo".to_string(),
+        service_name: "echo".to_string(),
+        args: serde_yaml::Value::Null,
+        layers: vec![],
+      }],
+      servers: vec![crate::config::Server {
+        name: "server1".to_string(),
+        hostnames: vec![],
+        listeners: vec![crate::config::Listener {
+          listener_name: "http".to_string(),
+          args: serde_yaml::from_str(
+            r#"{addresses: ["127.0.0.1:8080"]}"#,
+          )
+          .unwrap(),
+        }],
+        service: "echo".to_string(),
+        tls: None,
+        users: None,
+        access_log: None,
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(
+      !collector.has_errors(),
+      "Valid config should pass: {:?}",
+      collector.errors()
+    );
+  }
+
+  #[test]
+  fn test_validate_config_empty() {
+    let config = Config::default();
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(!collector.has_errors());
+  }
+
+  #[test]
+  fn test_validate_config_worker_threads_zero() {
+    let config = Config {
+      worker_threads: 0,
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors
+      .iter()
+      .any(|e| e.location == "worker_threads" && e.message.contains("at least 1"));
+    assert!(found, "Should have worker_threads validation error");
+  }
+
+  #[test]
+  fn test_validate_config_service_reference_not_found() {
+    let config = Config {
+      services: vec![],
+      servers: vec![crate::config::Server {
+        name: "test_server".to_string(),
+        listeners: vec![],
+        service: "nonexistent".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].kind, ConfigErrorKind::NotFound);
+    assert!(
+      errors[0].message.contains("service 'nonexistent' not found")
+    );
+  }
+
+  #[test]
+  fn test_validate_config_invalid_listener_address() {
+    let config = Config {
+      servers: vec![crate::config::Server {
+        name: "test".to_string(),
+        listeners: vec![crate::config::Listener {
+          listener_name: "http".to_string(),
+          args: serde_yaml::from_str(
+            r#"{addresses: ["invalid:address"]}"#,
+          )
+          .unwrap(),
+        }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].kind, ConfigErrorKind::InvalidAddress);
+  }
+
+  #[test]
+  fn test_validate_config_https_without_tls() {
+    let config = Config {
+      servers: vec![crate::config::Server {
+        name: "https_server".to_string(),
+        listeners: vec![crate::config::Listener {
+          listener_name: "https".to_string(),
+          args: serde_yaml::from_str(
+            r#"{addresses: ["127.0.0.1:8443"]}"#,
+          )
+          .unwrap(),
+        }],
+        service: "".to_string(),
+        tls: None,
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.message.contains("requires server-level 'tls' configuration")
+    });
+    assert!(found, "Should have TLS required error for https");
+  }
+
+  // =========================================================================
   // Address Conflict Detection Tests
   // =========================================================================
 
@@ -626,8 +1388,6 @@ mod tests {
   #[test]
   fn test_address_conflict_tcp_vs_tcp_different_kind() {
     // Two listeners of different TCP kinds on same address should conflict
-    use crate::config::{Config, Listener, Server, Service};
-
     let args1 =
       serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
         .unwrap();
@@ -641,30 +1401,31 @@ mod tests {
       access_log: None,
       services: vec![Service {
         name: "echo".to_string(),
-        kind: "echo.echo".to_string(),
+        plugin_name: "echo".to_string(),
+        service_name: "echo".to_string(),
         args: serde_yaml::Value::Null,
         layers: vec![],
       }],
       servers: vec![
-        Server {
+        crate::config::Server {
           name: "server1".to_string(),
           hostnames: vec![],
           tls: None,
           users: None,
-          listeners: vec![Listener {
-            kind: "http".to_string(),
+          listeners: vec![crate::config::Listener {
+            listener_name: "http".to_string(),
             args: args1,
           }],
           service: "echo".to_string(),
           access_log: None,
         },
-        Server {
+        crate::config::Server {
           name: "server2".to_string(),
           hostnames: vec![],
           tls: None,
           users: None,
-          listeners: vec![Listener {
-            kind: "socks5".to_string(),
+          listeners: vec![crate::config::Listener {
+            listener_name: "socks5".to_string(),
             args: args2,
           }],
           service: "echo".to_string(),
@@ -674,7 +1435,7 @@ mod tests {
     };
 
     let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
+    validate_config(&config, &mut collector);
     assert!(collector.has_errors());
     assert!(has_error_containing(&collector, "address conflict"));
   }
@@ -682,10 +1443,7 @@ mod tests {
   #[test]
   fn test_address_no_conflict_tcp_vs_udp() {
     // HTTP (TCP) and HTTP/3 (UDP) on same address should NOT conflict
-    use crate::config::{
-      CertificateConfig, Config, Listener, Server, ServerTlsConfig,
-      Service,
-    };
+    use crate::config::{CertificateConfig, ServerTlsConfig};
 
     // Install CryptoProvider for TLS validation
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -700,11 +1458,12 @@ mod tests {
       access_log: None,
       services: vec![Service {
         name: "echo".to_string(),
-        kind: "echo.echo".to_string(),
+        plugin_name: "echo".to_string(),
+        service_name: "echo".to_string(),
         args: serde_yaml::Value::Null,
         layers: vec![],
       }],
-      servers: vec![Server {
+      servers: vec![crate::config::Server {
         name: "server1".to_string(),
         hostnames: vec![],
         tls: Some(ServerTlsConfig {
@@ -716,8 +1475,8 @@ mod tests {
         }),
         users: None,
         listeners: vec![
-          Listener { kind: "http".to_string(), args: args.clone() },
-          Listener { kind: "http3".to_string(), args: args },
+          crate::config::Listener { listener_name: "http".to_string(), args: args.clone() },
+          crate::config::Listener { listener_name: "http3".to_string(), args: args },
         ],
         service: "echo".to_string(),
         access_log: None,
@@ -725,7 +1484,7 @@ mod tests {
     };
 
     let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
+    validate_config(&config, &mut collector);
     // Should NOT have address conflict errors (may have other errors like missing cert files)
     let has_address_conflict =
       has_error_containing(&collector, "address conflict");
@@ -738,8 +1497,6 @@ mod tests {
   #[test]
   fn test_address_same_kind_can_share_with_hostnames() {
     // Same kind (http) CAN share address when they support hostname routing
-    use crate::config::{Config, Listener, Server, Service};
-
     let args: serde_yaml::Value =
       serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
         .unwrap();
@@ -750,30 +1507,31 @@ mod tests {
       access_log: None,
       services: vec![Service {
         name: "echo".to_string(),
-        kind: "echo.echo".to_string(),
+        plugin_name: "echo".to_string(),
+        service_name: "echo".to_string(),
         args: serde_yaml::Value::Null,
         layers: vec![],
       }],
       servers: vec![
-        Server {
+        crate::config::Server {
           name: "default_server".to_string(),
           hostnames: vec![],
           tls: None,
           users: None,
-          listeners: vec![Listener {
-            kind: "http".to_string(),
+          listeners: vec![crate::config::Listener {
+            listener_name: "http".to_string(),
             args: args.clone(),
           }],
           service: "echo".to_string(),
           access_log: None,
         },
-        Server {
+        crate::config::Server {
           name: "api_server".to_string(),
           hostnames: vec!["api.example.com".to_string()],
           tls: None,
           users: None,
-          listeners: vec![Listener {
-            kind: "http".to_string(),
+          listeners: vec![crate::config::Listener {
+            listener_name: "http".to_string(),
             args: args,
           }],
           service: "echo".to_string(),
@@ -783,7 +1541,7 @@ mod tests {
     };
 
     let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
+    validate_config(&config, &mut collector);
     // Should be VALID - same kind with hostname routing can share address
     assert!(
       !collector.has_errors(),
@@ -797,8 +1555,6 @@ mod tests {
     // socks5 does NOT support hostname routing, so multiple socks5 on same address = CONFLICT
     // This is now caught by the "multiple default servers" check (Task 003)
     // since SOCKS5 servers have empty hostnames and are treated as default servers
-    use crate::config::{Config, Listener, Server, Service};
-
     let args1 =
       serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#)
         .unwrap();
@@ -812,30 +1568,31 @@ mod tests {
       access_log: None,
       services: vec![Service {
         name: "echo".to_string(),
-        kind: "echo.echo".to_string(),
+        plugin_name: "echo".to_string(),
+        service_name: "echo".to_string(),
         args: serde_yaml::Value::Null,
         layers: vec![],
       }],
       servers: vec![
-        Server {
+        crate::config::Server {
           name: "server1".to_string(),
           hostnames: vec![],
           tls: None,
           users: None,
-          listeners: vec![Listener {
-            kind: "socks5".to_string(),
+          listeners: vec![crate::config::Listener {
+            listener_name: "socks5".to_string(),
             args: args1,
           }],
           service: "echo".to_string(),
           access_log: None,
         },
-        Server {
+        crate::config::Server {
           name: "server2".to_string(),
           hostnames: vec![],
           tls: None,
           users: None,
-          listeners: vec![Listener {
-            kind: "socks5".to_string(),
+          listeners: vec![crate::config::Listener {
+            listener_name: "socks5".to_string(),
             args: args2,
           }],
           service: "echo".to_string(),
@@ -845,7 +1602,7 @@ mod tests {
     };
 
     let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
+    validate_config(&config, &mut collector);
     assert!(collector.has_errors());
     // SOCKS5 conflict is now caught by "multiple default servers" check
     assert!(has_error_containing(
@@ -858,8 +1615,6 @@ mod tests {
   fn test_address_multiple_http_no_hostnames_conflict() {
     // CR-003: Multiple default servers (empty hostnames) on same address+kind should cause error
     // This causes routing ambiguity - when no Host header matches, which default server handles the request?
-    use crate::config::{Config, Listener, Server, Service};
-
     let args1 =
       serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
         .unwrap();
@@ -873,30 +1628,31 @@ mod tests {
       access_log: None,
       services: vec![Service {
         name: "echo".to_string(),
-        kind: "echo.echo".to_string(),
+        plugin_name: "echo".to_string(),
+        service_name: "echo".to_string(),
         args: serde_yaml::Value::Null,
         layers: vec![],
       }],
       servers: vec![
-        Server {
+        crate::config::Server {
           name: "server1".to_string(),
           hostnames: vec![],
           tls: None,
           users: None,
-          listeners: vec![Listener {
-            kind: "http".to_string(),
+          listeners: vec![crate::config::Listener {
+            listener_name: "http".to_string(),
             args: args1,
           }],
           service: "echo".to_string(),
           access_log: None,
         },
-        Server {
+        crate::config::Server {
           name: "server2".to_string(),
           hostnames: vec![],
           tls: None,
           users: None,
-          listeners: vec![Listener {
-            kind: "http".to_string(),
+          listeners: vec![crate::config::Listener {
+            listener_name: "http".to_string(),
             args: args2,
           }],
           service: "echo".to_string(),
@@ -906,7 +1662,7 @@ mod tests {
     };
 
     let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
+    validate_config(&config, &mut collector);
     // CR-003: This should be an error - multiple default servers on same address
     assert!(
       collector.has_errors(),
@@ -922,10 +1678,7 @@ mod tests {
   fn test_address_udp_vs_udp_conflict() {
     // Two HTTP/3 listeners on same address should NOT conflict if they support hostname routing
     // (similar to TCP case - same kind can share with hostname routing)
-    use crate::config::{
-      CertificateConfig, Config, Listener, Server, ServerTlsConfig,
-      Service,
-    };
+    use crate::config::{CertificateConfig, ServerTlsConfig};
 
     // Install CryptoProvider for TLS validation
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -943,12 +1696,13 @@ mod tests {
       access_log: None,
       services: vec![Service {
         name: "echo".to_string(),
-        kind: "echo.echo".to_string(),
+        plugin_name: "echo".to_string(),
+        service_name: "echo".to_string(),
         args: serde_yaml::Value::Null,
         layers: vec![],
       }],
       servers: vec![
-        Server {
+        crate::config::Server {
           name: "server1".to_string(),
           hostnames: vec![],
           tls: Some(ServerTlsConfig {
@@ -959,14 +1713,14 @@ mod tests {
             client_ca_certs: None,
           }),
           users: None,
-          listeners: vec![Listener {
-            kind: "http3".to_string(),
+          listeners: vec![crate::config::Listener {
+            listener_name: "http3".to_string(),
             args: args1,
           }],
           service: "echo".to_string(),
           access_log: None,
         },
-        Server {
+        crate::config::Server {
           name: "server2".to_string(),
           hostnames: vec!["api.example.com".to_string()],
           tls: Some(ServerTlsConfig {
@@ -977,8 +1731,8 @@ mod tests {
             client_ca_certs: None,
           }),
           users: None,
-          listeners: vec![Listener {
-            kind: "http3".to_string(),
+          listeners: vec![crate::config::Listener {
+            listener_name: "http3".to_string(),
             args: args2,
           }],
           service: "echo".to_string(),
@@ -988,7 +1742,7 @@ mod tests {
     };
 
     let mut collector = ConfigErrorCollector::new();
-    config.validate(&mut collector);
+    validate_config(&config, &mut collector);
     // Same UDP kind with hostname routing support is allowed
     // (may have cert file errors but should not have address conflict)
     let has_address_conflict =
@@ -996,6 +1750,1343 @@ mod tests {
     assert!(
       !has_address_conflict,
       "Expected no address conflict for same UDP kind with hostname routing"
+    );
+  }
+
+  // =========================================================================
+  // validate_listener_auth_config Tests
+  // =========================================================================
+
+  #[test]
+  fn test_validate_listener_auth_config_empty_is_error() {
+    let config = ListenerAuthConfig::default();
+    let mut collector = ConfigErrorCollector::new();
+    validate_listener_auth_config(&config, &mut collector);
+    assert!(collector.has_errors(), "Empty auth config should produce error");
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.message.contains("must have at least 'users' or 'client_ca_path'")
+    });
+    assert!(found, "Should have 'at least one method' error");
+  }
+
+  #[test]
+  fn test_validate_listener_auth_config_password_only_ok() {
+    let config = ListenerAuthConfig {
+      users: vec![UserCredential {
+        username: "admin".to_string(),
+        password: "secret".to_string(),
+      }],
+      client_ca_path: None,
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_listener_auth_config(&config, &mut collector);
+    assert!(!collector.has_errors(), "Password-only config should be valid");
+  }
+
+  #[test]
+  fn test_validate_listener_auth_config_tls_only_ok() {
+    let config = ListenerAuthConfig {
+      users: vec![],
+      client_ca_path: Some("/path/to/ca.pem".to_string()),
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_listener_auth_config(&config, &mut collector);
+    assert!(!collector.has_errors(), "TLS-only config should be valid");
+  }
+
+  #[test]
+  fn test_validate_listener_auth_config_duplicate_username_is_error() {
+    let config = ListenerAuthConfig {
+      users: vec![
+        UserCredential {
+          username: "admin".to_string(),
+          password: "pass1".to_string(),
+        },
+        UserCredential {
+          username: "admin".to_string(),
+          password: "pass2".to_string(),
+        },
+      ],
+      client_ca_path: None,
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_listener_auth_config(&config, &mut collector);
+    assert!(collector.has_errors(), "Duplicate usernames should be invalid");
+    let errors = collector.errors();
+    let found = errors
+      .iter()
+      .any(|e| e.message.contains("duplicate username"));
+    assert!(found, "Should have duplicate username error");
+  }
+
+  #[test]
+  fn test_validate_listener_auth_config_empty_username_is_error() {
+    let config = ListenerAuthConfig {
+      users: vec![UserCredential {
+        username: "".to_string(),
+        password: "pass".to_string(),
+      }],
+      client_ca_path: None,
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_listener_auth_config(&config, &mut collector);
+    assert!(collector.has_errors(), "Empty username should be invalid");
+    let errors = collector.errors();
+    let found = errors
+      .iter()
+      .any(|e| e.message.contains("username cannot be empty"));
+    assert!(found, "Should have empty username error");
+  }
+
+  // =========================================================================
+  // validate_worker_threads Tests
+  // =========================================================================
+
+  #[test]
+  fn test_validate_worker_threads_zero_standalone() {
+    let mut collector = ConfigErrorCollector::new();
+    validate_worker_threads(0, &mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors
+      .iter()
+      .any(|e| e.location == "worker_threads" && e.message.contains("at least 1"));
+    assert!(found, "Should have worker_threads validation error");
+  }
+
+  #[test]
+  fn test_validate_worker_threads_one_standalone() {
+    let mut collector = ConfigErrorCollector::new();
+    validate_worker_threads(1, &mut collector);
+    assert!(!collector.has_errors(), "worker_threads=1 should be valid");
+  }
+
+  #[test]
+  fn test_validate_empty_config() {
+    let config = Config::default();
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(!collector.has_errors());
+  }
+
+  #[test]
+  fn test_validate_valid_service() {
+    let config = Config {
+      services: vec![Service {
+        name: "test_echo".to_string(),
+        plugin_name: "echo".to_string(), service_name: "echo".to_string(),
+        args: serde_yaml::Value::Null,
+        layers: vec![],
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(!collector.has_errors());
+  }
+
+  #[test]
+  fn test_validate_valid_listener() {
+    let args =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "test_server".to_string(),
+        listeners: vec![Listener { listener_name: "http".to_string(), args }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(!collector.has_errors());
+  }
+
+  #[test]
+  fn test_validate_service_reference_not_found() {
+    let config = Config {
+      services: vec![],
+      servers: vec![Server {
+        name: "test_server".to_string(),
+        listeners: vec![],
+        service: "nonexistent".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].kind, ConfigErrorKind::NotFound);
+    assert!(
+      errors[0].message.contains("service 'nonexistent' not found")
+    );
+  }
+
+  #[test]
+  fn test_validate_service_reference_found() {
+    let config = Config {
+      services: vec![Service {
+        name: "existing".to_string(),
+        plugin_name: "echo".to_string(), service_name: "echo".to_string(),
+        args: serde_yaml::Value::Null,
+        layers: vec![],
+      }],
+      servers: vec![Server {
+        name: "test_server".to_string(),
+        listeners: vec![],
+        service: "existing".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(!collector.has_errors());
+  }
+
+  #[test]
+  fn test_validate_valid_address() {
+    let args =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "test".to_string(),
+        listeners: vec![Listener { listener_name: "http".to_string(), args }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(!collector.has_errors());
+  }
+
+  #[test]
+  fn test_validate_invalid_address() {
+    let args =
+      serde_yaml::from_str(r#"{addresses: ["invalid:address"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "test".to_string(),
+        listeners: vec![Listener { listener_name: "http".to_string(), args }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].kind, ConfigErrorKind::InvalidAddress);
+  }
+
+  #[test]
+  fn test_validate_multiple_invalid_addresses() {
+    let args = serde_yaml::from_str(
+      r#"{addresses: ["invalid1", "127.0.0.1:8080", "invalid2"]}"#,
+    )
+    .unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "test".to_string(),
+        listeners: vec![Listener { listener_name: "http".to_string(), args }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    assert_eq!(errors.len(), 2);
+    assert_eq!(errors[0].kind, ConfigErrorKind::InvalidAddress);
+    assert_eq!(errors[1].kind, ConfigErrorKind::InvalidAddress);
+  }
+
+  #[test]
+  fn test_validate_multiple_services_and_listeners() {
+    let listener_args1: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let listener_args2: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8081"]}"#)
+        .unwrap();
+    let config = Config {
+      services: vec![
+        Service {
+          name: "echo".to_string(),
+          plugin_name: "echo".to_string(), service_name: "echo".to_string(),
+          args: serde_yaml::Value::Null,
+          layers: vec![],
+        },
+        Service {
+          name: "connect".to_string(),
+          plugin_name: "connect_tcp".to_string(), service_name: "connect_tcp".to_string(),
+          args: serde_yaml::Value::Null,
+          layers: vec![],
+        },
+      ],
+      servers: vec![
+        Server {
+          name: "server1".to_string(),
+          listeners: vec![Listener {
+            listener_name: "http".to_string(),
+            args: listener_args1,
+          }],
+          service: "echo".to_string(),
+          ..Default::default()
+        },
+        Server {
+          name: "server2".to_string(),
+          listeners: vec![Listener {
+            listener_name: "http".to_string(),
+            args: listener_args2,
+          }],
+          service: "connect".to_string(),
+          ..Default::default()
+        },
+      ],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(!collector.has_errors());
+  }
+
+  #[test]
+  fn test_validate_multiple_errors() {
+    // Empty plugin_name/service_name produce plugin not found errors
+    // for referenced services, plus the service reference error.
+    let config = Config {
+      services: vec![
+        Service {
+          name: "test".to_string(),
+          plugin_name: String::new(),
+          service_name: String::new(),
+          args: serde_yaml::Value::Null,
+          layers: vec![],
+        },
+        Service {
+          name: "test2".to_string(),
+          plugin_name: String::new(),
+          service_name: String::new(),
+          args: serde_yaml::Value::Null,
+          layers: vec![],
+        },
+      ],
+      servers: vec![Server {
+        name: "server".to_string(),
+        listeners: vec![],
+        service: "test".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    // 1 plugin not found error (for referenced service "test") = 1
+    assert_eq!(errors.len(), 1);
+    // Verify plugin not found error is present
+    let found = errors.iter().any(|e| {
+      e.kind == ConfigErrorKind::NotFound
+        && e.message.contains("plugin '' not found")
+    });
+    assert!(found, "Should have plugin not found error");
+  }
+
+  #[test]
+  fn test_validate_empty_service_name() {
+    let config = Config {
+      servers: vec![Server {
+        name: "test".to_string(),
+        listeners: vec![],
+        service: "".to_string(), // empty service name should be allowed
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(!collector.has_errors());
+  }
+
+  #[test]
+  fn test_validate_addresses_empty_array() {
+    let args = serde_yaml::from_str(r#"{addresses: []}"#).unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "test".to_string(),
+        listeners: vec![Listener { listener_name: "http".to_string(), args }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    // Empty addresses list is an error
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.message.contains("addresses list cannot be empty")
+    });
+    assert!(found, "Should have empty addresses error");
+  }
+
+  #[test]
+  fn test_validate_socks5_with_hostnames_error() {
+    // SOCKS5 + hostnames should be a semantic error
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "socks_server".to_string(),
+        hostnames: vec!["api.example.com".to_string()], // Invalid with SOCKS5
+        listeners: vec![Listener { listener_name: "socks5".to_string(), args }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    assert!(!errors.is_empty());
+    // Should have error about hostnames with SOCKS5
+    let found = errors.iter().any(|e| {
+      e.message.contains("hostnames cannot be configured with SOCKS5")
+    });
+    assert!(found, "Should have SOCKS5 hostname error");
+  }
+
+  #[test]
+  fn test_validate_socks5_without_hostnames_ok() {
+    // SOCKS5 without hostnames should be OK
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "socks_server".to_string(),
+        hostnames: vec![], // Empty is OK
+        listeners: vec![Listener { listener_name: "socks5".to_string(), args }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    // Should NOT have errors about SOCKS5 hostnames
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.message.contains("hostnames cannot be configured with SOCKS5")
+    });
+    assert!(!found, "Should not have SOCKS5 hostname error");
+  }
+
+  #[test]
+  fn test_validate_http_with_hostnames_ok() {
+    // HTTP with hostnames should be OK
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "http_server".to_string(),
+        hostnames: vec!["api.example.com".to_string()],
+        listeners: vec![Listener { listener_name: "http".to_string(), args }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(!collector.has_errors());
+  }
+
+  #[test]
+  fn test_validate_socks5_hostname_error_location_uses_index() {
+    // CR-001: Error location should use index format, not server name
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "socks_server".to_string(),
+        hostnames: vec!["api.example.com".to_string()],
+        listeners: vec![Listener { listener_name: "socks5".to_string(), args }],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    let errors = collector.errors();
+    assert!(!errors.is_empty());
+    // Location should use index format "servers[0]" not name format "servers[socks_server]"
+    let error = errors
+      .iter()
+      .find(|e| {
+        e.message.contains("hostnames cannot be configured with SOCKS5")
+      })
+      .expect("Should have SOCKS5 hostname error");
+    assert_eq!(
+      error.location, "servers[0]",
+      "Location should use index format, not name format"
+    );
+  }
+
+  #[test]
+  fn test_validate_socks5_multiple_listeners_single_error() {
+    // CR-002: Multiple SOCKS5 listeners should produce only one error
+    let args1: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#)
+        .unwrap();
+    let args2: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1081"]}"#)
+        .unwrap();
+    let args3: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1082"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "socks_server".to_string(),
+        hostnames: vec!["api.example.com".to_string()],
+        listeners: vec![
+          Listener { listener_name: "socks5".to_string(), args: args1 },
+          Listener { listener_name: "socks5".to_string(), args: args2 },
+          Listener { listener_name: "socks5".to_string(), args: args3 },
+        ],
+        service: "".to_string(),
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    let errors = collector.errors();
+    // Count SOCKS5 hostname errors - should be exactly 1, not 3
+    let socks5_hostname_errors: Vec<_> = errors
+      .iter()
+      .filter(|e| {
+        e.message.contains("hostnames cannot be configured with SOCKS5")
+      })
+      .collect();
+    assert_eq!(
+      socks5_hostname_errors.len(),
+      1,
+      "Should have exactly one SOCKS5 hostname error, not one per listener"
+    );
+  }
+
+  #[test]
+  fn test_validate_exact_hostname_duplicate_conflict() {
+    // Two servers with same hostname on same address = conflict
+    let args1: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let args2: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![
+        Server {
+          name: "server_a".to_string(),
+          hostnames: vec!["api.example.com".to_string()],
+          listeners: vec![Listener {
+            listener_name: "http".to_string(),
+            args: args1,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+        Server {
+          name: "server_b".to_string(),
+          hostnames: vec!["api.example.com".to_string()], // Duplicate!
+          listeners: vec![Listener {
+            listener_name: "http".to_string(),
+            args: args2,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+      ],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.message
+        .contains("'api.example.com' defined in multiple servers")
+    });
+    assert!(found, "Should have hostname conflict error");
+  }
+
+  #[test]
+  fn test_validate_hostname_case_insensitive_conflict() {
+    // Same hostname different case = conflict (DNS is case-insensitive)
+    let args1: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let args2: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![
+        Server {
+          name: "server_a".to_string(),
+          hostnames: vec!["API.EXAMPLE.COM".to_string()],
+          listeners: vec![Listener {
+            listener_name: "http".to_string(),
+            args: args1,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+        Server {
+          name: "server_b".to_string(),
+          hostnames: vec!["api.example.com".to_string()],
+          listeners: vec![Listener {
+            listener_name: "http".to_string(),
+            args: args2,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+      ],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.message
+        .contains("'api.example.com' defined in multiple servers")
+    });
+    assert!(
+      found,
+      "Should have case-insensitive hostname conflict error"
+    );
+  }
+
+  #[test]
+  fn test_validate_wildcard_duplicate_conflict() {
+    // Two servers with same wildcard on same address = conflict
+    let args1: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let args2: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![
+        Server {
+          name: "server_a".to_string(),
+          hostnames: vec!["*.example.com".to_string()],
+          listeners: vec![Listener {
+            listener_name: "http".to_string(),
+            args: args1,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+        Server {
+          name: "server_b".to_string(),
+          hostnames: vec!["*.example.com".to_string()], // Duplicate wildcard!
+          listeners: vec![Listener {
+            listener_name: "http".to_string(),
+            args: args2,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+      ],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.message.contains("'*.example.com' defined in multiple servers")
+    });
+    assert!(found, "Should have wildcard conflict error");
+  }
+
+  #[test]
+  fn test_validate_wildcard_and_exact_no_conflict() {
+    // Wildcard + exact hostname = NO conflict (exact match takes precedence)
+    let args1: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let args2: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![
+        Server {
+          name: "wildcard".to_string(),
+          hostnames: vec!["*.example.com".to_string()],
+          listeners: vec![Listener {
+            listener_name: "http".to_string(),
+            args: args1,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+        Server {
+          name: "specific".to_string(),
+          hostnames: vec!["api.example.com".to_string()], // Exact match, OK
+          listeners: vec![Listener {
+            listener_name: "http".to_string(),
+            args: args2,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+      ],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    // Should NOT have hostname conflict errors
+    let errors = collector.errors();
+    let found = errors
+      .iter()
+      .any(|e| e.message.contains("defined in multiple servers"));
+    assert!(!found, "Wildcard + exact should not be a conflict");
+  }
+
+  #[test]
+  fn test_validate_different_hostnames_no_conflict() {
+    // Multiple servers with different hostnames = OK
+    let args1: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let args2: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![
+        Server {
+          name: "server_a".to_string(),
+          hostnames: vec!["api.example.com".to_string()],
+          listeners: vec![Listener {
+            listener_name: "http".to_string(),
+            args: args1,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+        Server {
+          name: "server_b".to_string(),
+          hostnames: vec!["web.example.com".to_string()],
+          listeners: vec![Listener {
+            listener_name: "http".to_string(),
+            args: args2,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+      ],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    // Should NOT have hostname conflict errors
+    let errors = collector.errors();
+    let found = errors
+      .iter()
+      .any(|e| e.message.contains("defined in multiple servers"));
+    assert!(!found, "Different hostnames should not be a conflict");
+  }
+
+  #[test]
+  fn test_validate_multiple_socks5_same_address_conflict() {
+    // Multiple SOCKS5 on same address = conflict (via default server check)
+    let args1: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#)
+        .unwrap();
+    let args2: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:1080"]}"#)
+        .unwrap();
+    let config = Config {
+      servers: vec![
+        Server {
+          name: "socks_a".to_string(),
+          hostnames: vec![], // SOCKS5 has no hostnames
+          listeners: vec![Listener {
+            listener_name: "socks5".to_string(),
+            args: args1,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+        Server {
+          name: "socks_b".to_string(),
+          hostnames: vec![], // SOCKS5 has no hostnames
+          listeners: vec![Listener {
+            listener_name: "socks5".to_string(),
+            args: args2,
+          }],
+          service: "".to_string(),
+          ..Default::default()
+        },
+      ],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    // Should have "multiple default servers" error (SOCKS5 treated as default)
+    let found = errors
+      .iter()
+      .any(|e| e.message.contains("multiple default servers"));
+    assert!(
+      found,
+      "Should have multiple default servers error for SOCKS5"
+    );
+  }
+
+  #[test]
+  fn test_validate_worker_threads_zero_is_error() {
+    let config = Config {
+      worker_threads: 0,
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors
+      .iter()
+      .any(|e| e.location == "worker_threads" && e.message.contains("at least 1"));
+    assert!(found, "Should have worker_threads validation error");
+  }
+
+  #[test]
+  fn test_validate_worker_threads_one_is_valid() {
+    let config = Config {
+      worker_threads: 1,
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(!collector.has_errors(), "worker_threads=1 should be valid");
+  }
+
+  #[test]
+  fn test_validate_https_without_tls_is_error() {
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8443"]}"#).unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "https_server".to_string(),
+        listeners: vec![Listener { listener_name: "https".to_string(), args }],
+        service: "".to_string(),
+        tls: None, // Missing TLS!
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.message.contains("requires server-level 'tls' configuration")
+    });
+    assert!(found, "Should have TLS required error for https");
+  }
+
+  #[test]
+  fn test_validate_http3_without_tls_is_error() {
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8443"]}"#).unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "http3_server".to_string(),
+        listeners: vec![Listener { listener_name: "http3".to_string(), args }],
+        service: "".to_string(),
+        tls: None, // Missing TLS!
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    assert!(collector.has_errors());
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.message.contains("requires server-level 'tls' configuration")
+    });
+    assert!(found, "Should have TLS required error for http3");
+  }
+
+  #[test]
+  fn test_validate_http_without_tls_is_valid() {
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:8080"]}"#).unwrap();
+    let config = Config {
+      servers: vec![Server {
+        name: "http_server".to_string(),
+        listeners: vec![Listener { listener_name: "http".to_string(), args }],
+        service: "".to_string(),
+        tls: None, // HTTP doesn't need TLS
+        ..Default::default()
+      }],
+      ..Default::default()
+    };
+    let mut collector = ConfigErrorCollector::new();
+    validate_config(&config, &mut collector);
+    // Should NOT have TLS required error (may have other errors like missing service)
+    let errors = collector.errors();
+    let found = errors.iter().any(|e| {
+      e.message.contains("requires server-level 'tls' configuration")
+    });
+    assert!(!found, "HTTP should not require TLS");
+  }
+
+  // =========================================================================
+  // validate_quic_config Tests (CR-008)
+  // =========================================================================
+
+  #[test]
+  fn test_validate_quic_config_valid() {
+    let quic = serde_yaml::from_str(
+      r#"{
+        max_concurrent_bidi_streams: 100,
+        max_idle_timeout_ms: 30000,
+        initial_mtu: 1200,
+        send_window: 1048576,
+        receive_window: 1048576
+      }"#,
+    )
+    .unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_quic_config(&quic, "test.quic", &mut collector);
+    assert!(
+      !collector.has_errors(),
+      "Valid QUIC config should pass: {:?}",
+      collector.errors()
+    );
+  }
+
+  #[test]
+  fn test_validate_quic_config_empty() {
+    let quic: serde_yaml::Value = serde_yaml::from_str("{}").unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_quic_config(&quic, "test.quic", &mut collector);
+    assert!(!collector.has_errors(), "Empty QUIC config should be valid");
+  }
+
+  #[test]
+  fn test_validate_quic_config_bidi_streams_too_low() {
+    let quic = serde_yaml::from_str(r#"{max_concurrent_bidi_streams: 0}"#)
+      .unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_quic_config(&quic, "test.quic", &mut collector);
+    assert!(collector.has_errors());
+    let found = collector.errors().iter().any(|e| {
+      e.location.contains("max_concurrent_bidi_streams")
+        && e.message.contains("expected range 1-10000")
+    });
+    assert!(found, "Should reject bidi_streams=0");
+  }
+
+  #[test]
+  fn test_validate_quic_config_bidi_streams_too_high() {
+    let quic =
+      serde_yaml::from_str(r#"{max_concurrent_bidi_streams: 10001}"#)
+        .unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_quic_config(&quic, "test.quic", &mut collector);
+    assert!(collector.has_errors());
+    let found = collector.errors().iter().any(|e| {
+      e.location.contains("max_concurrent_bidi_streams")
+        && e.message.contains("expected range 1-10000")
+    });
+    assert!(found, "Should reject bidi_streams=10001");
+  }
+
+  #[test]
+  fn test_validate_quic_config_bidi_streams_boundary_low() {
+    // Boundary: value 1 should be valid (start of range)
+    let quic = serde_yaml::from_str(r#"{max_concurrent_bidi_streams: 1}"#)
+      .unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_quic_config(&quic, "test.quic", &mut collector);
+    assert!(
+      !collector.has_errors(),
+      "bidi_streams=1 should be valid: {:?}",
+      collector.errors()
+    );
+  }
+
+  #[test]
+  fn test_validate_quic_config_bidi_streams_boundary_high() {
+    // Boundary: value 10000 should be valid (end of range)
+    let quic =
+      serde_yaml::from_str(r#"{max_concurrent_bidi_streams: 10000}"#)
+        .unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_quic_config(&quic, "test.quic", &mut collector);
+    assert!(
+      !collector.has_errors(),
+      "bidi_streams=10000 should be valid: {:?}",
+      collector.errors()
+    );
+  }
+
+  #[test]
+  fn test_validate_quic_config_idle_timeout_zero() {
+    let quic = serde_yaml::from_str(r#"{max_idle_timeout_ms: 0}"#).unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_quic_config(&quic, "test.quic", &mut collector);
+    assert!(collector.has_errors());
+    let found = collector.errors().iter().any(|e| {
+      e.location.contains("max_idle_timeout_ms")
+        && e.message.contains("expected value > 0")
+    });
+    assert!(found, "Should reject idle_timeout=0");
+  }
+
+  #[test]
+  fn test_validate_quic_config_idle_timeout_valid() {
+    let quic = serde_yaml::from_str(r#"{max_idle_timeout_ms: 1}"#).unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_quic_config(&quic, "test.quic", &mut collector);
+    assert!(
+      !collector.has_errors(),
+      "idle_timeout=1 should be valid: {:?}",
+      collector.errors()
+    );
+  }
+
+  #[test]
+  fn test_validate_quic_config_initial_mtu_too_low() {
+    let quic = serde_yaml::from_str(r#"{initial_mtu: 1199}"#).unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_quic_config(&quic, "test.quic", &mut collector);
+    assert!(collector.has_errors());
+    let found = collector.errors().iter().any(|e| {
+      e.location.contains("initial_mtu")
+        && e.message.contains("expected range 1200-9000")
+    });
+    assert!(found, "Should reject initial_mtu=1199");
+  }
+
+  #[test]
+  fn test_validate_quic_config_initial_mtu_too_high() {
+    let quic = serde_yaml::from_str(r#"{initial_mtu: 9001}"#).unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_quic_config(&quic, "test.quic", &mut collector);
+    assert!(collector.has_errors());
+    let found = collector.errors().iter().any(|e| {
+      e.location.contains("initial_mtu")
+        && e.message.contains("expected range 1200-9000")
+    });
+    assert!(found, "Should reject initial_mtu=9001");
+  }
+
+  #[test]
+  fn test_validate_quic_config_initial_mtu_boundary_low() {
+    let quic = serde_yaml::from_str(r#"{initial_mtu: 1200}"#).unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_quic_config(&quic, "test.quic", &mut collector);
+    assert!(
+      !collector.has_errors(),
+      "initial_mtu=1200 should be valid: {:?}",
+      collector.errors()
+    );
+  }
+
+  #[test]
+  fn test_validate_quic_config_initial_mtu_boundary_high() {
+    let quic = serde_yaml::from_str(r#"{initial_mtu: 9000}"#).unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_quic_config(&quic, "test.quic", &mut collector);
+    assert!(
+      !collector.has_errors(),
+      "initial_mtu=9000 should be valid: {:?}",
+      collector.errors()
+    );
+  }
+
+  #[test]
+  fn test_validate_quic_config_send_window_zero() {
+    let quic = serde_yaml::from_str(r#"{send_window: 0}"#).unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_quic_config(&quic, "test.quic", &mut collector);
+    assert!(collector.has_errors());
+    let found = collector.errors().iter().any(|e| {
+      e.location.contains("send_window")
+        && e.message.contains("expected value > 0")
+    });
+    assert!(found, "Should reject send_window=0");
+  }
+
+  #[test]
+  fn test_validate_quic_config_send_window_valid() {
+    let quic = serde_yaml::from_str(r#"{send_window: 1}"#).unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_quic_config(&quic, "test.quic", &mut collector);
+    assert!(
+      !collector.has_errors(),
+      "send_window=1 should be valid: {:?}",
+      collector.errors()
+    );
+  }
+
+  #[test]
+  fn test_validate_quic_config_receive_window_zero() {
+    let quic = serde_yaml::from_str(r#"{receive_window: 0}"#).unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_quic_config(&quic, "test.quic", &mut collector);
+    assert!(collector.has_errors());
+    let found = collector.errors().iter().any(|e| {
+      e.location.contains("receive_window")
+        && e.message.contains("expected value > 0")
+    });
+    assert!(found, "Should reject receive_window=0");
+  }
+
+  #[test]
+  fn test_validate_quic_config_receive_window_valid() {
+    let quic = serde_yaml::from_str(r#"{receive_window: 1}"#).unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_quic_config(&quic, "test.quic", &mut collector);
+    assert!(
+      !collector.has_errors(),
+      "receive_window=1 should be valid: {:?}",
+      collector.errors()
+    );
+  }
+
+  // =========================================================================
+  // validate_hostname Tests (CR-010)
+  // =========================================================================
+
+  #[test]
+  fn test_validate_hostname_empty_is_error() {
+    let mut collector = ConfigErrorCollector::new();
+    validate_hostname("", "test.hostname", &mut collector);
+    assert!(collector.has_errors(), "Empty hostname should be rejected");
+    let found = collector.errors().iter().any(|e| {
+      e.location == "test.hostname"
+        && e.message.contains("hostname cannot be empty")
+    });
+    assert!(found, "Should have empty hostname error");
+  }
+
+  #[test]
+  fn test_validate_hostname_valid_exact() {
+    let mut collector = ConfigErrorCollector::new();
+    validate_hostname("api.example.com", "test.hostname", &mut collector);
+    assert!(
+      !collector.has_errors(),
+      "Valid exact hostname should pass: {:?}",
+      collector.errors()
+    );
+  }
+
+  #[test]
+  fn test_validate_hostname_valid_single_label() {
+    let mut collector = ConfigErrorCollector::new();
+    validate_hostname("localhost", "test.hostname", &mut collector);
+    assert!(
+      !collector.has_errors(),
+      "Single-label hostname should pass: {:?}",
+      collector.errors()
+    );
+  }
+
+  #[test]
+  fn test_validate_hostname_valid_wildcard() {
+    let mut collector = ConfigErrorCollector::new();
+    validate_hostname("*.example.com", "test.hostname", &mut collector);
+    assert!(
+      !collector.has_errors(),
+      "Valid wildcard '*.example.com' should pass: {:?}",
+      collector.errors()
+    );
+  }
+
+  #[test]
+  fn test_validate_hostname_bare_wildcard_is_error() {
+    let mut collector = ConfigErrorCollector::new();
+    validate_hostname("*", "test.hostname", &mut collector);
+    assert!(
+      collector.has_errors(),
+      "Bare wildcard '*' should be rejected"
+    );
+    let found = collector.errors().iter().any(|e| {
+      e.message.contains("invalid wildcard hostname")
+    });
+    assert!(found, "Should have invalid wildcard error");
+  }
+
+  #[test]
+  fn test_validate_hostname_wildcard_no_dot_is_error() {
+    let mut collector = ConfigErrorCollector::new();
+    validate_hostname("*example.com", "test.hostname", &mut collector);
+    assert!(
+      collector.has_errors(),
+      "Wildcard '*example.com' (no dot) should be rejected"
+    );
+    let found = collector.errors().iter().any(|e| {
+      e.message.contains("invalid wildcard hostname")
+    });
+    assert!(found, "Should have invalid wildcard error");
+  }
+
+  #[test]
+  fn test_validate_hostname_wildcard_with_subdomain_is_valid() {
+    let mut collector = ConfigErrorCollector::new();
+    validate_hostname(
+      "*.sub.example.com",
+      "test.hostname",
+      &mut collector,
+    );
+    assert!(
+      !collector.has_errors(),
+      "Wildcard '*.sub.example.com' should be valid: {:?}",
+      collector.errors()
+    );
+  }
+
+  #[test]
+  fn test_validate_quic_config_multiple_errors() {
+    let quic = serde_yaml::from_str(
+      r#"{
+        max_concurrent_bidi_streams: 0,
+        max_idle_timeout_ms: 0,
+        initial_mtu: 500,
+        send_window: 0,
+        receive_window: 0
+      }"#,
+    )
+    .unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_quic_config(&quic, "test.quic", &mut collector);
+    assert!(collector.has_errors());
+    assert_eq!(collector.errors().len(), 5, "Should report all 5 errors");
+  }
+
+  // =========================================================================
+  // validate_http3_listener_args Tests (CR-008)
+  // =========================================================================
+
+  #[test]
+  fn test_validate_http3_listener_args_no_quic() {
+    let args = serde_yaml::from_str(r#"{}"#).unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_http3_listener_args(&args, "test", &mut collector);
+    assert!(
+      !collector.has_errors(),
+      "HTTP/3 args without quic should be valid: {:?}",
+      collector.errors()
+    );
+  }
+
+  #[test]
+  fn test_validate_http3_listener_args_valid_quic() {
+    let args = serde_yaml::from_str(
+      r#"{quic: {max_concurrent_bidi_streams: 100, initial_mtu: 1200}}"#,
+    )
+    .unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_http3_listener_args(&args, "test", &mut collector);
+    assert!(
+      !collector.has_errors(),
+      "Valid QUIC args should pass: {:?}",
+      collector.errors()
+    );
+  }
+
+  #[test]
+  fn test_validate_http3_listener_args_invalid_quic() {
+    let args = serde_yaml::from_str(
+      r#"{quic: {max_concurrent_bidi_streams: 0}}"#,
+    )
+    .unwrap();
+    let mut collector = ConfigErrorCollector::new();
+    validate_http3_listener_args(&args, "test", &mut collector);
+    assert!(collector.has_errors());
+    let found = collector.errors().iter().any(|e| {
+      e.location.contains("quic.max_concurrent_bidi_streams")
+    });
+    assert!(found, "Should propagate QUIC validation error");
+  }
+
+  // =========================================================================
+  // validate_service Tests (SR-006)
+  // =========================================================================
+
+  #[test]
+  fn test_validate_service_direct_not_found() {
+    let service_names: std::collections::HashSet<&str> =
+      std::collections::HashSet::new();
+    let mut collector = ConfigErrorCollector::new();
+    validate_service(&service_names, 0, "nonexistent", &mut collector);
+    assert!(
+      collector.has_errors(),
+      "Nonexistent service reference should produce error"
+    );
+    let found = collector.errors().iter().any(|e| {
+      e.kind == ConfigErrorKind::NotFound
+        && e.message.contains("service 'nonexistent' not found")
+    });
+    assert!(found, "Should have NotFound error for missing service");
+  }
+
+  #[test]
+  fn test_validate_service_direct_found() {
+    let mut service_names: std::collections::HashSet<&str> =
+      std::collections::HashSet::new();
+    service_names.insert("echo");
+    let mut collector = ConfigErrorCollector::new();
+    validate_service(&service_names, 0, "echo", &mut collector);
+    assert!(
+      !collector.has_errors(),
+      "Existing service reference should pass: {:?}",
+      collector.errors()
+    );
+  }
+
+  #[test]
+  fn test_validate_service_direct_empty_name() {
+    let service_names: std::collections::HashSet<&str> =
+      std::collections::HashSet::new();
+    let mut collector = ConfigErrorCollector::new();
+    validate_service(&service_names, 0, "", &mut collector);
+    assert!(
+      !collector.has_errors(),
+      "Empty service name should be allowed: {:?}",
+      collector.errors()
     );
   }
 }

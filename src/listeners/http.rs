@@ -15,12 +15,12 @@ use tokio::{net, task, time::timeout};
 use tower::util as tower_util;
 use tracing::{error, info, warn};
 
-use crate::http_types::{
+use crate::http_utils::{
   BytesBufBodyWrapper, Request, RequestBody, Response,
 };
 use crate::listeners::common::TokioLocalExecutor;
 use crate::plugin;
-use crate::server::ServerRoutingEntry;
+use crate::server::{Server, ServerRouter};
 use crate::shutdown::StreamTracker;
 
 /// Listener shutdown timeout in seconds.
@@ -36,28 +36,27 @@ const MONITORING_LOG_INTERVAL: Duration = Duration::from_secs(60);
 /// the Host header. Multiple servers can share the same address with
 /// hostname-based routing.
 struct HyperServiceAdaptor {
-  /// Server routing table for hostname-based routing
-  server_routing_table: Vec<ServerRoutingEntry>,
+  /// Server router for hostname-based routing
+  server_router: ServerRouter,
   /// Client address for logging
   client_addr: Option<SocketAddr>,
 }
 
 impl HyperServiceAdaptor {
   fn new(
-    server_routing_table: Vec<ServerRoutingEntry>,
+    server_routing_table: Vec<Server>,
     client_addr: Option<SocketAddr>,
   ) -> Self {
-    Self {
-      server_routing_table,
-      client_addr,
-    }
+    let server_router =
+      ServerRouter::build(server_routing_table);
+    Self { server_router, client_addr }
   }
 
   /// Route a request to the correct service based on Host header.
   fn route_request(
     &self,
     req: &Request,
-  ) -> Option<&ServerRoutingEntry> {
+  ) -> Option<std::rc::Rc<Server>> {
     // Get Host header and strip port if present
     let host = req
       .headers()
@@ -65,7 +64,7 @@ impl HyperServiceAdaptor {
       .and_then(|h| h.to_str().ok())
       .map(|h| h.split(':').next().unwrap_or(h));
 
-    super::common::route_request_by_hostname(&self.server_routing_table, host)
+    self.server_router.route(host)
   }
 }
 
@@ -192,7 +191,7 @@ struct HttpListener {
   /// Listening addresses
   addresses: Vec<SocketAddr>,
   /// Server routing table for hostname-based routing
-  server_routing_table: Vec<ServerRoutingEntry>,
+  server_routing_table: Vec<Server>,
   /// Stream tracker for connection management
   listening_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
   /// Connection tracker for graceful shutdown
@@ -205,7 +204,7 @@ impl HttpListener {
   /// Create an HttpListener from parsed configuration.
   fn from_args(
     args: HttpListenerArgs,
-    server_routing_table: Vec<ServerRoutingEntry>,
+    server_routing_table: Vec<Server>,
   ) -> Result<Self> {
     // Parse addresses, filtering out invalid ones
     let addresses: Vec<SocketAddr> = args
@@ -230,7 +229,7 @@ impl HttpListener {
   #[allow(clippy::new_ret_no_self)]
   fn new(
     sargs: plugin::SerializedArgs,
-    server_routing_table: Vec<ServerRoutingEntry>,
+    server_routing_table: Vec<Server>,
   ) -> Result<plugin::Listener> {
     let args: HttpListenerArgs = serde_yaml::from_value(sargs)?;
     Ok(plugin::Listener::new(Self::from_args(args, server_routing_table)?))
@@ -243,7 +242,7 @@ impl HttpListener {
     svc: plugin::Service,
   ) -> Result<Self> {
     let args: HttpListenerArgs = serde_yaml::from_value(sargs)?;
-    let entry = ServerRoutingEntry {
+    let entry = Server {
       hostnames: vec![],
       service: svc,
       service_name: "test_service".to_string(),
@@ -445,8 +444,8 @@ addresses:
       .unwrap()
   }
 
-  fn create_test_routing_entry() -> ServerRoutingEntry {
-    ServerRoutingEntry {
+  fn create_test_routing_entry() -> Server {
+    Server {
       hostnames: vec![],
       service: crate::server::placeholder_service(),
       service_name: "test_service".to_string(),
@@ -628,7 +627,7 @@ addresses:
 
     let args: HttpListenerArgs =
       serde_yaml::from_str(r#"{addresses: ["127.0.0.1:0"]}"#).unwrap();
-    let entry = ServerRoutingEntry {
+    let entry = Server {
       hostnames: vec![],
       service: crate::server::placeholder_service(),
       service_name: "test_service".to_string(),
@@ -717,6 +716,119 @@ addresses:
     assert!(
       auth.verify_and_extract_username(&req).is_err(),
       "Wrong credentials should fail verification"
+    );
+  }
+
+  // ============== Task 009: ServerRouter Routing Test ==============
+
+  #[test]
+  fn test_http_listener_routes_by_hostname() {
+    // Create servers with hostname routing
+    let servers = vec![
+      Server {
+        hostnames: vec![],
+        service: crate::server::placeholder_service(),
+        service_name: "default".to_string(),
+        users: None,
+        tls: None,
+        access_log_writer: None,
+      },
+      Server {
+        hostnames: vec!["api.example.com".to_string()],
+        service: crate::server::placeholder_service(),
+        service_name: "api".to_string(),
+        users: None,
+        tls: None,
+        access_log_writer: None,
+      },
+    ];
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{addresses: ["127.0.0.1:0"]}"#).unwrap();
+    // The builder should accept Vec<Server> and set up routing
+    let result = super::create_listener_builder()(args, servers);
+    assert!(
+      result.is_ok(),
+      "Listener builder should accept Vec<Server>"
+    );
+  }
+
+  #[test]
+  fn test_http_listener_routes_by_hostname_routing_behavior() {
+    // Verify that the listener correctly routes requests to the right
+    // server based on the Host header via ServerRouter.
+    let servers = vec![
+      Server {
+        hostnames: vec![],
+        service: crate::server::placeholder_service(),
+        service_name: "default".to_string(),
+        users: None,
+        tls: None,
+        access_log_writer: None,
+      },
+      Server {
+        hostnames: vec!["api.example.com".to_string()],
+        service: crate::server::placeholder_service(),
+        service_name: "api".to_string(),
+        users: None,
+        tls: None,
+        access_log_writer: None,
+      },
+    ];
+
+    let adaptor =
+      HyperServiceAdaptor::new(servers, None);
+
+    // Request with Host header matching api.example.com
+    let req_api = http::Request::builder()
+      .method("GET")
+      .uri("/test")
+      .header(http::header::HOST, "api.example.com")
+      .body(RequestBody::new(BytesBufBodyWrapper::new(
+        http_body_util::Empty::new(),
+      )))
+      .unwrap();
+
+    let result = adaptor.route_request(&req_api);
+    assert!(result.is_some());
+    assert_eq!(
+      result.unwrap().service_name,
+      "api",
+      "Request with Host: api.example.com should route to api server"
+    );
+
+    // Request with Host header not matching any specific server
+    let req_other = http::Request::builder()
+      .method("GET")
+      .uri("/test")
+      .header(http::header::HOST, "other.example.com")
+      .body(RequestBody::new(BytesBufBodyWrapper::new(
+        http_body_util::Empty::new(),
+      )))
+      .unwrap();
+
+    let result = adaptor.route_request(&req_other);
+    assert!(result.is_some());
+    assert_eq!(
+      result.unwrap().service_name,
+      "default",
+      "Request with non-matching Host should route to default server"
+    );
+
+    // Request without Host header
+    let req_no_host = http::Request::builder()
+      .method("GET")
+      .uri("/test")
+      .body(RequestBody::new(BytesBufBodyWrapper::new(
+        http_body_util::Empty::new(),
+      )))
+      .unwrap();
+
+    let result = adaptor.route_request(&req_no_host);
+    assert!(result.is_some());
+    assert_eq!(
+      result.unwrap().service_name,
+      "default",
+      "Request without Host header should route to default server"
     );
   }
 
@@ -848,7 +960,7 @@ addresses:
     );
 
     let args = create_test_listener_args();
-    let entry = ServerRoutingEntry {
+    let entry = Server {
       hostnames: vec![],
       service: crate::server::placeholder_service(),
       service_name: "tunnel".to_string(),
@@ -906,7 +1018,7 @@ addresses:
   #[test]
   fn test_route_request_no_host_header() {
     let server_routing_table = vec![
-      ServerRoutingEntry {
+      Server {
         hostnames: vec![],
         service: crate::server::placeholder_service(),
         service_name: "default_service".to_string(),
@@ -914,7 +1026,7 @@ addresses:
         tls: None,
         access_log_writer: None,
       },
-      ServerRoutingEntry {
+      Server {
         hostnames: vec!["api.example.com".to_string()],
         service: crate::server::placeholder_service(),
         service_name: "api_service".to_string(),
@@ -943,7 +1055,7 @@ addresses:
   #[test]
   fn test_route_request_with_host_header() {
     let server_routing_table = vec![
-      ServerRoutingEntry {
+      Server {
         hostnames: vec![],
         service: crate::server::placeholder_service(),
         service_name: "default_service".to_string(),
@@ -951,7 +1063,7 @@ addresses:
         tls: None,
         access_log_writer: None,
       },
-      ServerRoutingEntry {
+      Server {
         hostnames: vec!["api.example.com".to_string()],
         service: crate::server::placeholder_service(),
         service_name: "api_service".to_string(),

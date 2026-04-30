@@ -22,12 +22,12 @@ use tokio::{net, task, time::timeout};
 use tower::util as tower_util;
 use tracing::{error, info, warn};
 
-use crate::http_types::{
+use crate::http_utils::{
   BytesBufBodyWrapper, Request, RequestBody, Response,
 };
 use crate::listeners::common::TokioLocalExecutor;
 use crate::plugin;
-use crate::server::ServerRoutingEntry;
+use crate::server::{Server, ServerRouter};
 use crate::shutdown::StreamTracker;
 use crate::tls::build_tls_server_config;
 
@@ -49,7 +49,7 @@ pub struct HttpsListenerArgs {
 /// This function builds a TLS config that includes certificates from all servers
 /// in the routing table, enabling SNI-based certificate selection.
 fn load_tls_config_from_servers(
-  servers: &[ServerRoutingEntry],
+  servers: &[Server],
 ) -> Result<Arc<rustls::ServerConfig>> {
   // Use HTTP/1.1 ALPN
   build_tls_server_config(servers, vec![b"http/1.1".to_vec()])
@@ -57,8 +57,8 @@ fn load_tls_config_from_servers(
 
 /// HTTPS Service Adaptor with routing support.
 struct HttpsServiceAdaptor {
-  /// Routing table for hostname-based routing
-  server_routing_table: Vec<ServerRoutingEntry>,
+  /// Server router for hostname-based routing
+  server_router: ServerRouter,
   /// Client address for logging
   client_addr: Option<SocketAddr>,
   /// SNI from TLS handshake
@@ -67,22 +67,20 @@ struct HttpsServiceAdaptor {
 
 impl HttpsServiceAdaptor {
   fn new(
-    server_routing_table: Vec<ServerRoutingEntry>,
+    server_routing_table: Vec<Server>,
     client_addr: Option<SocketAddr>,
     sni: Option<String>,
   ) -> Self {
-    Self {
-      server_routing_table,
-      client_addr,
-      sni,
-    }
+    let server_router =
+      ServerRouter::build(server_routing_table);
+    Self { server_router, client_addr, sni }
   }
 
   /// Route a request to the correct service based on Host header.
   fn route_request(
     &self,
     req: &Request,
-  ) -> Option<&ServerRoutingEntry> {
+  ) -> Option<std::rc::Rc<Server>> {
     // Get Host header and strip port if present
     let host = req
       .headers()
@@ -90,10 +88,7 @@ impl HttpsServiceAdaptor {
       .and_then(|h| h.to_str().ok())
       .map(|h| h.split(':').next().unwrap_or(h));
 
-    super::common::route_request_by_hostname(
-      &self.server_routing_table,
-      host,
-    )
+    self.server_router.route(host)
   }
 }
 
@@ -244,7 +239,7 @@ pub struct HttpsListener {
   /// TLS configuration
   tls_config: Arc<rustls::ServerConfig>,
   /// Routing table for hostname-based routing
-  server_routing_table: Vec<ServerRoutingEntry>,
+  server_routing_table: Vec<Server>,
   /// Listening set for managing accept tasks
   listening_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
   /// Connection tracker for graceful shutdown
@@ -257,7 +252,7 @@ impl HttpsListener {
   #[allow(clippy::new_ret_no_self)]
   pub fn new(
     sargs: plugin::SerializedArgs,
-    server_routing_table: Vec<ServerRoutingEntry>,
+    server_routing_table: Vec<Server>,
   ) -> Result<plugin::Listener> {
     let args: HttpsListenerArgs = serde_yaml::from_value(sargs)?;
 
@@ -544,7 +539,7 @@ addresses:
     let args: plugin::SerializedArgs =
       serde_yaml::from_str(args_yaml).unwrap();
 
-    let entry = ServerRoutingEntry {
+    let entry = Server {
       hostnames: vec![],
       service: crate::server::placeholder_service(),
       service_name: "test_service".to_string(),
@@ -597,7 +592,7 @@ addresses:
     ensure_crypto_provider();
     let (cert_path, key_path, _temp_dir) = write_test_cert_files();
 
-    let entry = ServerRoutingEntry {
+    let entry = Server {
       hostnames: vec!["test.local".to_string()],
       service: crate::server::placeholder_service(),
       service_name: "test_service".to_string(),
@@ -617,7 +612,7 @@ addresses:
   fn test_load_tls_config_from_servers_empty_certificates() {
     ensure_crypto_provider();
 
-    let entry = ServerRoutingEntry {
+    let entry = Server {
       hostnames: vec![],
       service: crate::server::placeholder_service(),
       service_name: "test_service".to_string(),
@@ -641,7 +636,7 @@ addresses:
     let (cert_path2, key_path2, _temp_dir2) = write_test_cert_files();
 
     let entries = vec![
-      ServerRoutingEntry {
+      Server {
         hostnames: vec!["app1.test.local".to_string()],
         service: crate::server::placeholder_service(),
         service_name: "server1".to_string(),
@@ -655,7 +650,7 @@ addresses:
         }),
         access_log_writer: None,
       },
-      ServerRoutingEntry {
+      Server {
         hostnames: vec!["app2.test.local".to_string()],
         service: crate::server::placeholder_service(),
         service_name: "server2".to_string(),
@@ -713,5 +708,86 @@ addresses:
       http::StatusCode::HTTP_VERSION_NOT_SUPPORTED
     );
     assert!(resp.headers().get(http::header::CONTENT_TYPE).is_some());
+  }
+
+  // ============== Task 009: ServerRouter Routing Behavior Tests ==============
+
+  #[test]
+  fn test_https_listener_routes_by_hostname() {
+    // Verify that HttpsServiceAdaptor correctly routes requests to the
+    // right server based on the Host header via ServerRouter.
+    let servers = vec![
+      Server {
+        hostnames: vec![],
+        service: crate::server::placeholder_service(),
+        service_name: "default".to_string(),
+        users: None,
+        tls: None,
+        access_log_writer: None,
+      },
+      Server {
+        hostnames: vec!["api.example.com".to_string()],
+        service: crate::server::placeholder_service(),
+        service_name: "api".to_string(),
+        users: None,
+        tls: None,
+        access_log_writer: None,
+      },
+    ];
+
+    let adaptor = HttpsServiceAdaptor::new(servers, None, None);
+
+    // Request with Host header matching api.example.com
+    let req_api = http::Request::builder()
+      .method("GET")
+      .uri("/test")
+      .header(http::header::HOST, "api.example.com")
+      .body(RequestBody::new(BytesBufBodyWrapper::new(
+        http_body_util::Empty::new(),
+      )))
+      .unwrap();
+
+    let result = adaptor.route_request(&req_api);
+    assert!(result.is_some());
+    assert_eq!(
+      result.unwrap().service_name,
+      "api",
+      "Request with Host: api.example.com should route to api server"
+    );
+
+    // Request with Host header not matching any specific server
+    let req_other = http::Request::builder()
+      .method("GET")
+      .uri("/test")
+      .header(http::header::HOST, "other.example.com")
+      .body(RequestBody::new(BytesBufBodyWrapper::new(
+        http_body_util::Empty::new(),
+      )))
+      .unwrap();
+
+    let result = adaptor.route_request(&req_other);
+    assert!(result.is_some());
+    assert_eq!(
+      result.unwrap().service_name,
+      "default",
+      "Request with non-matching Host should route to default server"
+    );
+
+    // Request without Host header
+    let req_no_host = http::Request::builder()
+      .method("GET")
+      .uri("/test")
+      .body(RequestBody::new(BytesBufBodyWrapper::new(
+        http_body_util::Empty::new(),
+      )))
+      .unwrap();
+
+    let result = adaptor.route_request(&req_no_host);
+    assert!(result.is_some());
+    assert_eq!(
+      result.unwrap().service_name,
+      "default",
+      "Request without Host header should route to default server"
+    );
   }
 }

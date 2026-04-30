@@ -5,7 +5,7 @@ use std::task::{Context, Poll};
 
 use anyhow::Result;
 
-use crate::http_types::{Request, Response};
+use crate::http_utils::{Request, Response};
 
 /// To add `clone()` function to the `Service`. The `Clone` trait can
 /// not be added into the type definition of the `Service` directly, in
@@ -119,7 +119,7 @@ impl<F> BuildService for F where F: Fn(SerializedArgs) -> Result<Service>
 
 /// an alias for shorten complex trait definition.
 pub trait BuildListener:
-  Fn(SerializedArgs, Vec<crate::server::ServerRoutingEntry>) -> Result<Listener>
+  Fn(SerializedArgs, Vec<crate::server::Server>) -> Result<Listener>
   + Sync
   + Send
 {
@@ -128,7 +128,7 @@ pub trait BuildListener:
 impl<F> BuildListener for F where
   F: Fn(
       SerializedArgs,
-      Vec<crate::server::ServerRoutingEntry>,
+      Vec<crate::server::Server>,
     ) -> Result<Listener>
     + Sync
     + Send
@@ -409,7 +409,7 @@ mod tests {
 
   fn test_listener_builder(
     _args: SerializedArgs,
-    _server_routing_table: Vec<crate::server::ServerRoutingEntry>,
+    _server_routing_table: Vec<crate::server::Server>,
   ) -> Result<Listener> {
     struct DummyListener;
     impl Listening for DummyListener {
@@ -433,7 +433,7 @@ mod tests {
   fn test_build_listener_with_empty_context() {
     fn builder(
       _args: SerializedArgs,
-      _server_routing_table: Vec<crate::server::ServerRoutingEntry>,
+      _server_routing_table: Vec<crate::server::Server>,
     ) -> Result<Listener> {
       struct DummyListener;
       impl Listening for DummyListener {

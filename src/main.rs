@@ -11,7 +11,8 @@ use tokio::signal::unix as signal;
 use tokio::{runtime, sync, task};
 use tracing::{debug, error, info, warn};
 
-use crate::config::Config;
+use crate::config::{CmdOpt, Config};
+use crate::config_validator::{ConfigErrorCollector, validate_config};
 
 mod access_log;
 mod auth;
@@ -19,12 +20,13 @@ mod config;
 mod config_validator;
 mod connect_utils;
 mod h3_stream;
-mod http_types;
+mod http_utils;
 mod listeners;
 mod plugin;
 mod plugins;
 mod routing;
 mod server;
+mod server_thread;
 mod shutdown;
 mod stream;
 mod tls;
@@ -113,7 +115,7 @@ fn run_server_threads(
       thread::Builder::new()
         .name(name.clone())
         .spawn(move || -> Result<()> {
-          server::server_thread(name.as_str(), closer.clone())
+          server_thread::server_thread(name.as_str(), closer.clone())
         })
         .unwrap(),
     );
@@ -122,9 +124,9 @@ fn run_server_threads(
   server_thread_handles
 }
 
-fn init_log() -> tracing_appender::non_blocking::WorkerGuard {
+fn init_log(log_directory: &str) -> tracing_appender::non_blocking::WorkerGuard {
   let log_appender = tracing_appender::rolling::daily(
-    Config::global().log_directory.as_str(),
+    log_directory,
     "neoproxy.log",
   );
 
@@ -378,8 +380,23 @@ fn main() -> Result<()> {
     .install_default()
     .expect("Failed to install rustls crypto provider");
 
-  let _guard = init_log();
-  info!("server started with config:\n{:#?}\n", &Config::global());
+  // Load config
+  let config = Config::load(&CmdOpt::global().config_file)?;
+
+  // Validate config
+  let mut collector = ConfigErrorCollector::new();
+  validate_config(&config, &mut collector);
+  if collector.has_errors() {
+    collector.report_and_exit();
+  }
+
+  // Initialize logging after config is loaded (needs log_directory)
+  let _guard = init_log(&config.log_directory);
+
+  info!("server started with config:\n{:#?}\n", &config);
+
+  // Set global config for use by server threads
+  Config::init_global(config);
 
   let shutdown_notify = Arc::new(sync::Notify::new());
   let shutdown_triggered = Arc::new(AtomicBool::new(false));

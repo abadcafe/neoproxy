@@ -26,7 +26,10 @@ use serde::Deserialize;
 use tracing::warn;
 
 use crate::auth::{ListenerAuthConfig, UserPasswordAuth};
-use crate::http_types::{BytesBufBodyWrapper, RequestBody};
+use crate::config_validator::{
+  ConfigErrorCollector, validate_listener_auth_config,
+};
+use crate::http_utils::{BytesBufBodyWrapper, RequestBody};
 use crate::plugin;
 use crate::shutdown::{ShutdownHandle, StreamTracker};
 use crate::stream::{
@@ -89,7 +92,7 @@ impl Socks5Listener {
   pub fn new(
     args: Socks5ListenerArgs,
     _svc: plugin::Service,
-    server_routing_table: Vec<crate::server::ServerRoutingEntry>,
+    server_routing_table: Vec<crate::server::Server>,
   ) -> Result<plugin::Listener> {
     // Resolve addresses, skipping invalid ones
     let addresses = resolve_addresses(&args.addresses);
@@ -1161,9 +1164,19 @@ pub fn parse_config(
           .context("failed to parse auth config")?;
 
       // Validate the auth config
-      auth_config
-        .validate()
-        .context("auth config validation failed")?;
+      let mut collector = ConfigErrorCollector::new();
+      validate_listener_auth_config(&auth_config, &mut collector);
+      if collector.has_errors() {
+        let errors: Vec<String> = collector
+          .errors()
+          .iter()
+          .map(|e| format!("{}", e))
+          .collect();
+        bail!(
+          "auth config validation failed: {}",
+          errors.join("; ")
+        );
+      }
 
       // SOCKS5 only supports password auth, reject client_ca_path
       if auth_config.client_ca_path.is_some() {
@@ -1337,7 +1350,7 @@ pub fn listener_name() -> &'static str {
 pub fn create_listener_builder() -> Box<dyn plugin::BuildListener> {
   Box::new(
     |args: plugin::SerializedArgs,
-     server_routing_table: Vec<crate::server::ServerRoutingEntry>| {
+     server_routing_table: Vec<crate::server::Server>| {
       // Parse configuration
       let listener_args = parse_config(args)?;
 

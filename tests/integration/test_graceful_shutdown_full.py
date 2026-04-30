@@ -677,7 +677,10 @@ services:
 - name: test_service
   kind: nonexistent.service
 
-servers: []
+servers:
+- name: test_server
+  listeners: []
+  service: test_service
 """
         config_path = os.path.join(temp_dir, "invalid.yaml")
         with open(config_path, "w") as f:

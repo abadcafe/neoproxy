@@ -62,21 +62,26 @@ class TestHttpListenerNewAuthFormat:
         """
         port = get_unique_port()
         config = f"""
-worker_threads: 1
-log_directory: LOG_DIR_PLACEHOLDER
+server_threads: 1
 
 services:
   - name: connect_tcp
     kind: connect_tcp.connect_tcp
+    layers:
+      - kind: auth.basic_auth
+        args:
+          users:
+            - username: testuser
+              password: testpass
+
+listeners:
+  - name: http_main
+    kind: http
+    addresses: ["127.0.0.1:{port}"]
 
 servers:
   - name: test
-    users:
-      - username: testuser
-        password: testpass
-    listeners:
-      - kind: http
-        addresses: ["127.0.0.1:{port}"]
+    listeners: ["http_main"]
     service: connect_tcp
 """
         config_path = write_config(temp_dir, config)
@@ -130,22 +135,24 @@ class TestSocks5ListenerNewAuthFormat:
         """
         port = get_unique_port()
         config = f"""
-worker_threads: 1
-log_directory: LOG_DIR_PLACEHOLDER
+server_threads: 1
 
 services:
   - name: connect_tcp
     kind: connect_tcp.connect_tcp
 
+listeners:
+  - name: socks5_main
+    kind: socks5
+    addresses: ["127.0.0.1:{port}"]
+    args:
+      users:
+        - username: socks_user
+          password: socks_pass
+
 servers:
   - name: test
-    listeners:
-      - kind: socks5
-        addresses: ["127.0.0.1:{port}"]
-        args:
-          users:
-            - username: socks_user
-              password: socks_pass
+    listeners: ["socks5_main"]
     service: connect_tcp
 """
         config_path = write_config(temp_dir, config)
@@ -154,12 +161,15 @@ servers:
             assert wait_for_proxy("127.0.0.1", port, timeout=5.0), \
                 "Proxy should start with new SOCKS5 auth format"
 
-            # Test: SOCKS5 with correct credentials should succeed
+            # Test: SOCKS5 with correct credentials should not fail auth.
+            # Use a local unreachable target to avoid DNS/timeout issues;
+            # the test only checks that SOCKS5 auth succeeds (not returncode 97).
             result = subprocess.run(
                 ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
                  "--socks5", f"127.0.0.1:{port}",
                  "--proxy-user", "socks_user:socks_pass",
-                 "http://example.com:80"],
+                 "--connect-timeout", "3",
+                 "http://127.0.0.1:1"],
                 capture_output=True, text=True, timeout=10
             )
             # Should not get connection refused or auth error
@@ -177,72 +187,6 @@ servers:
 class TestNewAuthFormatValidation:
     """Test that invalid auth configs are rejected at startup."""
 
-    def test_empty_auth_object_rejected_for_listener(self, temp_dir: str) -> None:
-        """
-        TC-NEW-AUTH-003: HTTP listener with invalid users config is rejected.
-
-        Server-level users must have both username and password.
-        Missing password should be rejected.
-        """
-        port = get_unique_port()
-        config = f"""
-worker_threads: 1
-log_directory: LOG_DIR_PLACEHOLDER
-
-services:
-  - name: connect_tcp
-    kind: connect_tcp.connect_tcp
-
-servers:
-  - name: test
-    users:
-      - username: testuser
-    listeners:
-      - kind: http
-        addresses: ["127.0.0.1:{port}"]
-    service: connect_tcp
-"""
-        config_path = write_config(temp_dir, config)
-        proc = start_proxy(config_path)
-        try:
-            started = wait_for_proxy("127.0.0.1", port, timeout=3.0)
-            assert not started, \
-                "Proxy should NOT start with users missing password field"
-        finally:
-            terminate_process(proc)
-
-    def test_auth_without_users_or_ca_rejected(self, temp_dir: str) -> None:
-        """
-        TC-NEW-AUTH-004: HTTP listener with empty users array is rejected.
-
-        Server-level users array cannot be empty if specified.
-        """
-        port = get_unique_port()
-        config = f"""
-worker_threads: 1
-log_directory: LOG_DIR_PLACEHOLDER
-
-services:
-  - name: connect_tcp
-    kind: connect_tcp.connect_tcp
-
-servers:
-  - name: test
-    users: []
-    listeners:
-      - kind: http
-        addresses: ["127.0.0.1:{port}"]
-    service: connect_tcp
-"""
-        config_path = write_config(temp_dir, config)
-        proc = start_proxy(config_path)
-        try:
-            started = wait_for_proxy("127.0.0.1", port, timeout=3.0)
-            assert not started, \
-                "Proxy should NOT start with empty users array"
-        finally:
-            terminate_process(proc)
-
     def test_http_listener_ignores_server_level_tls(self, temp_dir: str, shared_test_certs: dict) -> None:
         """
         TC-NEW-AUTH-005: HTTP listener ignores server-level TLS config.
@@ -256,12 +200,16 @@ servers:
 
         port = get_unique_port()
         config = f"""
-worker_threads: 1
-log_directory: LOG_DIR_PLACEHOLDER
+server_threads: 1
 
 services:
   - name: connect_tcp
     kind: connect_tcp.connect_tcp
+
+listeners:
+  - name: http_main
+    kind: http
+    addresses: ["127.0.0.1:{port}"]
 
 servers:
   - name: test
@@ -271,9 +219,7 @@ servers:
           key_path: "{key_path}"
       client_ca_certs:
         - "{ca_path}"
-    listeners:
-      - kind: http
-        addresses: ["127.0.0.1:{port}"]
+    listeners: ["http_main"]
     service: connect_tcp
 """
         config_path = write_config(temp_dir, config)
@@ -295,20 +241,22 @@ servers:
         """
         port = get_unique_port()
         config = f"""
-worker_threads: 1
-log_directory: LOG_DIR_PLACEHOLDER
+server_threads: 1
 
 services:
   - name: connect_tcp
     kind: connect_tcp.connect_tcp
 
+listeners:
+  - name: socks5_main
+    kind: socks5
+    addresses: ["127.0.0.1:{port}"]
+    args:
+      client_ca_path: /some/ca.pem
+
 servers:
   - name: test
-    listeners:
-      - kind: socks5
-        addresses: ["127.0.0.1:{port}"]
-        args:
-          client_ca_path: /some/ca.pem
+    listeners: ["socks5_main"]
     service: connect_tcp
 """
         config_path = write_config(temp_dir, config)
@@ -338,34 +286,39 @@ class TestHttp3ChainNewCredentialFormat:
         auth_users: Optional[List[dict[str, str]]] = None,
     ) -> str:
         """Create an HTTP/3 upstream proxy config (the target proxy in the chain)."""
-        users_block = ""
+        layers_block = ""
         if auth_users:
             users_yaml = "\n".join(
-                f'      - username: "{u["username"]}"\n'
-                f'        password: "{u["password"]}"'
+                f'          - username: "{u["username"]}"\n'
+                f'            password: "{u["password"]}"'
                 for u in auth_users
             )
-            users_block = f"""
-    users:
+            layers_block = f"""
+    layers:
+      - kind: auth.basic_auth
+        args:
+          users:
 {users_yaml}"""
 
         config = f"""
-worker_threads: 1
-log_directory: LOG_DIR_PLACEHOLDER
+server_threads: 1
 
 services:
   - name: connect_tcp
-    kind: connect_tcp.connect_tcp
+    kind: connect_tcp.connect_tcp{layers_block}
+
+listeners:
+  - name: h3_main
+    kind: http3
+    addresses: ["127.0.0.1:{udp_port}"]
 
 servers:
-  - name: upstream{users_block}
+  - name: upstream
     tls:
       certificates:
         - cert_path: "{cert_path}"
           key_path: "{key_path}"
-    listeners:
-      - kind: http3
-        addresses: ["127.0.0.1:{udp_port}"]
+    listeners: ["h3_main"]
     service: connect_tcp
 """
         return write_config(temp_dir, config)
@@ -409,8 +362,7 @@ servers:
 
         # Create chain proxy with new format
         chain_config_content = f"""
-worker_threads: 1
-log_directory: LOG_DIR_PLACEHOLDER
+server_threads: 1
 
 services:
   - name: proxy_chain
@@ -426,14 +378,17 @@ services:
           tls:
             server_ca_path: "{ca_path}"
 
+listeners:
+  - name: http_main
+    kind: http
+    addresses: ["127.0.0.1:{http_port}"]
+    args:
+      protocols: [http]
+      hostnames: []
+
 servers:
   - name: chain
-    listeners:
-      - kind: http
-        addresses: ["127.0.0.1:{http_port}"]
-        args:
-          protocols: [http]
-          hostnames: []
+    listeners: ["http_main"]
     service: proxy_chain
 """
         chain_dir = os.path.join(temp_dir, "chain")
@@ -508,8 +463,7 @@ servers:
         )
 
         chain_config_content = f"""
-worker_threads: 1
-log_directory: LOG_DIR_PLACEHOLDER
+server_threads: 1
 
 services:
   - name: proxy_chain
@@ -525,14 +479,17 @@ services:
           tls:
             server_ca_path: "{ca_path}"
 
+listeners:
+  - name: http_main
+    kind: http
+    addresses: ["127.0.0.1:{http_port}"]
+    args:
+      protocols: [http]
+      hostnames: []
+
 servers:
   - name: chain
-    listeners:
-      - kind: http
-        addresses: ["127.0.0.1:{http_port}"]
-        args:
-          protocols: [http]
-          hostnames: []
+    listeners: ["http_main"]
     service: proxy_chain
 """
         chain_dir = os.path.join(temp_dir, "chain")
@@ -608,8 +565,7 @@ servers:
         )
 
         chain_config_content = f"""
-worker_threads: 1
-log_directory: LOG_DIR_PLACEHOLDER
+server_threads: 1
 
 services:
   - name: proxy_chain
@@ -625,14 +581,17 @@ services:
           tls:
             server_ca_path: "{ca_path}"
 
+listeners:
+  - name: http_main
+    kind: http
+    addresses: ["127.0.0.1:{http_port}"]
+    args:
+      protocols: [http]
+      hostnames: []
+
 servers:
   - name: chain
-    listeners:
-      - kind: http
-        addresses: ["127.0.0.1:{http_port}"]
-        args:
-          protocols: [http]
-          hostnames: []
+    listeners: ["http_main"]
     service: proxy_chain
 """
         chain_dir = os.path.join(temp_dir, "chain")
@@ -709,8 +668,7 @@ servers:
         )
 
         chain_config_content = f"""
-worker_threads: 1
-log_directory: LOG_DIR_PLACEHOLDER
+server_threads: 1
 
 services:
   - name: proxy_chain
@@ -726,14 +684,17 @@ services:
           tls:
             server_ca_path: "{ca_path}"
 
+listeners:
+  - name: http_main
+    kind: http
+    addresses: ["127.0.0.1:{http_port}"]
+    args:
+      protocols: [http]
+      hostnames: []
+
 servers:
   - name: chain
-    listeners:
-      - kind: http
-        addresses: ["127.0.0.1:{http_port}"]
-        args:
-          protocols: [http]
-          hostnames: []
+    listeners: ["http_main"]
     service: proxy_chain
 """
         chain_dir = os.path.join(temp_dir, "chain")
@@ -808,8 +769,7 @@ servers:
         )
 
         chain_config_content = f"""
-worker_threads: 1
-log_directory: LOG_DIR_PLACEHOLDER
+server_threads: 1
 
 services:
   - name: proxy_chain
@@ -822,14 +782,17 @@ services:
           tls:
             server_ca_path: "{ca_path}"
 
+listeners:
+  - name: http_main
+    kind: http
+    addresses: ["127.0.0.1:{http_port}"]
+    args:
+      protocols: [http]
+      hostnames: []
+
 servers:
   - name: chain
-    listeners:
-      - kind: http
-        addresses: ["127.0.0.1:{http_port}"]
-        args:
-          protocols: [http]
-          hostnames: []
+    listeners: ["http_main"]
     service: proxy_chain
 """
         chain_dir = os.path.join(temp_dir, "chain")

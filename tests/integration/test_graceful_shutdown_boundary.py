@@ -41,7 +41,7 @@ def create_empty_config(temp_dir: str) -> str:
     """
     Create configuration file with no services or servers.
 
-    This creates a minimal config with worker_threads: 1 (minimum allowed)
+    This creates a minimal config with server_threads: 1 (minimum allowed)
     and no services or servers. The process should still be able to
     handle signals and exit gracefully.
 
@@ -51,8 +51,7 @@ def create_empty_config(temp_dir: str) -> str:
     Returns:
         str: Path to the configuration file
     """
-    config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+    config_content = f"""server_threads: 1
 
 services: []
 
@@ -76,7 +75,7 @@ class TestBoundaryConditions:
         """
         TC-BOUNDARY-001: Empty config shutdown should be immediate.
 
-        Target: Verify that with worker_threads: 1 and no services/servers,
+        Target: Verify that with server_threads: 1 and no services/servers,
         the process:
         1. Starts successfully
         2. Waits for signals
@@ -134,7 +133,7 @@ class TestBoundaryConditions:
         TC-BOUNDARY-002: Empty config - SIGINT handling.
 
         Target: Verify SIGINT works the same as SIGTERM for empty config
-        (worker_threads: 1, no services/servers).
+        (server_threads: 1, no services/servers).
         """
         temp_dir = tempfile.mkdtemp()
         proxy_proc: Optional[subprocess.Popen] = None

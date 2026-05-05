@@ -198,8 +198,7 @@ class TestHTTP3ChainProxy:
         h3_port = get_unique_port()
 
         try:
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
 
 services:
 - name: http3_chain
@@ -212,15 +211,18 @@ services:
     default_tls:
       server_ca_path: "/nonexistent/ca.pem"
 
+listeners:
+- name: http_main
+  kind: http
+  addresses: [ "0.0.0.0:{http_port}" ]
+  args:
+    protocols: [ http ]
+    hostnames: []
+    certificates: []
+
 servers:
 - name: http_proxy
-  listeners:
-  - kind: http
-    addresses: [ "0.0.0.0:{http_port}" ]
-    args:
-      protocols: [ http ]
-      hostnames: []
-      certificates: []
+  listeners: ["http_main"]
   service: http3_chain
 """
             config_path = os.path.join(temp_dir, "missing_ca.yaml")

@@ -11,48 +11,71 @@ use hyper::{body as hyper_body, service as hyper_svc};
 use hyper_util::rt as rt_util;
 use hyper_util::server::conn::auto as conn_util;
 use serde::Deserialize;
-use tokio::{net, task, time::timeout};
+use tokio::time::timeout;
+use tokio::{net, task};
 use tower::util as tower_util;
 use tracing::{error, info, warn};
 
 use crate::config::SerializedArgs;
+use crate::context::RequestContext;
 use crate::http_utils::{
   BytesBufBodyWrapper, Request, RequestBody, Response,
 };
-use crate::listener::{BuildListener, Listener, ListenerProps, Listening, TransportLayer};
-use crate::listeners::common::TokioLocalExecutor;
+use crate::listener::{
+  BuildListener, Listener, ListenerProps, Listening, TransportLayer,
+};
+use crate::listeners::common::{
+  LISTENER_SHUTDOWN_TIMEOUT, MONITORING_LOG_INTERVAL,
+  TokioLocalExecutor,
+};
 use crate::server::{Server, ServerRouter};
-use crate::tracker::StreamTracker;
-
 #[cfg(test)]
 use crate::service::Service;
+use crate::tracker::StreamTracker;
 
-/// Listener shutdown timeout in seconds.
-/// This is the timeout for Phase 1 of graceful shutdown.
-const LISTENER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// Monitoring log interval in seconds.
-const MONITORING_LOG_INTERVAL: Duration = Duration::from_secs(60);
+/// Build a RequestContext with connection-level keys from accept
+/// parameters.
+///
+/// Populates the context with client/server IP and port, plus the
+/// service name. The returned context should be inserted into
+/// `req.extensions()` before calling the service so that downstream
+/// layers can access connection metadata.
+fn build_request_context(
+  peer_addr: &SocketAddr,
+  local_addr: &SocketAddr,
+  service_name: &str,
+) -> RequestContext {
+  let ctx = RequestContext::new();
+  ctx.insert("client.ip", peer_addr.ip().to_string());
+  ctx.insert("client.port", peer_addr.port().to_string());
+  ctx.insert("server.ip", local_addr.ip().to_string());
+  ctx.insert("server.port", local_addr.port().to_string());
+  ctx.insert("service.name", service_name);
+  ctx
+}
 
 /// HTTP Listener with shared-address routing support.
 ///
-/// This listener supports routing requests to different services based on
-/// the Host header. Multiple servers can share the same address with
+/// This listener supports routing requests to different services based
+/// on the Host header. Multiple servers can share the same address with
 /// hostname-based routing.
 struct HyperServiceAdaptor {
   /// Server router for hostname-based routing
   server_router: ServerRouter,
-  /// Client address for logging
+  /// Client (peer) address from accept
   client_addr: Option<SocketAddr>,
+  /// Local (server) address from accept
+  local_addr: Option<SocketAddr>,
 }
 
 impl HyperServiceAdaptor {
   fn new(
     server_routing_table: Vec<Server>,
     client_addr: Option<SocketAddr>,
+    local_addr: Option<SocketAddr>,
   ) -> Self {
     let server_router = ServerRouter::build(server_routing_table);
-    Self { server_router, client_addr }
+    Self { server_router, client_addr, local_addr }
   }
 
   /// Route a request to the correct service based on Host header.
@@ -82,8 +105,6 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
     &self,
     req: http::Request<hyper_body::Incoming>,
   ) -> Self::Future {
-    let start_time = std::time::Instant::now();
-
     // Step 1: Check HTTP version FIRST
     // HTTP/1.0 is not supported - return 505 HTTP Version Not Supported
     if let Err(_status) =
@@ -96,7 +117,7 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
 
     // Step 2: Route FIRST - get the correct server entry
     let (parts, body) = req.into_parts();
-    let req = Request::from_parts(
+    let mut req = Request::from_parts(
       parts,
       RequestBody::new(BytesBufBodyWrapper::new(body)),
     );
@@ -110,82 +131,23 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       }
     };
 
-    // Step 3: Build auth request for verification
-    let mut auth_req_builder = http::Request::builder()
-      .method(req.method().clone())
-      .uri(req.uri().clone())
-      .version(req.version());
-
-    for (name, value) in req.headers() {
-      auth_req_builder = auth_req_builder.header(name, value);
+    // Step 3: Build RequestContext with connection-level keys and
+    // insert into request extensions. Auth and access logging are
+    // now handled by the plugin layer in the service pipeline.
+    if let (Some(peer_addr), Some(local_addr)) =
+      (self.client_addr, self.local_addr)
+    {
+      let ctx = build_request_context(
+        &peer_addr,
+        &local_addr,
+        &routing_entry.service_name(),
+      );
+      req.extensions_mut().insert(ctx);
     }
-    let auth_req = auth_req_builder.body(()).unwrap();
 
-    // Step 4: Check authentication using routing_entry's users
-    let user_password_auth =
-      super::common::build_user_password_auth(&routing_entry.users);
-    let (user, auth_type) =
-      match user_password_auth.verify_and_extract_username(&auth_req) {
-        Ok(Some(username)) => {
-          (Some(username), crate::access_log::AuthType::Password)
-        }
-        Ok(None) => (None, crate::access_log::AuthType::None),
-        Err(_) => {
-          return Box::pin(async {
-            Ok(super::common::build_407_response())
-          });
-        }
-      };
-
-    // Step 5: Prepare values for async block
-    let access_log_writer = routing_entry.access_log_writer.clone();
-    let service_name = routing_entry.service_name();
-    let client_addr = self.client_addr;
-    let method = req.method().to_string();
-    let target = req.uri().to_string();
-
+    // Step 4: Call service (auth/access_log handled by layers)
     let s = routing_entry.service.clone();
-    Box::pin(async move {
-      let resp = tower_util::Oneshot::new(s, req).await;
-
-      // Record access log
-      if let Some(ref writer) = access_log_writer {
-        let duration = start_time.elapsed();
-        let status = match &resp {
-          Ok(r) => r.status().as_u16(),
-          Err(_) => 500,
-        };
-
-        let addr =
-          client_addr.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
-
-        let service_metrics = resp
-          .as_ref()
-          .ok()
-          .and_then(|r| {
-            r.extensions()
-              .get::<crate::access_log::ServiceMetrics>()
-              .cloned()
-          })
-          .unwrap_or_default();
-
-        let params = crate::access_log::HttpAccessLogParams {
-          client_addr: addr,
-          user,
-          auth_type,
-          method,
-          target,
-          status,
-          duration,
-          service_name,
-          service_metrics,
-        };
-
-        super::common::record_http_access_log(writer, &params);
-      }
-
-      resp
-    })
+    Box::pin(async move { tower_util::Oneshot::new(s, req).await })
   }
 }
 
@@ -244,14 +206,15 @@ impl HttpListener {
 
   /// Create an HttpListener directly for testing purposes.
   #[cfg(test)]
-  fn new_for_test(addresses: Vec<String>, svc: Service) -> Result<Self> {
+  fn new_for_test(
+    addresses: Vec<String>,
+    svc: Service,
+  ) -> Result<Self> {
     let entry = Server {
       hostnames: vec![],
       service: svc,
       service_name: "test_service".to_string(),
-      users: None,
       tls: None,
-      access_log_writer: None,
     };
     Self::from_args(addresses, vec![entry])
   }
@@ -287,10 +250,12 @@ impl HttpListener {
             error!("accepting new connection failed: {e}");
           }
           Ok((stream, raddr)) => {
+            let local_addr = stream.local_addr().ok();
             let io = rt_util::TokioIo::new(stream);
             let svc = HyperServiceAdaptor::new(
               server_routing_table.clone(),
               Some(raddr),
+              local_addr,
             );
             let builder = conn_util::Builder::new(TokioLocalExecutor);
             connection_tracker.register(async move {
@@ -410,21 +375,18 @@ pub fn create_listener_builder() -> Box<dyn BuildListener> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::auth::UserPasswordAuth;
-  use crate::config::ListenerAuthConfig;
   use crate::listeners::common::{
     TokioLocalExecutor, build_505_response, check_http_version,
-    record_http_access_log,
   };
   use crate::shutdown::ShutdownHandle;
-  use base64::{Engine, engine::general_purpose::STANDARD};
 
   // ============== HttpListenerArgs Tests ==============
 
   #[test]
   fn test_http_listener_args_no_auth_field() {
     // Auth should no longer be at listener level
-    // HttpListenerArgs now has no fields - addresses are passed separately
+    // HttpListenerArgs now has no fields - addresses are passed
+    // separately
     let yaml = r#"{}"#;
     let args: HttpListenerArgs = serde_yaml::from_str(yaml).unwrap();
     // Args should parse successfully without addresses field
@@ -448,9 +410,7 @@ mod tests {
       hostnames: vec![],
       service: crate::server::placeholder_service(),
       service_name: "test_service".to_string(),
-      users: None,
       tls: None,
-      access_log_writer: None,
     }
   }
 
@@ -463,23 +423,33 @@ mod tests {
   fn test_create_listener_builder() {
     let builder = create_listener_builder();
     let args = create_test_args();
-    let result = builder(create_test_addresses(), args, vec![create_test_routing_entry()]);
+    let result = builder(
+      create_test_addresses(),
+      args,
+      vec![create_test_routing_entry()],
+    );
     assert!(result.is_ok());
   }
 
   #[test]
   fn test_http_listener_new_valid() {
     let args = create_test_args();
-    let result =
-      HttpListener::new(create_test_addresses(), args, vec![create_test_routing_entry()]);
+    let result = HttpListener::new(
+      create_test_addresses(),
+      args,
+      vec![create_test_routing_entry()],
+    );
     assert!(result.is_ok());
   }
 
   #[test]
   fn test_http_listener_new_invalid_address() {
     let args = create_test_args();
-    let result =
-      HttpListener::new(create_test_addresses_with_invalid(), args, vec![create_test_routing_entry()]);
+    let result = HttpListener::new(
+      create_test_addresses_with_invalid(),
+      args,
+      vec![create_test_routing_entry()],
+    );
     // Invalid addresses are filtered out, so it should still succeed
     assert!(result.is_ok());
   }
@@ -487,7 +457,8 @@ mod tests {
   #[test]
   fn test_active_connections_initial() {
     let svc = crate::server::placeholder_service();
-    let listener = HttpListener::new_for_test(create_test_addresses(), svc).unwrap();
+    let listener =
+      HttpListener::new_for_test(create_test_addresses(), svc).unwrap();
     // active_connections should be 0 initially
     assert_eq!(listener.connection_tracker.active_count(), 0);
   }
@@ -507,7 +478,8 @@ mod tests {
   #[test]
   fn test_hyper_service_adaptor_creation() {
     let server_routing_table = vec![create_test_routing_entry()];
-    let _adaptor = HyperServiceAdaptor::new(server_routing_table, None);
+    let _adaptor =
+      HyperServiceAdaptor::new(server_routing_table, None, None);
   }
 
   #[test]
@@ -520,7 +492,8 @@ mod tests {
   fn test_listener_stop_and_start() {
     // This test verifies the listener can be created and stopped
     let svc = crate::server::placeholder_service();
-    let listener = HttpListener::new_for_test(create_test_addresses(), svc).unwrap();
+    let listener =
+      HttpListener::new_for_test(create_test_addresses(), svc).unwrap();
 
     // Stop should work even without start
     listener.stop();
@@ -541,8 +514,11 @@ mod tests {
   fn test_http_listener_struct_fields() {
     // Verify struct has all expected fields
     let args = create_test_args();
-    let listener =
-      HttpListener::new(create_test_addresses(), args, vec![create_test_routing_entry()]);
+    let listener = HttpListener::new(
+      create_test_addresses(),
+      args,
+      vec![create_test_routing_entry()],
+    );
 
     // This test verifies the constructor succeeds
     assert!(listener.is_ok());
@@ -573,7 +549,8 @@ mod tests {
   fn test_monitoring_log_format() {
     // Test that the monitoring log format is correct
     let svc = crate::server::placeholder_service();
-    let listener = HttpListener::new_for_test(create_test_addresses(), svc).unwrap();
+    let listener =
+      HttpListener::new_for_test(create_test_addresses(), svc).unwrap();
 
     let expected_format = format!(
       "[http] active_connections={}",
@@ -596,100 +573,9 @@ mod tests {
   }
 
   #[test]
-  fn test_http_listener_with_server_level_users() {
-    // Auth should come from server-level users via routing table
-    use crate::config::UserConfig;
-
-    let entry = Server {
-      hostnames: vec![],
-      service: crate::server::placeholder_service(),
-      service_name: "test_service".to_string(),
-      users: Some(vec![UserConfig {
-        username: "user1".to_string(),
-        password: "pass1".to_string(),
-      }]),
-      tls: None,
-      access_log_writer: None,
-    };
-    let listener = HttpListener::from_args(create_test_addresses(), vec![entry]).unwrap();
-    // Verify routing table contains the users config
-    assert!(
-      listener.server_routing_table[0].users.is_some(),
-      "Routing entry should have users configured"
-    );
-  }
-
-  #[test]
-  fn test_build_407_response() {
-    let resp = super::super::common::build_407_response();
-    assert_eq!(
-      resp.status(),
-      http::StatusCode::PROXY_AUTHENTICATION_REQUIRED
-    );
-    assert!(resp.headers().contains_key("Proxy-Authenticate"));
-  }
-
-  #[test]
   fn test_build_404_response() {
     let resp = super::super::common::build_404_response();
     assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
-  }
-
-  #[test]
-  fn test_check_auth_missing_header_returns_407() {
-    // Test that requests without auth header return 407 when auth is configured
-    use crate::config::UserCredential;
-
-    let config = ListenerAuthConfig {
-      users: vec![UserCredential {
-        username: "user1".to_string(),
-        password: "pass1".to_string(),
-      }],
-      client_ca_path: None,
-    };
-    let auth = UserPasswordAuth::from_config(&config);
-
-    // Simulate missing auth header
-    let req = http::Request::builder()
-      .method("GET")
-      .uri("http://example.com")
-      .body(())
-      .unwrap();
-
-    // Should return 407 response requirement
-    assert!(
-      auth.verify_and_extract_username(&req).is_err(),
-      "Missing auth header should fail verification"
-    );
-  }
-
-  #[test]
-  fn test_check_auth_wrong_credentials_returns_407() {
-    use crate::config::UserCredential;
-
-    let config = ListenerAuthConfig {
-      users: vec![UserCredential {
-        username: "user1".to_string(),
-        password: "pass1".to_string(),
-      }],
-      client_ca_path: None,
-    };
-    let auth = UserPasswordAuth::from_config(&config);
-
-    // Create header with wrong credentials (user2:wrongpass)
-    let encoded = STANDARD.encode("user2:wrongpass");
-    let req = http::Request::builder()
-      .method("GET")
-      .uri("http://example.com")
-      .header("Proxy-Authorization", format!("Basic {}", encoded))
-      .body(())
-      .unwrap();
-
-    // Verify against config - should fail
-    assert!(
-      auth.verify_and_extract_username(&req).is_err(),
-      "Wrong credentials should fail verification"
-    );
   }
 
   // ============== Task 009: ServerRouter Routing Test ==============
@@ -702,23 +588,21 @@ mod tests {
         hostnames: vec![],
         service: crate::server::placeholder_service(),
         service_name: "default".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
       Server {
         hostnames: vec!["api.example.com".to_string()],
         service: crate::server::placeholder_service(),
         service_name: "api".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
     ];
-    let args: serde_yaml::Value = serde_yaml::from_str(r#"{}"#).unwrap();
+    let args: serde_yaml::Value =
+      serde_yaml::from_str(r#"{}"#).unwrap();
     // The builder should accept Vec<Server> and set up routing
     let addresses = vec!["127.0.0.1:0".to_string()];
-    let result = super::create_listener_builder()(addresses, args, servers);
+    let result =
+      super::create_listener_builder()(addresses, args, servers);
     assert!(
       result.is_ok(),
       "Listener builder should accept Vec<Server>"
@@ -734,21 +618,17 @@ mod tests {
         hostnames: vec![],
         service: crate::server::placeholder_service(),
         service_name: "default".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
       Server {
         hostnames: vec!["api.example.com".to_string()],
         service: crate::server::placeholder_service(),
         service_name: "api".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
     ];
 
-    let adaptor = HyperServiceAdaptor::new(servers, None);
+    let adaptor = HyperServiceAdaptor::new(servers, None, None);
 
     // Request with Host header matching api.example.com
     let req_api = http::Request::builder()
@@ -804,148 +684,6 @@ mod tests {
     );
   }
 
-  #[test]
-  fn test_check_auth_valid_credentials_passes() {
-    use crate::config::UserCredential;
-
-    let config = ListenerAuthConfig {
-      users: vec![UserCredential {
-        username: "user1".to_string(),
-        password: "pass1".to_string(),
-      }],
-      client_ca_path: None,
-    };
-    let auth = UserPasswordAuth::from_config(&config);
-
-    // Create header with correct credentials
-    let encoded = STANDARD.encode("user1:pass1");
-    let req = http::Request::builder()
-      .method("GET")
-      .uri("http://example.com")
-      .header("Proxy-Authorization", format!("Basic {}", encoded))
-      .body(())
-      .unwrap();
-
-    // Verify against config - should pass
-    assert!(
-      auth.verify_and_extract_username(&req).is_ok(),
-      "Valid credentials should pass verification"
-    );
-  }
-
-  #[test]
-  fn test_record_access_log_writes_entry() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = crate::config::AccessLogConfig {
-      enabled: true,
-      path_prefix: "hypertest.log".to_string(),
-      format: crate::config::LogFormat::Text,
-      buffer: byte_unit::Byte::from_u64(64),
-      flush: crate::config::HumanDuration(
-        std::time::Duration::from_millis(100),
-      ),
-      max_size: byte_unit::Byte::from_u64(1024 * 1024),
-    };
-    let writer = crate::access_log::AccessLogWriter::new(
-      dir.path().to_str().unwrap(),
-      &config,
-    );
-
-    let client_addr: SocketAddr = "192.168.1.1:54321".parse().unwrap();
-    let mut metrics = crate::access_log::ServiceMetrics::new();
-    metrics.add("connect_ms", 42u64);
-
-    let params = crate::access_log::HttpAccessLogParams {
-      client_addr,
-      user: Some("testuser".to_string()),
-      auth_type: crate::access_log::AuthType::Password,
-      method: "CONNECT".to_string(),
-      target: "example.com:443".to_string(),
-      status: 200,
-      duration: std::time::Duration::from_millis(50),
-      service_name: "tunnel".to_string(),
-      service_metrics: metrics,
-    };
-
-    record_http_access_log(&writer, &params);
-
-    writer.flush();
-
-    // Verify log file was created and contains expected fields
-    let mut found = false;
-    for entry in std::fs::read_dir(dir.path()).unwrap() {
-      let entry = entry.unwrap();
-      let name = entry.file_name().to_string_lossy().to_string();
-      if name.starts_with("hypertest.log") {
-        let content = std::fs::read_to_string(entry.path()).unwrap();
-        assert!(
-          content.contains("192.168.1.1:54321"),
-          "Should contain client addr"
-        );
-        assert!(
-          content.contains("CONNECT example.com:443"),
-          "Should contain request line"
-        );
-        assert!(content.contains("200"), "Should contain status code");
-        assert!(
-          content.contains("service=tunnel"),
-          "Should contain service name"
-        );
-        assert!(
-          content.contains("service.connect_ms=42"),
-          "Should contain service metrics"
-        );
-        assert!(
-          content.contains("auth=password"),
-          "Should contain auth type"
-        );
-        found = true;
-      }
-    }
-    assert!(found, "Access log file should exist");
-  }
-
-  #[test]
-  fn test_http_listener_stores_access_log_writer() {
-    let args = create_test_args();
-    let listener =
-      HttpListener::new(create_test_addresses(), args, vec![create_test_routing_entry()])
-        .unwrap();
-    // Should compile and create without error
-    drop(listener);
-  }
-
-  #[test]
-  fn test_http_listener_with_access_log_writer() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = crate::config::AccessLogConfig {
-      enabled: true,
-      path_prefix: "test.log".to_string(),
-      format: crate::config::LogFormat::Text,
-      buffer: byte_unit::Byte::from_u64(256),
-      flush: crate::config::HumanDuration(
-        std::time::Duration::from_millis(100),
-      ),
-      max_size: byte_unit::Byte::from_u64(1024 * 1024),
-    };
-    let writer = crate::access_log::AccessLogWriter::new(
-      dir.path().to_str().unwrap(),
-      &config,
-    );
-
-    let entry = Server {
-      hostnames: vec![],
-      service: crate::server::placeholder_service(),
-      service_name: "tunnel".to_string(),
-      users: None,
-      tls: None,
-      access_log_writer: Some(writer),
-    };
-    let listener = HttpListener::new(create_test_addresses(), create_test_args(), vec![entry]).unwrap();
-    // Should compile and create without error
-    drop(listener);
-  }
-
   // ============== HTTP Version Check Tests ==============
 
   #[test]
@@ -986,6 +724,65 @@ mod tests {
     assert!(resp.headers().get(http::header::CONTENT_TYPE).is_some());
   }
 
+  // ============== RequestContext Tests ==============
+
+  #[test]
+  fn test_build_request_context_has_required_keys() {
+    let peer_addr: SocketAddr = "192.168.1.100:54321".parse().unwrap();
+    let local_addr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
+    let service_name = "web_service";
+
+    let ctx = super::build_request_context(
+      &peer_addr,
+      &local_addr,
+      service_name,
+    );
+
+    assert_eq!(ctx.get("client.ip"), Some("192.168.1.100".to_string()));
+    assert_eq!(ctx.get("client.port"), Some("54321".to_string()));
+    assert_eq!(ctx.get("server.ip"), Some("10.0.0.1".to_string()));
+    assert_eq!(ctx.get("server.port"), Some("8080".to_string()));
+    assert_eq!(
+      ctx.get("service.name"),
+      Some("web_service".to_string())
+    );
+  }
+
+  #[test]
+  fn test_build_request_context_inserts_into_extensions() {
+    let peer_addr: SocketAddr = "192.168.1.100:54321".parse().unwrap();
+    let local_addr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
+    let service_name = "test_svc";
+
+    let ctx = super::build_request_context(
+      &peer_addr,
+      &local_addr,
+      service_name,
+    );
+
+    let mut req = http::Request::builder()
+      .method("GET")
+      .uri("http://example.com")
+      .body(())
+      .unwrap();
+    req.extensions_mut().insert(ctx.clone());
+
+    let retrieved =
+      req.extensions().get::<crate::context::RequestContext>();
+    assert!(
+      retrieved.is_some(),
+      "RequestContext should be in extensions"
+    );
+    assert_eq!(
+      retrieved.unwrap().get("client.ip"),
+      Some("192.168.1.100".to_string())
+    );
+    assert_eq!(
+      retrieved.unwrap().get("service.name"),
+      Some("test_svc".to_string())
+    );
+  }
+
   // ============== Routing Tests ==============
 
   #[test]
@@ -995,21 +792,18 @@ mod tests {
         hostnames: vec![],
         service: crate::server::placeholder_service(),
         service_name: "default_service".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
       Server {
         hostnames: vec!["api.example.com".to_string()],
         service: crate::server::placeholder_service(),
         service_name: "api_service".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
     ];
 
-    let adaptor = HyperServiceAdaptor::new(server_routing_table, None);
+    let adaptor =
+      HyperServiceAdaptor::new(server_routing_table, None, None);
 
     // Request without Host header should route to default
     let req = http::Request::builder()
@@ -1032,21 +826,18 @@ mod tests {
         hostnames: vec![],
         service: crate::server::placeholder_service(),
         service_name: "default_service".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
       Server {
         hostnames: vec!["api.example.com".to_string()],
         service: crate::server::placeholder_service(),
         service_name: "api_service".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
     ];
 
-    let adaptor = HyperServiceAdaptor::new(server_routing_table, None);
+    let adaptor =
+      HyperServiceAdaptor::new(server_routing_table, None, None);
 
     // Request with Host header should route to matching server
     let req = http::Request::builder()

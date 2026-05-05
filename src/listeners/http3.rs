@@ -16,9 +16,16 @@ use tower::Service;
 use tracing::{info, warn};
 
 use crate::config::SerializedArgs;
-use crate::http_utils::build_error_response;
-use crate::http_utils::{BytesBufBodyWrapper, RequestBody, Response};
-use crate::listener::{BuildListener, Listener, ListenerProps, Listening, TransportLayer};
+use crate::context::RequestContext;
+use crate::http_utils::{
+  BytesBufBodyWrapper, RequestBody, Response, build_error_response,
+};
+use crate::listener::{
+  BuildListener, Listener, ListenerProps, Listening, TransportLayer,
+};
+use crate::listeners::common::{
+  LISTENER_SHUTDOWN_TIMEOUT, MONITORING_LOG_INTERVAL,
+};
 use crate::shutdown::ShutdownHandle;
 use crate::stream::H3UpgradeTrigger;
 use crate::tls::build_tls_server_config;
@@ -32,7 +39,7 @@ use crate::tracker::StreamTracker;
 const DEFAULT_MAX_CONCURRENT_BIDI_STREAMS: u64 = 100;
 
 /// Default maximum idle timeout in milliseconds
-const DEFAULT_MAX_IDLE_TIMEOUT_MS: u64 = 30000;
+const DEFAULT_MAX_IDLE_TIMEOUT_MS: u64 = 5000;
 
 /// Default initial MTU
 const DEFAULT_INITIAL_MTU: u16 = 1200;
@@ -42,12 +49,6 @@ const DEFAULT_SEND_WINDOW: u64 = 10485760;
 
 /// Default receive window size (10MB)
 const DEFAULT_RECEIVE_WINDOW: u64 = 10485760;
-
-/// Graceful shutdown timeout for HTTP/3 Listener
-const LISTENER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// Monitoring log interval in seconds
-const MONITORING_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 /// H3_NO_ERROR error code for CONNECTION_CLOSE frame
 /// See: https://www.rfc-editor.org/rfc/rfc9114.html#errors
@@ -60,6 +61,7 @@ const H3_NO_ERROR_CODE: u32 = 0x100;
 
 /// HTTP/3 Listener configuration arguments
 #[derive(Deserialize, Clone, Debug, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Http3ListenerArgs {
   /// QUIC protocol parameters (optional)
   #[serde(default)]
@@ -68,10 +70,12 @@ pub struct Http3ListenerArgs {
 
 /// QUIC protocol configuration arguments
 #[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct QuicConfigArgs {
-  /// Maximum concurrent bidirectional streams (default: 100, range: 1-10000)
+  /// Maximum concurrent bidirectional streams (default: 100, range:
+  /// 1-10000)
   pub max_concurrent_bidi_streams: Option<u64>,
-  /// Maximum idle timeout in milliseconds (default: 30000)
+  /// Maximum idle timeout in milliseconds (default: 5000)
   pub max_idle_timeout_ms: Option<u64>,
   /// Initial MTU (default: 1200, range: 1200-9000)
   pub initial_mtu: Option<u16>,
@@ -98,8 +102,8 @@ impl Default for QuicConfigArgs {
 impl QuicConfigArgs {
   /// Validate and apply defaults to QUIC configuration
   ///
-  /// Returns validated configuration with defaults applied where needed.
-  /// Invalid values return an error, rejecting startup.
+  /// Returns validated configuration with defaults applied where
+  /// needed. Invalid values return an error, rejecting startup.
   pub fn validate_and_apply_defaults(&self) -> Result<QuicConfig> {
     let max_concurrent_bidi_streams =
       match self.max_concurrent_bidi_streams {
@@ -180,10 +184,10 @@ impl Default for QuicConfig {
 
 /// Check for :authority vs Host header mismatch in HTTP/3 requests.
 ///
-/// In HTTP/3, the `:authority` pseudo-header serves as the equivalent of the
-/// Host header. According to RFC 9114, if both `:authority` and Host header
-/// are present, they should match. A mismatch could indicate a potential
-/// security issue.
+/// In HTTP/3, the `:authority` pseudo-header serves as the equivalent
+/// of the Host header. According to RFC 9114, if both `:authority` and
+/// Host header are present, they should match. A mismatch could
+/// indicate a potential security issue.
 ///
 /// Returns true if there's a mismatch (should return 421).
 fn check_h3_authority_host_mismatch(req: &http::Request<()>) -> bool {
@@ -207,39 +211,6 @@ fn check_h3_authority_host_mismatch(req: &http::Request<()>) -> bool {
 }
 
 // ============================================================================
-// Access Log Recording
-// ============================================================================
-
-/// Record an access log entry for an HTTP/3 request.
-///
-/// Delegates to the common implementation in `super::common::record_http_access_log`.
-fn record_access_log(
-  writer: &crate::access_log::AccessLogWriter,
-  client_addr: SocketAddr,
-  user: Option<String>,
-  auth_type: crate::access_log::AuthType,
-  method: String,
-  target: String,
-  status: u16,
-  duration: std::time::Duration,
-  service_name: String,
-  service_metrics: crate::access_log::ServiceMetrics,
-) {
-  let params = crate::access_log::HttpAccessLogParams {
-    client_addr,
-    user,
-    auth_type,
-    method,
-    target,
-    status,
-    duration,
-    service_name,
-    service_metrics,
-  };
-  super::common::record_http_access_log(writer, &params);
-}
-
-// ============================================================================
 // HTTP/3 Stream Handler
 // ============================================================================
 
@@ -255,21 +226,21 @@ fn record_access_log(
 /// 4. Create (trigger, on_upgrade) pair
 /// 5. Build Request with on_upgrade in extensions
 /// 6. Call service.call(request)
-/// 7. Based on response status, trigger.send_success() or trigger.send_error()
+/// 7. Based on response status, trigger.send_success() or
+///    trigger.send_error()
 ///
-/// Returns unit `()` because all errors are handled internally via logging
-/// and H3 error responses. This function never propagates errors upward.
+/// Returns unit `()` because all errors are handled internally via
+/// logging and H3 error responses. This function never propagates
+/// errors upward.
 async fn handle_h3_stream(
   req: http::Request<()>,
   stream: server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
   server_router: crate::server::ServerRouter,
   _shutdown_handle: ShutdownHandle,
   client_addr: SocketAddr,
+  local_addr: SocketAddr,
 ) -> () {
-  // Capture start time for access log
-  let start_time = std::time::Instant::now();
   let method = req.method().clone();
-  let target = req.uri().to_string();
 
   // Phase 1: Check SNI vs Host for HTTP/3 FIRST
   if check_h3_authority_host_mismatch(&req) {
@@ -303,32 +274,17 @@ async fn handle_h3_stream(
     }
   };
 
-  // Phase 3: Authentication using routing_entry's users
-  let user_password_auth =
-    super::common::build_user_password_auth(&routing_entry.users);
-  let auth_result =
-    user_password_auth.verify_and_extract_username(&req);
-  let (user, auth_type) = match auth_result {
-    Ok(Some(username)) => {
-      (Some(username), crate::access_log::AuthType::Password)
-    }
-    Ok(None) => (None, crate::access_log::AuthType::None),
-    Err(_) => {
-      let resp = build_error_response(
-        http::StatusCode::PROXY_AUTHENTICATION_REQUIRED,
-        "Proxy Authentication Required",
-      );
-      let mut stream = stream;
-      if let Err(e) = send_h3_response(&mut stream, resp, true).await {
-        warn!("Failed to send 407 response: {e}");
-      }
-      return;
-    }
-  };
-
   let mut service = routing_entry.service.clone();
-  let access_log_writer = routing_entry.access_log_writer.clone();
-  let service_name = routing_entry.service_name();
+
+  // Phase 3: Build RequestContext with connection-level keys and insert
+  // into request extensions. Auth and access logging are now handled
+  // by the plugin layer in the service pipeline.
+  let ctx = RequestContext::new();
+  ctx.insert("client.ip", client_addr.ip().to_string());
+  ctx.insert("client.port", client_addr.port().to_string());
+  ctx.insert("server.ip", local_addr.ip().to_string());
+  ctx.insert("server.port", local_addr.port().to_string());
+  ctx.insert("service.name", &routing_entry.service_name);
 
   // Phase 4: Create upgrade pair ONLY for CONNECT method
   let is_connect = method == http::Method::CONNECT;
@@ -347,6 +303,9 @@ async fn handle_h3_stream(
     request.headers_mut().insert(name.clone(), value.clone());
   }
 
+  // Insert RequestContext into request extensions
+  request.extensions_mut().insert(ctx);
+
   let (trigger, mut stream_holder) = if is_connect {
     let (trigger, on_upgrade) = H3UpgradeTrigger::pair(stream);
     request.extensions_mut().insert(on_upgrade);
@@ -358,19 +317,9 @@ async fn handle_h3_stream(
   // Phase 6: Call Service
   let result = service.call(request).await;
 
-  let mut final_status: u16 = 502;
-  let mut service_metrics = crate::access_log::ServiceMetrics::new();
-
   // Phase 7: Handle Service response
   match result {
     Ok(resp) => {
-      final_status = resp.status().as_u16();
-      service_metrics = resp
-        .extensions()
-        .get::<crate::access_log::ServiceMetrics>()
-        .cloned()
-        .unwrap_or_default();
-
       if is_connect {
         if resp.status() == http::StatusCode::OK {
           if let Some(t) = trigger {
@@ -429,22 +378,6 @@ async fn handle_h3_stream(
       }
     }
   }
-
-  if let Some(ref writer) = access_log_writer {
-    let duration = start_time.elapsed();
-    record_access_log(
-      writer,
-      client_addr,
-      user,
-      auth_type,
-      method.to_string(),
-      target,
-      final_status,
-      duration,
-      service_name,
-      service_metrics,
-    );
-  }
 }
 
 /// Send an HTTP/3 response with optional stream finish
@@ -452,9 +385,9 @@ async fn handle_h3_stream(
 /// # Arguments
 /// * `stream` - The HTTP/3 request stream
 /// * `resp` - The HTTP response to send
-/// * `finish_stream` - If true, close the stream after sending response.
-///   Should be false for CONNECT success response to allow bidirectional
-///   data transfer.
+/// * `finish_stream` - If true, close the stream after sending
+///   response. Should be false for CONNECT success response to allow
+///   bidirectional data transfer.
 async fn send_h3_response(
   stream: &mut server::RequestStream<
     h3_quinn::BidiStream<Bytes>,
@@ -476,7 +409,8 @@ async fn send_h3_response(
   }
 
   // Finish the stream only if requested
-  // For CONNECT success, we don't finish to allow bidirectional transfer
+  // For CONNECT success, we don't finish to allow bidirectional
+  // transfer
   if finish_stream {
     stream.finish().await?;
   }
@@ -494,6 +428,7 @@ async fn handle_h3_connection(
   server_routing_table: Vec<crate::server::Server>,
   stream_tracker: Rc<StreamTracker>,
   shutdown_handle: ShutdownHandle,
+  local_addr: SocketAddr,
 ) {
   let client_addr = conn.remote_address();
 
@@ -536,6 +471,7 @@ async fn handle_h3_connection(
                 server_router,
                 stream_shutdown,
                 client_addr,
+                local_addr,
               )
               .await;
             }
@@ -619,7 +555,8 @@ impl Http3Listener {
       bail!("http3 listener requires server-level tls configuration");
     }
 
-    // Build TLS config from all servers' certificates (SNI-based selection)
+    // Build TLS config from all servers' certificates (SNI-based
+    // selection)
     let tls_config = build_tls_server_config(
       &server_routing_table,
       vec![H3_ALPN.to_vec()],
@@ -692,7 +629,7 @@ impl Listening for Http3Listener {
 
       // Channel to receive incoming connections from all endpoints
       let (conn_tx, mut conn_rx) =
-        tokio::sync::mpsc::channel::<quinn::Incoming>(32);
+        tokio::sync::mpsc::channel::<(SocketAddr, quinn::Incoming)>(32);
 
       // Spawn accept task for each endpoint
       // Note: We share endpoints with Arc for concurrent access
@@ -707,7 +644,10 @@ impl Listening for Http3Listener {
               conn = endpoint.accept() => {
                 match conn {
                   Some(incoming) => {
-                    if conn_tx.send(incoming).await.is_err() {
+                    let local_addr = endpoint
+                      .local_addr()
+                      .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
+                    if conn_tx.send((local_addr, incoming)).await.is_err() {
                       break;
                     }
                   }
@@ -721,7 +661,8 @@ impl Listening for Http3Listener {
           }
         });
       }
-      // Drop the original sender so conn_rx will end when all spawn tasks end
+      // Drop the original sender so conn_rx will end when all spawn
+      // tasks end
       drop(conn_tx);
 
       // Monitoring is integrated into the accept loop below
@@ -751,7 +692,7 @@ impl Listening for Http3Listener {
         };
 
         match accept_result {
-          Some(conn) => {
+          Some((local_addr, conn)) => {
             let server_routing_table = server_routing_table.clone();
             let tracker_for_register = stream_tracker.clone();
             let tracker_for_handler = stream_tracker.clone();
@@ -765,6 +706,7 @@ impl Listening for Http3Listener {
                     server_routing_table,
                     tracker_for_handler,
                     stream_shutdown,
+                    local_addr,
                   )
                   .await;
                 }
@@ -790,14 +732,15 @@ impl Listening for Http3Listener {
 
       if wait_result.is_err() {
         warn!(
-          "HTTP/3 Listener shutdown timeout ({:?}) expired, aborting {} \
-           remaining streams",
+          "HTTP/3 Listener shutdown timeout ({:?}) expired, aborting \
+           {} remaining streams",
           LISTENER_SHUTDOWN_TIMEOUT,
           stream_tracker.active_count()
         );
         stream_tracker.abort_all();
         // Wait for aborted tasks to be cleaned up with a short timeout
-        // Aborted tasks should finish quickly, but we add a safety timeout
+        // Aborted tasks should finish quickly, but we add a safety
+        // timeout
         const ABORT_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
         if stream_tracker
           .wait_shutdown_with_timeout(ABORT_WAIT_TIMEOUT)
@@ -825,7 +768,8 @@ impl Listening for Http3Listener {
   }
 
   fn stop(&self) {
-    // Step 1: Trigger shutdown notification to stop accepting new connections
+    // Step 1: Trigger shutdown notification to stop accepting new
+    // connections
     self.shutdown_handle.shutdown();
 
     // Step 2: Notify all active streams to stop
@@ -863,15 +807,6 @@ pub fn create_listener_builder() -> Box<dyn BuildListener> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::auth::UserPasswordAuth;
-  use crate::config::ListenerAuthConfig;
-  use crate::config::UserCredential;
-  use crate::config::{
-    ConfigErrorCollector, validate_listener_auth_config,
-  };
-  use base64::{
-    Engine, engine::general_purpose::STANDARD as BASE64_STANDARD,
-  };
 
   // ============== QuicConfigArgs Tests ==============
 
@@ -1024,93 +959,6 @@ mod tests {
     assert_eq!(config.initial_mtu, DEFAULT_INITIAL_MTU);
     assert_eq!(config.send_window, DEFAULT_SEND_WINDOW);
     assert_eq!(config.receive_window, DEFAULT_RECEIVE_WINDOW);
-  }
-
-  // ============== ListenerAuthConfig Tests ==============
-
-  #[test]
-  fn test_auth_config_none() {
-    // No auth at listener level - it's now at server level
-    let args = Http3ListenerArgs {
-      quic: None,
-    };
-    // ListenerArgs no longer has auth field - auth is at server level
-    assert!(args.quic.is_none());
-  }
-
-  #[test]
-  fn test_auth_config_password_plaintext() {
-    // Test that plaintext password format works with new auth module
-    let yaml = r#"
-users:
-  - username: admin
-    password: plaintext_secret
-"#;
-    let yaml_value: serde_yaml::Value =
-      serde_yaml::from_str(yaml).expect("parse yaml");
-    let config: ListenerAuthConfig =
-      serde_yaml::from_value(yaml_value).unwrap();
-    let mut collector = ConfigErrorCollector::new();
-    validate_listener_auth_config(&config, &mut collector);
-    assert!(!collector.has_errors());
-    assert!(!config.users.is_empty());
-    let users = config.users_map().expect("users should exist");
-    assert_eq!(
-      users.get("admin"),
-      Some(&"plaintext_secret".to_string())
-    );
-  }
-
-  #[test]
-  fn test_auth_config_tls_client_cert() {
-    // Test that TLS client cert format works with new auth module
-    let yaml = r#"
-client_ca_path: /path/to/ca.pem
-"#;
-    let yaml_value: serde_yaml::Value =
-      serde_yaml::from_str(yaml).expect("parse yaml");
-    let config: ListenerAuthConfig =
-      serde_yaml::from_value(yaml_value).unwrap();
-    let mut collector = ConfigErrorCollector::new();
-    validate_listener_auth_config(&config, &mut collector);
-    assert!(!collector.has_errors());
-    assert_eq!(
-      config.client_ca_path,
-      Some("/path/to/ca.pem".to_string())
-    );
-  }
-
-  #[test]
-  fn test_auth_config_dual_factor() {
-    // Test that dual-factor (users + client_ca_path) works
-    let yaml = r#"
-users:
-  - username: admin
-    password: secret
-client_ca_path: /path/to/ca.pem
-"#;
-    let yaml_value: serde_yaml::Value =
-      serde_yaml::from_str(yaml).expect("parse yaml");
-    let config: ListenerAuthConfig =
-      serde_yaml::from_value(yaml_value).unwrap();
-    let mut collector = ConfigErrorCollector::new();
-    validate_listener_auth_config(&config, &mut collector);
-    assert!(!collector.has_errors());
-    assert!(!config.users.is_empty());
-    assert!(config.client_ca_path.is_some());
-  }
-
-  #[test]
-  fn test_auth_config_empty_is_error() {
-    // Empty auth config should fail validation
-    let yaml = r#"{}"#;
-    let yaml_value: serde_yaml::Value =
-      serde_yaml::from_str(yaml).expect("parse yaml");
-    let config: ListenerAuthConfig =
-      serde_yaml::from_value(yaml_value).unwrap();
-    let mut collector = ConfigErrorCollector::new();
-    validate_listener_auth_config(&config, &mut collector);
-    assert!(collector.has_errors());
   }
 
   // ============== Error Response Tests ==============
@@ -1302,7 +1150,7 @@ quic:
   #[test]
   fn test_default_values() {
     assert_eq!(DEFAULT_MAX_CONCURRENT_BIDI_STREAMS, 100);
-    assert_eq!(DEFAULT_MAX_IDLE_TIMEOUT_MS, 30000);
+    assert_eq!(DEFAULT_MAX_IDLE_TIMEOUT_MS, 5000);
     assert_eq!(DEFAULT_INITIAL_MTU, 1200);
     assert_eq!(DEFAULT_SEND_WINDOW, 10485760);
     assert_eq!(DEFAULT_RECEIVE_WINDOW, 10485760);
@@ -1350,148 +1198,18 @@ quic:
     assert_eq!(resp.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
   }
 
-  #[test]
-  fn test_verify_and_extract_username_combines_auth_and_extraction() {
-    // Test that verify_and_extract_username correctly combines auth and extraction
-    // This verifies CR-001 and CR-002 fixes: no duplicated logic, no wasteful computation
-
-    // Case 1: Auth required, valid credentials - should return username
-    let user_password_auth =
-      UserPasswordAuth::from_config(&ListenerAuthConfig {
-        users: vec![UserCredential {
-          username: "testuser".to_string(),
-          password: "testpass".to_string(),
-        }],
-        client_ca_path: None,
-      });
-    let req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("http://example.com:80")
-      .header(
-        "Proxy-Authorization",
-        format!(
-          "Basic {}",
-          BASE64_STANDARD.encode("testuser:testpass")
-        ),
-      )
-      .body(())
-      .unwrap();
-    let result = user_password_auth.verify_and_extract_username(&req);
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), Some("testuser".to_string()));
-
-    // Case 2: Auth required, invalid credentials - should return error
-    let req_invalid = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("http://example.com:80")
-      .header(
-        "Proxy-Authorization",
-        format!(
-          "Basic {}",
-          BASE64_STANDARD.encode("testuser:wrongpass")
-        ),
-      )
-      .body(())
-      .unwrap();
-    let result =
-      user_password_auth.verify_and_extract_username(&req_invalid);
-    assert!(result.is_err());
-
-    // Case 3: No auth required - should return Ok(None)
-    let no_auth = UserPasswordAuth::none();
-    let req_no_auth = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("http://example.com:80")
-      .body(())
-      .unwrap();
-    let result = no_auth.verify_and_extract_username(&req_no_auth);
-    assert!(result.is_ok());
-    assert!(result.unwrap().is_none());
-  }
-
-  // ============== record_access_log Tests ==============
-
-  #[test]
-  fn test_record_access_log_writes_entry() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = crate::config::AccessLogConfig {
-      enabled: true,
-      path_prefix: "h3test.log".to_string(),
-      format: crate::config::LogFormat::Text,
-      buffer: byte_unit::Byte::from_u64(64),
-      flush: crate::config::HumanDuration(
-        std::time::Duration::from_millis(100),
-      ),
-      max_size: byte_unit::Byte::from_u64(1024 * 1024),
-    };
-    let writer = crate::access_log::AccessLogWriter::new(
-      dir.path().to_str().unwrap(),
-      &config,
-    );
-
-    let client_addr: SocketAddr = "192.168.1.1:54321".parse().unwrap();
-    let mut metrics = crate::access_log::ServiceMetrics::new();
-    metrics.add("connect_ms", 42u64);
-
-    record_access_log(
-      &writer,
-      client_addr,
-      Some("testuser".to_string()),
-      crate::access_log::AuthType::Password,
-      "CONNECT".to_string(),
-      "example.com:443".to_string(),
-      200,
-      std::time::Duration::from_millis(50),
-      "tunnel".to_string(),
-      metrics,
-    );
-
-    writer.flush();
-
-    // Verify log file was created and contains expected fields
-    let mut found = false;
-    for entry in std::fs::read_dir(dir.path()).unwrap() {
-      let entry = entry.unwrap();
-      let name = entry.file_name().to_string_lossy().to_string();
-      if name.starts_with("h3test.log") {
-        let content = std::fs::read_to_string(entry.path()).unwrap();
-        assert!(
-          content.contains("192.168.1.1:54321"),
-          "Should contain client addr"
-        );
-        assert!(
-          content.contains("CONNECT example.com:443"),
-          "Should contain request line"
-        );
-        assert!(content.contains("200"), "Should contain status code");
-        assert!(
-          content.contains("service=tunnel"),
-          "Should contain service name"
-        );
-        assert!(
-          content.contains("service.connect_ms=42"),
-          "Should contain service metrics"
-        );
-        assert!(
-          content.contains("auth=password"),
-          "Should contain auth type"
-        );
-        found = true;
-      }
-    }
-    assert!(found, "Access log file should exist");
-  }
-
   // ============== CONNECT-Only Upgrade Pair Tests ==============
 
-  /// Test that non-CONNECT requests do NOT create an upgrade pair in extensions.
+  /// Test that non-CONNECT requests do NOT create an upgrade pair in
+  /// extensions.
   ///
   /// This test verifies the logic used in handle_h3_stream:
   /// - For non-CONNECT methods, `is_connect` is false
   /// - Therefore, H3OnUpgrade is NOT inserted into request extensions
   ///
-  /// The actual integration test (test_h3_get_to_echo_service_no_upgrade_error)
-  /// verifies this behavior end-to-end.
+  /// The actual integration test
+  /// (test_h3_get_to_echo_service_no_upgrade_error) verifies this
+  /// behavior end-to-end.
   #[test]
   fn test_non_connect_no_upgrade_pair_in_extensions() {
     use http::Method;
@@ -1519,7 +1237,8 @@ quic:
       // Therefore, no H3OnUpgrade is inserted into extensions
       assert!(
         !is_connect,
-        "Method {} should NOT trigger upgrade pair creation (is_connect should be false)",
+        "Method {} should NOT trigger upgrade pair creation \
+         (is_connect should be false)",
         method
       );
     }
@@ -1541,7 +1260,8 @@ quic:
     // request.extensions_mut().insert(on_upgrade);
     assert!(
       is_connect,
-      "CONNECT method should trigger upgrade pair creation (is_connect should be true)"
+      "CONNECT method should trigger upgrade pair creation \
+       (is_connect should be true)"
     );
   }
 
@@ -1555,11 +1275,13 @@ quic:
   /// 3. If !is_connect: keep stream for direct response, no H3OnUpgrade
   ///
   /// The actual end-to-end verification is done in the black-box test:
-  /// tests/integration/test_http3_listener.py::TestHTTP3EchoService::test_h3_get_to_echo_service_no_upgrade_error
+  /// tests/integration/test_http3_listener.
+  /// py::TestHTTP3EchoService::test_h3_get_to_echo_service_no_upgrade_error
   #[tokio::test]
   async fn test_h3_upgrade_trigger_only_for_connect() {
-    use crate::stream::H3OnUpgrade;
     use http::Method;
+
+    use crate::stream::H3OnUpgrade;
 
     // Simulate the decision logic from handle_h3_stream
     fn should_insert_on_upgrade(method: &Method) -> bool {
@@ -1632,7 +1354,8 @@ quic:
       "H3OnUpgrade should be extractable for CONNECT"
     );
 
-    // Verify second extraction returns None (single-extraction contract)
+    // Verify second extraction returns None (single-extraction
+    // contract)
     let second = H3OnUpgrade::on(&mut request);
     assert!(
       second.is_none(),
@@ -1668,7 +1391,8 @@ quic:
     assert!(args.quic.is_none());
   }
 
-  // ============== Task 011: Remove TLS/Auth from Listener Args Tests ==============
+  // ============== Task 011: Remove TLS/Auth from Listener Args Tests
+  // ==============
 
   #[test]
   fn test_http3_listener_args_no_tls_fields() {
@@ -1682,7 +1406,8 @@ quic:
   #[test]
   fn test_http3_listener_args_no_auth_field() {
     // Auth should no longer be at listener level
-    // The struct no longer has an auth field, so parsing without it should work
+    // The struct no longer has an auth field, so parsing without it
+    // should work
     let yaml = r#"{}"#;
     let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
     // Auth is now at server level, not listener level

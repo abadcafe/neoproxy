@@ -114,19 +114,21 @@ class TestSOCKS5HostnameValidation:
         Expected: Exit code 1, error message about SOCKS5 + hostnames
         """
         socks_port = get_unique_port()
-        config = f"""worker_threads: 1
-log_directory: "/tmp/neoproxy_test_logs"
+        config = f"""server_threads: 1
 
 services:
 - name: echo
   kind: echo.echo
 
+listeners:
+- name: socks_main
+  kind: socks5
+  addresses: ["127.0.0.1:{socks_port}"]
+
 servers:
 - name: socks_server
   hostnames: ["api.example.com"]
-  listeners:
-  - kind: socks5
-    addresses: ["127.0.0.1:{socks_port}"]
+  listeners: ["socks_main"]
   service: echo
 """
         try:
@@ -153,19 +155,21 @@ servers:
         Expected: Process starts successfully and stays running.
         """
         socks_port = get_unique_port()
-        config = f"""worker_threads: 1
-log_directory: "/tmp/neoproxy_test_logs"
+        config = f"""server_threads: 1
 
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
 
+listeners:
+- name: socks_main
+  kind: socks5
+  addresses: ["127.0.0.1:{socks_port}"]
+
 servers:
 - name: socks_server
   hostnames: []
-  listeners:
-  - kind: socks5
-    addresses: ["127.0.0.1:{socks_port}"]
+  listeners: ["socks_main"]
   service: connect_tcp
 """
         proc, stdout, stderr = start_neoproxy_and_check_running(config)
@@ -197,26 +201,29 @@ class TestExactHostnameConflict:
         Expected: Exit code 1, error message about hostname conflict
         """
         http_port = get_unique_port()
-        config = f"""worker_threads: 1
-log_directory: "/tmp/neoproxy_test_logs"
+        config = f"""server_threads: 1
 
 services:
 - name: echo
   kind: echo.echo
 
+listeners:
+- name: http_a
+  kind: http
+  addresses: ["127.0.0.1:{http_port}"]
+- name: http_b
+  kind: http
+  addresses: ["127.0.0.1:{http_port}"]
+
 servers:
 - name: server_a
   hostnames: ["api.example.com"]
-  listeners:
-  - kind: http
-    addresses: ["127.0.0.1:{http_port}"]
+  listeners: ["http_a"]
   service: echo
 
 - name: server_b
   hostnames: ["api.example.com"]
-  listeners:
-  - kind: http
-    addresses: ["127.0.0.1:{http_port}"]
+  listeners: ["http_b"]
   service: echo
 """
         try:
@@ -243,26 +250,29 @@ servers:
         Expected: Exit code 1, error message about hostname conflict
         """
         http_port = get_unique_port()
-        config = f"""worker_threads: 1
-log_directory: "/tmp/neoproxy_test_logs"
+        config = f"""server_threads: 1
 
 services:
 - name: echo
   kind: echo.echo
 
+listeners:
+- name: http_a
+  kind: http
+  addresses: ["127.0.0.1:{http_port}"]
+- name: http_b
+  kind: http
+  addresses: ["127.0.0.1:{http_port}"]
+
 servers:
 - name: server_a
   hostnames: ["API.EXAMPLE.COM"]
-  listeners:
-  - kind: http
-    addresses: ["127.0.0.1:{http_port}"]
+  listeners: ["http_a"]
   service: echo
 
 - name: server_b
   hostnames: ["api.example.com"]
-  listeners:
-  - kind: http
-    addresses: ["127.0.0.1:{http_port}"]
+  listeners: ["http_b"]
   service: echo
 """
         try:
@@ -293,26 +303,29 @@ class TestWildcardHostnameConflict:
         Expected: Exit code 1, error message about wildcard conflict
         """
         http_port = get_unique_port()
-        config = f"""worker_threads: 1
-log_directory: "/tmp/neoproxy_test_logs"
+        config = f"""server_threads: 1
 
 services:
 - name: echo
   kind: echo.echo
 
+listeners:
+- name: http_a
+  kind: http
+  addresses: ["127.0.0.1:{http_port}"]
+- name: http_b
+  kind: http
+  addresses: ["127.0.0.1:{http_port}"]
+
 servers:
 - name: server_a
   hostnames: ["*.example.com"]
-  listeners:
-  - kind: http
-    addresses: ["127.0.0.1:{http_port}"]
+  listeners: ["http_a"]
   service: echo
 
 - name: server_b
   hostnames: ["*.example.com"]
-  listeners:
-  - kind: http
-    addresses: ["127.0.0.1:{http_port}"]
+  listeners: ["http_b"]
   service: echo
 """
         try:
@@ -339,26 +352,29 @@ servers:
         Expected: Process starts successfully and stays running.
         """
         http_port = get_unique_port()
-        config = f"""worker_threads: 1
-log_directory: "/tmp/neoproxy_test_logs"
+        config = f"""server_threads: 1
 
 services:
 - name: echo
   kind: echo.echo
 
+listeners:
+- name: http_wildcard
+  kind: http
+  addresses: ["127.0.0.1:{http_port}"]
+- name: http_specific
+  kind: http
+  addresses: ["127.0.0.1:{http_port}"]
+
 servers:
 - name: wildcard
   hostnames: ["*.example.com"]
-  listeners:
-  - kind: http
-    addresses: ["127.0.0.1:{http_port}"]
+  listeners: ["http_wildcard"]
   service: echo
 
 - name: specific
   hostnames: ["api.example.com"]
-  listeners:
-  - kind: http
-    addresses: ["127.0.0.1:{http_port}"]
+  listeners: ["http_specific"]
   service: echo
 """
         proc, stdout, stderr = start_neoproxy_and_check_running(config)
@@ -391,26 +407,29 @@ class TestMultipleSOCKS5Conflict:
         Expected: Exit code 1, error message about multiple default servers
         """
         socks_port = get_unique_port()
-        config = f"""worker_threads: 1
-log_directory: "/tmp/neoproxy_test_logs"
+        config = f"""server_threads: 1
 
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
 
+listeners:
+- name: socks_a_main
+  kind: socks5
+  addresses: ["127.0.0.1:{socks_port}"]
+- name: socks_b_main
+  kind: socks5
+  addresses: ["127.0.0.1:{socks_port}"]
+
 servers:
 - name: socks_a
   hostnames: []
-  listeners:
-  - kind: socks5
-    addresses: ["127.0.0.1:{socks_port}"]
+  listeners: ["socks_a_main"]
   service: connect_tcp
 
 - name: socks_b
   hostnames: []
-  listeners:
-  - kind: socks5
-    addresses: ["127.0.0.1:{socks_port}"]
+  listeners: ["socks_b_main"]
   service: connect_tcp
 """
         returncode, stdout, stderr = run_neoproxy_with_config(config)
@@ -439,26 +458,29 @@ class TestDifferentHostnamesNoConflict:
         Expected: Process starts successfully and stays running.
         """
         http_port = get_unique_port()
-        config = f"""worker_threads: 1
-log_directory: "/tmp/neoproxy_test_logs"
+        config = f"""server_threads: 1
 
 services:
 - name: echo
   kind: echo.echo
 
+listeners:
+- name: http_a
+  kind: http
+  addresses: ["127.0.0.1:{http_port}"]
+- name: http_b
+  kind: http
+  addresses: ["127.0.0.1:{http_port}"]
+
 servers:
 - name: server_a
   hostnames: ["api.example.com"]
-  listeners:
-  - kind: http
-    addresses: ["127.0.0.1:{http_port}"]
+  listeners: ["http_a"]
   service: echo
 
 - name: server_b
   hostnames: ["web.example.com"]
-  listeners:
-  - kind: http
-    addresses: ["127.0.0.1:{http_port}"]
+  listeners: ["http_b"]
   service: echo
 """
         proc, stdout, stderr = start_neoproxy_and_check_running(config)

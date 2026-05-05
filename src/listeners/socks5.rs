@@ -5,9 +5,9 @@
 //!
 //! # Design Note: Thread Safety
 //!
-//! Note: The `#![allow(clippy::await_holding_refcell_ref)]` attribute is
-//! used because we hold RefCell references across await points in the
-//! single-threaded LocalSet context, which is safe.
+//! Note: The `#![allow(clippy::await_holding_refcell_ref)]` attribute
+//! is used because we hold RefCell references across await points in
+//! the single-threaded LocalSet context, which is safe.
 //!
 //! The Listener uses `Socks5UpgradeTrigger::pair()` to create a linked
 //! (trigger, upgrade) pair. The `Socks5OnUpgrade` is stored in
@@ -23,29 +23,28 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use tower::Service;
 use tracing::warn;
 
 use crate::auth::UserPasswordAuth;
 use crate::config::SerializedArgs;
+use crate::context::RequestContext;
 use crate::http_utils::{BytesBufBodyWrapper, RequestBody};
-use crate::listener::{BuildListener, Listener, ListenerProps, Listening, TransportLayer};
+use crate::listener::{
+  BuildListener, Listener, ListenerProps, Listening, TransportLayer,
+};
+use crate::listeners::common::{
+  LISTENER_SHUTDOWN_TIMEOUT, MONITORING_LOG_INTERVAL,
+};
 use crate::service::Service as RuntimeService;
 use crate::shutdown::ShutdownHandle;
 use crate::stream::{
   Socks5UpgradeTrigger, http_status_to_socks5_error,
 };
 use crate::tracker::StreamTracker;
-use tower::Service;
-
-/// Listener shutdown timeout in seconds.
-/// This is the timeout for Phase 1 of graceful shutdown.
-const LISTENER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Default handshake timeout in seconds.
 const DEFAULT_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
-
-/// Monitoring log interval in seconds.
-const MONITORING_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 /// SOCKS5 listener implementation.
 ///
@@ -65,8 +64,6 @@ pub struct Socks5Listener {
   handshake_timeout: Duration,
   /// User password authentication.
   user_password_auth: UserPasswordAuth,
-  /// Access log writer for logging request/response information.
-  access_log_writer: Option<crate::access_log::AccessLogWriter>,
   /// Service name for identification in logs.
   service_name: String,
 }
@@ -82,7 +79,8 @@ impl Socks5Listener {
   ///
   /// # Returns
   ///
-  /// Returns a `Listener` on success, or an error if all addresses are invalid.
+  /// Returns a `Listener` on success, or an error if all addresses are
+  /// invalid.
   ///
   /// # Errors
   ///
@@ -105,16 +103,12 @@ impl Socks5Listener {
       );
     }
 
-    // Get service from routing table (SOCKS5 doesn't support hostname routing,
-    // so we use the first entry's service)
+    // Get service from routing table (SOCKS5 doesn't support hostname
+    // routing, so we use the first entry's service)
     let service = server_routing_table
       .first()
       .map(|e| e.service.clone())
       .unwrap_or_else(crate::server::placeholder_service);
-
-    let access_log_writer = server_routing_table
-      .first()
-      .and_then(|e| e.access_log_writer.clone());
 
     let service_name = server_routing_table
       .first()
@@ -128,7 +122,6 @@ impl Socks5Listener {
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
       handshake_timeout: args.handshake_timeout,
       user_password_auth: args.user_password_auth,
-      access_log_writer,
       service_name,
     }))
   }
@@ -143,7 +136,6 @@ impl Socks5Listener {
   /// * `shutdown_handle` - Shutdown notification handle
   /// * `handshake_timeout` - Timeout for SOCKS5 handshake
   /// * `user_password_auth` - User password authentication
-  /// * `access_log_writer` - Access log writer (optional)
   /// * `service_name` - Service name for access log
   ///
   /// # Returns
@@ -157,7 +149,6 @@ impl Socks5Listener {
     shutdown_handle: ShutdownHandle,
     handshake_timeout: Duration,
     user_password_auth: UserPasswordAuth,
-    access_log_writer: Option<crate::access_log::AccessLogWriter>,
     service_name: String,
   ) -> Result<std::pin::Pin<Box<dyn Future<Output = Result<()>>>>> {
     // Create TCP socket based on address type
@@ -177,14 +168,14 @@ impl Socks5Listener {
     let listener = socket.listen(1024)?;
 
     let accepting_fut = async move {
-      // Log listener startup event (architecture requirement: record listener startup)
+      // Log listener startup event (architecture requirement: record
+      // listener startup)
       tracing::info!("SOCKS5 listener started on {}", addr);
 
       // Clone handles for use in accept loop
       let shutdown_handle = shutdown_handle;
       let connection_tracker = connection_tracker;
       let service = service;
-      let access_log_writer = access_log_writer;
       let service_name = service_name;
 
       // Create monitoring interval timer
@@ -225,77 +216,97 @@ impl Socks5Listener {
             // Clone handles for use in connection handler
             let mut service = service.clone();
             let user_password_auth = user_password_auth.clone();
-            let access_log_writer = access_log_writer.clone();
             let service_name = service_name.clone();
 
             // Register connection handler
             connection_tracker.register(async move {
-              // Capture start time for access log
-              let start_time = std::time::Instant::now();
+              // Capture local address before handshake consumes the
+              // stream
+              let local_addr = match stream.local_addr() {
+                Ok(addr) => addr,
+                Err(e) => {
+                  tracing::warn!(
+                    "SOCKS5 failed to get local addr from {}: {}",
+                    peer_addr,
+                    e
+                  );
+                  return;
+                }
+              };
 
-              // Step 1: Perform SOCKS5 handshake with timeout protection
-              let handshake_result =
-                match perform_handshake(stream, handshake_timeout, &user_password_auth)
-                  .await
-                {
-                  Ok(result) => result,
-                  Err(e) => {
-                    // Handle handshake errors
-                    match e {
-                      HandshakeError::Timeout => {
-                        // Timeout - do not send response, just close connection
+              // Step 1: Perform SOCKS5 handshake with timeout
+              // protection
+              let handshake_result = match perform_handshake(
+                stream,
+                handshake_timeout,
+                &user_password_auth,
+              )
+              .await
+              {
+                Ok(result) => result,
+                Err(e) => {
+                  // Handle handshake errors
+                  match e {
+                    HandshakeError::Timeout => {
+                      // Timeout - do not send response, just close
+                      // connection
+                      tracing::warn!(
+                        "SOCKS5 handshake timeout from {}",
+                        peer_addr
+                      );
+                    }
+                    HandshakeError::InvalidVersion(v) => {
+                      // Invalid version - do not send response
+                      tracing::warn!(
+                        "SOCKS5 invalid version {} from {}",
+                        v,
+                        peer_addr
+                      );
+                    }
+                    HandshakeError::MethodNotAcceptable(_) => {
+                      // METHOD=0xFF was already sent
+                      tracing::warn!(
+                        "SOCKS5 method not acceptable from {}",
+                        peer_addr
+                      );
+                    }
+                    HandshakeError::AuthenticationFailed {
+                      username,
+                    } => {
+                      // Auth failure response was already sent
+                      if let Some(user) = username {
                         tracing::warn!(
-                          "SOCKS5 handshake timeout from {}",
+                          "SOCKS5 authentication failed for user '{}' \
+                           from {}",
+                          user,
                           peer_addr
-                        );
-                      }
-                      HandshakeError::InvalidVersion(v) => {
-                        // Invalid version - do not send response
-                        tracing::warn!(
-                          "SOCKS5 invalid version {} from {}",
-                          v,
-                          peer_addr
-                        );
-                      }
-                      HandshakeError::MethodNotAcceptable(_) => {
-                        // METHOD=0xFF was already sent
-                        tracing::warn!(
-                          "SOCKS5 method not acceptable from {}",
-                          peer_addr
-                        );
-                      }
-                      HandshakeError::AuthenticationFailed { username } => {
-                        // Auth failure response was already sent
-                        if let Some(user) = username {
-                          tracing::warn!(
-                            "SOCKS5 authentication failed for user '{}' from {}",
-                            user,
-                            peer_addr
-                          );
-                        }
-                      }
-                      HandshakeError::ClientDisconnected => {
-                        tracing::info!(
-                          "SOCKS5 connection disconnected from {}",
-                          peer_addr
-                        );
-                      }
-                      HandshakeError::IoError(e) => {
-                        tracing::warn!(
-                          "SOCKS5 handshake IO error from {}: {}",
-                          peer_addr,
-                          e
                         );
                       }
                     }
-                    // Connection is already closed by the error handler
-                    return;
+                    HandshakeError::ClientDisconnected => {
+                      tracing::info!(
+                        "SOCKS5 connection disconnected from {}",
+                        peer_addr
+                      );
+                    }
+                    HandshakeError::IoError(e) => {
+                      tracing::warn!(
+                        "SOCKS5 handshake IO error from {}: {}",
+                        peer_addr,
+                        e
+                      );
+                    }
                   }
-                };
+                  // Connection is already closed by the error handler
+                  return;
+                }
+              };
 
               // Step 2: Read command and target address
               let command_result =
-                match read_command_and_target(handshake_result.proto).await {
+                match read_command_and_target(handshake_result.proto)
+                  .await
+                {
                   Ok(result) => result,
                   Err(e) => {
                     // Command error responses are already sent
@@ -316,7 +327,8 @@ impl Socks5Listener {
                       }
                       CommandError::ClientDisconnected => {
                         tracing::warn!(
-                          "SOCKS5 client disconnected during command processing from {}",
+                          "SOCKS5 client disconnected during command \
+                           processing from {}",
                           peer_addr
                         );
                       }
@@ -333,44 +345,45 @@ impl Socks5Listener {
                 };
 
               // Step 3: Create upgrade pair
-              let (trigger, on_upgrade) = Socks5UpgradeTrigger::pair(
-                command_result.proto,
-              );
+              let (trigger, on_upgrade) =
+                Socks5UpgradeTrigger::pair(command_result.proto);
 
-              // Step 4: Build HTTP CONNECT request with on_upgrade in extensions
-              let (host, port) = extract_host_port(&command_result.target_addr);
+              // Step 4: Build HTTP CONNECT request with on_upgrade in
+              // extensions
+              let (host, port) =
+                extract_host_port(&command_result.target_addr);
               let uri = format_connect_uri(&host, port);
 
               let mut request = http::Request::builder()
                 .method(http::Method::CONNECT)
                 .uri(&uri)
                 .version(http::Version::HTTP_11)
-                .body(RequestBody::new(
-                  BytesBufBodyWrapper::new(
-                    http_body_util::Empty::<bytes::Bytes>::new(),
-                  ),
-                ))
+                .body(RequestBody::new(BytesBufBodyWrapper::new(
+                  http_body_util::Empty::<bytes::Bytes>::new(),
+                )))
                 .expect("failed to build CONNECT request");
 
               request.extensions_mut().insert(on_upgrade);
 
+              // Build RequestContext with connection-level keys and
+              // insert into request extensions. Auth and
+              // access logging are now handled by the
+              // plugin layer in the service pipeline.
+              let ctx = RequestContext::new();
+              ctx.insert("client.ip", peer_addr.ip().to_string());
+              ctx.insert("client.port", peer_addr.port().to_string());
+              ctx.insert("server.ip", local_addr.ip().to_string());
+              ctx.insert("server.port", local_addr.port().to_string());
+              ctx.insert("service.name", &service_name);
+              request.extensions_mut().insert(ctx);
+
               // Step 5: Call the associated Service
               let result = service.call(request).await;
 
-              // Variables for access log
-              let status: u16;
-              let service_metrics: crate::access_log::ServiceMetrics;
-
-              // Step 6: Based on Response, send SOCKS5 reply via trigger
+              // Step 6: Based on Response, send SOCKS5 reply via
+              // trigger
               match result {
                 Ok(resp) => {
-                  status = resp.status().as_u16();
-                  service_metrics = resp
-                    .extensions()
-                    .get::<crate::access_log::ServiceMetrics>()
-                    .cloned()
-                    .unwrap_or_default();
-
                   if resp.status() == http::StatusCode::OK {
                     if let Err(e) = trigger.send_success().await {
                       tracing::warn!(
@@ -380,7 +393,8 @@ impl Socks5Listener {
                       );
                     }
                   } else {
-                    let error = http_status_to_socks5_error(resp.status());
+                    let error =
+                      http_status_to_socks5_error(resp.status());
                     if let Err(e) = trigger.send_error(error).await {
                       tracing::warn!(
                         "SOCKS5 failed to send error reply to {}: {}",
@@ -391,9 +405,6 @@ impl Socks5Listener {
                   }
                 }
                 Err(e) => {
-                  status = 500;
-                  service_metrics = crate::access_log::ServiceMetrics::new();
-
                   tracing::error!(
                     "SOCKS5 service error from {}: {}",
                     peer_addr,
@@ -410,29 +421,6 @@ impl Socks5Listener {
                     );
                   }
                 }
-              }
-
-              // Record access log after Step 6
-              if let Some(ref writer) = access_log_writer {
-                let duration = start_time.elapsed();
-                let auth_type = if handshake_result.username.is_some() {
-                  crate::access_log::AuthType::Password
-                } else {
-                  crate::access_log::AuthType::None
-                };
-
-                record_access_log(
-                  writer,
-                  peer_addr,
-                  handshake_result.username,
-                  auth_type,
-                  "CONNECT".to_string(),
-                  command_result.target_addr.to_string(),
-                  status,
-                  duration,
-                  service_name,
-                  service_metrics,
-                );
               }
             });
             false
@@ -508,7 +496,6 @@ impl Listening for Socks5Listener {
       let shutdown_handle = shutdown_handle.clone();
       let handshake_timeout = self.handshake_timeout;
       let user_password_auth = self.user_password_auth.clone();
-      let access_log_writer = self.access_log_writer.clone();
       let service_name = self.service_name.clone();
 
       match self.serve_addr(
@@ -518,7 +505,6 @@ impl Listening for Socks5Listener {
         shutdown_handle,
         handshake_timeout,
         user_password_auth,
-        access_log_writer,
         service_name,
       ) {
         Ok(fut) => {
@@ -538,7 +524,8 @@ impl Listening for Socks5Listener {
     // Check if any listeners started successfully
     if listening_tasks.is_empty() {
       return Box::pin(future::ready(Err(anyhow::anyhow!(
-        "failed to start any SOCKS5 listener; all addresses failed to bind"
+        "failed to start any SOCKS5 listener; all addresses failed to \
+         bind"
       ))));
     }
 
@@ -616,7 +603,6 @@ impl Clone for Socks5Listener {
       graceful_shutdown_timeout: self.graceful_shutdown_timeout,
       handshake_timeout: self.handshake_timeout,
       user_password_auth: self.user_password_auth.clone(),
-      access_log_writer: self.access_log_writer.clone(),
       service_name: self.service_name.clone(),
     }
   }
@@ -653,7 +639,8 @@ pub enum HandshakeError {
   /// Handshake timed out.
   ///
   /// According to architecture requirements, no response should be sent
-  /// when handshake times out. The connection should be closed directly.
+  /// when handshake times out. The connection should be closed
+  /// directly.
   Timeout,
 
   /// Invalid SOCKS version number.
@@ -664,14 +651,16 @@ pub enum HandshakeError {
 
   /// Authentication method not acceptable.
   ///
-  /// The client requested authentication methods that the server doesn't support.
-  /// According to RFC 1928, we should send METHOD=0xFF and close the connection.
+  /// The client requested authentication methods that the server
+  /// doesn't support. According to RFC 1928, we should send
+  /// METHOD=0xFF and close the connection.
   MethodNotAcceptable(Vec<u8>),
 
   /// Authentication failed.
   ///
   /// The username/password combination was invalid.
-  /// According to RFC 1929, we should send auth failure response and close connection.
+  /// According to RFC 1929, we should send auth failure response and
+  /// close connection.
   AuthenticationFailed {
     /// The username that failed authentication (for logging).
     username: Option<String>,
@@ -835,8 +824,9 @@ impl From<fast_socks5::server::SocksServerError> for CommandError {
 
 /// Result of a successful SOCKS5 command read.
 ///
-/// Contains the protocol state after command reading and the target address.
-/// Note: We don't store the command because we only support CONNECT.
+/// Contains the protocol state after command reading and the target
+/// address. Note: We don't store the command because we only support
+/// CONNECT.
 pub struct CommandResult {
   /// The protocol state after command has been read.
   pub proto: fast_socks5::server::Socks5ServerProtocol<
@@ -974,8 +964,8 @@ impl From<fast_socks5::server::SocksServerError> for HandshakeError {
 /// On success, returns a `HandshakeResult` containing the authenticated
 /// protocol state and optional username.
 ///
-/// On failure, returns a `HandshakeError`. The caller is responsible for
-/// sending appropriate responses based on the error type:
+/// On failure, returns a `HandshakeError`. The caller is responsible
+/// for sending appropriate responses based on the error type:
 /// - `Timeout`: Do not send response, close connection
 /// - `InvalidVersion`: Do not send response, close connection
 /// - `MethodNotAcceptable`: METHOD=0xFF was already sent
@@ -1113,7 +1103,8 @@ impl Default for Socks5ListenerArgs {
 ///
 /// # Arguments
 ///
-/// * `args` - The serialized YAML configuration (addresses are passed separately)
+/// * `args` - The serialized YAML configuration (addresses are passed
+///   separately)
 ///
 /// # Returns
 ///
@@ -1171,10 +1162,7 @@ pub fn parse_config(
     }
   };
 
-  Ok(Socks5ListenerArgs {
-    handshake_timeout,
-    user_password_auth,
-  })
+  Ok(Socks5ListenerArgs { handshake_timeout, user_password_auth })
 }
 
 /// Parses handshake timeout string format.
@@ -1202,7 +1190,8 @@ fn parse_handshake_timeout(
       // Validate format: must end with 's' (seconds)
       if !s.ends_with('s') {
         bail!(
-          "invalid handshake_timeout format '{}': expected format like \"10s\"",
+          "invalid handshake_timeout format '{}': expected format \
+           like \"10s\"",
           s
         );
       }
@@ -1220,21 +1209,24 @@ fn parse_handshake_timeout(
 
 /// Determines if an accept error is fatal and should stop the listener.
 ///
-/// Fatal errors indicate a permanent problem that cannot be recovered from
-/// by continuing to accept connections. Temporary errors may resolve on retry.
+/// Fatal errors indicate a permanent problem that cannot be recovered
+/// from by continuing to accept connections. Temporary errors may
+/// resolve on retry.
 ///
 /// # Fatal errors
 ///
 /// - `InvalidInput`: Invalid input parameter (bug in code)
 /// - `InvalidData`: Invalid data received
 /// - `NotFound`: Resource not found (listener socket closed)
-/// - `PermissionDenied`: Permission denied (SELinux/AppArmor denial, fd permission)
+/// - `PermissionDenied`: Permission denied (SELinux/AppArmor denial, fd
+///   permission)
 ///
 /// # Temporary errors
 ///
 /// - `WouldBlock`: Would block (should not happen in async)
 /// - `Interrupted`: Interrupted by signal
-/// - Connection reset, broken pipe, etc.: Network-level temporary issues
+/// - Connection reset, broken pipe, etc.: Network-level temporary
+///   issues
 fn is_fatal_accept_error(e: &std::io::Error) -> bool {
   use std::io::ErrorKind;
   matches!(
@@ -1246,7 +1238,8 @@ fn is_fatal_accept_error(e: &std::io::Error) -> bool {
   )
 }
 
-/// Resolves address strings to SocketAddr, logging warnings for invalid ones.
+/// Resolves address strings to SocketAddr, logging warnings for invalid
+/// ones.
 ///
 /// # Arguments
 ///
@@ -1345,38 +1338,13 @@ pub fn create_listener_builder() -> Box<dyn BuildListener> {
       let listener_args = parse_config(args)?;
 
       // Create listener
-      Socks5Listener::new(addresses, listener_args, server_routing_table)
+      Socks5Listener::new(
+        addresses,
+        listener_args,
+        server_routing_table,
+      )
     },
   )
-}
-
-/// Record an access log entry for a SOCKS5 request.
-///
-/// Delegates to the common implementation in `super::common::record_socks5_access_log`.
-fn record_access_log(
-  writer: &crate::access_log::AccessLogWriter,
-  client_addr: SocketAddr,
-  user: Option<String>,
-  auth_type: crate::access_log::AuthType,
-  method: String,
-  target: String,
-  status: u16,
-  duration: std::time::Duration,
-  service_name: String,
-  service_metrics: crate::access_log::ServiceMetrics,
-) {
-  super::common::record_socks5_access_log(
-    writer,
-    client_addr,
-    user,
-    auth_type,
-    method,
-    target,
-    status,
-    duration,
-    service_name,
-    service_metrics,
-  );
 }
 
 #[cfg(test)]
@@ -1604,78 +1572,5 @@ users:
   fn test_listening_trait_implementation() {
     fn assert_listening<T: Listening>() {}
     assert_listening::<Socks5Listener>();
-  }
-
-  // ========== Access Log Tests ==========
-
-  #[test]
-  fn test_record_access_log_writes_entry() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = crate::config::AccessLogConfig {
-      enabled: true,
-      path_prefix: "socks5test.log".to_string(),
-      format: crate::config::LogFormat::Text,
-      buffer: byte_unit::Byte::from_u64(64),
-      flush: crate::config::HumanDuration(
-        std::time::Duration::from_millis(100),
-      ),
-      max_size: byte_unit::Byte::from_u64(1024 * 1024),
-    };
-    let writer = crate::access_log::AccessLogWriter::new(
-      dir.path().to_str().unwrap(),
-      &config,
-    );
-
-    let client_addr: SocketAddr = "192.168.1.1:54321".parse().unwrap();
-    let mut metrics = crate::access_log::ServiceMetrics::new();
-    metrics.add("connect_ms", 42u64);
-
-    record_access_log(
-      &writer,
-      client_addr,
-      Some("testuser".to_string()),
-      crate::access_log::AuthType::Password,
-      "CONNECT".to_string(),
-      "example.com:443".to_string(),
-      200,
-      std::time::Duration::from_millis(50),
-      "tunnel".to_string(),
-      metrics,
-    );
-
-    writer.flush();
-
-    // Verify log file was created and contains expected fields
-    let mut found = false;
-    for entry in std::fs::read_dir(dir.path()).unwrap() {
-      let entry = entry.unwrap();
-      let name = entry.file_name().to_string_lossy().to_string();
-      if name.starts_with("socks5test.log") {
-        let content = std::fs::read_to_string(entry.path()).unwrap();
-        assert!(
-          content.contains("192.168.1.1:54321"),
-          "Should contain client addr"
-        );
-        assert!(
-          content.contains("CONNECT example.com:443"),
-          "Should contain request line"
-        );
-        assert!(content.contains("200"), "Should contain status code");
-        assert!(
-          content.contains("service=tunnel"),
-          "Should contain service name"
-        );
-        assert!(
-          content.contains("service.connect_ms=42"),
-          "Should contain service metrics"
-        );
-        assert!(
-          content.contains("auth=password"),
-          "Should contain auth type"
-        );
-        found = true;
-      }
-    }
-    assert!(found, "Access log file should exist");
   }
 }

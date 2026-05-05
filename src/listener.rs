@@ -1,6 +1,7 @@
 //! Runtime listener types.
 //!
-//! This module provides types for building and managing network listeners:
+//! This module provides types for building and managing network
+//! listeners:
 //! - `Listener` - A wrapper type for any listener implementation
 //! - `Listening` - Trait for listener lifecycle (start/stop)
 //! - `BuildListener` - Factory trait for creating listeners
@@ -44,8 +45,8 @@ pub struct ListenerProps {
 
 /// Trait for listener lifecycle management.
 ///
-/// Implementations provide `start()` for beginning to accept connections
-/// and `stop()` for graceful shutdown.
+/// Implementations provide `start()` for beginning to accept
+/// connections and `stop()` for graceful shutdown.
 pub trait Listening {
   /// Start the listener.
   ///
@@ -84,6 +85,12 @@ impl Listener {
   }
 }
 
+impl std::fmt::Debug for Listener {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("Listener").finish()
+  }
+}
+
 /// Factory trait for building listeners.
 ///
 /// A `BuildListener` is a function that takes:
@@ -92,15 +99,13 @@ impl Listener {
 /// - `servers` - List of servers for routing
 ///
 /// Returns a `Listener` instance.
-///
-/// Must be `Sync + Send` to allow concurrent access from multiple threads.
 pub trait BuildListener:
-  Fn(Vec<String>, SerializedArgs, Vec<Server>) -> Result<Listener> + Sync + Send
+  Fn(Vec<String>, SerializedArgs, Vec<Server>) -> Result<Listener>
 {
 }
 
 impl<F> BuildListener for F where
-  F: Fn(Vec<String>, SerializedArgs, Vec<Server>) -> Result<Listener> + Sync + Send
+  F: Fn(Vec<String>, SerializedArgs, Vec<Server>) -> Result<Listener>
 {
 }
 
@@ -118,6 +123,7 @@ mod tests {
       fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Ok(()) })
       }
+
       fn stop(&self) {}
     }
     Ok(Listener::new(DummyListener))
@@ -143,6 +149,7 @@ mod tests {
         fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
           Box::pin(async { Ok(()) })
         }
+
         fn stop(&self) {}
       }
       Ok(Listener::new(DummyListener))
@@ -161,6 +168,7 @@ mod tests {
       fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Ok(()) })
       }
+
       fn stop(&self) {}
     }
 

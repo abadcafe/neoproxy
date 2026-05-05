@@ -17,17 +17,21 @@ from .conftest import get_unique_port
 def test_http_proxy_basic_connect(temp_dir: str) -> None:
     """HTTP proxy can handle a basic CONNECT request."""
     port = get_unique_port()
-    config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+    config_content = f"""server_threads: 1
+
+listeners:
+- name: http_main
+  kind: http
+  addresses: ["127.0.0.1:{port}"]
+
 services:
 - name: echo_svc
   kind: echo.echo
 
 servers:
 - name: server1
-  listeners:
-  - kind: http
-    addresses: [ "127.0.0.1:{port}" ]
+  hostnames: []
+  listeners: ["http_main"]
   service: echo_svc
 """
     config_path = os.path.join(temp_dir, "config.yaml")
@@ -54,8 +58,7 @@ servers:
 
 def test_config_validation_bad_kind(temp_dir: str) -> None:
     """Config validation rejects invalid kind format (missing dot)."""
-    config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+    config_content = f"""server_threads: 1
 
 services:
 - name: test
@@ -82,8 +85,7 @@ def test_config_validation_nonexistent_plugin_no_servers(temp_dir: str) -> None:
     referencing it will start successfully because the plugin is never
     instantiated.
     """
-    config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+    config_content = f"""server_threads: 1
 
 services:
 - name: test

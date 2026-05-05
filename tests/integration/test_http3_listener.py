@@ -194,7 +194,7 @@ def create_http3_listener_config(
     temp_dir: str,
     auth_config: Optional[str] = None,
     quic_config: Optional[str] = None,
-    worker_threads: int = 1
+    server_threads: int = 1
 ) -> str:
     """
     Create HTTP/3 Listener configuration file.
@@ -206,7 +206,7 @@ def create_http3_listener_config(
         temp_dir: Temporary directory for logs
         auth_config: Optional authentication config YAML string
         quic_config: Optional QUIC config YAML string
-        worker_threads: Number of worker threads
+        server_threads: Number of worker threads
 
     Returns:
         str: Path to the configuration file
@@ -214,20 +214,21 @@ def create_http3_listener_config(
     # QUIC config goes in listener args
     quic_section = ""
     if quic_config:
+        # Indent each line of quic_config so it nests under 'quic:'
+        indented = "\n".join(
+            "      " + line.strip() for line in quic_config.strip().splitlines()
+        )
         quic_section = f"""
-    args:
-      quic:
-{quic_config}"""
+  args:
+    quic:
+{indented}"""
 
-    # Users config goes at server level
-    users_section = ""
-    if auth_config:
-        users_section = f"""
-    users:
-{auth_config}"""
+    config_content = f"""server_threads: {server_threads}
 
-    config_content = f"""worker_threads: {worker_threads}
-log_directory: "{temp_dir}/logs"
+listeners:
+- name: h3_main
+  kind: http3
+  addresses: ["0.0.0.0:{proxy_port}"]{quic_section}
 
 services:
 - name: connect_tcp
@@ -239,10 +240,7 @@ servers:
     certificates:
     - cert_path: "{cert_path}"
       key_path: "{key_path}"
-{users_section}
-  listeners:
-  - kind: http3
-    addresses: ["0.0.0.0:{proxy_port}"]{quic_section}
+  listeners: ["h3_main"]
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "http3_config.yaml")
@@ -256,7 +254,7 @@ def create_http3_chain_config(
     proxy_group: List[Tuple[str, int, int]],
     ca_path: str,
     temp_dir: str,
-    worker_threads: int = 1
+    server_threads: int = 1
 ) -> str:
     """
     Create HTTP/3 Chain service configuration file.
@@ -266,7 +264,7 @@ def create_http3_chain_config(
         proxy_group: List of (address, port, weight) tuples
         ca_path: CA certificate path
         temp_dir: Temporary directory for logs
-        worker_threads: Number of worker threads
+        server_threads: Number of worker threads
 
     Returns:
         str: Path to the configuration file
@@ -277,8 +275,12 @@ def create_http3_chain_config(
 
     proxy_section = "\n".join(proxy_list)
 
-    config_content = f"""worker_threads: {worker_threads}
-log_directory: "{temp_dir}/logs"
+    config_content = f"""server_threads: {server_threads}
+
+listeners:
+- name: http_main
+  kind: http
+  addresses: ["0.0.0.0:{http_port}"]
 
 services:
 - name: http3_chain
@@ -291,9 +293,7 @@ services:
 
 servers:
 - name: http_proxy
-  listeners:
-  - kind: http
-    addresses: [ "0.0.0.0:{http_port}" ]
+  listeners: ["http_main"]
   service: http3_chain
 """
     config_path = os.path.join(temp_dir, "http3_chain_config.yaml")
@@ -505,8 +505,12 @@ class TestHTTP3ErrorHandling:
 
         try:
             # NEW config format: server-level TLS with non-existent cert
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
+
+listeners:
+- name: h3_main
+  kind: http3
+  addresses: ["0.0.0.0:{proxy_port}"]
 
 services:
 - name: connect_tcp
@@ -518,9 +522,7 @@ servers:
     certificates:
     - cert_path: "/nonexistent/path/to/cert.pem"
       key_path: "/nonexistent/path/to/key.pem"
-  listeners:
-  - kind: http3
-    addresses: ["0.0.0.0:{proxy_port}"]
+  listeners: ["h3_main"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "invalid_config.yaml")
@@ -562,8 +564,12 @@ servers:
             cert_path = shared_test_certs['cert_path']
 
             # NEW config format: server-level TLS with non-existent key
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
+
+listeners:
+- name: h3_main
+  kind: http3
+  addresses: ["0.0.0.0:{proxy_port}"]
 
 services:
 - name: connect_tcp
@@ -575,9 +581,7 @@ servers:
     certificates:
     - cert_path: "{cert_path}"
       key_path: "/nonexistent/path/to/key.pem"
-  listeners:
-  - kind: http3
-    addresses: ["0.0.0.0:{proxy_port}"]
+  listeners: ["h3_main"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "invalid_config.yaml")
@@ -627,8 +631,12 @@ servers:
             )
 
             # NEW config format: server-level TLS with mismatched cert/key
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
+
+listeners:
+- name: h3_main
+  kind: http3
+  addresses: ["0.0.0.0:{proxy_port}"]
 
 services:
 - name: connect_tcp
@@ -640,9 +648,7 @@ servers:
     certificates:
     - cert_path: "{cert_path1}"
       key_path: "{key_path2}"
-  listeners:
-  - kind: http3
-    addresses: ["0.0.0.0:{proxy_port}"]
+  listeners: ["h3_main"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "mismatch_config.yaml")
@@ -711,13 +717,10 @@ class TestHTTP3ConfigValidation:
 
             proxy_proc = start_proxy(config_path)
 
-            # Should still start successfully with default value
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
-                "HTTP/3 listener should start with default QUIC params"
-
-            # Verify process is running
-            assert proxy_proc.poll() is None, \
-                "HTTP/3 listener should be running"
+            # Invalid value is rejected at startup (bail!)
+            proxy_proc.wait(timeout=10)
+            assert proxy_proc.returncode != 0, \
+                "HTTP/3 listener should reject invalid max_concurrent_bidi_streams"
 
         finally:
             if proxy_proc:
@@ -737,8 +740,12 @@ class TestHTTP3ConfigValidation:
 
         try:
             # NEW config format: Missing server-level tls (required for http3)
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
+
+listeners:
+- name: h3_main
+  kind: http3
+  addresses: ["0.0.0.0:{proxy_port}"]
 
 services:
 - name: connect_tcp
@@ -746,9 +753,7 @@ services:
 
 servers:
 - name: http3_server
-  listeners:
-  - kind: http3
-    addresses: ["0.0.0.0:{proxy_port}"]
+  listeners: ["h3_main"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "missing_fields.yaml")
@@ -788,8 +793,12 @@ servers:
 
         try:
             # NEW config format: server-level TLS with invalid address format
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
+
+listeners:
+- name: h3_main
+  kind: http3
+  addresses: ["invalid_address_format"]
 
 services:
 - name: connect_tcp
@@ -801,9 +810,7 @@ servers:
     certificates:
     - cert_path: "{cert_path}"
       key_path: "{key_path}"
-  listeners:
-  - kind: http3
-    addresses: ["invalid_address_format"]
+  listeners: ["h3_main"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "invalid_addr.yaml")
@@ -895,7 +902,7 @@ class TestHTTP3GracefulShutdown:
             key_path = shared_test_certs['key_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,
-                worker_threads=4
+                server_threads=4
             )
 
             proxy_proc = start_proxy(config_path)
@@ -1068,8 +1075,12 @@ class TestHTTP3EchoService:
             ca_path = shared_test_certs['ca_path']
 
             # Create config with echo service
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
+
+listeners:
+- name: h3_main
+  kind: http3
+  addresses: ["0.0.0.0:{proxy_port}"]
 
 services:
 - name: echo
@@ -1081,9 +1092,7 @@ servers:
     certificates:
     - cert_path: "{cert_path}"
       key_path: "{key_path}"
-  listeners:
-  - kind: http3
-    addresses: ["0.0.0.0:{proxy_port}"]
+  listeners: ["h3_main"]
   service: echo
 """
             config_path = os.path.join(temp_dir, "echo_config.yaml")

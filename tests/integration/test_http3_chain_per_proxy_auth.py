@@ -58,7 +58,7 @@ def create_http3_chain_config_with_per_proxy_auth(
     temp_dir: str,
     default_user: Optional[Tuple[str, str]] = None,
     default_tls: Optional[str] = None,
-    worker_threads: int = 1
+    server_threads: int = 1
 ) -> str:
     """
     Create HTTP/3 Chain service configuration file with per-proxy auth.
@@ -72,7 +72,7 @@ def create_http3_chain_config_with_per_proxy_auth(
         temp_dir: Temporary directory for logs
         default_user: Optional tuple of (username, password) for default_user.
         default_tls: Optional YAML string for default_tls extra fields.
-        worker_threads: Number of worker threads
+        server_threads: Number of worker threads
 
     Returns:
         str: Path to the configuration file
@@ -110,8 +110,7 @@ def create_http3_chain_config_with_per_proxy_auth(
       server_ca_path: "{ca_path}"
 """
 
-    config_content = f"""worker_threads: {worker_threads}
-log_directory: "{temp_dir}/logs"
+    config_content = f"""server_threads: {server_threads}
 
 services:
 - name: http3_chain
@@ -120,11 +119,14 @@ services:
     proxy_group:
 {proxy_section}{default_user_section}{default_tls_section}
 
+listeners:
+- name: http_main
+  kind: http
+  addresses: [ "0.0.0.0:{http_port}" ]
+
 servers:
 - name: http_proxy
-  listeners:
-  - kind: http
-    addresses: [ "0.0.0.0:{http_port}" ]
+  listeners: ["http_main"]
   service: http3_chain
 """
     config_path = os.path.join(temp_dir, "http3_chain_auth_config.yaml")

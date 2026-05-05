@@ -649,8 +649,7 @@ class TestErrorLogging:
         temp_dir = tempfile.mkdtemp()
 
         try:
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
 
 services:
 - name: test
@@ -667,10 +666,11 @@ servers:
                 f.write(config_content)
 
             proc = subprocess.Popen(
-                [NEOPROXY_BINARY, "--config", config_path],
+                [os.path.abspath(NEOPROXY_BINARY), "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=False
+                text=False,
+                cwd=temp_dir,
             )
 
             proc.wait(timeout=10)
@@ -679,13 +679,21 @@ servers:
             assert proc.returncode != 0, \
                 f"Process should exit with non-zero code for bad config, got: {proc.returncode}"
 
-            # Error should be in stderr
-            stderr = proc.stderr.read().decode('utf-8', errors='ignore')
-            assert len(stderr) > 0, "Error message should be output"
+            # Error is logged via tracing to log files, not stderr.
+            # Check the log directory for the error message.
+            log_dir = os.path.join(temp_dir, "logs")
+            log_content = ""
+            if os.path.isdir(log_dir):
+                for log_file in os.listdir(log_dir):
+                    log_path = os.path.join(log_dir, log_file)
+                    if os.path.isfile(log_path):
+                        with open(log_path, 'r', errors='ignore') as f:
+                            log_content += f.read()
+            assert len(log_content) > 0, "Error message should be in log files"
 
             # Verify error message contains specific keywords
-            assert "not found" in stderr.lower() or "error" in stderr.lower(), \
-                f"Error message should indicate plugin not found. Got: {stderr}"
+            assert "not found" in log_content.lower() or "error" in log_content.lower(), \
+                f"Error message should indicate plugin not found. Got: {log_content[:500]}"
 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1267,12 +1275,22 @@ class TestMultiListenerMonitoring:
             key_path = shared_test_certs['key_path']
 
             # Create multi-listener config
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
 
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
+
+listeners:
+- name: http_main
+  kind: http
+  addresses: [ "0.0.0.0:{http_port}" ]
+- name: socks5_main
+  kind: socks5
+  addresses: [ "0.0.0.0:{socks5_port}" ]
+- name: http3_main
+  kind: http3
+  addresses: [ "0.0.0.0:{http3_port}" ]
 
 servers:
 - name: multi_listener_server
@@ -1280,13 +1298,7 @@ servers:
     certificates:
       - cert_path: "{cert_path}"
         key_path: "{key_path}"
-  listeners:
-  - kind: http
-    addresses: [ "0.0.0.0:{http_port}" ]
-  - kind: socks5
-    addresses: [ "0.0.0.0:{socks5_port}" ]
-  - kind: http3
-    addresses: [ "0.0.0.0:{http3_port}" ]
+  listeners: ["http_main", "socks5_main", "http3_main"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "multi_listener_config.yaml")

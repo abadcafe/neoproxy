@@ -173,12 +173,16 @@ def create_multi_server_config(
         str: Path to config file
     """
     config_lines = [
-        f"worker_threads: 1",
-        f'log_directory: "{temp_dir}/logs"',
+        f"server_threads: 1",
         "",
         "services:",
         "  - name: echo",
         "    kind: echo.echo",
+        "",
+        "listeners:",
+        "  - name: https_main",
+        "    kind: https",
+        f'    addresses: ["127.0.0.1:{proxy_port}"]',
         "",
         "servers:",
     ]
@@ -200,10 +204,7 @@ def create_multi_server_config(
             "      certificates:",
             f'        - cert_path: {server["cert_path"]}',
             f'          key_path: {server["key_path"]}',
-            "    listeners:",
-            "      - kind: https",
-            "        args:",
-            f'          addresses: ["127.0.0.1:{proxy_port}"]',
+            '    listeners: ["https_main"]',
             "    service: echo",
             "",
         ])
@@ -236,12 +237,16 @@ def create_single_server_config(
         str: Path to config file
     """
     lines = [
-        "worker_threads: 1",
-        f'log_directory: "{temp_dir}/logs"',
+        "server_threads: 1",
         "",
         "services:",
         "  - name: echo",
         "    kind: echo.echo",
+        "",
+        "listeners:",
+        "  - name: https_main",
+        "    kind: https",
+        f'    addresses: ["127.0.0.1:{proxy_port}"]',
         "",
         "servers:",
         "  - name: test_server",
@@ -256,10 +261,7 @@ def create_single_server_config(
         "      certificates:",
         f"        - cert_path: {cert_path}",
         f"          key_path: {key_path}",
-        "    listeners:",
-        "      - kind: https",
-        "        args:",
-        f'          addresses: ["127.0.0.1:{proxy_port}"]',
+        '    listeners: ["https_main"]',
         "    service: echo",
     ])
 

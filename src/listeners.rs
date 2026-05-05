@@ -1,6 +1,5 @@
 #![allow(clippy::borrowed_box)]
 use std::collections::HashMap;
-use std::sync::LazyLock;
 
 use crate::listener::{BuildListener, ListenerProps};
 
@@ -15,18 +14,34 @@ pub mod socks5;
 /// Provides access to:
 /// - `BuildListener` functions for creating listener instances
 /// - `ListenerProps` for conflict detection
-pub struct ListenerBuilderSet {
+pub struct ListenerManager {
   builders: HashMap<&'static str, Box<dyn BuildListener>>,
   props: HashMap<&'static str, ListenerProps>,
 }
 
-impl ListenerBuilderSet {
-  fn new() -> Self {
+impl ListenerManager {
+  pub fn new() -> Self {
     let builders = HashMap::from([
-      (http::listener_name(), Box::new(http::create_listener_builder()) as Box<dyn BuildListener>),
-      (https::listener_name(), Box::new(https::create_listener_builder()) as Box<dyn BuildListener>),
-      (http3::listener_name(), Box::new(http3::create_listener_builder()) as Box<dyn BuildListener>),
-      (socks5::listener_name(), Box::new(socks5::create_listener_builder()) as Box<dyn BuildListener>),
+      (
+        http::listener_name(),
+        Box::new(http::create_listener_builder())
+          as Box<dyn BuildListener>,
+      ),
+      (
+        https::listener_name(),
+        Box::new(https::create_listener_builder())
+          as Box<dyn BuildListener>,
+      ),
+      (
+        http3::listener_name(),
+        Box::new(http3::create_listener_builder())
+          as Box<dyn BuildListener>,
+      ),
+      (
+        socks5::listener_name(),
+        Box::new(socks5::create_listener_builder())
+          as Box<dyn BuildListener>,
+      ),
     ]);
     let props = HashMap::from([
       (http::listener_name(), http::props()),
@@ -37,9 +52,18 @@ impl ListenerBuilderSet {
     Self { builders, props }
   }
 
-  /// Get a listener builder by kind.
-  pub fn listener_builder(&self, kind: &str) -> Option<&Box<dyn BuildListener>> {
-    self.builders.get(kind)
+  /// Build a listener by kind.
+  pub fn build_listener(
+    &self,
+    kind: &str,
+    addresses: Vec<String>,
+    args: crate::config::SerializedArgs,
+    servers: Vec<crate::server::Server>,
+  ) -> Result<crate::listener::Listener, anyhow::Error> {
+    let builder = self.builders.get(kind).ok_or_else(|| {
+      anyhow::anyhow!("unknown listener kind '{}'", kind)
+    })?;
+    builder(addresses, args, servers)
   }
 
   /// Get listener properties by kind.
@@ -48,12 +72,6 @@ impl ListenerBuilderSet {
   pub fn props(&self, kind: &str) -> Option<&ListenerProps> {
     self.props.get(kind)
   }
-
-  pub fn global() -> &'static LazyLock<ListenerBuilderSet> {
-    static LISTENER_MANAGER: LazyLock<ListenerBuilderSet> =
-      LazyLock::new(ListenerBuilderSet::new);
-    &LISTENER_MANAGER
-  }
 }
 
 #[cfg(test)]
@@ -61,108 +79,34 @@ mod tests {
   use super::*;
 
   #[test]
-  fn test_listener_builder_set_http_kind() {
-    let set = ListenerBuilderSet::new();
-    assert!(
-      set.listener_builder("http").is_some(),
-      "http kind should be registered"
-    );
+  fn test_listener_manager_registered_kinds() {
+    let lm = ListenerManager::new();
+    assert!(lm.props("http").is_some());
+    assert!(lm.props("https").is_some());
+    assert!(lm.props("http3").is_some());
+    assert!(lm.props("socks5").is_some());
   }
 
   #[test]
-  fn test_listener_builder_set_https_kind() {
-    let set = ListenerBuilderSet::new();
-    assert!(
-      set.listener_builder("https").is_some(),
-      "https kind should be registered"
-    );
+  fn test_listener_manager_old_kinds_removed() {
+    let lm = ListenerManager::new();
+    assert!(lm.props("hyper.listener").is_none());
+    assert!(lm.props("http3.listener").is_none());
+    assert!(lm.props("fast_socks5.listener").is_none());
   }
 
   #[test]
-  fn test_listener_builder_set_http3_kind() {
-    let set = ListenerBuilderSet::new();
-    assert!(
-      set.listener_builder("http3").is_some(),
-      "http3 kind should be registered"
-    );
+  fn test_listener_manager_nonexistent_kind() {
+    let lm = ListenerManager::new();
+    assert!(lm.props("nonexistent").is_none());
   }
 
   #[test]
-  fn test_listener_builder_set_socks5_kind() {
-    let set = ListenerBuilderSet::new();
-    assert!(
-      set.listener_builder("socks5").is_some(),
-      "socks5 kind should be registered"
-    );
-  }
-
-  #[test]
-  fn test_listener_builder_set_old_kinds_removed() {
-    let set = ListenerBuilderSet::new();
-    assert!(
-      set.listener_builder("hyper.listener").is_none(),
-      "old hyper.listener should be removed"
-    );
-    assert!(
-      set.listener_builder("http3.listener").is_none(),
-      "old http3.listener should be removed"
-    );
-    assert!(
-      set.listener_builder("fast_socks5.listener").is_none(),
-      "old fast_socks5.listener should be removed"
-    );
-  }
-
-  #[test]
-  fn test_listener_builder_set_new() {
-    let set = ListenerBuilderSet::new();
-    assert!(set.builders.contains_key("http"));
-    assert!(set.builders.contains_key("https"));
-    assert!(set.builders.contains_key("http3"));
-    assert!(set.builders.contains_key("socks5"));
-  }
-
-  #[test]
-  fn test_listener_builder_set_get_existing() {
-    let set = ListenerBuilderSet::new();
-    let builder = set.listener_builder("http");
-    assert!(builder.is_some());
-  }
-
-  #[test]
-  fn test_listener_builder_set_get_http3_listener() {
-    let set = ListenerBuilderSet::new();
-    let builder = set.listener_builder("http3");
-    assert!(builder.is_some());
-  }
-
-  #[test]
-  fn test_listener_builder_set_get_fast_socks5_listener() {
-    let set = ListenerBuilderSet::new();
-    let builder = set.listener_builder("socks5");
-    assert!(builder.is_some());
-  }
-
-  #[test]
-  fn test_listener_builder_set_get_nonexistent() {
-    let set = ListenerBuilderSet::new();
-    let builder = set.listener_builder("nonexistent");
-    assert!(builder.is_none());
-  }
-
-  #[test]
-  fn test_listener_builder_set_global() {
-    let global_set = ListenerBuilderSet::global();
-    assert!(global_set.listener_builder("http").is_some());
-    assert!(global_set.listener_builder("https").is_some());
-    assert!(global_set.listener_builder("http3").is_some());
-    assert!(global_set.listener_builder("socks5").is_some());
-  }
-
-  #[test]
-  fn test_listener_builder_set_global_is_singleton() {
-    let global1 = ListenerBuilderSet::global() as *const _;
-    let global2 = ListenerBuilderSet::global() as *const _;
-    assert_eq!(global1, global2);
+  fn test_listener_manager_new() {
+    let lm = ListenerManager::new();
+    assert!(lm.builders.contains_key("http"));
+    assert!(lm.builders.contains_key("https"));
+    assert!(lm.builders.contains_key("http3"));
+    assert!(lm.builders.contains_key("socks5"));
   }
 }

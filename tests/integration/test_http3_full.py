@@ -310,7 +310,7 @@ class TestHTTP3GracefulShutdownWithConnections:
             key_path = shared_test_certs['key_path']
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,
-                worker_threads=2
+                server_threads=2
             )
 
             proxy_proc = start_proxy(config_path)
@@ -729,12 +729,10 @@ class TestHTTP3ConfigValidationFull:
 
             proxy_proc = start_proxy(config_path)
 
-            # Should still start successfully
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
-                "HTTP/3 listener should start with valid QUIC params"
-
-            assert proxy_proc.poll() is None, \
-                "HTTP/3 listener should be running"
+            # Invalid value is rejected at startup (bail!)
+            proxy_proc.wait(timeout=10)
+            assert proxy_proc.returncode != 0, \
+                "HTTP/3 listener should reject invalid max_concurrent_bidi_streams"
 
         finally:
             if proxy_proc:
@@ -756,7 +754,7 @@ class TestHTTP3ConfigValidationFull:
             cert_path = shared_test_certs['cert_path']
             key_path = shared_test_certs['key_path']
 
-            # Test with zero timeout (invalid, should use default)
+            # Test with zero timeout (invalid, rejected at startup)
             quic_config = """      max_concurrent_bidi_streams: 100
       max_idle_timeout_ms: 0"""
 
@@ -767,9 +765,10 @@ class TestHTTP3ConfigValidationFull:
 
             proxy_proc = start_proxy(config_path)
 
-            # Should still start successfully with default
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
-                "HTTP/3 listener should start with default timeout"
+            # Invalid timeout is rejected at startup (bail!)
+            proxy_proc.wait(timeout=10)
+            assert proxy_proc.returncode != 0, \
+                "HTTP/3 listener should reject invalid max_idle_timeout_ms"
 
         finally:
             if proxy_proc:
@@ -793,25 +792,30 @@ class TestHTTP3ConfigValidationFull:
             cert_path = shared_test_certs['cert_path']
             key_path = shared_test_certs['key_path']
 
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
 
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
+  layers:
+    - kind: auth.basic_auth
+      args:
+        users:
+          - username: "testuser"
+            password: "plaintext_secret"
+
+listeners:
+- name: http3_main
+  kind: http3
+  addresses: ["0.0.0.0:{proxy_port}"]
 
 servers:
 - name: http3_server
-  users:
-  - username: "testuser"
-    password: "plaintext_secret"
   tls:
     certificates:
     - cert_path: "{cert_path}"
       key_path: "{key_path}"
-  listeners:
-  - kind: http3
-    addresses: ["0.0.0.0:{proxy_port}"]
+  listeners: ["http3_main"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "valid_password.yaml")

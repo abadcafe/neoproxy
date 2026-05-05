@@ -4,10 +4,11 @@ use std::fs;
 
 use serde::Deserialize;
 
-use super::{ConfigErrorCollector, ConfigErrorKind};
+use super::{ConfigError, ConfigErrorCollector};
 
 /// Certificate configuration (cert + key pair)
 #[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct CertificateConfig {
   /// Path to certificate file (PEM format)
   pub cert_path: String,
@@ -17,6 +18,7 @@ pub struct CertificateConfig {
 
 /// Server-level TLS configuration
 #[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct ServerTlsConfig {
   /// List of certificates (cert_path + key_path pairs)
   pub certificates: Vec<CertificateConfig>,
@@ -121,46 +123,41 @@ pub fn validate_server_tls(
   collector: &mut ConfigErrorCollector,
 ) {
   if tls.certificates.is_empty() {
-    collector.add(
-      format!("{}.certificates", location),
-      "at least one certificate is required".to_string(),
-      ConfigErrorKind::InvalidFormat,
-    );
+    collector.add(ConfigError::InvalidFormat {
+      location: format!("{}.certificates", location),
+      message: "at least one certificate is required".into(),
+    });
     return;
   }
 
   for (idx, cert) in tls.certificates.iter().enumerate() {
     let cert_location = format!("{}.certificates[{}]", location, idx);
 
-    // Validate cert path exists and is readable
     match fs::read_to_string(std::path::Path::new(&cert.cert_path)) {
       Ok(content) => {
         if !content.contains("-----BEGIN CERTIFICATE-----")
           && !content.contains("-----BEGIN TRUSTED CERTIFICATE-----")
         {
-          collector.add(
-            format!("{}.cert_path", cert_location),
-            format!(
+          collector.add(ConfigError::InvalidFormat {
+            location: format!("{}.cert_path", cert_location),
+            message: format!(
               "certificate file '{}' is not in PEM format",
               cert.cert_path
             ),
-            ConfigErrorKind::InvalidFormat,
-          );
+          });
         }
       }
       Err(e) => {
-        collector.add(
-          format!("{}.cert_path", cert_location),
-          format!(
+        collector.add(ConfigError::FileRead {
+          location: format!("{}.cert_path", cert_location),
+          message: format!(
             "certificate file '{}' cannot be read: {}",
             cert.cert_path, e
           ),
-          ConfigErrorKind::FileRead,
-        );
+        });
       }
     }
 
-    // Validate key path exists and is readable
     match fs::read_to_string(std::path::Path::new(&cert.key_path)) {
       Ok(content) => {
         if !content.contains("-----BEGIN PRIVATE KEY-----")
@@ -168,25 +165,23 @@ pub fn validate_server_tls(
           && !content.contains("-----BEGIN EC PRIVATE KEY-----")
           && !content.contains("-----BEGIN ENCRYPTED PRIVATE KEY-----")
         {
-          collector.add(
-            format!("{}.key_path", cert_location),
-            format!(
+          collector.add(ConfigError::InvalidFormat {
+            location: format!("{}.key_path", cert_location),
+            message: format!(
               "private key file '{}' is not in PEM format",
               cert.key_path
             ),
-            ConfigErrorKind::InvalidFormat,
-          );
+          });
         }
       }
       Err(e) => {
-        collector.add(
-          format!("{}.key_path", cert_location),
-          format!(
+        collector.add(ConfigError::FileRead {
+          location: format!("{}.key_path", cert_location),
+          message: format!(
             "private key file '{}' cannot be read: {}",
             cert.key_path, e
           ),
-          ConfigErrorKind::FileRead,
-        );
+        });
       }
     }
   }
@@ -203,9 +198,10 @@ mod validation_tests {
     let mut collector = ConfigErrorCollector::new();
     validate_server_tls(&tls, "servers[0].tls", &mut collector);
     assert!(collector.has_errors());
-    let found = collector.errors().iter().any(|e| {
-      e.message.contains("at least one certificate is required")
-    });
+    let found = collector
+      .errors()
+      .iter()
+      .any(|e| matches!(e, ConfigError::InvalidFormat { .. }));
     assert!(found);
   }
 

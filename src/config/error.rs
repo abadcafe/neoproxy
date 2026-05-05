@@ -2,37 +2,49 @@
 
 use std::process;
 
-/// Configuration error kind
+/// Configuration validation error.
+///
+/// Each variant represents a distinct class of configuration error.
+/// Use pattern matching to inspect errors instead of string comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfigErrorKind {
-  /// File read failed
-  FileRead,
-  /// YAML parsing failed
-  YamlParse,
-  /// Invalid field format
-  InvalidFormat,
-  /// Reference not found
-  NotFound,
-  /// Address parsing failed
-  InvalidAddress,
-  /// Address conflict between listeners
-  AddressConflict,
+pub enum ConfigError {
+  /// File read failed.
+  FileRead { location: String, message: String },
+  /// Invalid field format.
+  InvalidFormat { location: String, message: String },
+  /// Reference not found.
+  NotFound { location: String, message: String },
+  /// Address parsing failed.
+  InvalidAddress { location: String, message: String },
+  /// Address conflict between listeners.
+  AddressConflict { location: String, message: String },
 }
 
-/// Configuration validation error
-#[derive(Debug, Clone)]
-pub struct ConfigError {
-  /// Error location (e.g. "services[0].kind")
-  pub location: String,
-  /// Error message
-  pub message: String,
-  /// Error kind
-  pub kind: ConfigErrorKind,
+impl ConfigError {
+  pub fn location(&self) -> &str {
+    match self {
+      Self::FileRead { location, .. }
+      | Self::InvalidFormat { location, .. }
+      | Self::NotFound { location, .. }
+      | Self::InvalidAddress { location, .. }
+      | Self::AddressConflict { location, .. } => location,
+    }
+  }
+
+  pub fn message(&self) -> &str {
+    match self {
+      Self::FileRead { message, .. }
+      | Self::InvalidFormat { message, .. }
+      | Self::NotFound { message, .. }
+      | Self::InvalidAddress { message, .. }
+      | Self::AddressConflict { message, .. } => message,
+    }
+  }
 }
 
 impl std::fmt::Display for ConfigError {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(f, "{}: {}", self.location, self.message)
+    write!(f, "{}: {}", self.location(), self.message())
   }
 }
 
@@ -50,17 +62,8 @@ impl ConfigErrorCollector {
   }
 
   /// Add an error
-  pub fn add(
-    &mut self,
-    location: impl Into<String>,
-    message: impl Into<String>,
-    kind: ConfigErrorKind,
-  ) {
-    self.errors.push(ConfigError {
-      location: location.into(),
-      message: message.into(),
-      kind,
-    });
+  pub fn add(&mut self, error: ConfigError) {
+    self.errors.push(error);
   }
 
   /// Check if there are any errors
@@ -68,7 +71,9 @@ impl ConfigErrorCollector {
     !self.errors.is_empty()
   }
 
-  /// Get all errors
+  /// Get all errors (test-only: production code uses
+  /// has_errors/report_and_exit)
+  #[cfg(test)]
   pub fn errors(&self) -> &[ConfigError] {
     &self.errors
   }
@@ -82,7 +87,7 @@ impl ConfigErrorCollector {
 
     eprintln!("Configuration errors:");
     for error in &self.errors {
-      eprintln!("  {}: {}", error.location, error.message);
+      eprintln!("  {}", error);
     }
 
     eprintln!();
@@ -108,10 +113,9 @@ mod tests {
 
   #[test]
   fn test_config_error_display() {
-    let error = ConfigError {
+    let error = ConfigError::InvalidFormat {
       location: "services[0].kind".to_string(),
       message: "invalid format".to_string(),
-      kind: ConfigErrorKind::InvalidFormat,
     };
     assert_eq!(
       format!("{}", error),
@@ -120,20 +124,26 @@ mod tests {
   }
 
   #[test]
-  fn test_config_error_kind_equality() {
-    assert_eq!(ConfigErrorKind::FileRead, ConfigErrorKind::FileRead);
-    assert_eq!(
-      ConfigErrorKind::InvalidFormat,
-      ConfigErrorKind::InvalidFormat
-    );
-    assert_ne!(ConfigErrorKind::FileRead, ConfigErrorKind::YamlParse);
+  fn test_config_error_is_error() {
+    fn assert_error<E: std::error::Error>() {}
+    assert_error::<ConfigError>();
+  }
+
+  #[test]
+  fn test_config_error_debug() {
+    let error = ConfigError::NotFound {
+      location: "test".to_string(),
+      message: "test message".to_string(),
+    };
+    let debug_str = format!("{:?}", error);
+    assert!(debug_str.contains("NotFound"));
+    assert!(debug_str.contains("test"));
   }
 
   #[test]
   fn test_error_collector_new() {
     let collector = ConfigErrorCollector::new();
     assert!(!collector.has_errors());
-    assert!(collector.errors().is_empty());
   }
 
   #[test]
@@ -145,118 +155,32 @@ mod tests {
   #[test]
   fn test_error_collector_add_single_error() {
     let mut collector = ConfigErrorCollector::new();
-    collector.add(
-      "services[0].kind",
-      "plugin 'unknown_plugin' not found",
-      ConfigErrorKind::NotFound,
-    );
+    collector.add(ConfigError::NotFound {
+      location: "services[0].kind".into(),
+      message: "plugin 'unknown_plugin' not found".into(),
+    });
 
     assert!(collector.has_errors());
-    assert_eq!(collector.errors().len(), 1);
-
-    let error = &collector.errors()[0];
-    assert_eq!(error.location, "services[0].kind");
-    assert_eq!(error.message, "plugin 'unknown_plugin' not found");
-    assert_eq!(error.kind, ConfigErrorKind::NotFound);
+    assert!(matches!(
+      collector.errors[0],
+      ConfigError::NotFound { .. }
+    ));
+    assert_eq!(collector.errors[0].location(), "services[0].kind");
   }
 
   #[test]
   fn test_error_collector_add_multiple_errors() {
     let mut collector = ConfigErrorCollector::new();
-
-    collector.add(
-      "services[0].kind",
-      "plugin 'unknown_plugin' not found",
-      ConfigErrorKind::NotFound,
-    );
-    collector.add(
-      "servers[0].listeners[0].kind",
-      "listener builder 'http' not found",
-      ConfigErrorKind::NotFound,
-    );
+    collector.add(ConfigError::NotFound {
+      location: "services[0].kind".into(),
+      message: "plugin 'unknown_plugin' not found".into(),
+    });
+    collector.add(ConfigError::NotFound {
+      location: "servers[0].listeners[0]".into(),
+      message: "listener builder 'http' not found".into(),
+    });
 
     assert!(collector.has_errors());
-    assert_eq!(collector.errors().len(), 2);
-  }
-
-  #[test]
-  fn test_error_collector_add_with_string_types() {
-    let mut collector = ConfigErrorCollector::new();
-    let location = String::from("services[0].kind");
-    let message = String::from("error message");
-
-    collector.add(location, message, ConfigErrorKind::InvalidFormat);
-
-    assert!(collector.has_errors());
-    assert_eq!(collector.errors()[0].location, "services[0].kind");
-    assert_eq!(collector.errors()[0].message, "error message");
-  }
-
-  #[test]
-  fn test_error_collector_errors_slice() {
-    let mut collector = ConfigErrorCollector::new();
-    collector.add("loc1", "msg1", ConfigErrorKind::InvalidFormat);
-    collector.add("loc2", "msg2", ConfigErrorKind::InvalidFormat);
-
-    let errors = collector.errors();
-    assert_eq!(errors.len(), 2);
-    assert_eq!(errors[0].location, "loc1");
-    assert_eq!(errors[1].location, "loc2");
-  }
-
-  #[test]
-  fn test_config_error_is_error() {
-    fn assert_error<E: std::error::Error>() {}
-    assert_error::<ConfigError>();
-  }
-
-  #[test]
-  fn test_config_error_debug() {
-    let error = ConfigError {
-      location: "test".to_string(),
-      message: "test message".to_string(),
-      kind: ConfigErrorKind::InvalidFormat,
-    };
-    let debug_str = format!("{:?}", error);
-    assert!(debug_str.contains("ConfigError"));
-    assert!(debug_str.contains("test"));
-  }
-
-  #[test]
-  fn test_config_error_kind_debug() {
-    let kind = ConfigErrorKind::InvalidFormat;
-    let debug_str = format!("{:?}", kind);
-    assert!(debug_str.contains("InvalidFormat"));
-  }
-
-  #[test]
-  fn test_error_collector_all_error_kinds() {
-    let mut collector = ConfigErrorCollector::new();
-
-    collector.add("loc1", "msg1", ConfigErrorKind::FileRead);
-    collector.add("loc2", "msg2", ConfigErrorKind::YamlParse);
-    collector.add("loc3", "msg3", ConfigErrorKind::InvalidFormat);
-    collector.add("loc4", "msg4", ConfigErrorKind::NotFound);
-    collector.add("loc5", "msg5", ConfigErrorKind::InvalidAddress);
-    collector.add("loc6", "msg6", ConfigErrorKind::AddressConflict);
-
-    assert_eq!(collector.errors().len(), 6);
-    assert!(collector.has_errors());
-
-    assert_eq!(collector.errors()[0].kind, ConfigErrorKind::FileRead);
-    assert_eq!(collector.errors()[1].kind, ConfigErrorKind::YamlParse);
-    assert_eq!(
-      collector.errors()[2].kind,
-      ConfigErrorKind::InvalidFormat
-    );
-    assert_eq!(collector.errors()[3].kind, ConfigErrorKind::NotFound);
-    assert_eq!(
-      collector.errors()[4].kind,
-      ConfigErrorKind::InvalidAddress
-    );
-    assert_eq!(
-      collector.errors()[5].kind,
-      ConfigErrorKind::AddressConflict
-    );
+    assert_eq!(collector.errors.len(), 2);
   }
 }

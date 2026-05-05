@@ -12,6 +12,9 @@ import shutil
 import threading
 import os
 import sys
+import json
+import contextlib
+import time
 from typing import Optional, Generator, Callable, Dict
 
 import pytest
@@ -70,6 +73,204 @@ def get_unique_port() -> int:
                 continue
 
         raise RuntimeError("Could not find an available port after 100 attempts")
+
+
+# ==============================================================================
+# Layer Test Fixtures
+# ==============================================================================
+
+
+@pytest.fixture
+def proxy_with_config(temp_dir: str) -> Generator:
+    """Start proxy with a given config dict, yield a context manager.
+
+    Usage:
+        with proxy_with_config(config_dict) as proxy:
+            # proxy.port - the port the proxy is listening on
+            # proxy.working_dir - the temp directory
+            # proxy.process - the subprocess.Popen object
+    """
+
+    class ProxyContext:
+        def __init__(self, process: subprocess.Popen, port: int, working_dir: str):
+            self.process = process
+            self.port = port
+            self.working_dir = working_dir
+
+    @contextlib.contextmanager
+    def _proxy_with_config(config_dict: dict) -> Generator[ProxyContext, None, None]:
+        port = get_unique_port()
+        # Update listener addresses to use the allocated port
+        for listener in config_dict.get("listeners", []):
+            addrs = listener.get("addresses", [])
+            listener["addresses"] = [
+                addr.replace("AUTO_PORT", str(port))
+                if "AUTO_PORT" in addr
+                else addr
+                for addr in addrs
+            ]
+            # If no addresses were specified or all were empty, default to 127.0.0.1:port
+            if not listener["addresses"]:
+                listener["addresses"] = [f"127.0.0.1:{port}"]
+
+        config_path = os.path.join(temp_dir, f"config_{port}.yaml")
+        yaml_content = _dict_to_yaml(config_dict)
+        with open(config_path, "w") as f:
+            f.write(yaml_content)
+
+        # Resolve binary path to absolute path since cwd changes to temp_dir
+        binary_path = os.path.abspath(NEOPROXY_BINARY)
+        proc = subprocess.Popen(
+            [binary_path, "--config", config_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=temp_dir,
+        )
+        if not wait_for_proxy("127.0.0.1", port, timeout=10.0):
+            terminate_process(proc)
+            raise RuntimeError(f"Proxy did not start on port {port}")
+
+        ctx = ProxyContext(proc, port, temp_dir)
+        try:
+            yield ctx
+        finally:
+            terminate_process(proc)
+
+    yield _proxy_with_config
+
+
+def _dict_to_yaml(config: dict) -> str:
+    """Convert a config dict to YAML string manually.
+
+    Avoids yaml.dump() formatting issues with the Rust serde_yaml parser.
+    All top-level keys are rendered generically via _yaml_value, which handles
+    dicts, lists, lists-of-dicts, strings, booleans, and nulls. This ensures
+    any new config key (e.g. tls, plugins) is rendered correctly without
+    silent data loss.
+    """
+    lines: list[str] = []
+
+    for key, value in config.items():
+        lines.extend(_yaml_value(key, value, indent=0))
+
+    return "\n".join(lines) + "\n"
+
+
+def _yaml_dict(d: dict, indent: int, key: str | None = None) -> list[str]:
+    """Render a dict as YAML key-value lines with proper indentation.
+
+    Args:
+        d: The dictionary to render.
+        indent: The indentation level (number of spaces) for the first key.
+        key: Optional parent key name. If provided, the key is rendered first.
+
+    Returns:
+        List of YAML lines.
+    """
+    prefix = " " * indent
+    lines: list[str] = []
+    if key is not None:
+        lines.append(f"{prefix}{key}:")
+        indent += 2
+        prefix = " " * indent
+
+    for k, v in d.items():
+        if isinstance(v, dict):
+            lines.append(f"{prefix}{k}:")
+            sub_lines = _yaml_dict(v, indent=indent + 2)
+            lines.extend(sub_lines)
+        elif isinstance(v, list):
+            # Check if it's a list of dicts (sequence of mappings)
+            if v and isinstance(v[0], dict):
+                lines.append(f"{prefix}{k}:")
+                for item in v:
+                    lines.append(f"{prefix}  -")
+                    for ik, iv in item.items():
+                        lines.extend(_yaml_value(ik, iv, indent=indent + 4))
+            else:
+                lines.append(f"{prefix}{k}: {json.dumps(v)}")
+        elif isinstance(v, str):
+            lines.append(f'{prefix}{k}: "{v}"')
+        elif isinstance(v, bool):
+            lines.append(f"{prefix}{k}: {'true' if v else 'false'}")
+        elif v is None:
+            lines.append(f"{prefix}{k}: null")
+        else:
+            lines.append(f"{prefix}{k}: {v}")
+    return lines
+
+
+def _yaml_value(key: str, value: object, indent: int = 0) -> list[str]:
+    """Render a single YAML key-value pair, handling dicts, lists, and scalars.
+
+    Used for dynamic keys that don't have special rendering rules.
+
+    Args:
+        key: The YAML key.
+        value: The value to render.
+        indent: The indentation level (number of spaces).
+
+    Returns:
+        List of YAML lines.
+    """
+    prefix = " " * indent
+    lines: list[str] = []
+    if isinstance(value, dict):
+        lines.append(f"{prefix}{key}:")
+        lines.extend(_yaml_dict(value, indent=indent + 2))
+    elif isinstance(value, list):
+        # Check if it's a list of dicts (sequence of mappings)
+        if value and isinstance(value[0], dict):
+            lines.append(f"{prefix}{key}:")
+            for item in value:
+                lines.append(f"{prefix}  -")
+                for ik, iv in item.items():
+                    lines.extend(_yaml_value(ik, iv, indent=indent + 4))
+        else:
+            lines.append(f"{prefix}{key}: {json.dumps(value)}")
+    elif isinstance(value, str):
+        lines.append(f'{prefix}{key}: "{value}"')
+    elif isinstance(value, bool):
+        lines.append(f"{prefix}{key}: {'true' if value else 'false'}")
+    elif value is None:
+        lines.append(f"{prefix}{key}: null")
+    else:
+        lines.append(f"{prefix}{key}: {value}")
+    return lines
+
+
+@pytest.fixture
+def target_http_server(available_port: Callable[[], int]) -> Generator:
+    """Start a simple HTTP echo server, yield the server info.
+
+    Usage:
+        with target_http_server() as server:
+            # server.port - the port the server is listening on
+            # server.url - base URL like "http://127.0.0.1:PORT"
+    """
+
+    class ServerInfo:
+        def __init__(self, port: int, sock: socket.socket) -> None:
+            self.port = port
+            self.socket = sock
+            self.url = f"http://127.0.0.1:{port}"
+
+    @contextlib.contextmanager
+    def _target_http_server() -> Generator[ServerInfo, None, None]:
+        port = available_port()
+        from .utils.helpers import http_echo_handler
+        thread, sock = create_target_server("127.0.0.1", port, http_echo_handler)
+        time.sleep(0.1)  # Wait for server to start
+        info = ServerInfo(port, sock)
+        try:
+            yield info
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    yield _target_http_server
 
 
 # ==============================================================================

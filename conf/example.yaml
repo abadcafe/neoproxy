@@ -15,9 +15,9 @@
 # Global Settings
 # -----------------------------------------------------------------------------
 
-# Worker threads - controls concurrent processing capacity
-# Default: 1
-worker_threads: 2
+# Server threads - controls concurrent processing capacity
+# Default: 4
+server_threads: 2
 
 # Log directory - where application logs are written
 # Default: "logs/"
@@ -41,6 +41,11 @@ services:
   # Handles HTTP CONNECT requests for HTTPS proxying
   - name: connect_tcp
     kind: connect_tcp.connect_tcp
+    args:
+      # Timeout for TCP connect to target server (default: 10s)
+      connect_timeout: 10s
+      # Idle timeout for tunnel data transfer (default: 60s)
+      idle_timeout: 60s
 
   # HTTP/3 chain proxy service
   # Forwards requests to upstream proxy servers via HTTP/3

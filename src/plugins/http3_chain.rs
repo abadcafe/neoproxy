@@ -9,28 +9,29 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 use std::{fs, path};
-use tokio::sync::Mutex;
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use bytes::Bytes;
 use h3::client as h3_cli;
-use hyper_util::rt::TokioIo;
 use rustls::pki_types::CertificateDer;
 use rustls_native_certs::CertificateResult;
 use rustls_pemfile;
 use serde::Deserialize;
+use tokio::sync::Mutex;
 use tokio::task;
 use tracing::{error, info, warn};
 
 use crate::config::{SerializedArgs, UserCredential};
 use crate::connect_utils::{self as utils, ConnectTargetError};
+use crate::context::RequestContext;
 use crate::h3_stream::H3ClientBidiStream;
-use crate::http_utils::{Request, Response};
-use crate::http_utils::{build_empty_response, build_error_response};
+use crate::http_utils::{
+  Request, Response, build_empty_response, build_error_response,
+};
 use crate::plugin::Plugin;
 use crate::service::{BuildService, Service};
-use crate::stream::{ClientStream, H3OnUpgrade, Socks5OnUpgrade};
+use crate::stream::{H3OnUpgrade, Socks5OnUpgrade};
 use crate::tracker::StreamTracker;
 
 /// Error indicating proxy authentication failure (HTTP 407)
@@ -84,19 +85,21 @@ impl ActiveConnection {
 /// Tracker for active QUIC connections.
 ///
 /// This allows us to close all connections gracefully during shutdown.
-/// The tracker maintains references to all active connections so they can
-/// be properly closed with H3_NO_ERROR during graceful shutdown.
+/// The tracker maintains references to all active connections so they
+/// can be properly closed with H3_NO_ERROR during graceful shutdown.
 ///
 /// # Usage Pattern
 ///
 /// The typical lifecycle is:
 /// 1. `register()` - Add a new connection when established
-/// 2. `close_all()` then `clear()` - During shutdown, close all then clear the tracker
+/// 2. `close_all()` then `clear()` - During shutdown, close all then
+///    clear the tracker
 ///
 /// # Important
 ///
-/// Always call `close_all()` before `clear()`. Calling `clear()` without `close_all()`
-/// will leave connections open but untracked, potentially causing resource leaks.
+/// Always call `close_all()` before `clear()`. Calling `clear()`
+/// without `close_all()` will leave connections open but untracked,
+/// potentially causing resource leaks.
 #[derive(Clone, Default)]
 struct ActiveConnectionTracker {
   connections: Rc<RefCell<Vec<ActiveConnection>>>,
@@ -120,7 +123,8 @@ impl ActiveConnectionTracker {
   /// After calling this, the connections are still tracked but will be
   /// closed by the QUIC layer. Call `clear()` to remove the references.
   ///
-  /// **Important**: Call this before `clear()` to ensure graceful shutdown.
+  /// **Important**: Call this before `clear()` to ensure graceful
+  /// shutdown.
   fn close_all(&self) {
     let connections = self.connections.borrow();
     for conn in connections.iter() {
@@ -139,9 +143,9 @@ impl ActiveConnectionTracker {
 
   /// Clear all connection references.
   ///
-  /// **Important**: Call `close_all()` before this to ensure connections
-  /// are gracefully closed. Calling `clear()` alone does NOT close the
-  /// connections - it only removes them from tracking.
+  /// **Important**: Call `close_all()` before this to ensure
+  /// connections are gracefully closed. Calling `clear()` alone does
+  /// NOT close the connections - it only removes them from tracking.
   fn clear(&self) {
     self.connections.borrow_mut().clear();
   }
@@ -153,6 +157,7 @@ impl ActiveConnectionTracker {
 
 /// Client TLS configuration for http3_chain.
 #[derive(Deserialize, Clone, Debug, Default)]
+#[serde(deny_unknown_fields)]
 struct ClientTlsConfig {
   #[serde(default)]
   client_cert_path: Option<String>,
@@ -168,7 +173,8 @@ impl ClientTlsConfig {
     let has_key = self.client_key_path.is_some();
     if has_cert != has_key {
       bail!(
-        "client_cert_path and client_key_path must both be present or both absent"
+        "client_cert_path and client_key_path must both be present or \
+         both absent"
       );
     }
     Ok(())
@@ -181,7 +187,8 @@ impl ClientTlsConfig {
   }
 
   /// Deep merge with a default TLS config.
-  /// Fields in `self` take priority; missing fields are inherited from `default`.
+  /// Fields in `self` take priority; missing fields are inherited from
+  /// `default`.
   fn deep_merge(&self, default: &ClientTlsConfig) -> ClientTlsConfig {
     ClientTlsConfig {
       client_cert_path: self
@@ -210,6 +217,7 @@ impl UserPasswordCredential {
   fn none() -> Self {
     Self { user: None }
   }
+
   fn apply(&self, req: &mut http::Request<()>) {
     if let Some(ref user) = self.user {
       let credentials = base64::engine::general_purpose::STANDARD
@@ -234,6 +242,7 @@ impl ClientCertCredential {
   fn none() -> Self {
     Self { cert_path: None, key_path: None }
   }
+
   fn build_tls_config(
     &self,
     roots: rustls::RootCertStore,
@@ -488,15 +497,11 @@ impl ProxyGroup {
   }
 }
 
-/// Build a 200 OK tunnel response with ServiceMetrics attached.
+/// Build a 200 OK tunnel response.
 ///
-/// Extracted to enable unit testing of the metrics insertion logic.
-fn build_tunnel_response_with_metrics(connect_ms: u64) -> Response {
-  let mut resp = build_empty_response(http::StatusCode::OK);
-  let mut metrics = crate::access_log::ServiceMetrics::new();
-  metrics.add("connect_ms", connect_ms);
-  resp.extensions_mut().insert(metrics);
-  resp
+/// Extracted to enable unit testing of the response construction.
+fn build_tunnel_response() -> Response {
+  build_empty_response(http::StatusCode::OK)
 }
 
 // ============================================================================
@@ -504,9 +509,11 @@ fn build_tunnel_response_with_metrics(connect_ms: u64) -> Response {
 // ============================================================================
 
 #[derive(Deserialize, Default, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 struct Http3ChainServiceArgsProxyGroup {
   address: String,
-  /// Hostname for SNI (optional, defaults to IP address from `address`)
+  /// Hostname for SNI (optional, defaults to IP address from
+  /// `address`)
   #[serde(default)]
   hostname: Option<String>,
   weight: usize,
@@ -524,6 +531,13 @@ struct Http3ChainServiceArgs {
   default_user: Option<UserCredential>,
   #[serde(default)]
   default_tls: Option<ClientTlsConfig>,
+  /// Idle timeout for tunnel data transfer.
+  #[serde(default = "default_idle_timeout")]
+  idle_timeout: Duration,
+}
+
+fn default_idle_timeout() -> Duration {
+  Duration::from_secs(super::tunnel::DEFAULT_IDLE_TIMEOUT_SECS)
 }
 
 impl Http3ChainServiceArgs {
@@ -599,6 +613,7 @@ struct Http3ChainService {
   proxy_group: Arc<Mutex<ProxyGroup>>,
   stream_tracker: Rc<StreamTracker>,
   conn_tracker: ActiveConnectionTracker,
+  idle_timeout: Duration,
 }
 
 impl Http3ChainService {
@@ -643,10 +658,13 @@ impl Http3ChainService {
 
     let proxy_group = ProxyGroup::new(proxy_addresses);
 
+    let idle_timeout = args.idle_timeout;
+
     Ok(Service::new(Self {
       proxy_group: Arc::new(Mutex::new(proxy_group)),
       stream_tracker,
       conn_tracker,
+      idle_timeout,
     }))
   }
 
@@ -673,6 +691,14 @@ impl tower::Service<Request> for Http3ChainService {
     let st = self.stream_tracker.clone();
     let ct = self.conn_tracker.clone();
     let is_shutting_down = self.is_shutting_down();
+    let idle_timeout = self.idle_timeout;
+
+    // Extract RequestContext from request extensions
+    let ctx = req
+      .extensions()
+      .get::<RequestContext>()
+      .cloned()
+      .expect("RequestContext should be present");
 
     // Check for SOCKS5 upgrade
     let socks5_upgrade = Socks5OnUpgrade::on(&mut req);
@@ -730,7 +756,8 @@ impl tower::Service<Request> for Http3ChainService {
         Ok(r) => r,
         Err(e) => {
           warn!(
-            "Http3ChainService: failed to connect to next hop proxy: {e}"
+            "Http3ChainService: failed to connect to next hop proxy: \
+             {e}"
           );
           return Ok(build_empty_response(
             http::StatusCode::BAD_GATEWAY,
@@ -748,6 +775,8 @@ impl tower::Service<Request> for Http3ChainService {
         socks5_upgrade,
         h3_upgrade,
         http_upgrade,
+        &ctx,
+        idle_timeout,
       )
       .await
     })
@@ -764,6 +793,8 @@ async fn send_connect_and_tunnel_with_credential(
   socks5_upgrade: Option<Socks5OnUpgrade>,
   h3_upgrade: Option<H3OnUpgrade>,
   http_upgrade: Option<hyper::upgrade::OnUpgrade>,
+  ctx: &RequestContext,
+  idle_timeout: Duration,
 ) -> Result<Response> {
   // Build CONNECT request
   let mut proxy_req = http::Request::builder()
@@ -806,6 +837,8 @@ async fn send_connect_and_tunnel_with_credential(
     h3_upgrade,
     http_upgrade,
     proxy_ms,
+    ctx,
+    idle_timeout,
   )
   .await
 }
@@ -822,76 +855,45 @@ async fn complete_tunnel(
   h3_upgrade: Option<H3OnUpgrade>,
   http_upgrade: Option<hyper::upgrade::OnUpgrade>,
   connect_ms: u64,
+  ctx: &RequestContext,
+  idle_timeout: Duration,
 ) -> Result<Response> {
-  let resp = build_tunnel_response_with_metrics(connect_ms);
+  // Write metrics to RequestContext
+  ctx.insert(
+    "http3_chain.http3_chain.connect_ms",
+    connect_ms.to_string(),
+  );
+
+  let resp = build_tunnel_response();
   let shutdown_handle = st.shutdown_handle();
+  let addr = "http3_chain".to_string();
 
   st.register(async move {
-    info!("Http3ChainService: tunnel background task started");
-
-    // Check if shutdown is already triggered
-    if shutdown_handle.is_shutdown() {
-      warn!("Http3ChainService: shutdown already triggered, aborting tunnel");
-      return;
-    }
-
-    let client_result: Result<ClientStream, String> =
-      if let Some(socks5) = socks5_upgrade {
-        info!("Http3ChainService: waiting for SOCKS5 upgrade");
-        match socks5.await {
-          Ok(stream) => {
-            info!("Http3ChainService: SOCKS5 upgrade succeeded");
-            Ok(ClientStream::Socks5(stream))
-          },
-          Err(e) => Err(format!("SOCKS5 upgrade failed: {e}")),
-        }
-      } else if let Some(h3) = h3_upgrade {
-        info!("Http3ChainService: waiting for H3 upgrade");
-        match h3.await {
-          Ok(stream) => {
-            info!("Http3ChainService: H3 upgrade succeeded");
-            Ok(ClientStream::H3(stream))
-          },
-          Err(e) => Err(format!("H3 upgrade failed: {e}")),
-        }
-      } else if let Some(http) = http_upgrade {
-        info!("Http3ChainService: waiting for HTTP upgrade");
-        match http.await {
-          Ok(upgraded) => {
-            info!("Http3ChainService: HTTP upgrade succeeded");
-            Ok(ClientStream::Http(TokioIo::new(upgraded)))
-          },
-          Err(e) => Err(format!("HTTP upgrade failed: {e}")),
-        }
-      } else {
-        warn!("Http3ChainService: no upgrade available for tunnel");
-        return;
-      };
-
-    let mut client = match client_result {
+    let mut client = match super::tunnel::resolve_client_stream(
+      socks5_upgrade,
+      h3_upgrade,
+      http_upgrade,
+    )
+    .await
+    {
       Ok(c) => c,
       Err(e) => {
-        warn!("Http3ChainService tunnel upgrade failed: {e}");
+        warn!("tunnel to {addr} upgrade failed: {e}");
         return;
       }
     };
 
-    info!("Http3ChainService: client upgrade complete, starting bidirectional transfer");
-    let mut h3_stream = H3ClientBidiStream::new(sending_stream, receiving_stream);
+    let mut h3_stream =
+      H3ClientBidiStream::new(sending_stream, receiving_stream);
 
-    let result = tokio::select! {
-      res = tokio::io::copy_bidirectional(&mut client, &mut h3_stream) => res,
-      _shutdown = shutdown_handle.notified() => {
-        warn!("Http3ChainService tunnel shutdown by notification");
-        return;
-      }
-    };
-
-    if let Err(e) = result {
-      warn!("Http3ChainService tunnel transfer error: {e}");
-    } else {
-      info!("Http3ChainService: bidirectional transfer completed successfully");
-    }
+    super::tunnel::run_tunnel(
+      &mut client,
+      &mut h3_stream,
+      shutdown_handle,
+      idle_timeout,
+      &addr,
+    )
+    .await;
   });
 
   Ok(resp)
@@ -940,8 +942,8 @@ impl Http3ChainPlugin {
     stream_tracker.wait_shutdown().await;
 
     info!(
-      "Http3ChainPlugin: all streams completed, \
-       {} connections remaining",
+      "Http3ChainPlugin: all streams completed, {} connections \
+       remaining",
       conn_tracker.count()
     );
   }
@@ -955,7 +957,7 @@ impl Plugin for Http3ChainPlugin {
     self.service_builders.get(name)
   }
 
-  fn uninstall(&mut self) -> Pin<Box<dyn Future<Output = ()>>> {
+  fn uninstall(&self) -> Pin<Box<dyn Future<Output = ()>>> {
     // Idempotency check: if already uninstalled, return immediately
     if self.is_uninstalled.load(Ordering::SeqCst) {
       info!("Http3ChainPlugin: already uninstalled, skipping");
@@ -977,8 +979,8 @@ impl Plugin for Http3ChainPlugin {
       info!("Http3ChainPlugin: starting graceful shutdown");
 
       // Use a single unified timeout for the entire shutdown process
-      // to ensure total time does not exceed 5 seconds as per architecture
-      // document section 2.3.2
+      // to ensure total time does not exceed 5 seconds as per
+      // architecture document section 2.3.2
       let shutdown_result = tokio::time::timeout(
         SHUTDOWN_TIMEOUT,
         Self::do_graceful_shutdown(&stream_tracker, &conn_tracker),
@@ -994,13 +996,15 @@ impl Plugin for Http3ChainPlugin {
           // This provides accurate numbers for timeout logging
           warn!(
             "Http3ChainPlugin: shutdown timeout reached after {:?}, \
-             forcefully aborting remaining tasks: {} streams, {} connections",
+             forcefully aborting remaining tasks: {} streams, {} \
+             connections",
             SHUTDOWN_TIMEOUT, initial_stream_count, initial_conn_count
           );
           // Forcefully abort all streams and connections
-          // abort_all() is synchronous and immediately terminates tasks,
-          // no additional waiting needed
+          // abort_all() is synchronous and immediately terminates
+          // tasks, no additional waiting needed
           stream_tracker.abort_all();
+          stream_tracker.drain().await;
           info!("Http3ChainPlugin: forced shutdown completed");
         }
       }
@@ -1027,11 +1031,13 @@ pub fn create_plugin() -> Box<dyn Plugin> {
 
 #[cfg(test)]
 mod tests {
-  use super::*;
-  use crate::plugin::Plugin;
   use std::future::pending;
 
-  // ============== Http3ChainServiceArgs Tests (new format without service-level server_ca_path) ==============
+  use super::*;
+  use crate::plugin::Plugin;
+
+  // ============== Http3ChainServiceArgs Tests (new format without
+  // service-level server_ca_path) ==============
 
   #[test]
   fn test_service_args_deserialize_new_format_no_service_level_ca() {
@@ -1052,8 +1058,8 @@ default_tls:
 
   #[test]
   fn test_service_args_rejects_unknown_fields() {
-    // CR-002: After removing service-level server_ca_path, users with old configs
-    // should get a clear error instead of silent ignore
+    // CR-002: After removing service-level server_ca_path, users with
+    // old configs should get a clear error instead of silent ignore
     let yaml = r#"
 proxy_group:
   - address: "127.0.0.1:8080"
@@ -1064,7 +1070,8 @@ server_ca_path: "/tmp/ca.pem"
       serde_yaml::from_str(yaml);
     assert!(
       result.is_err(),
-      "Should reject unknown field 'server_ca_path' with deny_unknown_fields"
+      "Should reject unknown field 'server_ca_path' with \
+       deny_unknown_fields"
     );
     let err = result.unwrap_err().to_string();
     assert!(
@@ -1239,6 +1246,7 @@ server_ca_path: /path/to/ca.pem
         client_key_path: None,
         server_ca_path: Some("/default/ca.pem".to_string()),
       }),
+      ..Default::default()
     };
     // Proxy has only server_ca_path, should override default
     let proxy_tls = Some(ClientTlsConfig {
@@ -1266,6 +1274,7 @@ server_ca_path: /path/to/ca.pem
         client_key_path: None,
         server_ca_path: Some("/default/ca.pem".to_string()),
       }),
+      ..Default::default()
     };
     // None means inherit default_tls
     let (_upc, _ccc, server_ca) = args.resolve_credential(&None, &None);
@@ -1286,8 +1295,10 @@ server_ca_path: /path/to/ca.pem
         client_key_path: None,
         server_ca_path: Some("/path/to/ca.pem".to_string()),
       }),
+      ..Default::default()
     };
-    // Some(empty) means "no client cert" but server_ca_path IS inherited for TLS verification
+    // Some(empty) means "no client cert" but server_ca_path IS
+    // inherited for TLS verification
     let empty_tls = Some(ClientTlsConfig {
       client_cert_path: None,
       client_key_path: None,
@@ -1301,7 +1312,8 @@ server_ca_path: /path/to/ca.pem
     );
     assert!(
       server_ca.is_some(),
-      "Empty tls config should inherit server_ca_path from default for TLS verification"
+      "Empty tls config should inherit server_ca_path from default \
+       for TLS verification"
     );
   }
 
@@ -1311,6 +1323,7 @@ server_ca_path: /path/to/ca.pem
       proxy_group: vec![],
       default_user: None,
       default_tls: None,
+      ..Default::default()
     };
     // None means inherit, but no default → no credential
     let (upc, ccc, server_ca) = args.resolve_credential(&None, &None);
@@ -1341,6 +1354,7 @@ server_ca_path: /path/to/ca.pem
         client_key_path: None,
         server_ca_path: None,
       }),
+      ..Default::default()
     };
     let result = args.validate();
     assert!(
@@ -1365,6 +1379,7 @@ server_ca_path: /path/to/ca.pem
         password: "default_pass".to_string(),
       }),
       default_tls: None,
+      ..Default::default()
     };
     // Proxy has no user, should inherit default_user
     let (upc, _ccc, _server_ca) = args.resolve_credential(&None, &None);
@@ -1386,6 +1401,7 @@ server_ca_path: /path/to/ca.pem
         password: "default_pass".to_string(),
       }),
       default_tls: None,
+      ..Default::default()
     };
     // Proxy has its own user, should override default
     let proxy_user = Some(UserCredential {
@@ -1414,8 +1430,8 @@ server_ca_path: /path/to/ca.pem
 
   #[test]
   fn test_plugin_new_no_transfering_set() {
-    // After refactor, Http3ChainPlugin should not have transfering_set field
-    // and should still work correctly
+    // After refactor, Http3ChainPlugin should not have transfering_set
+    // field and should still work correctly
     let plugin = Http3ChainPlugin::new();
     assert!(plugin.service_builder("http3_chain").is_some());
   }
@@ -1438,7 +1454,7 @@ server_ca_path: /path/to/ca.pem
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
-        let mut plugin = Http3ChainPlugin::new();
+        let plugin = Http3ChainPlugin::new();
 
         // Uninstall with no active streams should complete quickly
         let result = tokio::time::timeout(
@@ -1459,7 +1475,7 @@ server_ca_path: /path/to/ca.pem
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
-        let mut plugin = Http3ChainPlugin::new();
+        let plugin = Http3ChainPlugin::new();
 
         // Register a pending stream that never completes
         plugin.stream_tracker.register(async {
@@ -1479,12 +1495,19 @@ server_ca_path: /path/to/ca.pem
           elapsed >= SHUTDOWN_TIMEOUT,
           "Uninstall should wait for timeout"
         );
-        // Allow small margin (100ms) for test overhead since abort_all()
-        // is synchronous and no additional waiting is needed
+        // Allow margin for test overhead + drain
         assert!(
-          elapsed < SHUTDOWN_TIMEOUT + Duration::from_millis(100),
-          "Uninstall should not take much longer than timeout, took {:?}",
+          elapsed < SHUTDOWN_TIMEOUT + Duration::from_millis(500),
+          "Uninstall should not take much longer than timeout, took \
+           {:?}",
           elapsed
+        );
+
+        // After abort + drain, active_count should be 0
+        assert_eq!(
+          plugin.stream_tracker.active_count(),
+          0,
+          "Aborted streams should be drained"
         );
       })
       .await;
@@ -1495,7 +1518,7 @@ server_ca_path: /path/to/ca.pem
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
-        let mut plugin = Http3ChainPlugin::new();
+        let plugin = Http3ChainPlugin::new();
 
         let completed = Rc::new(RefCell::new(false));
         let completed_clone = completed.clone();
@@ -1530,7 +1553,7 @@ server_ca_path: /path/to/ca.pem
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
-        let mut plugin = Http3ChainPlugin::new();
+        let plugin = Http3ChainPlugin::new();
 
         // First uninstall
         plugin.uninstall().await;
@@ -1592,7 +1615,8 @@ server_ca_path: /path/to/ca.pem
   #[test]
   fn test_proxy_group_schedule_wrr_two_proxies_weight_2_to_1() {
     // Test WRR with two proxies: weights 2:1
-    // Expected distribution over 6 calls: 0, 1, 0, 0, 1, 0 (4:2 ratio = 2:1)
+    // Expected distribution over 6 calls: 0, 1, 0, 0, 1, 0 (4:2 ratio =
+    // 2:1)
     let addresses = vec![
       (
         "127.0.0.1:8080".parse().unwrap(),
@@ -1796,23 +1820,24 @@ default_tls:
     assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
   }
 
-  // ============== ServiceMetrics Tests ==============
+  // ============== RequestContext Integration Tests ==============
 
   #[test]
-  fn test_build_tunnel_response_with_metrics() {
-    let resp = build_tunnel_response_with_metrics(42);
+  fn test_build_tunnel_response() {
+    let resp = build_tunnel_response();
 
     assert_eq!(resp.status(), http::StatusCode::OK);
+  }
 
-    let metrics =
-      resp.extensions().get::<crate::access_log::ServiceMetrics>();
-    assert!(
-      metrics.is_some(),
-      "Response should contain ServiceMetrics"
-    );
-    let metrics = metrics.unwrap();
-    let has_connect =
-      metrics.iter().any(|(k, v)| k == "connect_ms" && v == "42");
-    assert!(has_connect, "ServiceMetrics should contain connect_ms=42");
+  #[test]
+  fn test_request_context_insert_and_get_roundtrip() {
+    use crate::context::RequestContext;
+
+    let ctx = RequestContext::new();
+    ctx.insert("http3_chain.http3_chain.connect_ms", "42".to_string());
+
+    let connect_ms =
+      ctx.get("http3_chain.http3_chain.connect_ms").unwrap();
+    assert_eq!(connect_ms, "42");
   }
 }

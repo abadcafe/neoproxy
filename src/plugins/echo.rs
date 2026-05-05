@@ -81,14 +81,16 @@ pub fn create_plugin() -> Box<dyn Plugin> {
 
 #[cfg(test)]
 mod tests {
-  use super::*;
-  use crate::http_utils::RequestBody;
-  use crate::plugin::Plugin;
+  use std::task::{Context, Poll};
+
   use bytes::Bytes;
   use futures::task::noop_waker;
   use http_body_util::BodyExt;
-  use std::task::{Context, Poll};
   use tower::Service;
+
+  use super::*;
+  use crate::http_utils::RequestBody;
+  use crate::plugin::Plugin;
 
   // ============== EchoService Tests ==============
 

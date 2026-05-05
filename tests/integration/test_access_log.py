@@ -3,46 +3,49 @@ Black-box tests for access log functionality.
 
 Tests verify that neoproxy produces correct access log files
 when processing proxy requests.
+
+The access_log.file layer writes to logs/access.log (hardcoded path,
+text format). The layer is configured per-service.
 """
 
 import os
 import re
-import json
+import subprocess
 import time
 import socket
 import tempfile
 import shutil
-from typing import Optional, Generator
+from typing import Generator
 
 import pytest
-import yaml  # pyyaml - standard in test environments
 
 from .utils.helpers import (
-    start_proxy,
+    NEOPROXY_BINARY,
+    curl_request,
     terminate_process,
     wait_for_proxy,
 )
 
 
 # ==============================================================================
-# Helper: Write config YAML
+# Helper: Write config YAML (new format)
 # ==============================================================================
 
 
 def write_config(
     config_dir: str,
     proxy_port: int,
-    access_log_config: Optional[dict] = None,
-    server_access_log_config: Optional[dict] = None,
+    context_fields: list[str] | None = None,
+    include_layer: bool = True,
 ) -> str:
     """
-    Write a neoproxy config file with access log settings.
+    Write a neoproxy config file with access log layer.
 
     Args:
-        config_dir: Directory to write config and logs
+        config_dir: Directory to write config
         proxy_port: Port for the HTTP proxy listener
-        access_log_config: Top-level access_log config (optional)
-        server_access_log_config: Server-level access_log override (optional)
+        context_fields: Optional list of context fields for the layer
+        include_layer: Whether to include access_log.file layer on service
 
     Returns:
         Path to the config file
@@ -50,117 +53,55 @@ def write_config(
     log_dir = os.path.join(config_dir, "logs")
     os.makedirs(log_dir, exist_ok=True)
 
+    layers = []
+    if include_layer:
+        layer_args: dict = {}
+        if context_fields:
+            layer_args["context_fields"] = context_fields
+        layers.append({"kind": "access_log.file", "args": layer_args})
+
     config = {
-        "worker_threads": 1,
-        "log_directory": log_dir,
-        "services": [
-            {
-                "name": "tunnel",
-                "kind": "connect_tcp.connect_tcp",
-            }
+        "listeners": [
+            {"name": "http_main", "kind": "http", "addresses": [f"127.0.0.1:{proxy_port}"]}
         ],
         "servers": [
             {
                 "name": "http_proxy",
-                "service": "tunnel",
-                "listeners": [
-                    {
-                        "kind": "http",
-                        "args": {
-                            "addresses": [f"127.0.0.1:{proxy_port}"],
-                        },
-                    }
-                ],
+                "hostnames": [],
+                "listeners": ["http_main"],
+                "service": "echo_svc",
+            }
+        ],
+        "services": [
+            {
+                "name": "echo_svc",
+                "kind": "echo.echo",
+                "layers": layers,
             }
         ],
     }
 
-    if access_log_config is not None:
-        config["access_log"] = access_log_config
-
-    if server_access_log_config is not None:
-        config["servers"][0]["access_log"] = server_access_log_config
-
     config_path = os.path.join(config_dir, "server.yaml")
+    from .conftest import _dict_to_yaml
     with open(config_path, "w") as f:
-        yaml.dump(config, f)
+        f.write(_dict_to_yaml(config))
 
     return config_path
 
 
-def send_connect_request(
-    proxy_host: str,
-    proxy_port: int,
-    target_host: str,
-    target_port: int,
-) -> int:
+def start_proxy_with_cwd(config_path: str, cwd: str) -> subprocess.Popen:
+    """Start proxy with a specific working directory.
+
+    The access log writer uses a hardcoded relative path (logs/access.log),
+    so the proxy's CWD must be set to the test's temp directory.
     """
-    Send an HTTP CONNECT request to the proxy and return the status code.
-
-    Args:
-        proxy_host: Proxy host
-        proxy_port: Proxy port
-        target_host: Target host for CONNECT
-        target_port: Target port for CONNECT
-
-    Returns:
-        HTTP status code from the proxy response
-
-    Raises:
-        RuntimeError: If connection fails, response is empty, or response is malformed
-    """
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(5.0)
-    try:
-        try:
-            sock.connect((proxy_host, proxy_port))
-        except socket.error as e:
-            raise RuntimeError(
-                f"Failed to connect to proxy at {proxy_host}:{proxy_port}: {e}"
-            )
-
-        request = (
-            f"CONNECT {target_host}:{target_port} HTTP/1.1\r\n"
-            f"Host: {target_host}:{target_port}\r\n"
-            f"\r\n"
-        )
-        sock.sendall(request.encode())
-
-        try:
-            response = sock.recv(4096).decode()
-        except UnicodeDecodeError as e:
-            raise RuntimeError(
-                f"Invalid UTF-8 response from proxy at {proxy_host}:{proxy_port}: {e}"
-            )
-        if not response:
-            raise RuntimeError(
-                f"Empty response from proxy at {proxy_host}:{proxy_port}"
-            )
-
-        # Parse status code from "HTTP/1.1 200 OK\r\n..."
-        lines = response.split("\r\n")
-        if not lines:
-            raise RuntimeError(
-                f"Malformed response from proxy (no CRLF): {response!r}"
-            )
-
-        status_line = lines[0]
-        parts = status_line.split(" ")
-        if len(parts) < 2:
-            raise RuntimeError(
-                f"Malformed status line from proxy: {status_line!r}"
-            )
-
-        try:
-            status_code = int(parts[1])
-        except ValueError:
-            raise RuntimeError(
-                f"Invalid status code in response: {parts[1]!r}"
-            )
-
-        return status_code
-    finally:
-        sock.close()
+    binary_path = os.path.abspath(NEOPROXY_BINARY)
+    return subprocess.Popen(
+        [binary_path, "--config", config_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+    )
 
 
 def find_access_log_files(log_dir: str, prefix: str = "access.log") -> list[str]:
@@ -262,12 +203,12 @@ def test_env() -> Generator[dict, None, None]:
 
 
 # ==============================================================================
-# Tests: Text Format
+# Tests: Access Log File Creation and Text Format
 # ==============================================================================
 
 
 class TestAccessLogTextFormat:
-    """Tests for access log in text format (default)."""
+    """Tests for access log in text format (default, only supported format)."""
 
     def test_access_log_file_created_after_request(
         self, test_env: dict
@@ -276,19 +217,13 @@ class TestAccessLogTextFormat:
         config_path = write_config(
             test_env["temp_dir"],
             test_env["proxy_port"],
-            access_log_config={"enabled": True, "format": "text"},
         )
-        proc = start_proxy(config_path)
+        proc = start_proxy_with_cwd(config_path, test_env["temp_dir"])
         try:
             assert wait_for_proxy("127.0.0.1", test_env["proxy_port"])
 
-            # Send a CONNECT request (target doesn't need to exist)
-            send_connect_request(
-                "127.0.0.1",
-                test_env["proxy_port"],
-                "example.com",
-                443,
-            )
+            status = curl_request("http://example.com/", test_env["proxy_port"])
+            assert status == 200
         finally:
             terminate_process(proc)
 
@@ -299,25 +234,21 @@ class TestAccessLogTextFormat:
     def test_access_log_text_format_fields(
         self, test_env: dict
     ) -> None:
-        """Text format log line should contain all required fields."""
+        """Text format log line should contain all required fields.
+
+        Expected format:
+        [YYYY-MM-DD HH:MM:SS] CLIENT_IP:CLIENT_PORT -> SERVER_IP:SERVER_PORT METHOD TARGET STATUS DURATIONms svc=SERVICE
+        """
         config_path = write_config(
             test_env["temp_dir"],
             test_env["proxy_port"],
-            access_log_config={
-                "enabled": True,
-                "format": "text",
-            },
         )
-        proc = start_proxy(config_path)
+        proc = start_proxy_with_cwd(config_path, test_env["temp_dir"])
         try:
             assert wait_for_proxy("127.0.0.1", test_env["proxy_port"])
 
-            send_connect_request(
-                "127.0.0.1",
-                test_env["proxy_port"],
-                "example.com",
-                443,
-            )
+            status = curl_request("http://example.com/", test_env["proxy_port"])
+            assert status == 200
         finally:
             terminate_process(proc)
 
@@ -327,14 +258,13 @@ class TestAccessLogTextFormat:
 
         line = lines[0]
         # Verify text format structure:
-        # IP:PORT - [TIME] "METHOD TARGET" STATUS DURATIONms key=value...
-        # Example: 127.0.0.1:54321 - [25/Apr/2026:10:00:00 +0800] "CONNECT example.com:443" 200 50ms service=tunnel
+        # [YYYY-MM-DD HH:MM:SS] IP:PORT -> IP:PORT METHOD TARGET STATUS DURATIONms svc=NAME
+        assert re.search(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]", line), \
+            f"Should contain timestamp in brackets, got: {line}"
         assert re.search(r"\d+\.\d+\.\d+\.\d+:\d+", line), \
             f"Should contain client IP:port, got: {line}"
-        assert re.search(r"\[.+\]", line), \
-            f"Should contain timestamp in brackets, got: {line}"
-        assert '"CONNECT example.com:443"' in line, \
-            f"Should contain request line, got: {line}"
+        assert "GET" in line, \
+            f"Should contain GET method, got: {line}"
         assert re.search(r"\d{3}", line), \
             f"Should contain status code, got: {line}"
         assert re.search(r"\d+ms", line), \
@@ -343,213 +273,25 @@ class TestAccessLogTextFormat:
     def test_access_log_text_service_name(
         self, test_env: dict
     ) -> None:
-        """Text format should include service=<name> field."""
+        """Text format should include svc=<name> field."""
         config_path = write_config(
             test_env["temp_dir"],
             test_env["proxy_port"],
-            access_log_config={
-                "enabled": True,
-                "format": "text",
-            },
         )
-        proc = start_proxy(config_path)
+        proc = start_proxy_with_cwd(config_path, test_env["temp_dir"])
         try:
             assert wait_for_proxy("127.0.0.1", test_env["proxy_port"])
 
-            send_connect_request(
-                "127.0.0.1",
-                test_env["proxy_port"],
-                "example.com",
-                443,
-            )
+            status = curl_request("http://example.com/", test_env["proxy_port"])
+            assert status == 200
         finally:
             terminate_process(proc)
 
         # After shutdown, logs should be flushed
         lines = wait_for_access_log(test_env["log_dir"], min_lines=1, timeout=5.0)
         assert len(lines) >= 1, "Should have at least one log line"
-        assert "service=tunnel" in lines[0], \
+        assert "svc=echo_svc" in lines[0], \
             f"Should contain service name, got: {lines[0]}"
-
-
-# ==============================================================================
-# Tests: JSON Format
-# ==============================================================================
-
-
-class TestAccessLogJsonFormat:
-    """Tests for access log in JSON format."""
-
-    def test_access_log_json_format_valid(
-        self, test_env: dict
-    ) -> None:
-        """JSON format log line should be valid JSON with required fields."""
-        config_path = write_config(
-            test_env["temp_dir"],
-            test_env["proxy_port"],
-            access_log_config={
-                "enabled": True,
-                "format": "json",
-            },
-        )
-        proc = start_proxy(config_path)
-        try:
-            assert wait_for_proxy("127.0.0.1", test_env["proxy_port"])
-
-            send_connect_request(
-                "127.0.0.1",
-                test_env["proxy_port"],
-                "example.com",
-                443,
-            )
-        finally:
-            terminate_process(proc)
-
-        # After shutdown, logs should be flushed
-        lines = wait_for_access_log(test_env["log_dir"], min_lines=1, timeout=5.0)
-        assert len(lines) >= 1, "Should have at least one log line"
-
-        entry = json.loads(lines[0])
-        assert "time" in entry, "JSON should have 'time' field"
-        assert "client_ip" in entry, "JSON should have 'client_ip' field"
-        assert "client_port" in entry, "JSON should have 'client_port' field"
-        assert "method" in entry, "JSON should have 'method' field"
-        assert "target" in entry, "JSON should have 'target' field"
-        assert "status" in entry, "JSON should have 'status' field"
-        assert "duration_ms" in entry, "JSON should have 'duration_ms' field"
-        assert "service" in entry, "JSON should have 'service' field"
-
-        assert entry["method"] == "CONNECT"
-        assert entry["target"] == "example.com:443"
-        assert entry["service"] == "tunnel"
-        assert isinstance(entry["status"], int)
-        assert isinstance(entry["duration_ms"], int)
-        assert isinstance(entry["client_port"], int)
-
-    def test_access_log_json_time_format_iso8601(
-        self, test_env: dict
-    ) -> None:
-        """JSON format time field should be ISO8601."""
-        config_path = write_config(
-            test_env["temp_dir"],
-            test_env["proxy_port"],
-            access_log_config={
-                "enabled": True,
-                "format": "json",
-            },
-        )
-        proc = start_proxy(config_path)
-        try:
-            assert wait_for_proxy("127.0.0.1", test_env["proxy_port"])
-
-            send_connect_request(
-                "127.0.0.1",
-                test_env["proxy_port"],
-                "example.com",
-                443,
-            )
-        finally:
-            terminate_process(proc)
-
-        # After shutdown, logs should be flushed
-        lines = wait_for_access_log(test_env["log_dir"], min_lines=1, timeout=5.0)
-        assert len(lines) >= 1, "Should have at least one log line"
-
-        entry = json.loads(lines[0])
-        # ISO8601 format: 2026-04-25T10:00:00[.nanoseconds]+08:00
-        assert re.match(
-            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?[+-]\d{2}:\d{2}",
-            entry["time"],
-        ), f"Time should be ISO8601, got: {entry['time']}"
-
-
-# ==============================================================================
-# Tests: Config Override
-# ==============================================================================
-
-
-class TestAccessLogConfigOverride:
-    """Tests for server-level config overriding top-level config."""
-
-    def test_server_level_overrides_path_prefix(
-        self, test_env: dict
-    ) -> None:
-        """Server-level path_prefix should override top-level."""
-        config_path = write_config(
-            test_env["temp_dir"],
-            test_env["proxy_port"],
-            access_log_config={
-                "enabled": True,
-                "format": "text",
-                "path_prefix": "default_access.log",
-            },
-            server_access_log_config={
-                "path_prefix": "http_access.log",
-            },
-        )
-        proc = start_proxy(config_path)
-        try:
-            assert wait_for_proxy("127.0.0.1", test_env["proxy_port"])
-
-            send_connect_request(
-                "127.0.0.1",
-                test_env["proxy_port"],
-                "example.com",
-                443,
-            )
-        finally:
-            terminate_process(proc)
-
-        # After shutdown, logs should be flushed
-        # Wait for access log with custom prefix
-        lines = wait_for_access_log(
-            test_env["log_dir"], min_lines=1, timeout=5.0, prefix="http_access.log"
-        )
-
-        # Should use server-level prefix, not top-level
-        http_files = find_access_log_files(
-            test_env["log_dir"], "http_access.log"
-        )
-        default_files = find_access_log_files(
-            test_env["log_dir"], "default_access.log"
-        )
-        assert len(http_files) > 0, \
-            "Should create file with server-level prefix"
-        assert len(default_files) == 0, \
-            "Should NOT create file with top-level prefix"
-
-    def test_server_level_disabled_overrides_enabled(
-        self, test_env: dict
-    ) -> None:
-        """Server-level enabled=false should disable access log for that server."""
-        config_path = write_config(
-            test_env["temp_dir"],
-            test_env["proxy_port"],
-            access_log_config={
-                "enabled": True,
-                "format": "text",
-            },
-            server_access_log_config={
-                "enabled": False,
-            },
-        )
-        proc = start_proxy(config_path)
-        try:
-            assert wait_for_proxy("127.0.0.1", test_env["proxy_port"])
-
-            send_connect_request(
-                "127.0.0.1",
-                test_env["proxy_port"],
-                "example.com",
-                443,
-            )
-        finally:
-            terminate_process(proc)
-
-        # No access log files should be created even after shutdown
-        lines = read_access_log_lines(test_env["log_dir"])
-        assert len(lines) == 0, \
-            "Disabled access log should produce no log lines"
 
 
 # ==============================================================================
@@ -567,23 +309,13 @@ class TestAccessLogGracefulShutdown:
         config_path = write_config(
             test_env["temp_dir"],
             test_env["proxy_port"],
-            access_log_config={
-                "enabled": True,
-                "format": "text",
-                "buffer": "1MiB",
-                "flush": "60s",  # Long flush interval
-            },
         )
-        proc = start_proxy(config_path)
+        proc = start_proxy_with_cwd(config_path, test_env["temp_dir"])
         try:
             assert wait_for_proxy("127.0.0.1", test_env["proxy_port"])
 
-            send_connect_request(
-                "127.0.0.1",
-                test_env["proxy_port"],
-                "example.com",
-                443,
-            )
+            status = curl_request("http://example.com/", test_env["proxy_port"])
+            assert status == 200
 
             # Don't wait for flush interval - just shut down
             time.sleep(0.5)
@@ -594,163 +326,109 @@ class TestAccessLogGracefulShutdown:
         time.sleep(0.5)
         lines = read_access_log_lines(test_env["log_dir"])
         assert len(lines) >= 1, \
-            "Logs should be flushed on graceful shutdown even with long flush interval"
+            "Logs should be flushed on graceful shutdown"
 
 
 # ==============================================================================
-# Tests: File Rotation by Size
+# Tests: Context Fields
 # ==============================================================================
 
 
-class TestAccessLogFileRotation:
-    """Tests for access log file rotation by max_size."""
+class TestAccessLogContextFields:
+    """Tests for context_fields in access log output."""
 
-    def test_file_rotation_creates_dated_files(
+    def test_access_log_with_layer_works(
         self, test_env: dict
     ) -> None:
-        """Access log files should use dated naming convention."""
+        """Access log with context_fields should still create log entries."""
         config_path = write_config(
             test_env["temp_dir"],
             test_env["proxy_port"],
-            access_log_config={
-                "enabled": True,
-                "format": "text",
-            },
+            context_fields=["echo.echo"],
         )
-        proc = start_proxy(config_path)
+        proc = start_proxy_with_cwd(config_path, test_env["temp_dir"])
         try:
             assert wait_for_proxy("127.0.0.1", test_env["proxy_port"])
 
-            # Start a local target server so CONNECT requests succeed quickly
-            target_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            target_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            target_sock.bind(("127.0.0.1", 0))
-            target_sock.listen(5)
-            target_port = target_sock.getsockname()[1]
-
-            try:
-                # Send a request to generate log data
-                send_connect_request(
-                    "127.0.0.1",
-                    test_env["proxy_port"],
-                    "127.0.0.1",
-                    target_port,
-                )
-            finally:
-                target_sock.close()
+            status = curl_request("http://example.com/", test_env["proxy_port"])
+            assert status == 200
         finally:
             terminate_process(proc)
 
-        # After shutdown, logs should be flushed
-        time.sleep(0.5)  # Give a moment for file system to sync
+        lines = wait_for_access_log(test_env["log_dir"], min_lines=1, timeout=5.0)
+        assert len(lines) >= 1, "Should have at least one log line"
 
-        # Verify access log files were created with dated naming
-        files = find_access_log_files(test_env["log_dir"])
-        assert len(files) >= 1, \
-            f"Should have at least one log file, got {len(files)}"
-
-        # Verify file naming scheme: access.log.YYYY-MM-DD[.N]
-        for f in files:
-            basename = os.path.basename(f)
-            assert basename.startswith("access.log."), \
-                f"File should start with 'access.log.', got: {basename}"
-            # Verify date portion exists (YYYY-MM-DD)
-            parts = basename.split(".")
-            assert len(parts) >= 3, \
-                f"File should have format access.log.YYYY-MM-DD[.N], got: {basename}"
+        line = lines[0]
+        # Verify basic log content is present
+        assert "GET" in line, f"Should contain GET method, got: {line}"
+        assert "200" in line, f"Should contain status 200, got: {line}"
+        assert "svc=echo_svc" in line, f"Should contain service name, got: {line}"
 
 
 # ==============================================================================
-# Tests: Service Metrics in Log Output
+# Tests: Log Content Validation
 # ==============================================================================
 
 
-class TestAccessLogServiceMetrics:
-    """Tests for service metrics appearing in access log output."""
+class TestAccessLogContent:
+    """Tests for validating access log content."""
 
-    def test_text_format_contains_service_metrics(
+    def test_log_contains_request_details(
         self, test_env: dict
     ) -> None:
-        """Text format should include service.connect_ms metric."""
-        # Start a real target server so connect_tcp succeeds
-        # and produces connect_ms metric
-        target_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        target_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        target_sock.bind(("127.0.0.1", 0))
-        target_sock.listen(5)
-        target_port = target_sock.getsockname()[1]
-
+        """Access log should contain request method, target, and status."""
         config_path = write_config(
             test_env["temp_dir"],
             test_env["proxy_port"],
-            access_log_config={
-                "enabled": True,
-                "format": "text",
-            },
         )
+        proc = start_proxy_with_cwd(config_path, test_env["temp_dir"])
         try:
-            proc = start_proxy(config_path)
-            try:
-                assert wait_for_proxy("127.0.0.1", test_env["proxy_port"])
+            assert wait_for_proxy("127.0.0.1", test_env["proxy_port"])
 
-                # CONNECT to the real target so connect_tcp measures connect_ms
-                send_connect_request(
-                    "127.0.0.1",
-                    test_env["proxy_port"],
-                    "127.0.0.1",
-                    target_port,
-                )
-            finally:
-                terminate_process(proc)
-
-            # After shutdown, logs should be flushed
-            lines = wait_for_access_log(test_env["log_dir"], min_lines=1, timeout=5.0)
-            assert len(lines) >= 1, "Should have at least one log line"
-
-            line = lines[0]
-            assert "service.connect_ms=" in line, \
-                f"Text log should contain service.connect_ms metric, got: {line}"
+            status = curl_request("http://example.com/", test_env["proxy_port"])
+            assert status == 200
         finally:
-            target_sock.close()
+            terminate_process(proc)
 
-    def test_json_format_contains_service_metrics(
+        lines = wait_for_access_log(test_env["log_dir"], min_lines=1, timeout=5.0)
+        assert len(lines) >= 1, "Should have at least one log line"
+
+        line = lines[0]
+        # Verify log contains request details
+        assert "GET" in line, f"Should contain method, got: {line}"
+        assert "200" in line, f"Should contain status, got: {line}"
+        assert "ms" in line, f"Should contain duration, got: {line}"
+        assert "svc=echo_svc" in line, f"Should contain service name, got: {line}"
+
+
+# ==============================================================================
+# Tests: Without Access Log Layer
+# ==============================================================================
+
+
+class TestAccessLogDisabled:
+    """Tests for behavior when access_log layer is not configured."""
+
+    def test_no_log_file_without_layer(
         self, test_env: dict
     ) -> None:
-        """JSON format should include service.connect_ms metric."""
-        target_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        target_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        target_sock.bind(("127.0.0.1", 0))
-        target_sock.listen(5)
-        target_port = target_sock.getsockname()[1]
-
+        """Without access_log.file layer, no access log should be created."""
         config_path = write_config(
             test_env["temp_dir"],
             test_env["proxy_port"],
-            access_log_config={
-                "enabled": True,
-                "format": "json",
-            },
+            include_layer=False,
         )
+        proc = start_proxy_with_cwd(config_path, test_env["temp_dir"])
         try:
-            proc = start_proxy(config_path)
-            try:
-                assert wait_for_proxy("127.0.0.1", test_env["proxy_port"])
+            assert wait_for_proxy("127.0.0.1", test_env["proxy_port"])
 
-                send_connect_request(
-                    "127.0.0.1",
-                    test_env["proxy_port"],
-                    "127.0.0.1",
-                    target_port,
-                )
-            finally:
-                terminate_process(proc)
-
-            # After shutdown, logs should be flushed
-            lines = wait_for_access_log(test_env["log_dir"], min_lines=1, timeout=5.0)
-            assert len(lines) >= 1, "Should have at least one log line"
-
-            entry = json.loads(lines[0])
-            assert "service.connect_ms" in entry, \
-                f"JSON log should contain service.connect_ms, got keys: {list(entry.keys())}"
+            status = curl_request("http://example.com/", test_env["proxy_port"])
+            assert status == 200
         finally:
-            target_sock.close()
+            terminate_process(proc)
+
+        # No access log files should be created
+        time.sleep(1)
+        lines = read_access_log_lines(test_env["log_dir"])
+        assert len(lines) == 0, \
+            "Without access_log layer, no log lines should be produced"

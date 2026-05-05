@@ -1,7 +1,8 @@
 //! Task tracking for graceful shutdown.
 //!
-//! Provides [`StreamTracker`] for tracking async tasks with graceful shutdown support.
-//! Supports dual-layer tracking (connections + streams) for protocols like QUIC.
+//! Provides [`StreamTracker`] for tracking async tasks with graceful
+//! shutdown support. Supports dual-layer tracking (connections +
+//! streams) for protocols like QUIC.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -61,6 +62,22 @@ impl StreamTracker {
   pub fn abort_all(&self) {
     self.streams.borrow_mut().abort_all();
     self.connections.borrow_mut().abort_all();
+  }
+
+  /// Drain aborted tasks from the JoinSet with a safety timeout.
+  ///
+  /// After `abort_all()`, tasks are marked cancelled but remain in the
+  /// JoinSet until polled via `join_next()`. This method drains them
+  /// so `active_count()` reflects the true state.
+  ///
+  /// A timeout is applied because aborted tasks may still be holding
+  /// locks or in CPU-bound loops, preventing immediate cancellation.
+  pub async fn drain(&self) {
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+      while self.streams.borrow_mut().join_next().await.is_some() {}
+      while self.connections.borrow_mut().join_next().await.is_some() {}
+    })
+    .await;
   }
 
   /// Wait for all tasks to complete.

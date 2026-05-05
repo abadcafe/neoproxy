@@ -9,13 +9,14 @@ use tokio::io;
 /// State for an in-progress send_data or finish operation.
 /// Generic over the send stream type S.
 ///
-/// The boxed futures require `Send + Sync` bounds because `H3ServerBidiStream`
-/// must be `Sync` for use with `http::Extensions::insert`. The `Sync` bound
-/// propagates through: `H3ServerBidiStream` contains `SendState`, which
-/// contains these boxed futures. Without `+ Sync` on the futures, the
-/// `H3ServerBidiStream` type would not be `Sync`, preventing it from being
-/// stored in `http::Extensions` or sent through oneshot channels in the
-/// `H3OnUpgrade` mechanism.
+/// The boxed futures require `Send + Sync` bounds because
+/// `H3ServerBidiStream` must be `Sync` for use with
+/// `http::Extensions::insert`. The `Sync` bound propagates through:
+/// `H3ServerBidiStream` contains `SendState`, which contains these
+/// boxed futures. Without `+ Sync` on the futures, the
+/// `H3ServerBidiStream` type would not be `Sync`, preventing it from
+/// being stored in `http::Extensions` or sent through oneshot channels
+/// in the `H3OnUpgrade` mechanism.
 enum SendState<S> {
   Idle,
   Sending {
@@ -35,14 +36,16 @@ enum SendState<S> {
   },
 }
 
-/// HTTP/3 bidirectional stream wrapper, generic over send/recv stream types.
+/// HTTP/3 bidirectional stream wrapper, generic over send/recv stream
+/// types.
 ///
 /// Combines h3 SendStream and RecvStream into a single type
 /// implementing AsyncRead + AsyncWrite, enabling use with
 /// `tokio::io::copy_bidirectional`.
 ///
-/// Works with both `h3::client::RequestStream` and `h3::server::RequestStream`
-/// since both have identical `send_data()`, `finish()`, and `poll_recv_data()` APIs.
+/// Works with both `h3::client::RequestStream` and
+/// `h3::server::RequestStream` since both have identical `send_data()`,
+/// `finish()`, and `poll_recv_data()` APIs.
 pub struct H3BidirectionalStream<S: 'static, R> {
   send: Option<S>,
   recv: R,
@@ -61,16 +64,18 @@ impl<S: 'static, R> H3BidirectionalStream<S, R> {
   }
 }
 
-// SAFETY: H3BidirectionalStream does not contain any self-referential data.
-// The fields are all owned data: Option<S>, R, Option<Bytes>, and SendState<S>.
-// The SendState enum contains boxed futures, but those futures own their data
-// (including the send stream S), not borrow from self.
+// SAFETY: H3BidirectionalStream does not contain any self-referential
+// data. The fields are all owned data: Option<S>, R, Option<Bytes>, and
+// SendState<S>. The SendState enum contains boxed futures, but those
+// futures own their data (including the send stream S), not borrow from
+// self.
 impl<S: 'static, R> Unpin for H3BidirectionalStream<S, R> {}
 
-/// Macro to implement AsyncWrite for H3BidirectionalStream with a specific
-/// send stream type. Both h3::client::RequestStream and h3::server::RequestStream
-/// have identical send_data()/finish() signatures but are different types,
-/// so we use a macro to avoid duplication.
+/// Macro to implement AsyncWrite for H3BidirectionalStream with a
+/// specific send stream type. Both h3::client::RequestStream and
+/// h3::server::RequestStream have identical send_data()/finish()
+/// signatures but are different types, so we use a macro to avoid
+/// duplication.
 macro_rules! impl_h3_async_write {
   ($send_type:ty) => {
     impl<R> io::AsyncWrite for H3BidirectionalStream<$send_type, R> {
@@ -172,8 +177,8 @@ macro_rules! impl_h3_async_write {
   };
 }
 
-/// Macro to implement AsyncRead for H3BidirectionalStream with a specific
-/// recv stream type.
+/// Macro to implement AsyncRead for H3BidirectionalStream with a
+/// specific recv stream type.
 macro_rules! impl_h3_async_read {
   ($send_type:ty, $recv_type:ty) => {
     impl io::AsyncRead
@@ -247,8 +252,10 @@ impl_h3_async_read!(
 /// stream obtained from `h3::client::SendRequest::send_request()`.
 ///
 /// # Data Flow Direction
-/// - **Send half**: Data written via `AsyncWrite` goes to the upstream proxy
-/// - **Recv half**: Data read via `AsyncRead` comes from the upstream proxy
+/// - **Send half**: Data written via `AsyncWrite` goes to the upstream
+///   proxy
+/// - **Recv half**: Data read via `AsyncRead` comes from the upstream
+///   proxy
 ///
 /// # Usage
 /// ```ignore
@@ -263,20 +270,22 @@ pub type H3ClientBidiStream = H3BidirectionalStream<
 
 /// Server-side H3 bidirectional stream for inbound client connections.
 ///
-/// Used by the H3 listener when receiving connections from downstream clients.
-/// The stream wraps the server-side H3 request stream obtained from
-/// `h3::server::Connection::accept()`. Delivered to the Service via
-/// `H3OnUpgrade` after the listener sends the protocol response.
+/// Used by the H3 listener when receiving connections from downstream
+/// clients. The stream wraps the server-side H3 request stream obtained
+/// from `h3::server::Connection::accept()`. Delivered to the Service
+/// via `H3OnUpgrade` after the listener sends the protocol response.
 ///
 /// # Data Flow Direction
-/// - **Send half**: Data written via `AsyncWrite` goes to the downstream client
-/// - **Recv half**: Data read via `AsyncRead` comes from the downstream client
+/// - **Send half**: Data written via `AsyncWrite` goes to the
+///   downstream client
+/// - **Recv half**: Data read via `AsyncRead` comes from the downstream
+///   client
 ///
 /// # Relation to h3 Types
-/// - Send type: `h3::server::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>`
-///   (obtained via `.split()` on the full bidi stream)
-/// - Recv type: `h3::server::RequestStream<h3_quinn::RecvStream, Bytes>`
-///   (obtained via `.split()` on the full bidi stream)
+/// - Send type: `h3::server::RequestStream<h3_quinn::SendStream<Bytes>,
+///   Bytes>` (obtained via `.split()` on the full bidi stream)
+/// - Recv type: `h3::server::RequestStream<h3_quinn::RecvStream,
+///   Bytes>` (obtained via `.split()` on the full bidi stream)
 ///
 /// # Usage
 /// ```ignore
@@ -293,8 +302,9 @@ pub type H3ServerBidiStream = H3BidirectionalStream<
 
 #[cfg(test)]
 mod tests {
-  use super::*;
   use tokio::io::{AsyncRead, AsyncWrite};
+
+  use super::*;
 
   /// Compile-time verification that H3ServerBidiStream implements
   /// AsyncRead + AsyncWrite. This is critical because H3OnUpgrade
@@ -346,10 +356,11 @@ mod tests {
 
   /// Compile-time verification that H3ServerBidiStream is Sync.
   ///
-  /// Required for use with `http::Extensions::insert` which requires `Send + Sync`.
-  /// The `+ Sync` bound on the boxed futures in `SendState` ensures this trait
-  /// is implemented. Without it, `H3ServerBidiStream` could not be stored in
-  /// `http::Extensions` or sent through oneshot channels in `H3OnUpgrade`.
+  /// Required for use with `http::Extensions::insert` which requires
+  /// `Send + Sync`. The `+ Sync` bound on the boxed futures in
+  /// `SendState` ensures this trait is implemented. Without it,
+  /// `H3ServerBidiStream` could not be stored in `http::Extensions`
+  /// or sent through oneshot channels in `H3OnUpgrade`.
   fn assert_sync<T: Sync>() {}
 
   #[test]

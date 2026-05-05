@@ -18,34 +18,57 @@ use hyper::{body as hyper_body, service as hyper_svc};
 use hyper_util::rt as rt_util;
 use hyper_util::server::conn::auto as conn_util;
 use serde::Deserialize;
-use tokio::{net, task, time::timeout};
+use tokio::time::timeout;
+use tokio::{net, task};
 use tower::util as tower_util;
 use tracing::{error, info, warn};
 
 use crate::config::SerializedArgs;
+use crate::context::RequestContext;
 use crate::http_utils::{
   BytesBufBodyWrapper, Request, RequestBody, Response,
 };
-use crate::listener::{BuildListener, Listener, ListenerProps, Listening, TransportLayer};
-use crate::listeners::common::TokioLocalExecutor;
+use crate::listener::{
+  BuildListener, Listener, ListenerProps, Listening, TransportLayer,
+};
+use crate::listeners::common::{
+  LISTENER_SHUTDOWN_TIMEOUT, MONITORING_LOG_INTERVAL,
+  TokioLocalExecutor,
+};
 use crate::server::{Server, ServerRouter};
 use crate::tls::build_tls_server_config;
 use crate::tracker::StreamTracker;
 
-/// Listener shutdown timeout in seconds.
-const LISTENER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// Monitoring log interval in seconds.
-const MONITORING_LOG_INTERVAL: Duration = Duration::from_secs(60);
+/// Default TLS handshake timeout in seconds.
+const DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS: u64 = 5;
 
 /// HTTPS Listener configuration arguments.
-#[derive(Deserialize, Default, Clone, Debug)]
-pub struct HttpsListenerArgs {}
+#[derive(Deserialize, Clone, Debug)]
+pub struct HttpsListenerArgs {
+  /// TLS handshake timeout in seconds (default: 5).
+  /// Protects against slow clients holding connections during TLS
+  /// negotiation.
+  #[serde(default = "default_tls_handshake_timeout_secs")]
+  pub tls_handshake_timeout_secs: u64,
+}
+
+impl Default for HttpsListenerArgs {
+  fn default() -> Self {
+    Self {
+      tls_handshake_timeout_secs: DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS,
+    }
+  }
+}
+
+fn default_tls_handshake_timeout_secs() -> u64 {
+  DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS
+}
 
 /// Load TLS server configuration from server routing table.
 ///
-/// This function builds a TLS config that includes certificates from all servers
-/// in the routing table, enabling SNI-based certificate selection.
+/// This function builds a TLS config that includes certificates from
+/// all servers in the routing table, enabling SNI-based certificate
+/// selection.
 fn load_tls_config_from_servers(
   servers: &[Server],
 ) -> Result<Arc<rustls::ServerConfig>> {
@@ -59,6 +82,8 @@ struct HttpsServiceAdaptor {
   server_router: ServerRouter,
   /// Client address for logging
   client_addr: Option<SocketAddr>,
+  /// Local address from accept
+  local_addr: Option<SocketAddr>,
   /// SNI from TLS handshake
   sni: Option<String>,
 }
@@ -67,10 +92,11 @@ impl HttpsServiceAdaptor {
   fn new(
     server_routing_table: Vec<Server>,
     client_addr: Option<SocketAddr>,
+    local_addr: Option<SocketAddr>,
     sni: Option<String>,
   ) -> Self {
     let server_router = ServerRouter::build(server_routing_table);
-    Self { server_router, client_addr, sni }
+    Self { server_router, client_addr, local_addr, sni }
   }
 
   /// Route a request to the correct service based on Host header.
@@ -100,8 +126,6 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
     &self,
     req: http::Request<hyper_body::Incoming>,
   ) -> Self::Future {
-    let start_time = std::time::Instant::now();
-
     // Step 1: Check HTTP version FIRST
     // HTTP/1.0 is not supported - return 505 HTTP Version Not Supported
     if let Err(_status) =
@@ -126,21 +150,9 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       }
     }
 
-    // Step 3: Build an http::Request<()> for routing and auth verification
-    let mut auth_req_builder = http::Request::builder()
-      .method(req.method().clone())
-      .uri(req.uri().clone())
-      .version(req.version());
-
-    for (name, value) in req.headers() {
-      auth_req_builder = auth_req_builder.header(name, value);
-    }
-
-    let auth_req = auth_req_builder.body(()).unwrap();
-
-    // Step 4: Route FIRST (route first, then auth)
+    // Step 3: Route FIRST
     let (parts, body) = req.into_parts();
-    let req = Request::from_parts(
+    let mut req = Request::from_parts(
       parts,
       RequestBody::new(BytesBufBodyWrapper::new(body)),
     );
@@ -155,78 +167,32 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       }
     };
 
-    // Step 5: Check authentication using routing_entry's users
-    let user_password_auth =
-      super::common::build_user_password_auth(&routing_entry.users);
-    let verify_result =
-      user_password_auth.verify_and_extract_username(&auth_req);
-    let (user, auth_type) = match verify_result {
-      Ok(Some(username)) => {
-        (Some(username), crate::access_log::AuthType::Password)
-      }
-      Ok(None) => (None, crate::access_log::AuthType::None),
-      Err(_) => {
-        return Box::pin(async {
-          Ok(super::common::build_407_response())
-        });
-      }
-    };
+    // Step 4: Build RequestContext with connection-level keys and
+    // insert into request extensions. Auth and access logging are
+    // now handled by the plugin layer in the service pipeline.
+    if let (Some(peer_addr), Some(local_addr)) =
+      (self.client_addr, self.local_addr)
+    {
+      let ctx = RequestContext::new();
+      ctx.insert("client.ip", peer_addr.ip().to_string());
+      ctx.insert("client.port", peer_addr.port().to_string());
+      ctx.insert("server.ip", local_addr.ip().to_string());
+      ctx.insert("server.port", local_addr.port().to_string());
+      ctx.insert("service.name", &routing_entry.service_name);
+      req.extensions_mut().insert(ctx);
+    }
 
-    // Step 6: Get access_log_writer from routing entry
-    let access_log_writer = routing_entry.access_log_writer.clone();
-    let service_name = routing_entry.service_name();
-    let client_addr = self.client_addr;
-    let method = req.method().to_string();
-    let target = req.uri().to_string();
-
+    // Step 5: Call service (auth/access_log handled by layers)
     let s = routing_entry.service.clone();
-    Box::pin(async move {
-      let resp = tower_util::Oneshot::new(s, req).await;
-
-      // Record access log
-      if let Some(ref writer) = access_log_writer {
-        let duration = start_time.elapsed();
-        let status = match &resp {
-          Ok(r) => r.status().as_u16(),
-          Err(_) => 500,
-        };
-
-        let addr =
-          client_addr.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
-        let service_metrics = resp
-          .as_ref()
-          .ok()
-          .and_then(|r| {
-            r.extensions()
-              .get::<crate::access_log::ServiceMetrics>()
-              .cloned()
-          })
-          .unwrap_or_default();
-
-        let params = crate::access_log::HttpAccessLogParams {
-          client_addr: addr,
-          user,
-          auth_type,
-          method,
-          target,
-          status,
-          duration,
-          service_name,
-          service_metrics,
-        };
-
-        super::common::record_http_access_log(writer, &params);
-      }
-
-      resp
-    })
+    Box::pin(async move { tower_util::Oneshot::new(s, req).await })
   }
 }
 
 /// Extract SNI from TLS connection.
 ///
-/// Returns None if SNI is not available (should not happen for valid HTTPS connections).
-/// The SNI (Server Name Indication) is extracted from the TLS handshake.
+/// Returns None if SNI is not available (should not happen for valid
+/// HTTPS connections). The SNI (Server Name Indication) is extracted
+/// from the TLS handshake.
 fn get_sni_from_tls_connection(
   conn: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
 ) -> Option<String> {
@@ -248,6 +214,8 @@ pub struct HttpsListener {
   connection_tracker: Rc<StreamTracker>,
   /// Graceful shutdown timeout
   graceful_shutdown_timeout: Duration,
+  /// TLS handshake timeout
+  tls_handshake_timeout: Duration,
 }
 
 impl HttpsListener {
@@ -259,6 +227,9 @@ impl HttpsListener {
   ) -> Result<Listener> {
     let _args: HttpsListenerArgs = serde_yaml::from_value(sargs)?;
 
+    let tls_handshake_timeout =
+      Duration::from_secs(_args.tls_handshake_timeout_secs);
+
     // TLS config is required for https listener
     // Check that at least one server has TLS configured
     let has_tls = server_routing_table.iter().any(|e| e.tls.is_some());
@@ -266,7 +237,8 @@ impl HttpsListener {
       bail!("https listener requires server-level tls configuration");
     }
 
-    // Build TLS config from all servers' certificates (SNI-based selection)
+    // Build TLS config from all servers' certificates (SNI-based
+    // selection)
     let tls_config =
       load_tls_config_from_servers(&server_routing_table)?;
 
@@ -287,6 +259,7 @@ impl HttpsListener {
       listening_set: Rc::new(RefCell::new(task::JoinSet::new())),
       connection_tracker: Rc::new(StreamTracker::new()),
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
+      tls_handshake_timeout,
     }))
   }
 
@@ -307,6 +280,7 @@ impl HttpsListener {
     let connection_tracker = self.connection_tracker.clone();
     let shutdown_handle = self.connection_tracker.shutdown_handle();
     let server_routing_table = self.server_routing_table.clone();
+    let tls_handshake_timeout = self.tls_handshake_timeout;
 
     let accepting_fut = async move {
       info!("HTTPS listener started on {}", addr);
@@ -322,12 +296,24 @@ impl HttpsListener {
             error!("accepting new connection failed: {}", e);
           }
           Ok((stream, raddr)) => {
+            let local_addr = match stream.local_addr() {
+              Ok(addr) => addr,
+              Err(e) => {
+                warn!("failed to get local addr from {}: {}", raddr, e);
+                return;
+              }
+            };
             let tls_acceptor =
               tokio_rustls::TlsAcceptor::from(tls_config.clone());
             let io = rt_util::TokioIo::new(stream);
 
-            match tls_acceptor.accept(io.into_inner()).await {
-              Ok(tls_stream) => {
+            match timeout(
+              tls_handshake_timeout,
+              tls_acceptor.accept(io.into_inner()),
+            )
+            .await
+            {
+              Ok(Ok(tls_stream)) => {
                 // Extract SNI from TLS connection
                 let sni = get_sni_from_tls_connection(&tls_stream);
 
@@ -335,6 +321,7 @@ impl HttpsListener {
                 let svc = HttpsServiceAdaptor::new(
                   server_routing_table.clone(),
                   Some(raddr),
+                  Some(local_addr),
                   sni,
                 );
                 let builder =
@@ -347,8 +334,11 @@ impl HttpsListener {
                   }
                 });
               }
-              Err(e) => {
+              Ok(Err(e)) => {
                 warn!("TLS handshake failed from {}: {}", raddr, e);
+              }
+              Err(_elapsed) => {
+                warn!("TLS handshake timeout from {}", raddr);
               }
             }
           }
@@ -416,7 +406,8 @@ impl Listening for HttpsListener {
 
       if wait_result.is_err() {
         warn!(
-          "graceful shutdown timeout ({:?}) expired, aborting {} remaining connections",
+          "graceful shutdown timeout ({:?}) expired, aborting {} \
+           remaining connections",
           graceful_timeout,
           connection_tracker.active_count()
         );
@@ -452,12 +443,13 @@ pub fn create_listener_builder() -> Box<dyn BuildListener> {
 
 #[cfg(test)]
 mod tests {
+  use std::sync::OnceLock;
+
   use super::*;
   use crate::config::{CertificateConfig, ServerTlsConfig};
   use crate::listeners::common::{
     TokioLocalExecutor, build_505_response, check_http_version,
   };
-  use std::sync::OnceLock;
 
   static CRYPTO_PROVIDER_INSTALLED: OnceLock<bool> = OnceLock::new();
 
@@ -513,16 +505,37 @@ mod tests {
 
   #[test]
   fn test_https_listener_args_deserialize() {
-    // HttpsListenerArgs is now empty - addresses passed separately
     let yaml = r#"{}"#;
     let args: HttpsListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    drop(args);
+    assert_eq!(
+      args.tls_handshake_timeout_secs,
+      DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS
+    );
   }
 
   #[test]
   fn test_https_listener_args_default() {
     let args = HttpsListenerArgs::default();
-    drop(args);
+    assert_eq!(
+      args.tls_handshake_timeout_secs,
+      DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS
+    );
+  }
+
+  #[test]
+  fn test_https_listener_args_custom_timeout() {
+    let yaml = r#"tls_handshake_timeout_secs: 10"#;
+    let args: HttpsListenerArgs = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(args.tls_handshake_timeout_secs, 10);
+  }
+
+  #[test]
+  fn test_tls_handshake_timeout_default_is_5_seconds() {
+    assert_eq!(DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS, 5);
+    assert_eq!(
+      Duration::from_secs(DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS),
+      Duration::from_secs(5)
+    );
   }
 
   #[test]
@@ -546,9 +559,7 @@ mod tests {
       hostnames: vec![],
       service: crate::server::placeholder_service(),
       service_name: "test_service".to_string(),
-      users: None,
       tls: None, // No TLS config - should cause error
-      access_log_writer: None,
     };
 
     // This should return an error because tls is required for https
@@ -603,12 +614,10 @@ mod tests {
       hostnames: vec!["test.local".to_string()],
       service: crate::server::placeholder_service(),
       service_name: "test_service".to_string(),
-      users: None,
       tls: Some(ServerTlsConfig {
         certificates: vec![CertificateConfig { cert_path, key_path }],
         client_ca_certs: None,
       }),
-      access_log_writer: None,
     };
 
     let result = load_tls_config_from_servers(&[entry]);
@@ -623,12 +632,10 @@ mod tests {
       hostnames: vec![],
       service: crate::server::placeholder_service(),
       service_name: "test_service".to_string(),
-      users: None,
       tls: Some(ServerTlsConfig {
         certificates: vec![],
         client_ca_certs: None,
       }),
-      access_log_writer: None,
     };
 
     // Should succeed but resolver will have no certificates
@@ -650,7 +657,6 @@ mod tests {
         hostnames: vec!["app1.test.local".to_string()],
         service: crate::server::placeholder_service(),
         service_name: "server1".to_string(),
-        users: None,
         tls: Some(ServerTlsConfig {
           certificates: vec![CertificateConfig {
             cert_path: cert_path1,
@@ -658,13 +664,11 @@ mod tests {
           }],
           client_ca_certs: None,
         }),
-        access_log_writer: None,
       },
       Server {
         hostnames: vec!["app2.test.local".to_string()],
         service: crate::server::placeholder_service(),
         service_name: "server2".to_string(),
-        users: None,
         tls: Some(ServerTlsConfig {
           certificates: vec![CertificateConfig {
             cert_path: cert_path2,
@@ -672,7 +676,6 @@ mod tests {
           }],
           client_ca_certs: None,
         }),
-        access_log_writer: None,
       },
     ];
 
@@ -720,7 +723,8 @@ mod tests {
     assert!(resp.headers().get(http::header::CONTENT_TYPE).is_some());
   }
 
-  // ============== Task 009: ServerRouter Routing Behavior Tests ==============
+  // ============== Task 009: ServerRouter Routing Behavior Tests
+  // ==============
 
   #[test]
   fn test_https_listener_routes_by_hostname() {
@@ -731,21 +735,17 @@ mod tests {
         hostnames: vec![],
         service: crate::server::placeholder_service(),
         service_name: "default".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
       Server {
         hostnames: vec!["api.example.com".to_string()],
         service: crate::server::placeholder_service(),
         service_name: "api".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
     ];
 
-    let adaptor = HttpsServiceAdaptor::new(servers, None, None);
+    let adaptor = HttpsServiceAdaptor::new(servers, None, None, None);
 
     // Request with Host header matching api.example.com
     let req_api = http::Request::builder()

@@ -7,8 +7,8 @@ use tokio::sync;
 
 /// Shutdown Handle for listeners and services.
 ///
-/// Provides a simple shutdown notification mechanism using a boolean flag
-/// and async notification. Clones share the same underlying state.
+/// Provides a simple shutdown notification mechanism using a boolean
+/// flag and async notification. Clones share the same underlying state.
 pub struct ShutdownHandle {
   notify: Arc<sync::Notify>,
   is_shutdown: Arc<AtomicBool>,
@@ -58,8 +58,9 @@ impl Default for ShutdownHandle {
 
 #[cfg(test)]
 mod tests {
-  use super::*;
   use std::time::Duration;
+
+  use super::*;
 
   #[test]
   fn test_shutdown_handle_new_is_not_shutdown() {
@@ -76,7 +77,8 @@ mod tests {
     handle.shutdown();
     assert!(
       handle.is_shutdown(),
-      "ShutdownHandle should be in shutdown state after shutdown() is called"
+      "ShutdownHandle should be in shutdown state after shutdown() is \
+       called"
     );
   }
 

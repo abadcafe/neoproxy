@@ -92,7 +92,7 @@ class TestHTTPConnect:
 
         try:
             # 1. 创建配置文件
-            config_path = create_test_config(proxy_port, temp_dir, worker_threads=2)
+            config_path = create_test_config(proxy_port, temp_dir, server_threads=2)
 
             # 2. 启动模拟目标服务器
             received_messages: List[bytes] = []
@@ -167,7 +167,7 @@ class TestHTTPConnect:
 
         try:
             # 1. 创建配置文件
-            config_path = create_test_config(proxy_port, temp_dir, worker_threads=2)
+            config_path = create_test_config(proxy_port, temp_dir, server_threads=2)
 
             # 2. 启动代理服务器
             proxy_proc = start_proxy(config_path)
@@ -212,7 +212,7 @@ class TestHTTPConnect:
 
         try:
             # 1. 创建配置文件
-            config_path = create_test_config(proxy_port, temp_dir, worker_threads=2)
+            config_path = create_test_config(proxy_port, temp_dir, server_threads=2)
 
             # 2. 启动代理服务器
             proxy_proc = start_proxy(config_path)
@@ -256,7 +256,7 @@ class TestHTTPConnect:
 
         try:
             # 1. 创建配置文件
-            config_path = create_test_config(proxy_port, temp_dir, worker_threads=2)
+            config_path = create_test_config(proxy_port, temp_dir, server_threads=2)
 
             # 2. 启动代理服务器
             proxy_proc = start_proxy(config_path)
@@ -330,7 +330,7 @@ class TestHTTPConnect:
 
         try:
             # 1. 创建配置文件
-            config_path = create_test_config(proxy_port, temp_dir, worker_threads=2)
+            config_path = create_test_config(proxy_port, temp_dir, server_threads=2)
 
             # 2. 启动模拟目标服务器
             connections_count: Dict[str, int] = {"count": 0}
@@ -424,7 +424,7 @@ class TestHTTPConnect:
 
         try:
             # 1. 创建配置文件
-            config_path = create_test_config(proxy_port, temp_dir, worker_threads=2)
+            config_path = create_test_config(proxy_port, temp_dir, server_threads=2)
 
             # 2. 启动模拟目标服务器
             received_data: List[bytes] = []
@@ -513,7 +513,7 @@ class TestHTTPConnect:
 
         try:
             # 1. 创建配置文件
-            config_path = create_test_config(proxy_port, temp_dir, worker_threads=2)
+            config_path = create_test_config(proxy_port, temp_dir, server_threads=2)
 
             # 2. 启动模拟目标服务器
             target_socket_closed = threading.Event()

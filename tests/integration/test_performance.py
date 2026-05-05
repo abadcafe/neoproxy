@@ -51,7 +51,7 @@ class TestPerformance:
         target_socket: Optional[socket.socket] = None
 
         try:
-            config_path = create_test_config(proxy_port, temp_dir, worker_threads=4)
+            config_path = create_test_config(proxy_port, temp_dir, server_threads=4)
 
             # Create target server
             connections_count: Dict[str, int] = {"count": 0}
@@ -414,7 +414,7 @@ class TestPerformance:
         target_socket: Optional[socket.socket] = None
 
         try:
-            config_path = create_test_config(proxy_port, temp_dir, worker_threads=8)
+            config_path = create_test_config(proxy_port, temp_dir, server_threads=8)
 
             # Create target server
             connections_count: Dict[str, int] = {"count": 0}

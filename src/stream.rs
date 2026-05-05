@@ -39,9 +39,10 @@ impl std::error::Error for H3UpgradeError {}
 ///
 /// # Single-Awaiter Contract
 ///
-/// Same as Socks5OnUpgrade: although Clone (required by http::Extensions::insert),
-/// only ONE instance should ever be .await'd. The on() extraction method removes
-/// the value from extensions, preventing accidental double-await.
+/// Same as Socks5OnUpgrade: although Clone (required by
+/// http::Extensions::insert), only ONE instance should ever be
+/// .await'd. The on() extraction method removes the value from
+/// extensions, preventing accidental double-await.
 #[derive(Clone)]
 pub struct H3OnUpgrade {
   receiver: Option<
@@ -68,8 +69,8 @@ impl H3OnUpgrade {
   ///
   /// Returns None if no H3 upgrade is available.
   ///
-  /// This method is used by Services (connect_tcp, http3_chain) to extract
-  /// H3OnUpgrade from requests received from the H3 listener.
+  /// This method is used by Services (connect_tcp, http3_chain) to
+  /// extract H3OnUpgrade from requests received from the H3 listener.
   pub fn on(req: &mut http::Request<RequestBody>) -> Option<Self> {
     req.extensions_mut().remove::<Self>()
   }
@@ -172,7 +173,8 @@ impl H3UpgradeTrigger {
     // Deliver to Service
     if self.sender.send(Ok(bidi)).is_err() {
       return Err(anyhow::anyhow!(
-        "H3 upgrade: Service dropped the receiver before success was delivered"
+        "H3 upgrade: Service dropped the receiver before success was \
+         delivered"
       ));
     }
     Ok(())
@@ -203,7 +205,8 @@ impl H3UpgradeTrigger {
       .is_err()
     {
       return Err(anyhow::anyhow!(
-        "H3 upgrade: Service dropped the receiver before error was delivered"
+        "H3 upgrade: Service dropped the receiver before error was \
+         delivered"
       ));
     }
     Ok(())
@@ -241,19 +244,22 @@ impl H3UpgradeTrigger {
       .is_err()
     {
       return Err(anyhow::anyhow!(
-        "H3 upgrade: Service dropped the receiver before error was delivered"
+        "H3 upgrade: Service dropped the receiver before error was \
+         delivered"
       ));
     }
     Ok(())
   }
 }
 
-/// A stream that can be either a SOCKS5 TCP stream or an HTTP upgraded stream.
+/// A stream that can be either a SOCKS5 TCP stream or an HTTP upgraded
+/// stream.
 ///
-/// This enum is needed because Rust doesn't allow trait objects with multiple
-/// non-auto traits (e.g., `dyn AsyncRead + AsyncWrite`). It is used by
-/// `connect_tcp` and `http3_chain` services to handle client streams uniformly
-/// regardless of whether they come from SOCKS5 or HTTP CONNECT.
+/// This enum is needed because Rust doesn't allow trait objects with
+/// multiple non-auto traits (e.g., `dyn AsyncRead + AsyncWrite`). It is
+/// used by `connect_tcp` and `http3_chain` services to handle client
+/// streams uniformly regardless of whether they come from SOCKS5 or
+/// HTTP CONNECT.
 ///
 /// # Example
 ///
@@ -399,16 +405,18 @@ impl std::error::Error for Socks5UpgradeError {
 ///
 /// # Single-Awaiter Contract
 ///
-/// Although this type implements `Clone` (required by `http::Extensions::insert`),
-/// only ONE instance should ever be `.await`ed. The `on()` extraction method
-/// removes the value from extensions, preventing accidental double-await in
-/// normal use. Concurrently awaiting multiple cloned instances is undefined
-/// behavior: only one clone's waker is registered on the shared receiver at a
-/// time, so the other clones may stall indefinitely and never receive
-/// `Socks5UpgradeError::Canceled`. Sequentially awaiting (where the second
-/// await starts after the first has resolved) will correctly return
-/// `Socks5UpgradeError::Canceled` for the second await. Do not clone this
-/// value before extraction unless you have a specific reason to do so.
+/// Although this type implements `Clone` (required by
+/// `http::Extensions::insert`), only ONE instance should ever be
+/// `.await`ed. The `on()` extraction method removes the value from
+/// extensions, preventing accidental double-await in normal use.
+/// Concurrently awaiting multiple cloned instances is undefined
+/// behavior: only one clone's waker is registered on the shared
+/// receiver at a time, so the other clones may stall indefinitely and
+/// never receive `Socks5UpgradeError::Canceled`. Sequentially awaiting
+/// (where the second await starts after the first has resolved) will
+/// correctly return `Socks5UpgradeError::Canceled` for the second
+/// await. Do not clone this value before extraction unless you have a
+/// specific reason to do so.
 #[derive(Clone)]
 pub struct Socks5OnUpgrade {
   receiver: Option<
@@ -528,8 +536,8 @@ impl Socks5UpgradeTrigger {
   /// Returns an error if the Service has already dropped the upgrade
   /// receiver (e.g., due to timeout or cancellation). Note: the SOCKS5
   /// success reply has already been sent to the client at this point,
-  /// so the client will believe the connection succeeded but the Service
-  /// has no stream to forward data through.
+  /// so the client will believe the connection succeeded but the
+  /// Service has no stream to forward data through.
   pub async fn send_success(mut self) -> Result<()> {
     let proto = self.proto.take().expect("proto already consumed");
     let stream = proto
@@ -543,7 +551,8 @@ impl Socks5UpgradeTrigger {
       let mut stream = stream.unwrap(); // Extract from Ok()
       let _ = stream.shutdown().await;
       return Err(anyhow::anyhow!(
-        "SOCKS5 upgrade: Service dropped the receiver before success reply was delivered"
+        "SOCKS5 upgrade: Service dropped the receiver before success \
+         reply was delivered"
       ));
     }
     Ok(())
@@ -552,8 +561,8 @@ impl Socks5UpgradeTrigger {
   /// Send SOCKS5 error reply and resolve the upgrade future with error.
   ///
   /// Returns an error if the Service has already dropped the upgrade
-  /// receiver. The SOCKS5 error reply has already been sent to the client,
-  /// so this is less severe than a send_success failure.
+  /// receiver. The SOCKS5 error reply has already been sent to the
+  /// client, so this is less severe than a send_success failure.
   pub async fn send_error(
     mut self,
     error: fast_socks5::ReplyError,
@@ -568,9 +577,11 @@ impl Socks5UpgradeTrigger {
       .send(Err(Socks5UpgradeError::ReplyError(error)))
       .is_err()
     {
-      // Return error without logging - the caller will log with context.
+      // Return error without logging - the caller will log with
+      // context.
       return Err(anyhow::anyhow!(
-        "SOCKS5 upgrade: Service dropped the receiver before error reply was delivered"
+        "SOCKS5 upgrade: Service dropped the receiver before error \
+         reply was delivered"
       ));
     }
     Ok(())
@@ -592,12 +603,14 @@ impl Socks5OnUpgrade {
 
 #[cfg(test)]
 impl Socks5UpgradeTrigger {
-  /// Test-only constructor for testing channel behavior without a real SOCKS5 protocol.
+  /// Test-only constructor for testing channel behavior without a real
+  /// SOCKS5 protocol.
   ///
-  /// This creates a trigger that can test the oneshot channel semantics,
-  /// including the receiver-dropped path. Note that `send_success()` and
-  /// `send_error()` will panic if called on a trigger created this way
-  /// (use `send_test_value()` instead for channel testing).
+  /// This creates a trigger that can test the oneshot channel
+  /// semantics, including the receiver-dropped path. Note that
+  /// `send_success()` and `send_error()` will panic if called on a
+  /// trigger created this way (use `send_test_value()` instead for
+  /// channel testing).
   pub fn new_for_test_channel_only() -> (Self, Socks5OnUpgrade) {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let trigger = Self {
@@ -623,12 +636,14 @@ impl Socks5UpgradeTrigger {
     match value {
       Ok(stream) => {
         if let Err(stream) = self.sender.send(Ok(stream)) {
-          // Service dropped the receiver - simulate graceful shutdown behavior
-          // Note: In real send_success(), we would call stream.shutdown().await
-          // Here we just drop the stream immediately since this is a channel test
+          // Service dropped the receiver - simulate graceful shutdown
+          // behavior Note: In real send_success(), we would
+          // call stream.shutdown().await Here we just drop
+          // the stream immediately since this is a channel test
           drop(stream);
           return Err(anyhow::anyhow!(
-            "SOCKS5 upgrade: Service dropped the receiver before success reply was delivered"
+            "SOCKS5 upgrade: Service dropped the receiver before \
+             success reply was delivered"
           ));
         }
         Ok(())
@@ -636,7 +651,8 @@ impl Socks5UpgradeTrigger {
       Err(e) => {
         if self.sender.send(Err(e)).is_err() {
           return Err(anyhow::anyhow!(
-            "SOCKS5 upgrade: Service dropped the receiver before error reply was delivered"
+            "SOCKS5 upgrade: Service dropped the receiver before \
+             error reply was delivered"
           ));
         }
         Ok(())
@@ -654,16 +670,19 @@ impl Socks5UpgradeTrigger {
 ///
 /// HTTP status codes have less granularity than SOCKS5 reply codes.
 /// The mapping preserves fidelity where possible:
-/// - `BAD_GATEWAY` (502): target refused the connection -> `ConnectionRefused`
-/// - `SERVICE_UNAVAILABLE` (503): service denied / shutting down -> `ConnectionNotAllowed`
-/// - `GATEWAY_TIMEOUT` (504): connection timed out -> `ConnectionTimeout` (REP=0x06)
+/// - `BAD_GATEWAY` (502): target refused the connection ->
+///   `ConnectionRefused`
+/// - `SERVICE_UNAVAILABLE` (503): service denied / shutting down ->
+///   `ConnectionNotAllowed`
+/// - `GATEWAY_TIMEOUT` (504): connection timed out ->
+///   `ConnectionTimeout` (REP=0x06)
 /// - `FORBIDDEN` (403): access denied -> `ConnectionNotAllowed`
 ///
-/// `SERVICE_UNAVAILABLE` is typically returned when the service is shutting
-/// down or overloaded, not for network unreachability. It maps to
-/// `ConnectionNotAllowed` which accurately conveys "service denied" semantics
-/// rather than "network unreachable" (which would mislead clients into
-/// diagnosing a routing problem).
+/// `SERVICE_UNAVAILABLE` is typically returned when the service is
+/// shutting down or overloaded, not for network unreachability. It maps
+/// to `ConnectionNotAllowed` which accurately conveys "service denied"
+/// semantics rather than "network unreachable" (which would mislead
+/// clients into diagnosing a routing problem).
 pub fn http_status_to_socks5_error(
   status: http::StatusCode,
 ) -> fast_socks5::ReplyError {
@@ -686,9 +705,10 @@ pub fn http_status_to_socks5_error(
 
 #[cfg(test)]
 mod tests {
+  use std::sync::Mutex;
+
   use super::*;
   use crate::http_utils::{BytesBufBodyWrapper, RequestBody};
-  use std::sync::Mutex;
 
   #[tokio::test]
   async fn test_socks5_on_upgrade_extracts_from_extensions() {
@@ -1230,7 +1250,8 @@ mod tests {
   #[test]
   fn test_h3_upgrade_trigger_debug_impl() {
     // We can't create a real H3UpgradeTrigger without a real H3 stream,
-    // but we can verify the Debug impl exists by checking the type implements Debug.
+    // but we can verify the Debug impl exists by checking the type
+    // implements Debug.
     fn assert_debug<T: std::fmt::Debug>() {}
     assert_debug::<super::H3UpgradeTrigger>();
   }

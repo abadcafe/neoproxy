@@ -75,7 +75,7 @@ def create_socks5_config(
     users: Optional[List[Dict[str, str]]] = None,
     addresses: Optional[List[str]] = None,
     handshake_timeout: Optional[str] = None,
-    worker_threads: int = 1
+    server_threads: int = 1
 ) -> str:
     """
     Create SOCKS5 listener configuration file.
@@ -87,7 +87,7 @@ def create_socks5_config(
         users: List of user dicts with "username" and "password" keys
         addresses: List of addresses to listen on (default: ["0.0.0.0:port"])
         handshake_timeout: Handshake timeout string (e.g., "10s")
-        worker_threads: Number of worker threads
+        server_threads: Number of worker threads
 
     Returns:
         str: Path to the configuration file
@@ -95,36 +95,38 @@ def create_socks5_config(
     if addresses is None:
         addresses = [f"0.0.0.0:{proxy_port}"]
 
-    auth_section = ""
-    if auth_type == "password" and users:
-        users_yaml = "\n".join([
-            f"        - username: \"{u['username']}\"\n          password: \"{u['password']}\""
-            for u in users
-        ])
-        auth_section = f"""
-      users:
-{users_yaml}"""
-
-    timeout_section = ""
+    # Build args section for the listener
+    args_entries = []
     if handshake_timeout:
-        timeout_section = f"\n      handshake_timeout: \"{handshake_timeout}\""
+        args_entries.append(f'    handshake_timeout: "{handshake_timeout}"')
+    if auth_type == "password" and users:
+        args_entries.append("    users:")
+        for u in users:
+            args_entries.append(f'      - username: "{u["username"]}"')
+            args_entries.append(f'        password: "{u["password"]}"')
 
-    addresses_yaml = "\n".join([f'    - "{a}"' for a in addresses])
+    addresses_yaml = "\n".join([f'  - "{a}"' for a in addresses])
 
-    config_content = f"""worker_threads: {worker_threads}
-log_directory: "{temp_dir}/logs"
+    if args_entries:
+        args_yaml = "\n" + "  args:\n" + "\n".join(args_entries)
+    else:
+        args_yaml = ""
+
+    config_content = f"""server_threads: {server_threads}
 
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
 
+listeners:
+- name: socks5_main
+  kind: socks5
+  addresses:
+{addresses_yaml}{args_yaml}
+
 servers:
 - name: socks5_server
-  listeners:
-  - kind: socks5
-    addresses:
-{addresses_yaml}
-    args:{timeout_section}{auth_section}
+  listeners: ["socks5_main"]
   service: connect_tcp
 """
 
@@ -1758,17 +1760,19 @@ class TestSocks5ConfigErrors:
 
         try:
             # Create invalid YAML config
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
+listeners:
+- name: socks5_main
+  kind: socks5
+  addresses: [
+    - "0.0.0.0:{proxy_port}"
 servers:
 - name: socks5_server
-  listeners:
-  - kind: socks5
-    addresses: [
-      - "0.0.0.0:{proxy_port}"
+  listeners: ["socks5_main"]
+  service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "invalid_config.yaml")
             with open(config_path, "w") as f:
@@ -1796,21 +1800,23 @@ servers:
         temp_dir = tempfile.mkdtemp()
 
         try:
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
 
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
 
+listeners:
+- name: socks5_main
+  kind: socks5
+  args:
+    users:
+      - username: "test"
+        password: "test"
+
 servers:
 - name: socks5_server
-  listeners:
-  - kind: socks5
-    args:
-      users:
-        - username: "test"
-          password: "test"
+  listeners: ["socks5_main"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "config.yaml")
@@ -1839,18 +1845,20 @@ servers:
         temp_dir = tempfile.mkdtemp()
 
         try:
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
 
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
 
+listeners:
+- name: socks5_main
+  kind: socks5
+  addresses: []
+
 servers:
 - name: socks5_server
-  listeners:
-  - kind: socks5
-    addresses: []
+  listeners: ["socks5_main"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "config.yaml")
@@ -1882,21 +1890,23 @@ servers:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
 
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
 
+listeners:
+- name: socks5_main
+  kind: socks5
+  addresses:
+    - "0.0.0.0:{proxy_port}"
+  args:
+    users: []
+
 servers:
 - name: socks5_server
-  listeners:
-  - kind: socks5
-    addresses:
-      - "0.0.0.0:{proxy_port}"
-    args:
-      users: []
+  listeners: ["socks5_main"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "config.yaml")
@@ -1932,21 +1942,23 @@ servers:
         proxy_port = get_unique_port()
 
         try:
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
 
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
 
+listeners:
+- name: socks5_main
+  kind: socks5
+  addresses:
+    - "0.0.0.0:{proxy_port}"
+  args:
+    some_unknown_field: true
+
 servers:
 - name: socks5_server
-  listeners:
-  - kind: socks5
-    addresses:
-      - "0.0.0.0:{proxy_port}"
-    args:
-      some_unknown_field: true
+  listeners: ["socks5_main"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "config.yaml")
@@ -1976,21 +1988,23 @@ servers:
         proxy_port = get_unique_port()
 
         try:
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
 
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
 
+listeners:
+- name: socks5_main
+  kind: socks5
+  addresses:
+    - "0.0.0.0:{proxy_port}"
+  args:
+    handshake_timeout: "invalid"
+
 servers:
 - name: socks5_server
-  listeners:
-  - kind: socks5
-    addresses:
-      - "0.0.0.0:{proxy_port}"
-    args:
-      handshake_timeout: "invalid"
+  listeners: ["socks5_main"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "config.yaml")
@@ -2301,21 +2315,23 @@ class TestSocks5TlsClientCertRejected:
         try:
             # client_ca_path is not a valid field in socks5 args
             # (SOCKS5 only supports password auth via 'users' field)
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
 
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
 
+listeners:
+- name: socks5_main
+  kind: socks5
+  addresses:
+    - "0.0.0.0:{proxy_port}"
+  args:
+    client_ca_path: "/path/to/ca.pem"
+
 servers:
 - name: socks5_server
-  listeners:
-  - kind: socks5
-    addresses:
-      - "0.0.0.0:{proxy_port}"
-    args:
-      client_ca_path: "/path/to/ca.pem"
+  listeners: ["socks5_main"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "config.yaml")

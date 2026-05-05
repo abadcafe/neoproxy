@@ -45,31 +45,27 @@ def create_new_http3_listener_config(
     key_path: str,
     temp_dir: str,
     auth_config: Optional[str] = None,
-    worker_threads: int = 1,
+    server_threads: int = 1,
 ) -> str:
     """Create HTTP/3 listener config with NEW architecture (server-level TLS)."""
-    users_section = ""
-    if auth_config:
-        users_section = f"""
-    users:
-{auth_config}"""
-
-    config_content = f"""worker_threads: {worker_threads}
-log_directory: "{temp_dir}/logs"
+    config_content = f"""server_threads: {server_threads}
 
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
+
+listeners:
+- name: http3_main
+  kind: http3
+  addresses: ["0.0.0.0:{proxy_port}"]
 
 servers:
 - name: http3_server
   tls:
     certificates:
     - cert_path: "{cert_path}"
-      key_path: "{key_path}"{users_section}
-  listeners:
-  - kind: http3
-    addresses: ["0.0.0.0:{proxy_port}"]
+      key_path: "{key_path}"
+  listeners: ["http3_main"]
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "new_http3_config.yaml")
@@ -84,7 +80,7 @@ def create_new_http3_chain_config(
     temp_dir: str,
     default_user: Optional[Dict[str, str]] = None,
     default_tls: Optional[Dict[str, Any]] = None,
-    worker_threads: int = 1,
+    server_threads: int = 1,
 ) -> str:
     """Create HTTP/3 chain config with new structure (user and tls separate).
 
@@ -96,7 +92,7 @@ def create_new_http3_chain_config(
         temp_dir: Temp directory for logs.
         default_user: Optional default user with username, password.
         default_tls: Optional default TLS config with same keys as tls.
-        worker_threads: Worker thread count.
+        server_threads: Worker thread count.
     """
     proxy_lines: list[str] = []
     for pg in proxy_group:
@@ -138,8 +134,7 @@ def create_new_http3_chain_config(
             default_tls_lines.append(f"      server_ca_path: \"{dt['server_ca_path']}\"")
         default_tls_section = "\n" + "\n".join(default_tls_lines)
 
-    config_content = f"""worker_threads: {worker_threads}
-log_directory: "{temp_dir}/logs"
+    config_content = f"""server_threads: {server_threads}
 
 services:
 - name: http3_chain
@@ -148,11 +143,14 @@ services:
     proxy_group:
 {proxy_section}{default_user_section}{default_tls_section}
 
+listeners:
+- name: http_main
+  kind: http
+  addresses: [ "0.0.0.0:{http_port}" ]
+
 servers:
 - name: http_proxy
-  listeners:
-  - kind: http
-    addresses: [ "0.0.0.0:{http_port}" ]
+  listeners: ["http_main"]
   service: http3_chain
 """
     config_path = os.path.join(temp_dir, "new_http3_chain_config.yaml")
@@ -545,8 +543,12 @@ class TestOldFieldNamesRejected:
             ca_path = shared_test_certs['ca_path']
 
             # Chain config uses OLD ca_path at service level (should be rejected)
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
+
+listeners:
+- name: http_main
+  kind: http
+  addresses: ["0.0.0.0:30589"]
 
 services:
 - name: http3_chain
@@ -560,9 +562,7 @@ services:
 
 servers:
 - name: http_proxy
-  listeners:
-  - kind: http
-    addresses: [ "0.0.0.0:30589" ]
+  listeners: ["http_main"]
   service: http3_chain
 """
             config_path = os.path.join(temp_dir, "old_format.yaml")
@@ -570,10 +570,11 @@ servers:
                 f.write(config_content)
 
             proc = subprocess.Popen(
-                [NEOPROXY_BINARY, "--config", config_path],
+                [os.path.abspath(NEOPROXY_BINARY), "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=False
+                text=False,
+                cwd=os.path.dirname(config_path),
             )
 
             try:

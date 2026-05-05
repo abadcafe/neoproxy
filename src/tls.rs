@@ -28,7 +28,8 @@ use crate::server::Server;
 /// 2. Then tries wildcard patterns in configuration order
 /// 3. Returns None if no match (TLS handshake will fail)
 ///
-/// There is no default certificate - unknown SNI results in handshake failure.
+/// There is no default certificate - unknown SNI results in handshake
+/// failure.
 #[derive(Debug)]
 pub struct SniResolver {
   /// Exact domain -> certificate mapping
@@ -94,7 +95,8 @@ impl ResolvesServerCert for SniResolver {
 /// - Pattern must start with "*."
 /// - "*.example.com" matches single-level subdomain: "foo.example.com"
 /// - "*.example.com" matches bare domain: "example.com"
-/// - "*.example.com" does NOT match multi-level subdomain: "bar.foo.example.com"
+/// - "*.example.com" does NOT match multi-level subdomain:
+///   "bar.foo.example.com"
 fn matches_wildcard(pattern: &str, hostname: &str) -> bool {
   if !pattern.starts_with("*.") {
     return false;
@@ -116,7 +118,8 @@ fn matches_wildcard(pattern: &str, hostname: &str) -> bool {
   let prefix_len = hostname.len() - suffix.len();
   let prefix = &hostname[..prefix_len];
 
-  // Empty prefix means hostname == ".example.com" (with leading dot) - weird but allow
+  // Empty prefix means hostname == ".example.com" (with leading dot) -
+  // weird but allow
   if prefix.is_empty() {
     return true;
   }
@@ -194,12 +197,12 @@ pub fn load_cert_and_key(
 
 /// Extract Subject Alternative Names (SAN) from a certificate.
 ///
-/// SAN entries typically contain DNS names that the certificate is valid for.
-/// These are used to build the SNI-to-certificate mapping.
+/// SAN entries typically contain DNS names that the certificate is
+/// valid for. These are used to build the SNI-to-certificate mapping.
 ///
-/// Note: This function uses a simple approach - it parses the certificate
-/// using x509-parser to extract SAN entries. For production, consider
-/// caching the parsed certificates.
+/// Note: This function uses a simple approach - it parses the
+/// certificate using x509-parser to extract SAN entries. For
+/// production, consider caching the parsed certificates.
 pub fn extract_san_dns_names(
   cert: &CertificateDer,
 ) -> Result<Vec<String>> {
@@ -233,7 +236,8 @@ pub fn extract_san_dns_names(
 /// 3. Extracts SAN from each certificate
 /// 4. Builds exact and wildcard SNI mappings
 ///
-/// No default certificate is used - unknown SNI will cause TLS handshake failure.
+/// No default certificate is used - unknown SNI will cause TLS
+/// handshake failure.
 pub fn build_sni_resolver(
   servers: &[Server],
 ) -> Result<Arc<SniResolver>> {
@@ -286,7 +290,8 @@ pub fn build_sni_resolver(
           }
           Err(e) => {
             warn!("Failed to extract SAN from certificate: {}", e);
-            // Continue anyway - the certificate might still work for some clients
+            // Continue anyway - the certificate might still work for
+            // some clients
           }
         }
       }
@@ -302,7 +307,8 @@ pub fn build_sni_resolver(
 /// - Uses SNI resolver for certificate selection
 /// - Optionally requires client certificates for mTLS
 ///
-/// Note: This takes the full routing table to support multi-server certificate selection.
+/// Note: This takes the full routing table to support multi-server
+/// certificate selection.
 pub fn build_tls_server_config(
   servers: &[Server],
   alpn_protocols: Vec<Vec<u8>>,
@@ -325,9 +331,9 @@ pub fn build_tls_server_config(
         let ca_certs: Vec<CertificateDer> =
           rustls_pemfile::certs(&mut ca_reader)
             .collect::<Result<Vec<_>, _>>()
-            .with_context(
-              || "Failed to parse client CA certificates",
-            )?;
+            .with_context(|| {
+              "Failed to parse client CA certificates"
+            })?;
         for cert in ca_certs {
           roots.add(cert)?;
         }
@@ -352,8 +358,9 @@ pub fn build_tls_server_config(
 
 #[cfg(test)]
 mod tests {
-  use super::*;
   use std::sync::OnceLock;
+
+  use super::*;
 
   static CRYPTO_PROVIDER_INSTALLED: OnceLock<bool> = OnceLock::new();
 
@@ -565,7 +572,6 @@ mod tests {
         hostnames: vec!["app1.example.com".to_string()],
         service: crate::server::placeholder_service(),
         service_name: "server1".to_string(),
-        users: None,
         tls: Some(crate::config::ServerTlsConfig {
           certificates: vec![CertificateConfig {
             cert_path: cert_path1,
@@ -573,13 +579,11 @@ mod tests {
           }],
           client_ca_certs: None,
         }),
-        access_log_writer: None,
       },
       Server {
         hostnames: vec!["app2.example.com".to_string()],
         service: crate::server::placeholder_service(),
         service_name: "server2".to_string(),
-        users: None,
         tls: Some(crate::config::ServerTlsConfig {
           certificates: vec![CertificateConfig {
             cert_path: cert_path2,
@@ -587,7 +591,6 @@ mod tests {
           }],
           client_ca_certs: None,
         }),
-        access_log_writer: None,
       },
     ];
 

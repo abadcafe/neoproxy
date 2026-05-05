@@ -7,7 +7,7 @@
 # The integration tests use dynamically generated configs with unique ports.
 # This file serves as documentation and for manual testing.
 
-worker_threads: 2
+server_threads: 2
 log_directory: "logs/"
 
 services:

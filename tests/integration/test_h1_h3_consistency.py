@@ -62,8 +62,7 @@ def write_h1_h3_config(
     os.makedirs(log_dir, exist_ok=True)
 
     config = {
-        "worker_threads": 2,
-        "log_directory": log_dir,
+        "server_threads": 2,
         "services": [
             {
                 "name": "echo",
@@ -71,25 +70,39 @@ def write_h1_h3_config(
                 "args": {},
             }
         ],
+        "listeners": [
+            {
+                "name": "http_main",
+                "kind": "http",
+                "addresses": [f"127.0.0.1:{http_port}"],
+            },
+            {
+                "name": "https_main",
+                "kind": "https",
+                "addresses": [f"127.0.0.1:{https_port}"],
+            },
+            {
+                "name": "h3_main",
+                "kind": "http3",
+                "addresses": [f"127.0.0.1:{http3_port}"],
+                "args": {
+                    "quic": {
+                        "max_concurrent_bidi_streams": 100,
+                    },
+                },
+            },
+            {
+                "name": "default_main",
+                "kind": "http",
+                "addresses": [f"127.0.0.1:{default_port}"],
+            },
+        ],
         "servers": [
             # Server with new http listener kind
             {
                 "name": "http_server",
                 "hostnames": ["http.example.com"],
-                "users": [
-                    {
-                        "username": "admin",
-                        "password": "secret",
-                    }
-                ],
-                "listeners": [
-                    {
-                        "kind": "http",
-                        "args": {
-                            "addresses": [f"127.0.0.1:{http_port}"],
-                        },
-                    }
-                ],
+                "listeners": ["http_main"],
                 "service": "echo",
             },
             # Server with new https listener kind
@@ -104,14 +117,7 @@ def write_h1_h3_config(
                         }
                     ]
                 },
-                "listeners": [
-                    {
-                        "kind": "https",
-                        "args": {
-                            "addresses": [f"127.0.0.1:{https_port}"],
-                        },
-                    }
-                ],
+                "listeners": ["https_main"],
                 "service": "echo",
             },
             # Server with http3 listener (multi-address)
@@ -126,30 +132,13 @@ def write_h1_h3_config(
                         }
                     ]
                 },
-                "listeners": [
-                    {
-                        "kind": "http3",
-                        "args": {
-                            "addresses": [f"127.0.0.1:{http3_port}"],
-                            "quic": {
-                                "max_concurrent_bidi_streams": 100,
-                            },
-                        },
-                    }
-                ],
+                "listeners": ["h3_main"],
                 "service": "echo",
             },
             # Default server (no hostnames)
             {
                 "name": "default_server",
-                "listeners": [
-                    {
-                        "kind": "http",
-                        "args": {
-                            "addresses": [f"127.0.0.1:{default_port}"],
-                        },
-                    }
-                ],
+                "listeners": ["default_main"],
                 "service": "echo",
             },
         ],
@@ -180,8 +169,7 @@ def write_minimal_echo_config(
     os.makedirs(log_dir, exist_ok=True)
 
     config = {
-        "worker_threads": 1,
-        "log_directory": log_dir,
+        "server_threads": 1,
         "services": [
             {
                 "name": "echo",
@@ -189,17 +177,17 @@ def write_minimal_echo_config(
                 "args": {},
             }
         ],
+        "listeners": [
+            {
+                "name": "http_main",
+                "kind": "http",
+                "addresses": [f"127.0.0.1:{port}"],
+            },
+        ],
         "servers": [
             {
                 "name": "default_server",
-                "listeners": [
-                    {
-                        "kind": "http",
-                        "args": {
-                            "addresses": [f"127.0.0.1:{port}"],
-                        },
-                    }
-                ],
+                "listeners": ["http_main"],
                 "service": "echo",
             }
         ],
@@ -377,32 +365,6 @@ class TestListenerKinds:
 class TestServerLevelConfig:
     """Test server-level configuration for TLS, auth, and hostnames."""
 
-    def test_server_level_users_accepted(
-        self, proxy_with_capture: Tuple[Optional[subprocess.Popen], bytes, str]
-    ) -> None:
-        """
-        Test that users at server level are accepted.
-
-        Expected: FAIL - Server struct doesn't have users field in current implementation.
-        """
-        proc, stderr_data, config_path = proxy_with_capture
-
-        if proc is None:
-            stderr_text = stderr_data.decode("utf-8", errors="replace")
-            # Check if error is specifically about users field
-            if "users" in stderr_text.lower():
-                pytest.fail(
-                    f"Server-level 'users' field not accepted.\n"
-                    f"stderr: {stderr_text}"
-                )
-            else:
-                pytest.fail(
-                    f"Process failed to start (possibly due to server-level users).\n"
-                    f"stderr: {stderr_text}"
-                )
-
-        assert proc.poll() is None, "Process should be running with server-level users"
-
     def test_server_level_tls_accepted(
         self, proxy_with_capture: Tuple[Optional[subprocess.Popen], bytes, str]
     ) -> None:
@@ -454,76 +416,6 @@ class TestServerLevelConfig:
         assert proc.poll() is None, "Process should be running with server-level hostnames"
 
 
-class TestAccessLogDefault:
-    """Test that access log is enabled by default."""
-
-    def test_access_log_enabled_by_default(
-        self, minimal_test_env: Tuple[str, int]
-    ) -> None:
-        """
-        Test that access log is written even without explicit config.
-
-        Expected: FAIL - Config::default() has access_log: None in current implementation.
-        """
-        config_path, port = minimal_test_env
-        log_dir = os.path.join(os.path.dirname(config_path), "logs")
-
-        proc: Optional[subprocess.Popen] = None
-
-        try:
-            proc = subprocess.Popen(
-                [NEOPROXY_BINARY, "--config", config_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-
-            # Wait for server to start using polling
-            if not wait_for_proxy("127.0.0.1", port, timeout=5.0):
-                if proc.poll() is not None:
-                    _, stderr_data = proc.communicate(timeout=5)
-                    stderr_text = stderr_data.decode("utf-8", errors="replace")
-                    pytest.fail(
-                        f"Process failed to start.\n"
-                        f"stderr: {stderr_text}"
-                    )
-                pytest.fail("Proxy server failed to start within timeout")
-
-            # Make a request with timeout
-            try:
-                response = requests.get(
-                    f"http://127.0.0.1:{port}/test",
-                    timeout=5.0,
-                )
-                # Request succeeded, check log file
-            except requests.exceptions.ConnectionError:
-                # Server may not be responding due to config error
-                pytest.fail(
-                    f"Could not connect to server on port {port}. "
-                    f"Check if listener kind 'http' is supported."
-                )
-            except requests.exceptions.Timeout:
-                pytest.fail(f"Request to server on port {port} timed out")
-
-            # Wait for access log to be written using polling
-            log_start_time = time.time()
-            while time.time() - log_start_time < 3.0:
-                if os.path.exists(log_dir) and os.listdir(log_dir):
-                    break
-                time.sleep(0.1)
-
-            # Check that access log file was created
-            # The log file naming convention may vary (access.log.* or neoproxy.log.*)
-            log_files = list(os.listdir(log_dir)) if os.path.exists(log_dir) else []
-            assert len(log_files) > 0, (
-                f"Access log should be created by default. "
-                f"Files in log dir: {log_files if log_files else 'dir not found'}"
-            )
-
-        finally:
-            if proc is not None:
-                terminate_process(proc)
-
-
 class TestHTTP3MultiAddress:
     """Test HTTP/3 listener multi-address support."""
 
@@ -568,18 +460,24 @@ class TestHTTP3MultiAddress:
             cert_path = shared_test_certs['cert_path']
             key_path = shared_test_certs['key_path']
 
-            log_dir = os.path.join(temp_dir, "logs")
-            os.makedirs(log_dir, exist_ok=True)
-
             # Create config with multiple HTTP/3 addresses
             config = {
-                "worker_threads": 1,
-                "log_directory": log_dir,
+                "server_threads": 1,
                 "services": [
                     {
                         "name": "echo",
                         "kind": "echo.echo",
                         "args": {},
+                    }
+                ],
+                "listeners": [
+                    {
+                        "name": "h3_multi",
+                        "kind": "http3",
+                        "addresses": [
+                            f"127.0.0.1:{proxy_port1}",
+                            f"127.0.0.1:{proxy_port2}",
+                        ],
                     }
                 ],
                 "servers": [
@@ -593,17 +491,7 @@ class TestHTTP3MultiAddress:
                                 }
                             ]
                         },
-                        "listeners": [
-                            {
-                                "kind": "http3",
-                                "args": {
-                                    "addresses": [
-                                        f"127.0.0.1:{proxy_port1}",
-                                        f"127.0.0.1:{proxy_port2}",
-                                    ],
-                                },
-                            }
-                        ],
+                        "listeners": ["h3_multi"],
                         "service": "echo",
                     }
                 ],
@@ -900,17 +788,20 @@ class TestHTTP3SNIHostMismatch:
             ca_path = shared_test_certs['ca_path']
 
             # Create HTTP/3 config with echo service
-            log_dir = os.path.join(temp_dir, "logs")
-            os.makedirs(log_dir, exist_ok=True)
-
             config = {
-                "worker_threads": 1,
-                "log_directory": log_dir,
+                "server_threads": 1,
                 "services": [
                     {
                         "name": "echo",
                         "kind": "echo.echo",
                         "args": {},
+                    }
+                ],
+                "listeners": [
+                    {
+                        "name": "h3_main",
+                        "kind": "http3",
+                        "addresses": [f"127.0.0.1:{http3_port}"],
                     }
                 ],
                 "servers": [
@@ -924,14 +815,7 @@ class TestHTTP3SNIHostMismatch:
                                 }
                             ]
                         },
-                        "listeners": [
-                            {
-                                "kind": "http3",
-                                "args": {
-                                    "addresses": [f"127.0.0.1:{http3_port}"],
-                                },
-                            }
-                        ],
+                        "listeners": ["h3_main"],
                         "service": "echo",
                     }
                 ],
@@ -1020,17 +904,20 @@ class TestHTTP3SNIHostMismatch:
             ca_path = shared_test_certs['ca_path']
 
             # Create HTTP/3 config with echo service
-            log_dir = os.path.join(temp_dir, "logs")
-            os.makedirs(log_dir, exist_ok=True)
-
             config = {
-                "worker_threads": 1,
-                "log_directory": log_dir,
+                "server_threads": 1,
                 "services": [
                     {
                         "name": "echo",
                         "kind": "echo.echo",
                         "args": {},
+                    }
+                ],
+                "listeners": [
+                    {
+                        "name": "h3_main",
+                        "kind": "http3",
+                        "addresses": [f"127.0.0.1:{http3_port}"],
                     }
                 ],
                 "servers": [
@@ -1044,14 +931,7 @@ class TestHTTP3SNIHostMismatch:
                                 }
                             ]
                         },
-                        "listeners": [
-                            {
-                                "kind": "http3",
-                                "args": {
-                                    "addresses": [f"127.0.0.1:{http3_port}"],
-                                },
-                            }
-                        ],
+                        "listeners": ["h3_main"],
                         "service": "echo",
                     }
                 ],

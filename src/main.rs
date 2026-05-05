@@ -11,13 +11,17 @@ use tokio::signal::unix as signal;
 use tokio::{runtime, sync, task};
 use tracing::{debug, error, info, warn};
 
-use crate::config::{CmdOpt, Config};
-use crate::config::{ConfigErrorCollector, validate_config};
+use crate::config::{
+  CmdOpt, Config, ConfigErrorCollector, validate_config,
+};
+use crate::listeners::ListenerManager;
+use crate::plugins::PluginManager;
 
-mod access_log;
+mod assembly;
 mod auth;
 mod config;
 mod connect_utils;
+mod context;
 mod h3_stream;
 mod http_utils;
 mod listener;
@@ -33,18 +37,19 @@ mod stream;
 mod tls;
 mod tracker;
 
-/// Thread check interval for detecting worker thread exit.
+/// Thread check interval for detecting server thread exit.
 const THREAD_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Configuration for the non-blocking log writer.
 ///
-/// This struct holds configuration for the tracing_appender non-blocking writer.
-/// The default `buffered_lines_limit(1)` ensures logs are written immediately
-/// without buffering delay.
+/// This struct holds configuration for the tracing_appender
+/// non-blocking writer. The default `buffered_lines_limit(1)` ensures
+/// logs are written immediately without buffering delay.
 #[derive(Debug, Clone, Copy)]
 struct LogWriterConfig {
   /// Number of lines to buffer before flushing.
-  /// Set to 1 to ensure each log line is sent to the background thread immediately.
+  /// Set to 1 to ensure each log line is sent to the background thread
+  /// immediately.
   buffered_lines_limit: usize,
 }
 
@@ -106,24 +111,55 @@ fn determine_exit_code(exit_reasons: &[ExitReason]) -> i32 {
   0
 }
 
-fn run_server_threads(
-  closer: Arc<sync::Notify>,
-) -> Vec<thread::JoinHandle<Result<()>>> {
-  let mut server_thread_handles = vec![];
-  for i in 0..Config::global().worker_threads {
-    let closer = closer.clone();
-    let name = format!("neoproxy server thread {i}");
-    server_thread_handles.push(
-      thread::Builder::new()
-        .name(name.clone())
-        .spawn(move || -> Result<()> {
-          server_thread::server_thread(name.as_str(), closer.clone())
-        })
-        .unwrap(),
-    );
-  }
+/// Run a server thread with listeners built from PluginManager.
+///
+/// Each server thread creates its own tokio runtime and PluginManager,
+/// builds listeners, and runs them concurrently. The thread waits for
+/// the shutdown signal, then stops all listeners.
+fn run_server_thread(
+  shutdown: Arc<sync::Notify>,
+  thread_id: usize,
+) -> Result<()> {
+  let local_set = task::LocalSet::new();
+  let rt = runtime::Builder::new_current_thread()
+    .enable_all()
+    .thread_name(format!("neoproxy-server-{}", thread_id))
+    .build()?;
 
-  server_thread_handles
+  rt.block_on(local_set.run_until(async {
+    // Each thread builds its own PluginManager and listeners
+    let mut plugin_manager = PluginManager::new();
+    let listener_manager = ListenerManager::new();
+
+    let listeners = assembly::build_listeners(
+      &plugin_manager,
+      Config::global(),
+      &listener_manager,
+    )
+    .map_err(|e| {
+      error!("failed to build listeners: {e}");
+      e
+    })?;
+
+    let mut join_set = task::JoinSet::new();
+
+    for listener in &listeners {
+      join_set.spawn_local(listener.start());
+    }
+
+    shutdown.notified().await;
+
+    for listener in &listeners {
+      listener.stop();
+    }
+
+    while join_set.join_next().await.is_some() {}
+
+    // Uninstall plugins at shutdown
+    plugin_manager.uninstall_all().await;
+
+    Ok(())
+  }))
 }
 
 fn init_log(
@@ -191,15 +227,16 @@ fn create_signal_future() -> Pin<Box<dyn Future<Output = ()> + Send>> {
   })
 }
 
-/// Main loop that monitors signals and worker threads.
+/// Main loop that monitors signals and server threads.
 ///
 /// This function implements the core shutdown logic:
-/// 1. If no worker threads, wait for signal and exit with code 0
+/// 1. If no server threads, wait for signal and exit with code 0
 /// 2. Otherwise, concurrently listen for:
 ///    - SIGINT/SIGTERM signals
 ///    - Worker thread exits (polled every 100ms)
 /// 3. On signal: trigger graceful shutdown
-/// 4. On worker thread abnormal exit: record reason and trigger shutdown
+/// 4. On server thread abnormal exit: record reason and trigger
+///    shutdown
 /// 5. Determine exit code based on collected exit reasons
 ///
 /// # Returns
@@ -226,10 +263,10 @@ async fn main_loop_with_signal(
   shutdown_triggered: Arc<AtomicBool>,
   mut signal_future: Pin<Box<dyn Future<Output = ()> + Send>>,
 ) -> i32 {
-  // If no worker threads, wait for signal and exit with code 0
+  // If no server threads, wait for signal and exit with code 0
   if handles.is_empty() {
     signal_future.await;
-    info!("received shutdown signal, exiting (no worker threads)");
+    info!("received shutdown signal, exiting (no server threads)");
     return 0;
   }
 
@@ -243,12 +280,13 @@ async fn main_loop_with_signal(
   // Main loop
   loop {
     // Check for signals using tokio::select!
-    // We use as_mut() to get a pinned reference that can be polled multiple times
+    // We use as_mut() to get a pinned reference that can be polled
+    // multiple times
     let signal_received = if signal_received_once {
       // Signal already received, only check threads
       tokio::select! {
         _ = tokio::time::sleep(THREAD_CHECK_INTERVAL) => {
-          let all_joined = check_worker_threads(
+          let all_joined = check_server_threads(
             &mut handles,
             &mut joined_indices,
             &mut exit_reasons,
@@ -271,7 +309,7 @@ async fn main_loop_with_signal(
         }
         // Thread check branch (every 100ms)
         _ = tokio::time::sleep(THREAD_CHECK_INTERVAL) => {
-          let all_joined = check_worker_threads(
+          let all_joined = check_server_threads(
             &mut handles,
             &mut joined_indices,
             &mut exit_reasons,
@@ -303,10 +341,10 @@ async fn main_loop_with_signal(
   exit_code
 }
 
-/// Check worker threads for exit status.
+/// Check server threads for exit status.
 ///
 /// Returns true if all threads have been joined.
-fn check_worker_threads(
+fn check_server_threads(
   handles: &mut [thread::JoinHandle<Result<()>>],
   joined_indices: &mut HashSet<usize>,
   exit_reasons: &mut Vec<ExitReason>,
@@ -339,7 +377,7 @@ fn check_worker_threads(
       // Thread panicked
       Err(panic_payload) => {
         error!(
-          "worker thread '{}' panicked: {:?}",
+          "server thread '{}' panicked: {:?}",
           thread_name, panic_payload
         );
         exit_reasons.push(ExitReason::Panic);
@@ -356,7 +394,7 @@ fn check_worker_threads(
         }
         Err(e) => {
           error!(
-            "worker thread '{}' exited with error: {}",
+            "server thread '{}' exited with error: {}",
             thread_name, e
           );
           exit_reasons.push(ExitReason::Error);
@@ -392,18 +430,32 @@ fn main() -> Result<()> {
     collector.report_and_exit();
   }
 
-  // Initialize logging after config is loaded (needs log_directory)
-  let _guard = init_log(&config.log_directory);
+  // Initialize logging after config is loaded
+  let _guard = init_log("logs/");
 
   info!("server started with config:\n{:#?}\n", &config);
 
   // Set global config for use by server threads
   Config::init_global(config);
 
+  // Create shutdown signal
   let shutdown_notify = Arc::new(sync::Notify::new());
   let shutdown_triggered = Arc::new(AtomicBool::new(false));
-  let handles = run_server_threads(shutdown_notify.clone());
 
+  // Spawn server threads (each builds its own PluginManager and
+  // listeners)
+  let handles: Vec<thread::JoinHandle<Result<()>>> = (0
+    ..Config::global().server_threads)
+    .map(|i| {
+      let shutdown = shutdown_notify.clone();
+      thread::Builder::new()
+        .name(format!("neoproxy-server-{}", i))
+        .spawn(move || run_server_thread(shutdown, i))
+        .unwrap()
+    })
+    .collect();
+
+  // Main loop (all async work inside rt.block_on)
   let local_set = task::LocalSet::new();
   let rt = runtime::Builder::new_current_thread()
     .enable_all()
@@ -422,6 +474,7 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::assembly;
 
   #[test]
   fn test_auth_module_exists() {
@@ -569,10 +622,10 @@ mod tests {
     assert_eq!(determine_exit_code(&reasons), 2);
   }
 
-  // ============== check_worker_threads Tests ==============
+  // ============== check_server_threads Tests ==============
 
   #[test]
-  fn test_check_worker_threads_all_running() {
+  fn test_check_server_threads_all_running() {
     let rt = runtime::Builder::new_current_thread()
       .enable_all()
       .build()
@@ -595,7 +648,7 @@ mod tests {
       let shutdown_notify = Arc::new(sync::Notify::new());
 
       // Thread is still running
-      let all_joined = check_worker_threads(
+      let all_joined = check_server_threads(
         &mut handles,
         &mut joined_indices,
         &mut exit_reasons,
@@ -611,7 +664,7 @@ mod tests {
       running.store(false, Ordering::SeqCst);
       // Wait for thread to finish and clean up
       tokio::time::sleep(Duration::from_millis(50)).await;
-      check_worker_threads(
+      check_server_threads(
         &mut handles,
         &mut joined_indices,
         &mut exit_reasons,
@@ -622,7 +675,7 @@ mod tests {
   }
 
   #[test]
-  fn test_check_worker_threads_normal_exit() {
+  fn test_check_server_threads_normal_exit() {
     let rt = runtime::Builder::new_current_thread()
       .enable_all()
       .build()
@@ -639,7 +692,7 @@ mod tests {
       let shutdown_triggered = Arc::new(AtomicBool::new(false));
       let shutdown_notify = Arc::new(sync::Notify::new());
 
-      let all_joined = check_worker_threads(
+      let all_joined = check_server_threads(
         &mut handles,
         &mut joined_indices,
         &mut exit_reasons,
@@ -655,7 +708,7 @@ mod tests {
   }
 
   #[test]
-  fn test_check_worker_threads_error_exit() {
+  fn test_check_server_threads_error_exit() {
     let rt = runtime::Builder::new_current_thread()
       .enable_all()
       .build()
@@ -672,7 +725,7 @@ mod tests {
       let shutdown_triggered = Arc::new(AtomicBool::new(false));
       let shutdown_notify = Arc::new(sync::Notify::new());
 
-      let all_joined = check_worker_threads(
+      let all_joined = check_server_threads(
         &mut handles,
         &mut joined_indices,
         &mut exit_reasons,
@@ -688,7 +741,7 @@ mod tests {
   }
 
   #[test]
-  fn test_check_worker_threads_panic() {
+  fn test_check_server_threads_panic() {
     let rt = runtime::Builder::new_current_thread()
       .enable_all()
       .build()
@@ -707,7 +760,7 @@ mod tests {
       let shutdown_triggered = Arc::new(AtomicBool::new(false));
       let shutdown_notify = Arc::new(sync::Notify::new());
 
-      let all_joined = check_worker_threads(
+      let all_joined = check_server_threads(
         &mut handles,
         &mut joined_indices,
         &mut exit_reasons,
@@ -723,7 +776,7 @@ mod tests {
   }
 
   #[test]
-  fn test_check_worker_threads_multiple_threads() {
+  fn test_check_server_threads_multiple_threads() {
     let rt = runtime::Builder::new_current_thread()
       .enable_all()
       .build()
@@ -744,7 +797,7 @@ mod tests {
       let shutdown_triggered = Arc::new(AtomicBool::new(false));
       let shutdown_notify = Arc::new(sync::Notify::new());
 
-      let all_joined = check_worker_threads(
+      let all_joined = check_server_threads(
         &mut handles,
         &mut joined_indices,
         &mut exit_reasons,
@@ -762,7 +815,7 @@ mod tests {
   }
 
   #[test]
-  fn test_check_worker_threads_already_triggered_shutdown() {
+  fn test_check_server_threads_already_triggered_shutdown() {
     let rt = runtime::Builder::new_current_thread()
       .enable_all()
       .build()
@@ -779,7 +832,7 @@ mod tests {
       let shutdown_triggered = Arc::new(AtomicBool::new(true));
       let shutdown_notify = Arc::new(sync::Notify::new());
 
-      let all_joined = check_worker_threads(
+      let all_joined = check_server_threads(
         &mut handles,
         &mut joined_indices,
         &mut exit_reasons,
@@ -789,13 +842,14 @@ mod tests {
 
       assert!(all_joined);
       assert!(shutdown_triggered.load(Ordering::SeqCst));
-      // Should still record the reason even when shutdown already triggered
+      // Should still record the reason even when shutdown already
+      // triggered
       assert_eq!(exit_reasons, vec![ExitReason::Error]);
     });
   }
 
   #[test]
-  fn test_check_worker_threads_already_joined_thread() {
+  fn test_check_server_threads_already_joined_thread() {
     let rt = runtime::Builder::new_current_thread()
       .enable_all()
       .build()
@@ -813,7 +867,7 @@ mod tests {
       let shutdown_triggered = Arc::new(AtomicBool::new(false));
       let shutdown_notify = Arc::new(sync::Notify::new());
 
-      let all_joined = check_worker_threads(
+      let all_joined = check_server_threads(
         &mut handles,
         &mut joined_indices,
         &mut exit_reasons,
@@ -831,7 +885,7 @@ mod tests {
   // ============== main_loop_with_signal Tests ==============
 
   #[test]
-  fn test_main_loop_no_worker_threads() {
+  fn test_main_loop_no_server_threads() {
     let rt = runtime::Builder::new_current_thread()
       .enable_all()
       .build()
@@ -855,7 +909,7 @@ mod tests {
       )
       .await;
 
-      // Should return 0 for no worker threads scenario
+      // Should return 0 for no server threads scenario
       assert_eq!(exit_code, 0);
     });
   }
@@ -1204,15 +1258,16 @@ mod tests {
 
   // ============== LogWriterConfig Tests ==============
 
-  /// Test that LogWriterConfig defaults to buffered_lines_limit(1) to fix
-  /// the runtime log delay issue. Without this, logs are buffered and
-  /// written with delay.
+  /// Test that LogWriterConfig defaults to buffered_lines_limit(1) to
+  /// fix the runtime log delay issue. Without this, logs are buffered
+  /// and written with delay.
   #[test]
   fn test_log_writer_config_buffered_lines_limit_defaults_to_1() {
     let config = LogWriterConfig::default();
     assert_eq!(
       config.buffered_lines_limit, 1,
-      "buffered_lines_limit should be 1 to ensure logs are written immediately"
+      "buffered_lines_limit should be 1 to ensure logs are written \
+       immediately"
     );
   }
 
@@ -1244,10 +1299,11 @@ mod tests {
   }
 
   /// Test that duplicate signals during graceful shutdown are ignored.
-  /// This verifies the requirement: "优雅关闭过程中收到多次信号，应忽略重复信号"
-  /// The behavior is:
+  /// This verifies the requirement:
+  /// "优雅关闭过程中收到多次信号，应忽略重复信号" The behavior is:
   /// 1. First signal triggers shutdown
-  /// 2. Subsequent signals are ignored (shutdown_triggered is already true)
+  /// 2. Subsequent signals are ignored (shutdown_triggered is already
+  ///    true)
   #[test]
   fn test_main_loop_duplicate_signal_ignored() {
     let rt = runtime::Builder::new_current_thread()
@@ -1318,7 +1374,8 @@ mod tests {
     let shutdown_triggered = Arc::new(AtomicBool::new(false));
     let shutdown_notify = Arc::new(sync::Notify::new());
 
-    // First call should return false (was not triggered) and set to true
+    // First call should return false (was not triggered) and set to
+    // true
     let was_triggered = shutdown_triggered.swap(true, Ordering::SeqCst);
     assert!(!was_triggered);
 
@@ -1330,7 +1387,8 @@ mod tests {
       shutdown_triggered.swap(true, Ordering::SeqCst);
     assert!(was_triggered_second);
 
-    // Should not call notify_waiters again because was_triggered_second is true
+    // Should not call notify_waiters again because was_triggered_second
+    // is true
   }
 
   /// Test that signal received after thread error is ignored.
@@ -1376,8 +1434,8 @@ mod tests {
         running_clone.store(false, Ordering::SeqCst);
       });
 
-      // Create a signal future that completes after error thread finishes
-      // but before long thread finishes
+      // Create a signal future that completes after error thread
+      // finishes but before long thread finishes
       let signal_future = Box::pin(async {
         // Wait for error thread to be processed (100ms check interval)
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1400,7 +1458,8 @@ mod tests {
   }
 
   /// Test that signal received after thread panic is ignored.
-  /// Similar to test_main_loop_signal_after_thread_error_ignored but with panic.
+  /// Similar to test_main_loop_signal_after_thread_error_ignored but
+  /// with panic.
   #[test]
   fn test_main_loop_signal_after_thread_panic_ignored() {
     let rt = runtime::Builder::new_current_thread()
@@ -1441,8 +1500,8 @@ mod tests {
         running_clone.store(false, Ordering::SeqCst);
       });
 
-      // Create a signal future that completes after panic thread finishes
-      // but before long thread finishes
+      // Create a signal future that completes after panic thread
+      // finishes but before long thread finishes
       let signal_future = Box::pin(async {
         // Wait for panic thread to be processed (100ms check interval)
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1462,5 +1521,69 @@ mod tests {
       // 2. shutdown_triggered is true
       assert!(shutdown_triggered.load(Ordering::SeqCst));
     });
+  }
+
+  // ============== main_tests (PR-041 fix) ==============
+
+  #[test]
+  fn test_plugin_manager_lifecycle() {
+    use crate::plugins::PluginManager;
+
+    let pm = PluginManager::new();
+
+    // Verify plugins are installed by checking
+    // build_service/build_layer errors mention specific plugin
+    // names (not "plugin 'X' not found")
+    let result =
+      pm.build_service("echo", "echo", serde_yaml::Value::Null);
+    // echo plugin should be found (even if args are wrong, plugin
+    // exists) The error should NOT be "plugin 'echo' not found"
+    if let Err(e) = &result {
+      assert!(
+        !e.to_string().contains("plugin 'echo' not found"),
+        "echo plugin should be installed: {}",
+        e
+      );
+    }
+
+    // Verify nonexistent plugin returns proper error
+    let result = pm.build_service(
+      "nonexistent_plugin",
+      "svc",
+      serde_yaml::Value::Null,
+    );
+    assert!(result.is_err());
+    assert!(
+      result
+        .unwrap_err()
+        .to_string()
+        .contains("plugin 'nonexistent_plugin' not found")
+    );
+  }
+
+  #[test]
+  fn test_build_listeners_integration() {
+    use crate::plugins::PluginManager;
+
+    let pm = PluginManager::new();
+
+    // Build listeners with empty config should succeed
+    let config = Config::default();
+    let listener_manager = ListenerManager::new();
+    let result =
+      assembly::build_listeners(&pm, &config, &listener_manager);
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_empty());
+  }
+
+  #[test]
+  fn test_run_server_thread_compiles() {
+    // Verify that run_server_thread can be called with the expected
+    // types This is a compile-only test that actually references
+    // the function
+    let _: fn(
+      std::sync::Arc<tokio::sync::Notify>,
+      usize,
+    ) -> Result<()> = run_server_thread;
   }
 }

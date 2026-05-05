@@ -1,6 +1,7 @@
 //! Runtime service types.
 //!
-//! This module provides types for building and managing request handlers:
+//! This module provides types for building and managing request
+//! handlers:
 //! - `Service` - A wrapper type for any tower::Service implementation
 //! - `BuildService` - Factory trait for creating services
 
@@ -104,3 +105,74 @@ pub trait BuildService: Fn(SerializedArgs) -> Result<Service> {}
 
 impl<F> BuildService for F where F: Fn(SerializedArgs) -> Result<Service>
 {}
+
+/// A layer that wraps a Service to produce another Service.
+pub struct Layer(
+  Box<dyn tower::Layer<Service, Service = Service> + 'static>,
+);
+
+impl Layer {
+  pub fn new<L>(layer: L) -> Self
+  where
+    L: tower::Layer<Service, Service = Service> + 'static,
+  {
+    Self(Box::new(layer))
+  }
+
+  pub fn layer(&self, inner: Service) -> Service {
+    self.0.layer(inner)
+  }
+}
+
+/// Factory trait for building layers.
+pub trait BuildLayer: Fn(SerializedArgs) -> Result<Layer> {}
+impl<F> BuildLayer for F where F: Fn(SerializedArgs) -> Result<Layer> {}
+
+#[cfg(test)]
+mod layer_tests {
+  use super::*;
+
+  #[derive(Clone)]
+  struct TestMiddleware {
+    inner: Service,
+  }
+
+  impl tower::Service<Request> for TestMiddleware {
+    type Error = anyhow::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Response>>>>;
+    type Response = Response;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+      self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: Request) -> Self::Future {
+      self.inner.call(req)
+    }
+  }
+
+  struct TestLayer;
+
+  impl tower::Layer<Service> for TestLayer {
+    type Service = Service;
+
+    fn layer(&self, inner: Service) -> Self::Service {
+      Service::new(TestMiddleware { inner })
+    }
+  }
+
+  #[test]
+  fn test_layer_new() {
+    let layer = Layer::new(TestLayer);
+    // Just verify it can be created
+    let _ = layer;
+  }
+
+  #[test]
+  fn test_layer_wraps_service() {
+    let inner = crate::server::placeholder_service();
+    let layer = Layer::new(TestLayer);
+    let _wrapped = layer.layer(inner);
+    // Wrapped service is created successfully
+  }
+}

@@ -1,13 +1,15 @@
 //! Virtual host routing implementation.
 //!
-//! This module provides hostname-based routing for HTTP/HTTPS/HTTP3 listeners.
-//! Routing priority: exact match > wildcard match > default server.
+//! This module provides hostname-based routing for HTTP/HTTPS/HTTP3
+//! listeners. Routing priority: exact match > wildcard match > default
+//! server.
 
 /// Check if a hostname matches a pattern.
 ///
 /// Pattern can be:
 /// - Exact match: "api.example.com" matches exactly "api.example.com"
-/// - Wildcard match: "*.example.com" matches "foo.example.com" but not "example.com"
+/// - Wildcard match: "*.example.com" matches "foo.example.com" but not
+///   "example.com"
 ///
 /// DNS matching is case-insensitive.
 pub fn matches_hostname(pattern: &str, hostname: &str) -> bool {
@@ -22,7 +24,8 @@ pub fn matches_hostname(pattern: &str, hostname: &str) -> bool {
 
   // Wildcard match
   if let Some(suffix) = pattern_lower.strip_prefix("*.") {
-    // hostname must end with .suffix and have exactly one additional level
+    // hostname must end with .suffix and have exactly one additional
+    // level
     if let Some(rest) =
       hostname_lower.strip_suffix(&format!(".{}", suffix))
     {

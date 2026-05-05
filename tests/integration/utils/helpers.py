@@ -5,6 +5,7 @@ This module provides reusable helper functions for integration testing
 neoproxy server behavior.
 """
 
+import os
 import subprocess
 import socket
 import threading
@@ -71,7 +72,7 @@ MAX_SHUTDOWN_TIME = LISTENER_SHUTDOWN_TIMEOUT + SERVICE_SHUTDOWN_TIMEOUT
 def create_test_config(
     proxy_port: int,
     temp_dir: str,
-    worker_threads: int = 1
+    server_threads: int = 1
 ) -> str:
     """
     Create test configuration file for CONNECT TCP service.
@@ -79,13 +80,17 @@ def create_test_config(
     Args:
         proxy_port: Port for the proxy server
         temp_dir: Temporary directory for logs
-        worker_threads: Number of worker threads
+        server_threads: Number of server threads
 
     Returns:
         str: Path to the configuration file
     """
-    config_content = f"""worker_threads: {worker_threads}
-log_directory: "{temp_dir}/logs"
+    config_content = f"""server_threads: {server_threads}
+
+listeners:
+- name: http_main
+  kind: http
+  addresses: ["0.0.0.0:{proxy_port}"]
 
 services:
 - name: connect_tcp
@@ -93,9 +98,8 @@ services:
 
 servers:
 - name: http_connect
-  listeners:
-  - kind: http
-    addresses: [ "0.0.0.0:{proxy_port}" ]
+  hostnames: []
+  listeners: ["http_main"]
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "test_config.yaml")
@@ -107,7 +111,7 @@ servers:
 def create_echo_config(
     proxy_port: int,
     temp_dir: str,
-    worker_threads: int = 1
+    server_threads: int = 1
 ) -> str:
     """
     Create echo service configuration file.
@@ -115,13 +119,17 @@ def create_echo_config(
     Args:
         proxy_port: Port for the proxy server
         temp_dir: Temporary directory for logs
-        worker_threads: Number of worker threads
+        server_threads: Number of server threads
 
     Returns:
         str: Path to the configuration file
     """
-    config_content = f"""worker_threads: {worker_threads}
-log_directory: "{temp_dir}/logs"
+    config_content = f"""server_threads: {server_threads}
+
+listeners:
+- name: http_main
+  kind: http
+  addresses: ["0.0.0.0:{proxy_port}"]
 
 services:
 - name: echo
@@ -129,9 +137,8 @@ services:
 
 servers:
 - name: echo_server
-  listeners:
-  - kind: http
-    addresses: [ "0.0.0.0:{proxy_port}" ]
+  hostnames: []
+  listeners: ["http_main"]
   service: echo
 """
     config_path = os.path.join(temp_dir, "echo_config.yaml")
@@ -150,7 +157,7 @@ def create_invalid_config(temp_dir: str) -> str:
     Returns:
         str: Path to the invalid configuration file
     """
-    config_content = "worker_threads: [\n  invalid yaml\n"
+    config_content = "server_threads: [\n  invalid yaml\n"
     config_path = os.path.join(temp_dir, "invalid.yaml")
     with open(config_path, "w") as f:
         f.write(config_content)
@@ -172,11 +179,13 @@ def start_proxy(config_path: str) -> subprocess.Popen:
     Returns:
         subprocess.Popen: Proxy server process
     """
+    binary = os.path.abspath(NEOPROXY_BINARY)
     proc = subprocess.Popen(
-        [NEOPROXY_BINARY, "--config", config_path],
+        [binary, "--config", config_path],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=False
+        text=False,
+        cwd=os.path.dirname(config_path),
     )
     return proc
 
@@ -572,6 +581,115 @@ def http_echo_handler(conn: socket.socket) -> None:
         pass
     finally:
         conn.close()
+
+
+# ==============================================================================
+# Curl Helpers
+# ==============================================================================
+
+
+def curl_request(
+    url: str,
+    proxy_port: int,
+    headers: dict[str, str] | None = None,
+    timeout: int = 5,
+) -> int:
+    """Make an HTTP request through the proxy using curl.
+
+    Args:
+        url: Target URL to request.
+        proxy_port: Port the proxy is listening on.
+        headers: Optional HTTP headers to include.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        HTTP status code (int). Returns 0 on parse failure.
+    """
+    cmd = [
+        "curl", "-s", "-o", "/dev/null",
+        "-w", "%{http_code}",
+        "-x", f"http://127.0.0.1:{proxy_port}",
+        "--connect-timeout", str(timeout),
+        "--max-time", str(timeout),
+    ]
+
+    if headers:
+        for key, value in headers.items():
+            cmd.extend(["-H", f"{key}: {value}"])
+
+    cmd.append(url)
+
+    env = get_curl_env_without_no_proxy()
+
+    result = subprocess.run(
+        cmd, capture_output=True, text=True,
+        timeout=timeout + 2, env=env,
+    )
+    status_code = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
+    return status_code
+
+
+def curl_request_with_headers(
+    url: str,
+    proxy_port: int,
+    headers: dict[str, str] | None = None,
+    timeout: int = 5,
+) -> tuple[int, dict[str, str], str]:
+    """Make an HTTP request through the proxy using curl, capturing response headers.
+
+    Args:
+        url: Target URL to request.
+        proxy_port: Port the proxy is listening on.
+        headers: Optional HTTP headers to include.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        Tuple of (status_code, response_headers_dict, body).
+    """
+    cmd = [
+        "curl", "-s", "-D", "-",
+        "-x", f"http://127.0.0.1:{proxy_port}",
+        "--connect-timeout", str(timeout),
+        "--max-time", str(timeout),
+    ]
+
+    if headers:
+        for key, value in headers.items():
+            cmd.extend(["-H", f"{key}: {value}"])
+
+    cmd.append(url)
+
+    env = get_curl_env_without_no_proxy()
+
+    result = subprocess.run(
+        cmd, capture_output=True, text=True,
+        timeout=timeout + 2, env=env,
+    )
+    output = result.stdout
+
+    # Parse status line and headers
+    lines = output.split('\n')
+    status_code = 0
+    response_headers: dict[str, str] = {}
+    body_start = len(lines)
+
+    for i, line in enumerate(lines):
+        if line.startswith('HTTP/'):
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    status_code = int(parts[1])
+                except ValueError:
+                    pass
+        elif ':' in line and line.strip():
+            key, _, value = line.partition(':')
+            response_headers[key.strip().lower()] = value.strip()
+        elif line.strip() == '':
+            body_start = i + 1
+            break
+
+    body = '\n'.join(lines[body_start:]) if body_start < len(lines) else ''
+    return status_code, response_headers, body
 
 
 # ==============================================================================

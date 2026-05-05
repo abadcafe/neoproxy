@@ -65,7 +65,7 @@ def create_http3_listener_config_with_password_auth(
     temp_dir: str,
     users: List[Tuple[str, str]],
     quic_config: Optional[str] = None,
-    worker_threads: int = 1
+    server_threads: int = 1
 ) -> str:
     """
     Create HTTP/3 Listener configuration with password authentication.
@@ -79,31 +79,40 @@ def create_http3_listener_config_with_password_auth(
         temp_dir: Temporary directory for logs
         users: List of (username, plaintext_password) tuples
         quic_config: Optional QUIC config YAML string
-        worker_threads: Number of worker threads
+        server_threads: Number of worker threads
 
     Returns:
         str: Path to the configuration file
     """
     user_lines = []
     for username, password in users:
-        user_lines.append(f'      - username: "{username}"')
-        user_lines.append(f'        password: "{password}"')
+        user_lines.append(f'        - username: "{username}"')
+        user_lines.append(f'          password: "{password}"')
 
     users_section = "\n".join(user_lines)
 
-    quic_section = ""
+    listener_args_section = ""
     if quic_config:
-        quic_section = f"""
-    args:
-      quic:
+        listener_args_section = f"""
+  args:
+    quic:
 {quic_config}"""
 
-    config_content = f"""worker_threads: {worker_threads}
-log_directory: "{temp_dir}/logs"
+    config_content = f"""server_threads: {server_threads}
 
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
+  layers:
+    - kind: auth.basic_auth
+      args:
+        users:
+{users_section}
+
+listeners:
+- name: h3_main
+  kind: http3
+  addresses: ["0.0.0.0:{proxy_port}"]{listener_args_section}
 
 servers:
 - name: http3_server
@@ -111,11 +120,7 @@ servers:
     certificates:
     - cert_path: "{cert_path}"
       key_path: "{key_path}"
-  users:
-{users_section}
-  listeners:
-  - kind: http3
-    addresses: ["0.0.0.0:{proxy_port}"]{quic_section}
+  listeners: ["h3_main"]
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "http3_auth_config.yaml")
@@ -131,7 +136,7 @@ def create_http3_listener_config_with_tls_client_cert(
     client_ca_path: str,
     temp_dir: str,
     quic_config: Optional[str] = None,
-    worker_threads: int = 1
+    server_threads: int = 1
 ) -> str:
     """
     Create HTTP/3 Listener configuration with TLS client certificate auth.
@@ -145,24 +150,28 @@ def create_http3_listener_config_with_tls_client_cert(
         client_ca_path: Client CA certificate path
         temp_dir: Temporary directory for logs
         quic_config: Optional QUIC config YAML string
-        worker_threads: Number of worker threads
+        server_threads: Number of worker threads
 
     Returns:
         str: Path to the configuration file
     """
-    quic_section = ""
+    listener_args_section = ""
     if quic_config:
-        quic_section = f"""
-    args:
-      quic:
+        listener_args_section = f"""
+  args:
+    quic:
 {quic_config}"""
 
-    config_content = f"""worker_threads: {worker_threads}
-log_directory: "{temp_dir}/logs"
+    config_content = f"""server_threads: {server_threads}
 
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
+
+listeners:
+- name: h3_main
+  kind: http3
+  addresses: ["0.0.0.0:{proxy_port}"]{listener_args_section}
 
 servers:
 - name: http3_server
@@ -172,9 +181,7 @@ servers:
       key_path: "{key_path}"
     client_ca_certs:
     - "{client_ca_path}"
-  listeners:
-  - kind: http3
-    addresses: ["0.0.0.0:{proxy_port}"]{quic_section}
+  listeners: ["h3_main"]
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "http3_tls_auth_config.yaml")
@@ -191,7 +198,7 @@ def create_http3_listener_config_with_mtls_and_password(
     temp_dir: str,
     users: List[Tuple[str, str]],
     quic_config: Optional[str] = None,
-    worker_threads: int = 1
+    server_threads: int = 1
 ) -> str:
     """
     Create HTTP/3 Listener configuration with BOTH TLS client cert AND password auth.
@@ -210,31 +217,40 @@ def create_http3_listener_config_with_mtls_and_password(
         temp_dir: Temporary directory for logs
         users: List of (username, plaintext_password) tuples for password auth
         quic_config: Optional QUIC config YAML string
-        worker_threads: Number of worker threads
+        server_threads: Number of worker threads
 
     Returns:
         str: Path to the configuration file
     """
     user_lines = []
     for username, password in users:
-        user_lines.append(f'      - username: "{username}"')
-        user_lines.append(f'        password: "{password}"')
+        user_lines.append(f'        - username: "{username}"')
+        user_lines.append(f'          password: "{password}"')
 
     users_section = "\n".join(user_lines)
 
-    quic_section = ""
+    listener_args_section = ""
     if quic_config:
-        quic_section = f"""
-    args:
-      quic:
+        listener_args_section = f"""
+  args:
+    quic:
 {quic_config}"""
 
-    config_content = f"""worker_threads: {worker_threads}
-log_directory: "{temp_dir}/logs"
+    config_content = f"""server_threads: {server_threads}
 
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
+  layers:
+    - kind: auth.basic_auth
+      args:
+        users:
+{users_section}
+
+listeners:
+- name: h3_main
+  kind: http3
+  addresses: ["0.0.0.0:{proxy_port}"]{listener_args_section}
 
 servers:
 - name: http3_server
@@ -244,11 +260,7 @@ servers:
       key_path: "{key_path}"
     client_ca_certs:
     - "{client_ca_path}"
-  users:
-{users_section}
-  listeners:
-  - kind: http3
-    addresses: ["0.0.0.0:{proxy_port}"]{quic_section}
+  listeners: ["h3_main"]
   service: connect_tcp
 """
     config_path = os.path.join(temp_dir, "http3_mtls_password_auth_config.yaml")
@@ -474,62 +486,6 @@ class TestHTTP3PasswordAuth:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_password_auth_empty_credentials_rejected(self, shared_test_certs) -> None:
-        """
-        TC-H3-AUTH-005: Password auth - empty credentials cause startup failure.
-
-        Target: Verify HTTP/3 listener fails to start with empty credentials list.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-
-        try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-
-            # NEW config format: server-level TLS with empty users
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
-
-services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
-
-servers:
-- name: http3_server
-  tls:
-    certificates:
-    - cert_path: "{cert_path}"
-      key_path: "{key_path}"
-  users: []
-  listeners:
-  - kind: http3
-    addresses: ["0.0.0.0:{proxy_port}"]
-  service: connect_tcp
-"""
-            config_path = os.path.join(temp_dir, "empty_creds.yaml")
-            with open(config_path, "w") as f:
-                f.write(config_content)
-
-            proc = subprocess.Popen(
-                [NEOPROXY_BINARY, "--config", config_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=False
-            )
-
-            try:
-                return_code = proc.wait(timeout=5)
-                assert return_code != 0, \
-                    f"Expected non-zero exit code for empty credentials, got {return_code}"
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-                raise AssertionError("Process should have exited with error for empty credentials")
-
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
 
 # ==============================================================================
 # Test cases - 7.3 TLS Client Certificate Authentication scenarios
@@ -590,13 +546,17 @@ class TestHTTP3TLSClientCertAuth:
             cert_path = shared_test_certs['cert_path']
             key_path = shared_test_certs['key_path']
 
-            # NEW config format: server-level TLS with non-existent client_ca_certs
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            # NEW config format: top-level listener with server-level TLS with non-existent client_ca_certs
+            config_content = f"""server_threads: 1
 
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
+
+listeners:
+- name: h3_main
+  kind: http3
+  addresses: ["0.0.0.0:{proxy_port}"]
 
 servers:
 - name: http3_server
@@ -606,9 +566,7 @@ servers:
       key_path: "{key_path}"
     client_ca_certs:
     - "/nonexistent/ca.pem"
-  listeners:
-  - kind: http3
-    addresses: ["0.0.0.0:{proxy_port}"]
+  listeners: ["h3_main"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "missing_ca.yaml")
@@ -1296,63 +1254,6 @@ class TestHTTP3DualAuth:
 class TestHTTP3AuthConfigValidation:
     """Test 7.7: HTTP/3 authentication configuration validation scenarios."""
 
-    def test_password_auth_missing_credentials_rejected(self, shared_test_certs) -> None:
-        """
-        TC-H3-AUTH-CFG-002: Password auth without credentials causes failure.
-
-        Target: Verify HTTP/3 listener fails when users is specified
-        but credentials list is empty
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-
-        try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-
-            # NEW config format: server-level users with empty list
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
-
-services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
-
-servers:
-- name: http3_server
-  tls:
-    certificates:
-    - cert_path: "{cert_path}"
-      key_path: "{key_path}"
-  users: []
-  listeners:
-  - kind: http3
-    addresses: ["0.0.0.0:{proxy_port}"]
-  service: connect_tcp
-"""
-            config_path = os.path.join(temp_dir, "missing_creds.yaml")
-            with open(config_path, "w") as f:
-                f.write(config_content)
-
-            proc = subprocess.Popen(
-                [NEOPROXY_BINARY, "--config", config_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=False
-            )
-
-            try:
-                return_code = proc.wait(timeout=5)
-                assert return_code != 0, \
-                    f"Expected non-zero exit code for missing credentials, got {return_code}"
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-                raise AssertionError("Process should have exited with error for missing credentials")
-
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
     def test_tls_client_cert_missing_ca_path_rejected(self, shared_test_certs) -> None:
         """
         TC-H3-AUTH-CFG-003: TLS client cert auth without CA path causes failure.
@@ -1367,13 +1268,17 @@ servers:
             cert_path = shared_test_certs['cert_path']
             key_path = shared_test_certs['key_path']
 
-            # NEW config format: server-level TLS with non-existent client_ca_certs
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            # NEW config format: top-level listener with server-level TLS with non-existent client_ca_certs
+            config_content = f"""server_threads: 1
 
 services:
 - name: connect_tcp
   kind: connect_tcp.connect_tcp
+
+listeners:
+- name: h3_main
+  kind: http3
+  addresses: ["0.0.0.0:{proxy_port}"]
 
 servers:
 - name: http3_server
@@ -1383,9 +1288,7 @@ servers:
       key_path: "{key_path}"
     client_ca_certs:
     - "/nonexistent/ca.pem"
-  listeners:
-  - kind: http3
-    addresses: ["0.0.0.0:{proxy_port}"]
+  listeners: ["h3_main"]
   service: connect_tcp
 """
             config_path = os.path.join(temp_dir, "missing_ca_path.yaml")

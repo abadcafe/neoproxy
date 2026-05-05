@@ -9,7 +9,8 @@ use tower::service_fn;
 use crate::service::Service;
 
 /// Create a placeholder service for routing table initialization.
-/// The actual service is selected at request time from the routing table.
+/// The actual service is selected at request time from the routing
+/// table.
 pub fn placeholder_service() -> Service {
   Service::new(service_fn(|_req| {
     Box::pin(async {
@@ -31,12 +32,8 @@ pub struct Server {
   pub service: Service,
   /// Service name for logging
   pub service_name: String,
-  /// Server-level authentication
-  pub users: Option<Vec<crate::config::UserConfig>>,
   /// Server-level TLS config (for https/http3)
   pub tls: Option<crate::config::ServerTlsConfig>,
-  /// Access log writer for this server
-  pub access_log_writer: Option<crate::access_log::AccessLogWriter>,
 }
 
 impl Server {
@@ -68,8 +65,8 @@ impl ServerRouter {
 
   /// Route a request to the appropriate server based on hostname.
   ///
-  /// Priority: exact match > wildcard match > default server (no hostnames).
-  /// Returns `None` if no match is found.
+  /// Priority: exact match > wildcard match > default server (no
+  /// hostnames). Returns `None` if no match is found.
   pub fn route(&self, hostname: Option<&str>) -> Option<Rc<Server>> {
     match hostname {
       Some(h) => {
@@ -118,17 +115,13 @@ mod shared_address_tests {
         hostnames: vec![],
         service: crate::server::placeholder_service(),
         service_name: "default_service".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
       Server {
         hostnames: vec!["api.example.com".to_string()],
         service: crate::server::placeholder_service(),
         service_name: "api_service".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
     ];
 
@@ -149,9 +142,7 @@ mod shared_address_tests {
       hostnames: vec![],
       service: placeholder_service(),
       service_name: "test".to_string(),
-      users: None,
       tls: None,
-      access_log_writer: None,
     };
     assert_eq!(entry.service_name, "test");
   }
@@ -159,8 +150,9 @@ mod shared_address_tests {
 
 #[cfg(test)]
 mod server_router_tests {
-  use super::*;
   use std::rc::Rc;
+
+  use super::*;
 
   // CR-006: build() returns Self directly, not Result
   #[test]
@@ -169,9 +161,7 @@ mod server_router_tests {
       hostnames: vec![],
       service: placeholder_service(),
       service_name: "default".to_string(),
-      users: None,
       tls: None,
-      access_log_writer: None,
     }];
     let router = ServerRouter::build(servers);
     let result: Option<Rc<Server>> = router.route(None);
@@ -186,17 +176,13 @@ mod server_router_tests {
         hostnames: vec![],
         service: placeholder_service(),
         service_name: "default".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
       Server {
         hostnames: vec!["api.example.com".to_string()],
         service: placeholder_service(),
         service_name: "api".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
     ];
     let router = ServerRouter::build(servers);
@@ -212,9 +198,7 @@ mod server_router_tests {
       hostnames: vec![],
       service: placeholder_service(),
       service_name: "default".to_string(),
-      users: None,
       tls: None,
-      access_log_writer: None,
     }];
     let router = ServerRouter::build(servers);
     let result: Option<Rc<Server>> =
@@ -229,9 +213,7 @@ mod server_router_tests {
       hostnames: vec!["api.example.com".to_string()],
       service: placeholder_service(),
       service_name: "api".to_string(),
-      users: None,
       tls: None,
-      access_log_writer: None,
     }];
     let router = ServerRouter::build(servers);
     let result: Option<Rc<Server>> =
@@ -245,9 +227,7 @@ mod server_router_tests {
       hostnames: vec!["*.example.com".to_string()],
       service: placeholder_service(),
       service_name: "wildcard".to_string(),
-      users: None,
       tls: None,
-      access_log_writer: None,
     }];
     let router = ServerRouter::build(servers);
     let result: Option<Rc<Server>> =
@@ -264,17 +244,13 @@ mod server_router_tests {
         hostnames: vec![],
         service: placeholder_service(),
         service_name: "default".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
       Server {
         hostnames: vec!["api.example.com".to_string()],
         service: placeholder_service(),
         service_name: "api".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
     ];
     let router = ServerRouter::build(servers);
@@ -291,17 +267,13 @@ mod server_router_tests {
         hostnames: vec!["*.example.com".to_string()],
         service: placeholder_service(),
         service_name: "wildcard".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
       Server {
         hostnames: vec!["api.example.com".to_string()],
         service: placeholder_service(),
         service_name: "api".to_string(),
-        users: None,
         tls: None,
-        access_log_writer: None,
       },
     ];
     let router = ServerRouter::build(servers);
@@ -326,9 +298,7 @@ mod server_router_tests {
       hostnames: vec!["api.example.com".to_string()],
       service: placeholder_service(),
       service_name: "api".to_string(),
-      users: None,
       tls: None,
-      access_log_writer: None,
     }];
     let router = ServerRouter::build(servers);
     let result: Option<Rc<Server>> = router.route(None);
@@ -338,9 +308,11 @@ mod server_router_tests {
 
 #[cfg(test)]
 mod placeholder_service_tests {
-  use super::*;
   use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
   use tower::Service;
+
+  use super::*;
 
   // Create a no-op waker
   fn no_op_clone(_: *const ()) -> RawWaker {

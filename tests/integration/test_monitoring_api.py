@@ -609,8 +609,7 @@ class TestErrorMonitoring:
 
         try:
             # Create invalid config
-            config_content = f"""worker_threads: 1
-log_directory: "{temp_dir}/logs"
+            config_content = f"""server_threads: 1
 
 services:
 - name: test
@@ -626,10 +625,11 @@ servers:
                 f.write(config_content)
 
             proc = subprocess.Popen(
-                [NEOPROXY_BINARY, "--config", config_path],
+                [os.path.abspath(NEOPROXY_BINARY), "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=False
+                text=False,
+                cwd=temp_dir,
             )
 
             return_code = proc.wait(timeout=10)
@@ -637,9 +637,16 @@ servers:
             # Should fail with error
             assert return_code != 0, "Should fail with invalid config"
 
-            # Verify error is in stderr
-            stderr = proc.stderr.read().decode('utf-8', errors='ignore')
-            assert len(stderr) > 0, "Error should be logged to stderr"
+            # Error is logged via tracing to log files, not stderr.
+            log_dir = os.path.join(temp_dir, "logs")
+            log_content = ""
+            if os.path.isdir(log_dir):
+                for log_file in os.listdir(log_dir):
+                    log_path = os.path.join(log_dir, log_file)
+                    if os.path.isfile(log_path):
+                        with open(log_path, 'r', errors='ignore') as f:
+                            log_content += f.read()
+            assert len(log_content) > 0, "Error should be in log files"
 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)

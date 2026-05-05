@@ -4,12 +4,16 @@
 //! to avoid code duplication.
 
 use std::future::Future;
-use std::net::SocketAddr;
+use std::time::Duration;
 
-use crate::auth::UserPasswordAuth;
-use crate::config::ListenerAuthConfig;
-use crate::config::UserConfig;
 use crate::http_utils::{BytesBufBodyWrapper, Response, ResponseBody};
+
+/// Listener shutdown timeout in seconds.
+/// This is the timeout for Phase 1 of graceful shutdown.
+pub const LISTENER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Monitoring log interval in seconds.
+pub const MONITORING_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Executor for spawning tasks on the current tokio LocalSet.
 #[derive(Clone)]
@@ -22,86 +26,6 @@ where
   fn execute(&self, fut: F) {
     tokio::task::spawn_local(fut);
   }
-}
-
-/// Record an HTTP access log entry.
-///
-/// This function creates an `AccessLogEntry` from the provided parameters
-/// and writes it to the access log writer. It is used by all HTTP-based
-/// listeners (HTTP, HTTPS, HTTP/3) to ensure consistent logging format.
-///
-/// # Arguments
-///
-/// * `writer` - The access log writer to write the entry to
-/// * `params` - The HTTP access log parameters containing all request details
-pub fn record_http_access_log(
-  writer: &crate::access_log::AccessLogWriter,
-  params: &crate::access_log::HttpAccessLogParams,
-) {
-  let entry = crate::access_log::AccessLogEntry {
-    time: time::OffsetDateTime::now_local()
-      .unwrap_or_else(|_| time::OffsetDateTime::now_utc()),
-    client_ip: params.client_addr.ip().to_string(),
-    client_port: params.client_addr.port(),
-    user: params.user.clone(),
-    auth_type: params.auth_type,
-    method: params.method.clone(),
-    target: params.target.clone(),
-    status: params.status,
-    duration_ms: params.duration.as_millis() as u64,
-    service: params.service_name.clone(),
-    service_metrics: params.service_metrics.clone(),
-  };
-  writer.write(&entry);
-}
-
-/// Record a SOCKS5 access log entry.
-///
-/// This function creates an `AccessLogEntry` from the individual parameters
-/// provided by the SOCKS5 listener and writes it to the access log writer.
-/// It accepts individual parameters rather than `HttpAccessLogParams` because
-/// SOCKS5 logging has slightly different semantics (target is a host:port
-/// string rather than a URI).
-///
-/// # Arguments
-///
-/// * `writer` - The access log writer to write the entry to
-/// * `client_addr` - The client's socket address
-/// * `user` - Optional username if authentication was used
-/// * `auth_type` - The type of authentication used
-/// * `method` - The SOCKS5 method (typically "CONNECT")
-/// * `target` - The target address (host:port)
-/// * `status` - The response status code
-/// * `duration` - The duration of the request
-/// * `service_name` - The name of the service that handled the request
-/// * `service_metrics` - Additional metrics from the service
-pub fn record_socks5_access_log(
-  writer: &crate::access_log::AccessLogWriter,
-  client_addr: SocketAddr,
-  user: Option<String>,
-  auth_type: crate::access_log::AuthType,
-  method: String,
-  target: String,
-  status: u16,
-  duration: std::time::Duration,
-  service_name: String,
-  service_metrics: crate::access_log::ServiceMetrics,
-) {
-  let entry = crate::access_log::AccessLogEntry {
-    time: time::OffsetDateTime::now_local()
-      .unwrap_or_else(|_| time::OffsetDateTime::now_utc()),
-    client_ip: client_addr.ip().to_string(),
-    client_port: client_addr.port(),
-    user,
-    auth_type,
-    method,
-    target,
-    status,
-    duration_ms: duration.as_millis() as u64,
-    service: service_name,
-    service_metrics,
-  };
-  writer.write(&entry);
 }
 
 /// Check HTTP version and return error if version is not supported.
@@ -197,23 +121,6 @@ pub fn build_421_misdirected_response() -> Response {
   resp
 }
 
-/// Build a 407 Proxy Authentication Required response.
-///
-/// This response is sent when a request requires proxy authentication.
-/// It includes a `Proxy-Authenticate` header with `Basic realm="proxy"`.
-pub fn build_407_response() -> Response {
-  let empty = http_body_util::Empty::new();
-  let bytes_buf = BytesBufBodyWrapper::new(empty);
-  let body = ResponseBody::new(bytes_buf);
-  let mut resp = Response::new(body);
-  *resp.status_mut() = http::StatusCode::PROXY_AUTHENTICATION_REQUIRED;
-  resp.headers_mut().insert(
-    http::header::PROXY_AUTHENTICATE,
-    http::HeaderValue::from_static("Basic realm=\"proxy\""),
-  );
-  resp
-}
-
 /// Build a 404 Not Found response.
 pub fn build_404_response() -> Response {
   let empty = http_body_util::Empty::new();
@@ -224,118 +131,9 @@ pub fn build_404_response() -> Response {
   resp
 }
 
-/// Build UserPasswordAuth from server-level users config.
-///
-/// This function creates a `UserPasswordAuth` instance from the optional
-/// users configuration. It is used by HTTP, HTTPS, and HTTP/3 listeners
-/// to ensure consistent authentication handling.
-///
-/// # Arguments
-///
-/// * `users` - Optional list of user configurations from server-level config
-///
-/// # Returns
-///
-/// A `UserPasswordAuth` instance that can be used to verify proxy authentication.
-pub fn build_user_password_auth(
-  users: &Option<Vec<UserConfig>>,
-) -> UserPasswordAuth {
-  match users {
-    Some(users) if !users.is_empty() => {
-      let config = ListenerAuthConfig {
-        users: users
-          .iter()
-          .map(|u| crate::config::UserCredential {
-            username: u.username.clone(),
-            password: u.password.clone(),
-          })
-          .collect(),
-        client_ca_path: None,
-      };
-      UserPasswordAuth::from_config(&config)
-    }
-    _ => UserPasswordAuth::none(),
-  }
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
-
-  // ============== Access Log Tests ==============
-
-  #[test]
-  fn test_record_http_access_log_writes_entry() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = crate::config::AccessLogConfig {
-      enabled: true,
-      path_prefix: "commonhtest.log".to_string(),
-      format: crate::config::LogFormat::Text,
-      buffer: byte_unit::Byte::from_u64(64),
-      flush: crate::config::HumanDuration(
-        std::time::Duration::from_millis(100),
-      ),
-      max_size: byte_unit::Byte::from_u64(1024 * 1024),
-    };
-    let writer = crate::access_log::AccessLogWriter::new(
-      dir.path().to_str().unwrap(),
-      &config,
-    );
-
-    let client_addr: std::net::SocketAddr =
-      "192.168.1.1:54321".parse().unwrap();
-    let mut metrics = crate::access_log::ServiceMetrics::new();
-    metrics.add("connect_ms", 42u64);
-
-    let params = crate::access_log::HttpAccessLogParams {
-      client_addr,
-      user: Some("testuser".to_string()),
-      auth_type: crate::access_log::AuthType::Password,
-      method: "CONNECT".to_string(),
-      target: "example.com:443".to_string(),
-      status: 200,
-      duration: std::time::Duration::from_millis(50),
-      service_name: "tunnel".to_string(),
-      service_metrics: metrics,
-    };
-
-    record_http_access_log(&writer, &params);
-
-    writer.flush();
-
-    // Verify log file was created and contains expected fields
-    let mut found = false;
-    for entry in std::fs::read_dir(dir.path()).unwrap() {
-      let entry = entry.unwrap();
-      let name = entry.file_name().to_string_lossy().to_string();
-      if name.starts_with("commonhtest.log") {
-        let content = std::fs::read_to_string(entry.path()).unwrap();
-        assert!(
-          content.contains("192.168.1.1:54321"),
-          "Should contain client addr"
-        );
-        assert!(
-          content.contains("CONNECT example.com:443"),
-          "Should contain request line"
-        );
-        assert!(content.contains("200"), "Should contain status code");
-        assert!(
-          content.contains("service=tunnel"),
-          "Should contain service name"
-        );
-        assert!(
-          content.contains("service.connect_ms=42"),
-          "Should contain service metrics"
-        );
-        assert!(
-          content.contains("auth=password"),
-          "Should contain auth type"
-        );
-        found = true;
-      }
-    }
-    assert!(found, "Access log file should exist");
-  }
 
   // ============== SNI/Host Matching Tests ==============
 
@@ -446,7 +244,8 @@ mod tests {
   fn test_build_421_response_body() {
     let resp = build_421_misdirected_response();
     let body = resp.into_body();
-    // We can't easily inspect the body without async, but we can check it exists
+    // We can't easily inspect the body without async, but we can check
+    // it exists
     let _ = body;
   }
 
@@ -518,82 +317,11 @@ mod tests {
     assert_eq!(content_type.unwrap(), "text/plain");
   }
 
-  // ============== 407 Response Tests ==============
-
-  #[test]
-  fn test_build_407_response() {
-    let resp = build_407_response();
-    assert_eq!(
-      resp.status(),
-      http::StatusCode::PROXY_AUTHENTICATION_REQUIRED
-    );
-    let auth_header =
-      resp.headers().get(http::header::PROXY_AUTHENTICATE);
-    assert!(auth_header.is_some());
-    assert_eq!(auth_header.unwrap(), "Basic realm=\"proxy\"");
-  }
-
   // ============== 404 Response Tests ==============
 
   #[test]
   fn test_build_404_response() {
     let resp = build_404_response();
     assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
-  }
-
-  // ============== build_user_password_auth Tests ==============
-
-  #[test]
-  fn test_build_user_password_auth_none() {
-    let auth = build_user_password_auth(&None);
-    let req = http::Request::builder()
-      .method("GET")
-      .uri("http://example.com")
-      .body(())
-      .unwrap();
-    assert!(auth.verify_and_extract_username(&req).is_ok());
-  }
-
-  #[test]
-  fn test_build_user_password_auth_empty_list() {
-    let auth = build_user_password_auth(&Some(vec![]));
-    let req = http::Request::builder()
-      .method("GET")
-      .uri("http://example.com")
-      .body(())
-      .unwrap();
-    assert!(auth.verify_and_extract_username(&req).is_ok());
-  }
-
-  #[test]
-  fn test_build_user_password_auth_with_users() {
-    use crate::config::UserConfig;
-
-    let users = Some(vec![UserConfig {
-      username: "admin".to_string(),
-      password: "secret".to_string(),
-    }]);
-    let auth = build_user_password_auth(&users);
-
-    // Without credentials should fail
-    let req = http::Request::builder()
-      .method("GET")
-      .uri("http://example.com")
-      .body(())
-      .unwrap();
-    assert!(auth.verify_and_extract_username(&req).is_err());
-
-    // With correct credentials should pass
-    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-    let credentials = BASE64.encode("admin:secret");
-    let req = http::Request::builder()
-      .method("GET")
-      .uri("http://example.com")
-      .header("Proxy-Authorization", format!("Basic {}", credentials))
-      .body(())
-      .unwrap();
-    let result = auth.verify_and_extract_username(&req);
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), Some("admin".to_string()));
   }
 }

@@ -7,23 +7,52 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use anyhow::Result;
-use hyper_util::rt::TokioIo;
+use serde::Deserialize;
 use tokio::{self, net};
-use tracing::{error, warn};
+use tracing::warn;
 
+use super::tunnel::{self, DEFAULT_IDLE_TIMEOUT_SECS};
 use crate::config::SerializedArgs;
 use crate::connect_utils::{self as utils, ConnectTargetError};
-use crate::http_utils::{Request, Response};
-use crate::http_utils::{build_empty_response, build_error_response};
+use crate::context::RequestContext;
+use crate::http_utils::{
+  Request, Response, build_empty_response, build_error_response,
+};
 use crate::plugin::Plugin;
 use crate::service::{BuildService, Service};
-use crate::stream::{ClientStream, H3OnUpgrade, Socks5OnUpgrade};
+use crate::stream::{H3OnUpgrade, Socks5OnUpgrade};
 use crate::tracker::StreamTracker;
+
+/// Default TCP connect timeout in seconds.
+const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
+
+#[derive(Deserialize, Default, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+struct ConnectTcpServiceArgs {
+  /// Timeout for TCP connect to target server.
+  #[serde(default = "default_connect_timeout")]
+  connect_timeout: Duration,
+  /// Idle timeout for tunnel data transfer.
+  #[serde(default = "default_idle_timeout")]
+  idle_timeout: Duration,
+}
+
+fn default_connect_timeout() -> Duration {
+  Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS)
+}
+
+fn default_idle_timeout() -> Duration {
+  Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS)
+}
 
 #[derive(Clone)]
 struct ConnectTcpService {
   /// Stream tracker (shared from Plugin)
   stream_tracker: Rc<StreamTracker>,
+  /// Timeout for TCP connect to target server
+  connect_timeout: Duration,
+  /// Idle timeout for tunnel data transfer
+  idle_timeout: Duration,
 }
 
 impl ConnectTcpService {
@@ -36,14 +65,24 @@ impl ConnectTcpService {
     sargs: SerializedArgs,
     stream_tracker: Rc<StreamTracker>,
   ) -> Result<Service> {
-    let _args: () = serde_yaml::from_value(sargs)?;
-    Ok(Service::new(Self { stream_tracker }))
+    let args: ConnectTcpServiceArgs = serde_yaml::from_value(sargs)?;
+    Ok(Service::new(Self {
+      stream_tracker,
+      connect_timeout: args.connect_timeout,
+      idle_timeout: args.idle_timeout,
+    }))
   }
 
   /// Create a ConnectTcpService directly for testing purposes.
   #[cfg(test)]
   fn new_for_test() -> Self {
-    Self { stream_tracker: Rc::new(StreamTracker::new()) }
+    Self {
+      stream_tracker: Rc::new(StreamTracker::new()),
+      connect_timeout: Duration::from_secs(
+        DEFAULT_CONNECT_TIMEOUT_SECS,
+      ),
+      idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
+    }
   }
 }
 
@@ -58,6 +97,15 @@ impl tower::Service<Request> for ConnectTcpService {
 
   fn call(&mut self, mut req: Request) -> Self::Future {
     let stream_tracker = self.stream_tracker.clone();
+    let connect_timeout = self.connect_timeout;
+    let idle_timeout = self.idle_timeout;
+
+    // Extract RequestContext from request extensions
+    let ctx = req
+      .extensions()
+      .get::<RequestContext>()
+      .cloned()
+      .expect("RequestContext should be present");
 
     // Check for SOCKS5 upgrade
     let socks5_upgrade = Socks5OnUpgrade::on(&mut req);
@@ -100,12 +148,17 @@ impl tower::Service<Request> for ConnectTcpService {
     };
 
     Box::pin(async move {
-      // Connect to target server with timing
+      // Connect to target server with timing and timeout
       let addr = format!("{host}:{port}");
       let connect_start = std::time::Instant::now();
-      let target_stream = match net::TcpStream::connect(&addr).await {
-        Ok(stream) => stream,
-        Err(e) => {
+      let connect_result = tokio::time::timeout(
+        connect_timeout,
+        net::TcpStream::connect(&addr),
+      )
+      .await;
+      let target_stream = match connect_result {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(e)) => {
           // Map IO error to HTTP status for the Listener to translate
           let status = match e.kind() {
             std::io::ErrorKind::ConnectionRefused => {
@@ -118,44 +171,39 @@ impl tower::Service<Request> for ConnectTcpService {
           };
           return Ok(build_empty_response(status));
         }
+        Err(_) => {
+          // Timeout expired
+          warn!(
+            "TCP connect to {addr} timed out after {connect_timeout:?}"
+          );
+          return Ok(build_empty_response(
+            http::StatusCode::GATEWAY_TIMEOUT,
+          ));
+        }
       };
       let connect_ms = connect_start.elapsed().as_millis() as u64;
 
-      // Build 200 response with ServiceMetrics
-      let mut resp = build_empty_response(http::StatusCode::OK);
-      let mut metrics = crate::access_log::ServiceMetrics::new();
-      metrics.add("connect_ms", connect_ms);
-      resp.extensions_mut().insert(metrics);
+      // Write metrics to RequestContext
+      ctx.insert(
+        "connect_tcp.connect_tcp.connect_ms",
+        connect_ms.to_string(),
+      );
+
+      // Build 200 response
+      let resp = build_empty_response(http::StatusCode::OK);
 
       // Get shutdown handle
       let shutdown_handle = stream_tracker.shutdown_handle();
 
       // Background task: wait for upgrade, then bidirectional transfer
       stream_tracker.register(async move {
-        // Get client stream (SOCKS5, H3, or HTTP upgrade)
-        let client_result: Result<ClientStream, String> =
-          if let Some(socks5) = socks5_upgrade {
-            match socks5.await {
-              Ok(stream) => Ok(ClientStream::Socks5(stream)),
-              Err(e) => Err(format!("SOCKS5 upgrade failed: {e}")),
-            }
-          } else if let Some(h3) = h3_upgrade {
-            match h3.await {
-              Ok(stream) => Ok(ClientStream::H3(stream)),
-              Err(e) => Err(format!("H3 upgrade failed: {e}")),
-            }
-          } else if let Some(http) = http_upgrade {
-            match http.await {
-              Ok(upgraded) => {
-                Ok(ClientStream::Http(TokioIo::new(upgraded)))
-              }
-              Err(e) => Err(format!("HTTP upgrade failed: {e}")),
-            }
-          } else {
-            Err("no upgrade available".to_string())
-          };
-
-        let mut client = match client_result {
+        let mut client = match tunnel::resolve_client_stream(
+          socks5_upgrade,
+          h3_upgrade,
+          http_upgrade,
+        )
+        .await
+        {
           Ok(c) => c,
           Err(e) => {
             warn!("tunnel to {addr} upgrade failed: {e}");
@@ -165,23 +213,14 @@ impl tower::Service<Request> for ConnectTcpService {
 
         let mut target_stream = target_stream;
 
-        // Bidirectional transfer with shutdown notification
-        let result = tokio::select! {
-          res = tokio::io::copy_bidirectional(
-            &mut client,
-            &mut target_stream
-          ) => {
-            res
-          }
-          _ = shutdown_handle.notified() => {
-            warn!("tunnel to {addr} shutdown by notification");
-            return;
-          }
-        };
-
-        if let Err(e) = result {
-          error!("tunnel to {addr} transfer error: {e}");
-        }
+        tunnel::run_tunnel(
+          &mut client,
+          &mut target_stream,
+          shutdown_handle,
+          idle_timeout,
+          &addr,
+        )
+        .await;
       });
 
       Ok(resp)
@@ -191,20 +230,6 @@ impl tower::Service<Request> for ConnectTcpService {
 
 /// Plugin-level timeout for tunnel shutdown.
 /// After this duration, remaining tunnels are forcefully aborted.
-///
-/// # Relationship with PLUGIN_UNINSTALL_TIMEOUT
-///
-/// This constant is used internally by `ConnectTcpPlugin::uninstall()`
-/// to wait for tunnels to complete gracefully. The server layer uses
-/// `PLUGIN_UNINSTALL_TIMEOUT` (also 5 seconds) to wait for all plugin
-/// uninstall futures.
-///
-/// While both values are currently 5 seconds, they serve different purposes:
-/// - `TUNNEL_SHUTDOWN_TIMEOUT`: Plugin-internal timeout for waiting on tunnels
-/// - `PLUGIN_UNINSTALL_TIMEOUT`: Server-level timeout for all plugins
-///
-/// This separation allows different plugins to have different internal
-/// shutdown strategies while the server maintains a consistent overall timeout.
 const TUNNEL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct ConnectTcpPlugin {
@@ -241,7 +266,7 @@ impl Plugin for ConnectTcpPlugin {
   /// 1. Triggers shutdown notification to all tunnels
   /// 2. Waits for tunnels to complete (up to TUNNEL_SHUTDOWN_TIMEOUT)
   /// 3. If timeout, forcefully aborts remaining tunnels
-  fn uninstall(&mut self) -> Pin<Box<dyn Future<Output = ()>>> {
+  fn uninstall(&self) -> Pin<Box<dyn Future<Output = ()>>> {
     let stream_tracker = self.stream_tracker.clone();
 
     Box::pin(async move {
@@ -258,13 +283,14 @@ impl Plugin for ConnectTcpPlugin {
       if result.is_err() {
         // Timeout reached, forcefully abort remaining tunnels
         warn!(
-          "Tunnel shutdown timeout after {:?}, aborting {} remaining tunnels",
+          "Tunnel shutdown timeout after {:?}, aborting {} remaining \
+           tunnels",
           TUNNEL_SHUTDOWN_TIMEOUT,
           stream_tracker.active_count()
         );
         stream_tracker.abort_all();
-        // Wait for aborted tasks to be cleaned up
-        stream_tracker.wait_shutdown().await;
+        // Drain so aborted tasks are removed from JoinSet
+        stream_tracker.drain().await;
       }
     })
   }
@@ -280,20 +306,23 @@ pub fn create_plugin() -> Box<dyn Plugin> {
 
 #[cfg(test)]
 mod tests {
+  use std::task::{Context, Poll};
+
+  use bytes::Bytes;
+  use futures::task::noop_waker;
+  use http_body_util::BodyExt;
+  use tower::Service as TowerService;
+
   use super::*;
   use crate::http_utils::{
     BytesBufBodyWrapper, RequestBody, ResponseBody,
   };
   use crate::plugin::Plugin;
   use crate::service::Service as RuntimeService;
-  use bytes::Bytes;
-  use futures::task::noop_waker;
-  use http_body_util::BodyExt;
-  use std::task::{Context, Poll};
-  use tower::Service as TowerService;
 
-  // ============== StreamTracker Tests (reusing tracker module tests) ==============
-  // Note: StreamTracker tests are now in src/tracker.rs
+  // ============== StreamTracker Tests (reusing tracker module tests)
+  // ============== Note: StreamTracker tests are now in
+  // src/tracker.rs
 
   // ============== ConnectTcpService Tests ==============
 
@@ -382,13 +411,17 @@ mod tests {
   }
 
   fn make_connect_request(method: http::Method, uri: &str) -> Request {
-    http::Request::builder()
+    use crate::context::RequestContext;
+
+    let mut req = http::Request::builder()
       .method(method)
       .uri(uri)
       .body(RequestBody::new(BytesBufBodyWrapper::new(
         http_body_util::Empty::new(),
       )))
-      .unwrap()
+      .unwrap();
+    req.extensions_mut().insert(RequestContext::new());
+    req
   }
 
   async fn collect_body(body: ResponseBody) -> Bytes {
@@ -499,17 +532,15 @@ mod tests {
       .run_until(async {
         let service = ConnectTcpService::new_for_test();
         let mut service = RuntimeService::new(service);
-        let req = make_connect_request(
-          http::Method::CONNECT,
-          "example.com:443",
-        );
+        let req =
+          make_connect_request(http::Method::CONNECT, "baidu.com:443");
         let fut = service.call(req);
         let resp = fut.await.unwrap();
-        // After refactor, Service connects to target before returning.
-        // Result depends on network availability.
+        // Result depends on network availability and timeout.
         assert!(
           resp.status() == http::StatusCode::OK
             || resp.status() == http::StatusCode::BAD_GATEWAY
+            || resp.status() == http::StatusCode::GATEWAY_TIMEOUT
         );
       })
       .await;
@@ -524,7 +555,8 @@ mod tests {
         let listener =
           tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        // Drop the listener so the port is free and connection will fail
+        // Drop the listener so the port is free and connection will
+        // fail
         drop(listener);
 
         let service = ConnectTcpService::new_for_test();
@@ -639,7 +671,8 @@ mod tests {
   }
 
   /// Test using hyper server to verify successful upgrade path.
-  /// This test creates an actual HTTP server that handles CONNECT requests.
+  /// This test creates an actual HTTP server that handles CONNECT
+  /// requests.
   #[tokio::test]
   async fn test_service_call_with_hyper_server() {
     use http_body_util::Empty;
@@ -749,13 +782,14 @@ mod tests {
       .await;
   }
 
-  /// Test that uninstall() completes immediately when no streams are active.
+  /// Test that uninstall() completes immediately when no streams are
+  /// active.
   #[tokio::test]
   async fn test_uninstall_no_active_streams() {
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
-        let mut plugin = ConnectTcpPlugin::new();
+        let plugin = ConnectTcpPlugin::new();
 
         // No streams, uninstall should complete quickly
         let result = tokio::time::timeout(
@@ -773,13 +807,14 @@ mod tests {
       .await;
   }
 
-  /// Test uninstall() with streams that respond to shutdown notification.
+  /// Test uninstall() with streams that respond to shutdown
+  /// notification.
   #[tokio::test]
   async fn test_uninstall_with_responsive_streams() {
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
-        let mut plugin = ConnectTcpPlugin::new();
+        let plugin = ConnectTcpPlugin::new();
 
         // Register a stream that responds to shutdown notification
         let shutdown_handle = plugin.stream_tracker.shutdown_handle();
@@ -819,7 +854,7 @@ mod tests {
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
-        let mut plugin = ConnectTcpPlugin::new();
+        let plugin = ConnectTcpPlugin::new();
 
         // Register a stream that ignores shutdown notification
         plugin.stream_tracker.register(async {
@@ -860,7 +895,7 @@ mod tests {
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
-        let mut plugin = ConnectTcpPlugin::new();
+        let plugin = ConnectTcpPlugin::new();
 
         // Call uninstall multiple times
         plugin.uninstall().await;
@@ -923,19 +958,16 @@ mod tests {
         let (_tx, rx) = tokio::sync::oneshot::channel();
         let upgrade = Socks5OnUpgrade::new_for_test(rx);
 
-        let mut req = make_connect_request(
-          http::Method::CONNECT,
-          "example.com:443",
-        );
+        let mut req =
+          make_connect_request(http::Method::CONNECT, "baidu.com:443");
         req.extensions_mut().insert(upgrade);
 
         let resp = service.call(req).await.unwrap();
-        // Service returns 200 because example.com:443 is reachable
-        // (or it may fail -- the key point is it doesn't panic)
-        // For a real test, we need a local target
+        // Result depends on network availability and timeout.
         assert!(
           resp.status() == http::StatusCode::OK
             || resp.status() == http::StatusCode::BAD_GATEWAY
+            || resp.status() == http::StatusCode::GATEWAY_TIMEOUT
         );
       })
       .await;
@@ -1075,10 +1107,12 @@ mod tests {
       .await;
   }
 
-  // ============== ServiceMetrics Tests ==============
+  // ============== RequestContext Integration Tests ==============
 
   #[tokio::test]
-  async fn test_service_response_contains_service_metrics() {
+  async fn test_service_writes_connect_ms_to_request_context() {
+    use crate::context::RequestContext;
+
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
@@ -1089,34 +1123,35 @@ mod tests {
 
         let service = ConnectTcpService::new_for_test();
         let mut service = RuntimeService::new(service);
-        let req = make_connect_request(
+
+        // Create request with RequestContext in extensions
+        let ctx = RequestContext::new();
+        let mut req = make_connect_request(
           http::Method::CONNECT,
           &format!("127.0.0.1:{}", target_addr.port()),
         );
+        req.extensions_mut().insert(ctx.clone());
+
         let resp = service.call(req).await.unwrap();
 
-        // Must assert status first so a failed connect is a clear test failure
+        // Must assert status first so a failed connect is a clear test
+        // failure
         assert_eq!(
           resp.status(),
           http::StatusCode::OK,
           "CONNECT to local TCP server must succeed"
         );
 
-        // Response should have ServiceMetrics in extensions
-        let metrics =
-          resp.extensions().get::<crate::access_log::ServiceMetrics>();
+        // RequestContext should have connect_ms
+        let connect_ms = ctx.get("connect_tcp.connect_tcp.connect_ms");
         assert!(
-          metrics.is_some(),
-          "Response should contain ServiceMetrics"
+          connect_ms.is_some(),
+          "RequestContext should contain \
+           connect_tcp.connect_tcp.connect_ms"
         );
-        let metrics = metrics.unwrap();
-        // Should have connect_ms at minimum
-        let has_connect =
-          metrics.iter().any(|(k, _)| k == "connect_ms");
-        assert!(
-          has_connect,
-          "ServiceMetrics should contain connect_ms"
-        );
+        // connect_ms should be a valid number
+        let ms: u64 = connect_ms.unwrap().parse().unwrap();
+        assert!(ms < u64::MAX, "connect_ms should be a valid u64");
       })
       .await;
   }

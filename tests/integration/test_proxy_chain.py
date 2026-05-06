@@ -14,17 +14,13 @@ Test matrix:
 import subprocess
 import os
 import signal
-import time
 import tempfile
 import shutil
 import socket
 import threading
 from typing import Optional, Tuple
 
-import pytest
-
 from .utils.helpers import (
-    NEOPROXY_BINARY,
     start_proxy,
     wait_for_proxy,
     create_target_server,
@@ -36,9 +32,7 @@ from .test_http3_listener import (
     generate_client_certificate,
 )
 
-# Alias for convenience
-
-from .utils.http_echo import http_echo_handler, read_http_request
+from .utils.http_echo import http_echo_handler
 
 from .conftest import get_unique_port
 
@@ -112,7 +106,8 @@ servers:
       certificates:
         - cert_path: "{cert_path}"
           key_path: "{key_path}"
-      client_ca_path: "{client_ca_path}"
+      client_ca_certs:
+        - "{client_ca_path}"
     listeners: ["h3_main"]
     service: tunnel
 """
@@ -364,7 +359,6 @@ def run_proxy_chain_test(
     upstream_proc: Optional[subprocess.Popen] = None
     entry_proc: Optional[subprocess.Popen] = None
     target_socket: Optional[socket.socket] = None
-    target_thread: Optional[threading.Thread] = None
 
     try:
         if shared_test_certs:
@@ -408,6 +402,7 @@ def run_proxy_chain_test(
                     http_port, h3_port, ca_path, temp_dir2
                 )
             else:
+                assert client_cert_path is not None and client_key_path is not None
                 entry_config = create_entry_http_tls_cert_config(
                     http_port, h3_port, ca_path,
                     client_cert_path, client_key_path, temp_dir2
@@ -418,6 +413,7 @@ def run_proxy_chain_test(
                     http_port, h3_port, ca_path, temp_dir2
                 )
             else:
+                assert client_cert_path is not None and client_key_path is not None
                 entry_config = create_entry_socks5_tls_cert_config(
                     http_port, h3_port, ca_path,
                     client_cert_path, client_key_path, temp_dir2
@@ -429,7 +425,7 @@ def run_proxy_chain_test(
 
         # Create target server for mock tests
         if target_type == "mock" and target_port:
-            target_thread, target_socket = create_echo_target_server(
+            _, target_socket = create_echo_target_server(
                 "127.0.0.1", target_port
             )
 

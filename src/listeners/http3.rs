@@ -227,6 +227,7 @@ async fn handle_h3_stream(
   client_addr: SocketAddr,
   local_addr: SocketAddr,
   sni: Option<String>,
+  client_cert_presented: bool,
 ) -> () {
   let method = req.method().clone();
 
@@ -292,6 +293,21 @@ async fn handle_h3_stream(
       return;
     }
   };
+
+  // Phase 2b: Check client certificate requirement
+  // If the server requires mTLS (has client_ca_certs) but the
+  // client did not present a certificate, reject with 403.
+  if routing_entry.requires_client_cert() && !client_cert_presented {
+    let resp = build_error_response(
+      http::StatusCode::FORBIDDEN,
+      "Forbidden: client certificate required",
+    );
+    let mut stream = stream;
+    if let Err(e) = send_h3_response(&mut stream, resp, true).await {
+      warn!("Failed to send 403 response: {e}");
+    }
+    return;
+  }
 
   let mut service = routing_entry.service.clone();
 
@@ -454,6 +470,9 @@ async fn handle_h3_connection(
   // Extract SNI before conn is moved into h3_quinn
   let sni = extract_sni_from_connection(&conn);
 
+  // Check whether client presented a certificate during TLS handshake
+  let client_cert_presented = conn.peer_identity().is_some();
+
   // Build ServerRouter once for the entire connection
   let server_router =
     crate::server::ServerRouter::build(server_routing_table);
@@ -496,6 +515,7 @@ async fn handle_h3_connection(
                 client_addr,
                 local_addr,
                 sni,
+                client_cert_presented,
               )
               .await;
             }

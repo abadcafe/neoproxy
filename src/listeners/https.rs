@@ -88,6 +88,8 @@ struct HttpsServiceAdaptor {
   local_addr: Option<SocketAddr>,
   /// SNI from TLS handshake
   sni: Option<String>,
+  /// Whether client presented a certificate during TLS handshake
+  client_cert_presented: bool,
 }
 
 impl HttpsServiceAdaptor {
@@ -96,9 +98,10 @@ impl HttpsServiceAdaptor {
     client_addr: Option<SocketAddr>,
     local_addr: Option<SocketAddr>,
     sni: Option<String>,
+    client_cert_presented: bool,
   ) -> Self {
     let server_router = ServerRouter::build(server_routing_table);
-    Self { server_router, client_addr, local_addr, sni }
+    Self { server_router, client_addr, local_addr, sni, client_cert_presented }
   }
 
   /// Route a request to the correct service based on Host header.
@@ -170,7 +173,18 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       }
     };
 
-    // Step 4: Build RequestContext with connection-level keys and
+    // Step 4: Check client certificate requirement
+    // If the server requires mTLS (has client_ca_certs) but the
+    // client did not present a certificate, reject with 403.
+    if routing_entry.requires_client_cert() && !self.client_cert_presented {
+      return Box::pin(async {
+        Ok(super::common::build_403_forbidden(
+          "Forbidden: client certificate required",
+        ))
+      });
+    }
+
+    // Step 5: Build RequestContext with connection-level keys and
     // insert into request extensions. Auth and access logging are
     // now handled by the plugin layer in the service pipeline.
     if let (Some(peer_addr), Some(local_addr)) =
@@ -201,6 +215,14 @@ fn get_sni_from_tls_connection(
 ) -> Option<String> {
   let (_, session) = conn.get_ref();
   session.server_name().map(|s| s.to_string())
+}
+
+/// Check whether the client presented a certificate during TLS handshake.
+fn get_client_cert_presented(
+  conn: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+) -> bool {
+  let (_, session) = conn.get_ref();
+  session.peer_certificates().is_some()
 }
 
 /// HTTPS Listener with shared-address routing support.
@@ -316,8 +338,10 @@ impl HttpsListener {
             .await
             {
               Ok(Ok(tls_stream)) => {
-                // Extract SNI from TLS connection
+                // Extract SNI and client cert info from TLS connection
                 let sni = get_sni_from_tls_connection(&tls_stream);
+                let client_cert_presented =
+                  get_client_cert_presented(&tls_stream);
 
                 let io = rt_util::TokioIo::new(tls_stream);
                 let svc = HttpsServiceAdaptor::new(
@@ -325,6 +349,7 @@ impl HttpsListener {
                   Some(raddr),
                   Some(local_addr),
                   sni,
+                  client_cert_presented,
                 );
                 let builder =
                   conn_util::Builder::new(TokioLocalExecutor);
@@ -674,7 +699,7 @@ mod tests {
       },
     ];
 
-    let adaptor = HttpsServiceAdaptor::new(servers, None, None, None);
+    let adaptor = HttpsServiceAdaptor::new(servers, None, None, None, false);
 
     // Request with Host header matching api.example.com
     let req_api = http::Request::builder()

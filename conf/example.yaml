@@ -136,6 +136,8 @@ services:
             client_cert_path: conf/certs/client.crt
             client_key_path: conf/certs/client.key
             server_ca_path: conf/certs/server-ca.crt
+    layers:
+      - kind: access_log.file
 
   # Connect TCP service with basic auth layer
   - name: connect_tcp

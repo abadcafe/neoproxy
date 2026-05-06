@@ -305,50 +305,59 @@ pub fn build_sni_resolver(
 ///
 /// Creates a rustls::ServerConfig that:
 /// - Uses SNI resolver for certificate selection
-/// - Optionally requires client certificates for mTLS
+/// - Requests client certificates but does not require them
+///   (allow_unauthenticated). The actual enforcement happens at
+///   the HTTP layer after routing to the correct server.
 ///
 /// Note: This takes the full routing table to support multi-server
-/// certificate selection.
+/// certificate selection. Client CA certificates from all servers
+/// are merged into a single verifier.
 pub fn build_tls_server_config(
   servers: &[Server],
   alpn_protocols: Vec<Vec<u8>>,
 ) -> Result<Arc<rustls::ServerConfig>> {
   let sni_resolver = build_sni_resolver(servers)?;
 
-  // Build client cert verifier if configured
-  // Use the first server's client_ca_certs for mTLS
-  let client_verifier = servers
-    .iter()
-    .find_map(|s| s.tls.as_ref())
-    .and_then(|tls| tls.client_ca_certs.as_ref())
-    .map(|client_ca_certs| -> Result<_> {
-      let mut roots = rustls::RootCertStore::empty();
-      for ca_path in client_ca_certs {
-        let ca_file = File::open(ca_path).with_context(|| {
-          format!("Failed to open client CA file: {}", ca_path)
-        })?;
-        let mut ca_reader = BufReader::new(ca_file);
-        let ca_certs: Vec<CertificateDer> =
-          rustls_pemfile::certs(&mut ca_reader)
-            .collect::<Result<Vec<_>, _>>()
-            .with_context(|| {
-              "Failed to parse client CA certificates"
-            })?;
-        for cert in ca_certs {
-          roots.add(cert)?;
+  // Collect all client_ca_certs from all servers
+  let mut roots = rustls::RootCertStore::empty();
+  let mut has_client_ca = false;
+
+  for server in servers {
+    if let Some(tls) = &server.tls {
+      if let Some(client_ca_certs) = &tls.client_ca_certs {
+        has_client_ca = true;
+        for ca_path in client_ca_certs {
+          let ca_file = File::open(ca_path).with_context(|| {
+            format!("Failed to open client CA file: {}", ca_path)
+          })?;
+          let mut ca_reader = BufReader::new(ca_file);
+          let ca_certs: Vec<CertificateDer> =
+            rustls_pemfile::certs(&mut ca_reader)
+              .collect::<Result<Vec<_>, _>>()
+              .with_context(|| {
+                "Failed to parse client CA certificates"
+              })?;
+          for cert in ca_certs {
+            roots.add(cert)?;
+          }
         }
       }
-      Ok(WebPkiClientVerifier::builder(roots.into()).build()?)
-    })
-    .transpose()?;
+    }
+  }
 
-  let mut config = match client_verifier {
-    Some(verifier) => rustls::ServerConfig::builder()
+  let mut config = if has_client_ca {
+    // Request client certificates but allow unauthenticated connections.
+    // Per-server enforcement happens at the HTTP layer after routing.
+    let verifier = WebPkiClientVerifier::builder(roots.into())
+      .allow_unauthenticated()
+      .build()?;
+    rustls::ServerConfig::builder()
       .with_client_cert_verifier(verifier)
-      .with_cert_resolver(sni_resolver),
-    None => rustls::ServerConfig::builder()
+      .with_cert_resolver(sni_resolver)
+  } else {
+    rustls::ServerConfig::builder()
       .with_no_client_auth()
-      .with_cert_resolver(sni_resolver),
+      .with_cert_resolver(sni_resolver)
   };
 
   config.alpn_protocols = alpn_protocols;

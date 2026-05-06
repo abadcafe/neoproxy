@@ -708,7 +708,7 @@ class TestHTTP3ConfigValidation:
 
             # Invalid QUIC config: max_concurrent_bidi_streams = 0
             quic_config = """      max_concurrent_bidi_streams: 0
-      max_idle_timeout: "30s""""
+      max_idle_timeout: '30s'"""
 
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,
@@ -964,12 +964,8 @@ class TestHTTP3ServiceDelegation:
         """
         import asyncio
         from .utils.http3_client import (
-            AIOQUIC_AVAILABLE,
             H3Client,
         )
-
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
 
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
@@ -1058,12 +1054,8 @@ class TestHTTP3EchoService:
         """
         import asyncio
         from .utils.http3_client import (
-            AIOQUIC_AVAILABLE,
             H3Client,
         )
-
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
 
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()

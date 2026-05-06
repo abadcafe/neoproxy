@@ -777,12 +777,8 @@ class TestHTTP3SNIHostMismatch:
         """
         import asyncio
         from .utils.http3_client import (
-            AIOQUIC_AVAILABLE,
             perform_h3_request_with_custom_authority,
         )
-
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
 
         temp_dir = tempfile.mkdtemp(prefix="neoproxy_h3_match_test_")
         http3_port = get_unique_port()
@@ -887,12 +883,8 @@ class TestHTTP3SNIHostMismatch:
         """
         import asyncio
         from .utils.http3_client import (
-            AIOQUIC_AVAILABLE,
             perform_h3_request_with_custom_authority,
         )
-
-        if not AIOQUIC_AVAILABLE:
-            pytest.skip("aioquic library not available")
 
         temp_dir = tempfile.mkdtemp(prefix="neoproxy_h3_mismatch_test_")
         http3_port = get_unique_port()
@@ -975,6 +967,313 @@ class TestHTTP3SNIHostMismatch:
                 f"Expected 400 Bad Request or protocol-level rejection (0) for authority/Host mismatch, "
                 f"got {response.status_code}. Body: {response.body}"
             )
+
+        finally:
+            if proc and proc.poll() is None:
+                terminate_process(proc)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+class TestHTTPSClientCert:
+    """Test HTTPS listener client certificate verification (Plan B).
+
+    With Plan B, TLS layer uses allow_unauthenticated() so the handshake
+    succeeds regardless of client cert. Enforcement happens at the HTTP
+    layer after routing: 403 if server requires mTLS but client has no cert.
+    """
+
+    def test_https_no_cert_returns_403(self, shared_test_certs: dict) -> None:
+        """
+        Test that HTTPS server with client_ca_certs returns 403 when
+        client does not present a certificate.
+
+        Plan B: TLS handshake succeeds, HTTP layer enforces cert requirement.
+        """
+        import ssl
+        import socket
+
+        temp_dir = tempfile.mkdtemp(prefix="neoproxy_https_mtls_")
+        https_port = get_unique_port()
+        proc: Optional[subprocess.Popen] = None
+
+        try:
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
+
+            config = {
+                "server_threads": 1,
+                "services": [
+                    {
+                        "name": "echo",
+                        "kind": "echo.echo",
+                        "args": {},
+                    }
+                ],
+                "listeners": [
+                    {
+                        "name": "https_main",
+                        "kind": "https",
+                        "addresses": [f"127.0.0.1:{https_port}"],
+                    }
+                ],
+                "servers": [
+                    {
+                        "name": "mtls_server",
+                        "tls": {
+                            "certificates": [
+                                {
+                                    "cert_path": cert_path,
+                                    "key_path": key_path,
+                                }
+                            ],
+                            "client_ca_certs": [ca_path],
+                        },
+                        "listeners": ["https_main"],
+                        "service": "echo",
+                    }
+                ],
+            }
+
+            config_path = os.path.join(temp_dir, "config.yaml")
+            with open(config_path, "w") as f:
+                yaml.dump(config, f)
+
+            proc = subprocess.Popen(
+                [NEOPROXY_BINARY, "--config", config_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            if not wait_for_proxy("127.0.0.1", https_port, timeout=5.0):
+                if proc.poll() is not None:
+                    _, stderr_data = proc.communicate(timeout=5)
+                    stderr_text = stderr_data.decode("utf-8", errors="replace")
+                    pytest.fail(f"Process failed to start.\nstderr: {stderr_text}")
+                pytest.fail("HTTPS listener failed to start within timeout")
+
+            # Connect WITHOUT client certificate
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5.0)
+            ssl_sock = context.wrap_socket(sock, server_hostname="localhost")
+            ssl_sock.connect(("127.0.0.1", https_port))
+
+            # Send request - should get 403 Forbidden
+            ssl_sock.sendall(
+                b"GET /test HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"\r\n"
+            )
+            response = ssl_sock.recv(4096).decode()
+            ssl_sock.close()
+
+            assert "403" in response, \
+                f"Expected 403 Forbidden for missing client certificate, got: {response}"
+
+        finally:
+            if proc and proc.poll() is None:
+                terminate_process(proc)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_https_with_cert_returns_200(self, shared_test_certs: dict, shared_client_cert: dict) -> None:
+        """
+        Test that HTTPS server with client_ca_certs returns 200 when
+        client presents a valid certificate.
+        """
+        import ssl
+        import socket
+
+        temp_dir = tempfile.mkdtemp(prefix="neoproxy_https_mtls_ok_")
+        https_port = get_unique_port()
+        proc: Optional[subprocess.Popen] = None
+
+        try:
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
+            client_cert_path = shared_client_cert['client_cert_path']
+            client_key_path = shared_client_cert['client_key_path']
+
+            config = {
+                "server_threads": 1,
+                "services": [
+                    {
+                        "name": "echo",
+                        "kind": "echo.echo",
+                        "args": {},
+                    }
+                ],
+                "listeners": [
+                    {
+                        "name": "https_main",
+                        "kind": "https",
+                        "addresses": [f"127.0.0.1:{https_port}"],
+                    }
+                ],
+                "servers": [
+                    {
+                        "name": "mtls_server",
+                        "tls": {
+                            "certificates": [
+                                {
+                                    "cert_path": cert_path,
+                                    "key_path": key_path,
+                                }
+                            ],
+                            "client_ca_certs": [ca_path],
+                        },
+                        "listeners": ["https_main"],
+                        "service": "echo",
+                    }
+                ],
+            }
+
+            config_path = os.path.join(temp_dir, "config.yaml")
+            with open(config_path, "w") as f:
+                yaml.dump(config, f)
+
+            proc = subprocess.Popen(
+                [NEOPROXY_BINARY, "--config", config_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            if not wait_for_proxy("127.0.0.1", https_port, timeout=5.0):
+                if proc.poll() is not None:
+                    _, stderr_data = proc.communicate(timeout=5)
+                    stderr_text = stderr_data.decode("utf-8", errors="replace")
+                    pytest.fail(f"Process failed to start.\nstderr: {stderr_text}")
+                pytest.fail("HTTPS listener failed to start within timeout")
+
+            # Connect WITH valid client certificate
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            context.load_cert_chain(
+                certfile=client_cert_path,
+                keyfile=client_key_path,
+            )
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5.0)
+            ssl_sock = context.wrap_socket(sock, server_hostname="localhost")
+            ssl_sock.connect(("127.0.0.1", https_port))
+
+            # Send request - should succeed
+            ssl_sock.sendall(
+                b"GET /test HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"\r\n"
+            )
+            response = ssl_sock.recv(4096).decode()
+            ssl_sock.close()
+
+            # Should get 200 OK (or 407 if auth is also configured)
+            assert "200" in response or "407" in response, \
+                f"Expected 200 or 407 with valid client cert, got: {response}"
+
+        finally:
+            if proc and proc.poll() is None:
+                terminate_process(proc)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+class TestHTTP3ClientCert:
+    """Test HTTP/3 listener client certificate verification (Plan B).
+
+    With Plan B, TLS layer uses allow_unauthenticated() so the handshake
+    succeeds regardless of client cert. Enforcement happens at the HTTP
+    layer after routing: 403 if server requires mTLS but client has no cert.
+    """
+
+    def test_h3_no_cert_returns_403(self, shared_test_certs: dict) -> None:
+        """
+        Test that HTTP/3 server with client_ca_certs returns 403 when
+        client does not present a certificate.
+        """
+        import asyncio
+        from .utils.http3_client import (
+            perform_h3_connection_test,
+        )
+
+        temp_dir = tempfile.mkdtemp(prefix="neoproxy_h3_mtls_")
+        http3_port = get_unique_port()
+        proc: Optional[subprocess.Popen] = None
+
+        try:
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
+
+            config = {
+                "server_threads": 1,
+                "services": [
+                    {
+                        "name": "echo",
+                        "kind": "echo.echo",
+                        "args": {},
+                    }
+                ],
+                "listeners": [
+                    {
+                        "name": "h3_main",
+                        "kind": "http3",
+                        "addresses": [f"127.0.0.1:{http3_port}"],
+                    }
+                ],
+                "servers": [
+                    {
+                        "name": "mtls_server",
+                        "tls": {
+                            "certificates": [
+                                {
+                                    "cert_path": cert_path,
+                                    "key_path": key_path,
+                                }
+                            ],
+                            "client_ca_certs": [ca_path],
+                        },
+                        "listeners": ["h3_main"],
+                        "service": "echo",
+                    }
+                ],
+            }
+
+            config_path = os.path.join(temp_dir, "config.yaml")
+            with open(config_path, "w") as f:
+                yaml.dump(config, f)
+
+            proc = subprocess.Popen(
+                [NEOPROXY_BINARY, "--config", config_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            if not wait_for_udp_port_bound("127.0.0.1", http3_port, timeout=5.0):
+                if proc.poll() is not None:
+                    _, stderr_data = proc.communicate(timeout=5)
+                    stderr_text = stderr_data.decode("utf-8", errors="replace")
+                    pytest.fail(f"Process failed to start.\nstderr: {stderr_text}")
+                pytest.fail("HTTP/3 listener failed to start within timeout")
+
+            # Connect WITHOUT client certificate
+            success, status_code, message = asyncio.run(
+                perform_h3_connection_test(
+                    "127.0.0.1", http3_port,
+                    ca_path=ca_path,
+                    timeout=15.0,
+                )
+            )
+
+            # Plan B: TLS handshake succeeds, HTTP layer returns 403
+            assert success, \
+                f"TLS handshake should succeed without client cert. Message: {message}"
+            assert status_code == 403, \
+                f"Expected 403 Forbidden for missing client certificate, got {status_code}. Message: {message}"
 
         finally:
             if proc and proc.poll() is None:

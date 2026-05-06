@@ -46,7 +46,6 @@ from .conftest import get_unique_port
 # Alias for convenience
 
 from .utils.http3_client import (
-    AIOQUIC_AVAILABLE,
     H3Client,
     perform_h3_connection_test,
     perform_h3_connect_test,
@@ -88,12 +87,12 @@ class TestHTTP3FullConnection:
 
             # Use real HTTP/3 client to verify QUIC handshake
             async def do_handshake():
-                success, message = await perform_h3_connection_test(
+                success, status_code, message = await perform_h3_connection_test(
                     "127.0.0.1", proxy_port, ca_path=ca_path, timeout=10.0
                 )
-                return success, message
+                return success, status_code, message
 
-            success, message = asyncio.run(do_handshake())
+            success, status_code, message = asyncio.run(do_handshake())
 
             assert success, f"QUIC handshake failed: {message}"
             assert proxy_proc.poll() is None, \
@@ -720,7 +719,7 @@ class TestHTTP3ConfigValidationFull:
 
             # Invalid: extremely large value
             quic_config = """      max_concurrent_bidi_streams: 999999999
-      max_idle_timeout: "30s""""
+      max_idle_timeout: '30s'"""
 
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,
@@ -756,7 +755,7 @@ class TestHTTP3ConfigValidationFull:
 
             # Test with zero timeout (invalid, rejected at startup)
             quic_config = """      max_concurrent_bidi_streams: 100
-      max_idle_timeout: "0s""""
+      max_idle_timeout: '0s'"""
 
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,
@@ -850,10 +849,10 @@ servers:
 
             # Test minimum valid values
             quic_config = """      max_concurrent_bidi_streams: 1
-      max_idle_timeout: "1ms"
+      max_idle_timeout: '1ms'
       initial_mtu: 1200
-      send_window: "1B"
-      receive_window: "1B"""
+      send_window: '1B'
+      receive_window: '1B'"""
 
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,
@@ -863,8 +862,16 @@ servers:
             proxy_proc = start_proxy(config_path)
 
             # Should start with minimum valid values
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
-                "HTTP/3 listener should start with minimum QUIC params"
+            if not wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0):
+                if proxy_proc.poll() is not None:
+                    _, stderr_data = proxy_proc.communicate(timeout=5)
+                    stderr_text = stderr_data.decode("utf-8", errors="replace")
+                    pytest.fail(
+                        f"Process failed to start.\nstderr: {stderr_text}"
+                    )
+                pytest.fail(
+                    "HTTP/3 listener should start with minimum QUIC params"
+                )
 
             assert proxy_proc.poll() is None, \
                 "HTTP/3 listener should be running"
@@ -891,10 +898,10 @@ servers:
 
             # Test maximum valid values per design doc
             quic_config = """      max_concurrent_bidi_streams: 10000
-      max_idle_timeout: "300s"
+      max_idle_timeout: '300s'
       initial_mtu: 9000
-      send_window: "100MiB"
-      receive_window: "100MiB"""
+      send_window: '100MiB'
+      receive_window: '100MiB'"""
 
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,
@@ -904,8 +911,16 @@ servers:
             proxy_proc = start_proxy(config_path)
 
             # Should start with maximum valid values
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
-                "HTTP/3 listener should start with maximum QUIC params"
+            if not wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0):
+                if proxy_proc.poll() is not None:
+                    _, stderr_data = proxy_proc.communicate(timeout=5)
+                    stderr_text = stderr_data.decode("utf-8", errors="replace")
+                    pytest.fail(
+                        f"Process failed to start.\nstderr: {stderr_text}"
+                    )
+                pytest.fail(
+                    "HTTP/3 listener should start with maximum QUIC params"
+                )
 
             assert proxy_proc.poll() is None, \
                 "HTTP/3 listener should be running"
@@ -933,7 +948,7 @@ servers:
             # Note: YAML may not parse negative values correctly for unsigned types
             # This tests that the system handles invalid input gracefully
             quic_config = """      max_concurrent_bidi_streams: 100
-      max_idle_timeout: "30s""""
+      max_idle_timeout: '30s'"""
 
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,
@@ -1289,7 +1304,7 @@ class TestHTTP3Performance:
                 start_time = time.time()
 
                 async def test_latency():
-                    success, _ = await perform_h3_connection_test(
+                    success, _, _ = await perform_h3_connection_test(
                         "127.0.0.1", proxy_port,
                         ca_path=ca_path,
                         timeout=10.0

@@ -120,6 +120,23 @@ pub fn build_421_misdirected_response() -> Response {
   resp
 }
 
+/// Build a 403 Forbidden response.
+///
+/// This response is sent when a server requires client certificate
+/// authentication but the client did not present one.
+pub fn build_403_forbidden(msg: &str) -> Response {
+  let body = http_body_util::Full::new(bytes::Bytes::from(msg.to_string()));
+  let bytes_buf = BytesBufBodyWrapper::new(body);
+  let body = ResponseBody::new(bytes_buf);
+  let mut resp = Response::new(body);
+  *resp.status_mut() = http::StatusCode::FORBIDDEN;
+  resp.headers_mut().insert(
+    http::header::CONTENT_TYPE,
+    http::HeaderValue::from_static("text/plain"),
+  );
+  resp
+}
+
 /// Build a 404 Not Found response.
 pub fn build_404_response() -> Response {
   let empty = http_body_util::Empty::new();

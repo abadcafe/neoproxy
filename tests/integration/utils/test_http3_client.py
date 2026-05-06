@@ -7,13 +7,11 @@ import pytest
 from typing import Dict, List, Tuple
 
 from .http3_client import (
-    AIOQUIC_AVAILABLE,
     perform_h3_request_with_custom_authority,
     H3Response,
 )
 
 
-@pytest.mark.skipif(not AIOQUIC_AVAILABLE, reason="aioquic not available")
 class TestH3CustomAuthority:
     """Tests for HTTP/3 custom authority functionality."""
 

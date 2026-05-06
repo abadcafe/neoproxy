@@ -76,6 +76,18 @@ impl Server {
   pub fn service_name(&self) -> String {
     self.service_name.clone()
   }
+
+  /// Check whether this server requires client certificate authentication.
+  ///
+  /// Returns true if the server has TLS config with client CA certificates
+  /// configured, meaning mTLS is required.
+  pub fn requires_client_cert(&self) -> bool {
+    self
+      .tls
+      .as_ref()
+      .and_then(|t| t.client_ca_certs.as_ref())
+      .is_some()
+  }
 }
 
 /// A router that encapsulates hostname-based routing logic.

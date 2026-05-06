@@ -45,7 +45,6 @@ from .conftest import get_unique_port
 # Alias for convenience
 
 from .utils.http3_client import (
-    AIOQUIC_AVAILABLE,
     H3Client,
     perform_h3_connection_test,
     perform_h3_connect_test,
@@ -666,19 +665,19 @@ servers:
 
             # Test with real HTTP/3 client using valid client certificate
             async def do_client_cert_connect():
-                success, message = await perform_h3_tls_client_cert_test(
+                success, status_code, message = await perform_h3_tls_client_cert_test(
                     "127.0.0.1", proxy_port,
                     ca_path=ca_path,
                     client_cert_path=client_cert_path,
                     client_key_path=client_key_path,
                     timeout=15.0
                 )
-                return success, message
+                return success, status_code, message
 
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                success, message = loop.run_until_complete(do_client_cert_connect())
+                success, status_code, message = loop.run_until_complete(do_client_cert_connect())
             finally:
                 loop.close()
 
@@ -753,24 +752,24 @@ servers:
 
             # Test with HTTP/3 client using INVALID client certificate
             async def do_invalid_client_cert_connect():
-                success, message = await perform_h3_tls_client_cert_test(
+                success, status_code, message = await perform_h3_tls_client_cert_test(
                     "127.0.0.1", proxy_port,
                     ca_path=ca_path,
                     client_cert_path=invalid_client_cert_path,
                     client_key_path=invalid_client_key_path,
                     timeout=15.0
                 )
-                return success, message
+                return success, status_code, message
 
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                success, message = loop.run_until_complete(do_invalid_client_cert_connect())
+                success, status_code, message = loop.run_until_complete(do_invalid_client_cert_connect())
             finally:
                 loop.close()
 
-            # CRITICAL ASSERTION: Per design section 5.3.2, invalid client certificates
-            # must be rejected during TLS handshake. The connection must fail.
+            # CRITICAL ASSERTION: Invalid client certificates (signed by untrusted CA)
+            # are still rejected at the TLS layer. The connection must fail.
             # success=True indicates a security vulnerability (invalid cert accepted).
             assert not success, \
                 f"SECURITY VIOLATION: Connection with invalid client cert should be rejected. " \
@@ -782,17 +781,16 @@ servers:
                 proxy_proc.wait(timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_tls_client_cert_no_cert_rejected(self, shared_test_certs) -> None:
+    def test_tls_client_cert_no_cert_returns_403(self, shared_test_certs) -> None:
         """
         TC-H3-AUTH-011: TLS client cert auth - no certificate handling.
 
         Target: Test HTTP/3 listener behavior when client certificate is not provided.
-        Per design section 5.3.2, when TLS client cert auth is configured,
-        clients must present a valid certificate. Clients without a certificate
-        must be rejected during TLS handshake.
+        With Plan B (allow_unauthenticated at TLS layer, enforce at HTTP layer),
+        the TLS handshake succeeds but the HTTP layer returns 403 Forbidden.
 
-        Expected per design: Connection should be rejected (handshake failure)
-        Verification: success must be False, indicating connection was rejected.
+        Expected: HTTP 403 Forbidden response.
+        Verification: success=True (TLS handshake ok), status_code=403.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
@@ -818,27 +816,26 @@ servers:
 
             # Test with HTTP/3 client without client certificate
             async def do_no_cert_connect():
-                success, message = await perform_h3_connection_test(
+                success, status_code, message = await perform_h3_connection_test(
                     "127.0.0.1", proxy_port,
                     ca_path=ca_path,
                     timeout=15.0
                 )
-                return success, message
+                return success, status_code, message
 
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                success, message = loop.run_until_complete(do_no_cert_connect())
+                success, status_code, message = loop.run_until_complete(do_no_cert_connect())
             finally:
                 loop.close()
 
-            # CRITICAL ASSERTION: Per design section 5.3.2, when TLS client cert auth
-            # is configured, clients MUST present a valid certificate. Missing client
-            # certificate must cause TLS handshake failure and connection rejection.
-            # success=True indicates a security vulnerability (no cert accepted).
-            assert not success, \
-                f"SECURITY VIOLATION: Connection without client cert should be rejected. " \
-                f"Server accepted connection without required client certificate. Message: {message}"
+            # Plan B: TLS handshake succeeds (allow_unauthenticated), but
+            # HTTP layer returns 403 when client cert is required but missing.
+            assert success, \
+                f"TLS handshake should succeed without client cert (allow_unauthenticated). Message: {message}"
+            assert status_code == 403, \
+                f"Expected 403 Forbidden for missing client certificate, got {status_code}. Message: {message}"
 
         finally:
             if proxy_proc:
@@ -1217,19 +1214,19 @@ class TestHTTP3DualAuth:
 
             # Connect with INVALID cert - should fail at transport
             async def do_invalid_cert():
-                success, message = await perform_h3_tls_client_cert_test(
+                success, status_code, message = await perform_h3_tls_client_cert_test(
                     "127.0.0.1", proxy_port,
                     ca_path=ca_path,
                     client_cert_path=invalid_cert_path,
                     client_key_path=invalid_key_path,
                     timeout=15.0,
                 )
-                return success, message
+                return success, status_code, message
 
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                success, message = loop.run_until_complete(do_invalid_cert())
+                success, status_code, message = loop.run_until_complete(do_invalid_cert())
             finally:
                 loop.close()
 

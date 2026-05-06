@@ -138,12 +138,13 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       });
     }
 
-    // Step 2: Check SNI vs Host header mismatch
-    // SNI and Host must match per RFC 7540 Section 9.1.2
-    if let Some(ref sni) = self.sni {
-      if let Some(host) = req.headers().get(http::header::HOST) {
-        if let Ok(host_str) = host.to_str() {
-          if !super::common::sni_matches_host(sni, host_str) {
+    // Step 2: Check SNI vs authority mismatch
+    // For CONNECT requests, authority contains the target server,
+    // not the proxy server, so mismatch is expected.
+    if req.method() != http::Method::CONNECT {
+      if let Some(ref sni) = self.sni {
+        if let Some(auth) = req.uri().authority() {
+          if super::common::check_sni_vs_authority(sni, auth.host()) {
             return Box::pin(async {
               Ok(super::common::build_421_misdirected_response())
             });

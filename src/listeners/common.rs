@@ -62,53 +62,52 @@ pub fn build_505_response() -> Response {
   resp
 }
 
-/// Check if SNI matches the Host header.
+/// Check if SNI matches the request authority host.
 ///
-/// Rules:
-/// - Comparison is case-insensitive (DNS names are case-insensitive)
-/// - Host header port is stripped for comparison
-/// - IPv6 brackets are handled (Host may have [::1] format)
-/// - Empty SNI or Host is treated as no match
+/// Both inputs are pure hostnames (no port), so comparison is
+/// straightforward case-insensitive string equality.
 ///
 /// # Arguments
-/// * `sni` - The SNI (Server Name Indication) from TLS handshake
-/// * `host_header` - The Host header value from the HTTP request
+/// * `sni` - The SNI hostname from TLS handshake
+/// * `authority_host` - The host part of the request URI authority
 ///
 /// # Returns
-/// `true` if SNI matches Host, `false` otherwise
-pub fn sni_matches_host(sni: &str, host_header: &str) -> bool {
-  // Empty strings are not valid matches
-  if sni.is_empty() || host_header.is_empty() {
+/// `true` if SNI does NOT match authority (mismatch), `false` otherwise
+pub fn check_sni_vs_authority(sni: &str, authority_host: &str) -> bool {
+  if sni.is_empty() || authority_host.is_empty() {
     return false;
   }
+  sni.to_lowercase() != authority_host.to_lowercase()
+}
 
-  // Extract the host part (strip port if present)
-  // For IPv6, Host format is [::1]:port, we need to handle brackets
-  let host = if host_header.starts_with('[') {
-    // IPv6 format: [::1]:port or [::1]
-    if let Some(bracket_end) = host_header.find(']') {
-      &host_header[1..bracket_end]
-    } else {
-      // Malformed IPv6, use as-is
-      host_header
-    }
-  } else {
-    // IPv4 or hostname: strip port
-    host_header.split(':').next().unwrap_or(host_header)
-  };
-
-  // Case-insensitive comparison (DNS is case-insensitive)
-  sni.to_lowercase() == host.to_lowercase()
+/// Check if authority and Host header values differ.
+///
+/// Per RFC 9114 §4.3.1, if both `:authority` and Host are present,
+/// they MUST contain the same value. Comparison is case-insensitive.
+///
+/// # Arguments
+/// * `authority_str` - The full authority string (e.g., "example.com:443")
+/// * `host_header` - The raw Host header value
+///
+/// # Returns
+/// `true` if authority and Host differ (mismatch), `false` otherwise
+pub fn check_authority_vs_host(
+  authority_str: &str,
+  host_header: &str,
+) -> bool {
+  if authority_str.is_empty() || host_header.is_empty() {
+    return false;
+  }
+  authority_str.to_lowercase() != host_header.to_lowercase()
 }
 
 /// Build a 421 Misdirected Request response.
 ///
 /// This response is sent when the SNI from TLS handshake does not match
-/// the Host header in the HTTP request, indicating a potential
-/// cross-protocol attack or misconfiguration.
+/// the request authority, indicating a misdirected connection.
 pub fn build_421_misdirected_response() -> Response {
   let body = http_body_util::Full::new(bytes::Bytes::from(
-    "Misdirected Request: SNI does not match Host header",
+    "Misdirected Request: SNI does not match request authority",
   ));
   let bytes_buf = BytesBufBodyWrapper::new(body);
   let body = ResponseBody::new(bytes_buf);
@@ -135,96 +134,94 @@ pub fn build_404_response() -> Response {
 mod tests {
   use super::*;
 
-  // ============== SNI/Host Matching Tests ==============
+  // ============== SNI vs Authority Check Tests ==============
 
   #[test]
-  fn test_sni_host_match_exact() {
-    // SNI and Host match exactly
-    let sni = "api.example.com";
-    let host = "api.example.com";
-    assert!(sni_matches_host(sni, host));
+  fn test_check_sni_vs_authority_match() {
+    assert!(!check_sni_vs_authority("api.example.com", "api.example.com"));
   }
 
   #[test]
-  fn test_sni_host_match_different() {
-    // SNI and Host are different - should return false
-    let sni = "api.example.com";
-    let host = "other.example.com";
-    assert!(!sni_matches_host(sni, host));
+  fn test_check_sni_vs_authority_mismatch() {
+    assert!(check_sni_vs_authority("api.example.com", "other.example.com"));
   }
 
   #[test]
-  fn test_sni_host_match_case_insensitive() {
-    // DNS comparison should be case-insensitive
-    let sni = "API.EXAMPLE.COM";
-    let host = "api.example.com";
-    assert!(sni_matches_host(sni, host));
+  fn test_check_sni_vs_authority_case_insensitive() {
+    assert!(!check_sni_vs_authority("API.EXAMPLE.COM", "api.example.com"));
   }
 
   #[test]
-  fn test_sni_host_match_with_port() {
-    // Host header may include port, should strip for comparison
-    let sni = "api.example.com";
-    let host = "api.example.com:443";
-    assert!(sni_matches_host(sni, host));
+  fn test_check_sni_vs_authority_empty_sni() {
+    assert!(!check_sni_vs_authority("", "api.example.com"));
   }
 
   #[test]
-  fn test_sni_host_match_empty_sni() {
-    // Empty SNI should not match anything
-    let sni = "";
-    let host = "api.example.com";
-    assert!(!sni_matches_host(sni, host));
+  fn test_check_sni_vs_authority_empty_authority() {
+    assert!(!check_sni_vs_authority("api.example.com", ""));
   }
 
   #[test]
-  fn test_sni_host_match_empty_host() {
-    // Empty host should not match anything
-    let sni = "api.example.com";
-    let host = "";
-    assert!(!sni_matches_host(sni, host));
+  fn test_check_sni_vs_authority_both_empty() {
+    assert!(!check_sni_vs_authority("", ""));
   }
 
   #[test]
-  fn test_sni_host_match_both_empty() {
-    // Both empty should not match
-    let sni = "";
-    let host = "";
-    assert!(!sni_matches_host(sni, host));
+  fn test_check_sni_vs_authority_ipv4() {
+    assert!(!check_sni_vs_authority("192.168.1.1", "192.168.1.1"));
+  }
+
+  // ============== Authority vs Host Check Tests ==============
+
+  #[test]
+  fn test_check_authority_vs_host_match() {
+    assert!(!check_authority_vs_host("api.example.com", "api.example.com"));
   }
 
   #[test]
-  fn test_sni_host_match_ipv4_address() {
-    // IPv4 addresses should match
-    let sni = "192.168.1.1";
-    let host = "192.168.1.1";
-    assert!(sni_matches_host(sni, host));
+  fn test_check_authority_vs_host_mismatch() {
+    assert!(check_authority_vs_host(
+      "api.example.com",
+      "other.example.com"
+    ));
   }
 
   #[test]
-  fn test_sni_host_match_ipv4_with_port() {
-    // IPv4 with port should match after stripping port
-    let sni = "192.168.1.1";
-    let host = "192.168.1.1:8443";
-    assert!(sni_matches_host(sni, host));
+  fn test_check_authority_vs_host_case_insensitive() {
+    assert!(!check_authority_vs_host(
+      "API.EXAMPLE.COM",
+      "api.example.com"
+    ));
   }
 
   #[test]
-  fn test_sni_host_match_ipv6_address() {
-    // IPv6 addresses should match (without brackets in SNI)
-    let sni = "::1";
-    // This is a special case - we handle it by stripping brackets
-    assert!(sni_matches_host(sni, "[::1]"));
+  fn test_check_authority_vs_host_with_port() {
+    // authority includes port, Host does not — they differ
+    assert!(check_authority_vs_host(
+      "api.example.com:443",
+      "api.example.com"
+    ));
   }
 
   #[test]
-  fn test_sni_host_match_ipv6_with_port() {
-    // IPv6 with port - Host format is [::1]:443
-    let sni = "::1";
-    let host = "[::1]:443";
-    // Should extract ::1 from [::1]:443
-    assert!(sni_matches_host(sni, host));
+  fn test_check_authority_vs_host_both_with_port() {
+    assert!(!check_authority_vs_host(
+      "api.example.com:443",
+      "api.example.com:443"
+    ));
   }
+
+  #[test]
+  fn test_check_authority_vs_host_empty_authority() {
+    assert!(!check_authority_vs_host("", "api.example.com"));
+  }
+
+  #[test]
+  fn test_check_authority_vs_host_empty_host() {
+    assert!(!check_authority_vs_host("api.example.com", ""));
+  }
+
+  // ============== 421 Response Tests ==============
 
   #[test]
   fn test_build_421_response() {

@@ -633,18 +633,18 @@ class TestHTTPVersionCheck:
 
 
 class TestSNIHostMismatch:
-    """Test that SNI vs Host header mismatch returns 421 Misdirected Request."""
+    """Test that SNI vs request authority mismatch returns 421 Misdirected Request."""
 
     def test_sni_host_mismatch_https_returns_421(
         self, h1_h3_test_env: Tuple[str, int, int, int, int]
     ) -> None:
         """
-        Test that SNI/Host mismatch on HTTPS returns 421 Misdirected Request.
+        Test that SNI vs authority mismatch on HTTPS returns 421 Misdirected Request.
 
-        According to spec: "SNI and Host header must match, otherwise return
-        421 Misdirected Request".
+        When SNI differs from the request authority (derived from Host header
+        in HTTP/1.1), the server returns 421 Misdirected Request.
 
-        Expected: PASS - SNI/Host mismatch should receive 421 response.
+        Expected: PASS - SNI/authority mismatch should receive 421 response.
         """
         import ssl
         import socket
@@ -702,9 +702,10 @@ class TestSNIHostMismatch:
         self, h1_h3_test_env: Tuple[str, int, int, int, int]
     ) -> None:
         """
-        Test that matching SNI and Host returns 200 OK.
+        Test that matching SNI and authority returns 200 OK.
 
-        When SNI and Host header match, the request should succeed.
+        When SNI and request authority (derived from Host header in HTTP/1.1)
+        match, the request should succeed.
         """
         import ssl
         import socket
@@ -760,14 +761,19 @@ class TestSNIHostMismatch:
 
 
 class TestHTTP3SNIHostMismatch:
-    """Test that HTTP/3 :authority vs Host header mismatch returns 421 Misdirected Request."""
+    """Test HTTP/3 authority/Host mismatch checks.
+
+    HTTP/3 performs two checks:
+    1. SNI vs authority: mismatch returns 421 Misdirected Request
+    2. authority vs Host: mismatch returns 400 Bad Request
+    """
 
     def test_h3_authority_host_match_returns_200(self, shared_test_certs: dict) -> None:
         """
-        Test that matching :authority and Host in HTTP/3 returns 200 OK.
+        Test that matching SNI, :authority, and Host in HTTP/3 returns 200 OK.
 
-        When :authority (derived from URL) and Host header match, the request should succeed.
-        This test verifies the basic HTTP/3 flow with correct headers.
+        When SNI, :authority, and Host header all match, the request should
+        succeed. This test verifies the basic HTTP/3 flow with correct headers.
         """
         import asyncio
         from .utils.http3_client import (
@@ -865,25 +871,19 @@ class TestHTTP3SNIHostMismatch:
                 terminate_process(proc)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_h3_authority_host_mismatch_returns_421(self, shared_test_certs: dict) -> None:
+    def test_h3_authority_host_mismatch_returns_400(self, shared_test_certs: dict) -> None:
         """
-        Test that :authority and Host mismatch in HTTP/3 is rejected.
+        Test that :authority and Host mismatch in HTTP/3 returns 400 Bad Request.
 
-        This test verifies that HTTP/3 requests with mismatched :authority
-        and Host headers are rejected by the protocol layer.
+        Per RFC 9114 §4.3.1, if both :authority and Host are present,
+        they MUST contain the same value. Mismatch returns 400 Bad Request.
 
-        IMPORTANT: The HTTP/3 protocol (RFC 9114) and the H3 library enforce
-        that `:authority` and Host headers must match. When they don't match,
-        the server rejects the request at the H3 protocol level with
-        H3_MESSAGE_ERROR before any HTTP response (including 421) can be sent.
+        Note: The H3 library may also reject mismatched authority/Host at the
+        protocol level before any HTTP response can be sent. In that case,
+        status_code 0 indicates protocol-level rejection, which is also
+        acceptable.
 
-        This test verifies that mismatched requests are properly rejected,
-        though not with a 421 HTTP response (which is impossible due to
-        protocol constraints). The authority/Host mismatch validation is
-        additionally tested by the Rust unit test:
-        - listeners::http3::tests::test_check_h3_authority_host_mismatch_has_mismatch
-
-        Expected: No HTTP response (protocol-level rejection).
+        Expected: 400 Bad Request or protocol-level rejection (status_code 0).
         """
         import asyncio
         from .utils.http3_client import (
@@ -969,10 +969,10 @@ class TestHTTP3SNIHostMismatch:
                 )
             )
 
-            # Expect no HTTP response (status_code 0) due to protocol-level rejection
-            # The server logs will show: H3_MESSAGE_ERROR - uri and authority field are in contradiction
-            assert response.status_code == 0, (
-                f"Expected protocol-level rejection (status_code 0) for authority/Host mismatch, "
+            # Expect 400 Bad Request or protocol-level rejection (status_code 0)
+            # The H3 library may reject at protocol level before HTTP response
+            assert response.status_code in (0, 400), (
+                f"Expected 400 Bad Request or protocol-level rejection (0) for authority/Host mismatch, "
                 f"got {response.status_code}. Body: {response.body}"
             )
 

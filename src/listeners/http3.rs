@@ -187,32 +187,13 @@ impl Default for QuicConfig {
 // Error Response Helpers
 // ============================================================================
 
-/// Check for :authority vs Host header mismatch in HTTP/3 requests.
-///
-/// In HTTP/3, the `:authority` pseudo-header serves as the equivalent
-/// of the Host header. According to RFC 9114, if both `:authority` and
-/// Host header are present, they should match. A mismatch could
-/// indicate a potential security issue.
-///
-/// Returns true if there's a mismatch (should return 421).
-fn check_h3_authority_host_mismatch(req: &http::Request<()>) -> bool {
-  // Get :authority from the URI
-  let authority = req.uri().authority().map(|a| a.to_string());
-
-  // Get Host header
-  let host = req.headers().get(http::header::HOST);
-
-  match (authority, host) {
-    (Some(auth), Some(host_val)) => {
-      if let Ok(host_str) = host_val.to_str() {
-        // Compare :authority with Host
-        !super::common::sni_matches_host(&auth, host_str)
-      } else {
-        false
-      }
-    }
-    _ => false, // If either is missing, no mismatch check needed
-  }
+/// Extract SNI from a quinn connection's handshake data.
+fn extract_sni_from_connection(conn: &quinn::Connection) -> Option<String> {
+  let handshake_data = conn.handshake_data()?;
+  let hd = handshake_data
+    .downcast::<quinn::crypto::rustls::HandshakeData>()
+    .ok()?;
+  hd.server_name
 }
 
 // ============================================================================
@@ -225,13 +206,14 @@ fn check_h3_authority_host_mismatch(req: &http::Request<()>) -> bool {
 /// Handle a single HTTP/3 stream by delegating to the Service.
 ///
 /// Flow:
-/// 1. SNI/Host mismatch check (fail -> send 421 directly)
-/// 2. Authentication check (fail -> send 407 directly)
-/// 3. Route request to correct service based on :authority
-/// 4. Create (trigger, on_upgrade) pair
-/// 5. Build Request with on_upgrade in extensions
-/// 6. Call service.call(request)
-/// 7. Based on response status, trigger.send_success() or
+/// 1. SNI vs authority mismatch check (fail -> send 421 directly)
+/// 2. authority vs Host mismatch check (fail -> send 400 directly)
+/// 3. Authentication check (fail -> send 407 directly)
+/// 4. Route request to correct service based on :authority
+/// 5. Create (trigger, on_upgrade) pair
+/// 6. Build Request with on_upgrade in extensions
+/// 7. Call service.call(request)
+/// 8. Based on response status, trigger.send_success() or
 ///    trigger.send_error()
 ///
 /// Returns unit `()` because all errors are handled internally via
@@ -244,20 +226,52 @@ async fn handle_h3_stream(
   _shutdown_handle: ShutdownHandle,
   client_addr: SocketAddr,
   local_addr: SocketAddr,
+  sni: Option<String>,
 ) -> () {
   let method = req.method().clone();
 
-  // Phase 1: Check SNI vs Host for HTTP/3 FIRST
-  if check_h3_authority_host_mismatch(&req) {
-    let resp = build_error_response(
-      http::StatusCode::MISDIRECTED_REQUEST,
-      "Misdirected Request: SNI does not match Host header",
-    );
-    let mut stream = stream;
-    if let Err(e) = send_h3_response(&mut stream, resp, true).await {
-      warn!("Failed to send 421 response: {e}");
+  // Phase 1a: Check SNI vs authority mismatch
+  // For CONNECT requests, authority contains the target server,
+  // not the proxy server, so mismatch is expected.
+  if method != http::Method::CONNECT {
+    if let Some(ref sni) = sni {
+      if let Some(auth) = req.uri().authority() {
+        if super::common::check_sni_vs_authority(sni, auth.host()) {
+          let resp = build_error_response(
+            http::StatusCode::MISDIRECTED_REQUEST,
+            "Misdirected Request: SNI does not match request authority",
+          );
+          let mut stream = stream;
+          if let Err(e) = send_h3_response(&mut stream, resp, true).await {
+            warn!("Failed to send 421 response: {e}");
+          }
+          return;
+        }
+      }
     }
-    return;
+  }
+
+  // Phase 1b: Check authority vs Host header mismatch
+  // Per RFC 9114 §4.3.1, :authority and Host must contain the same value.
+  if let Some(host_val) = req.headers().get(http::header::HOST) {
+    if let Some(auth) = req.uri().authority() {
+      if let Ok(host_str) = host_val.to_str() {
+        if super::common::check_authority_vs_host(
+          &auth.to_string(),
+          host_str,
+        ) {
+          let resp = build_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "Bad Request: :authority and Host headers differ",
+          );
+          let mut stream = stream;
+          if let Err(e) = send_h3_response(&mut stream, resp, true).await {
+            warn!("Failed to send 400 response: {e}");
+          }
+          return;
+        }
+      }
+    }
   }
 
   // Phase 2: Route FIRST based on :authority
@@ -437,6 +451,9 @@ async fn handle_h3_connection(
 ) {
   let client_addr = conn.remote_address();
 
+  // Extract SNI before conn is moved into h3_quinn
+  let sni = extract_sni_from_connection(&conn);
+
   // Build ServerRouter once for the entire connection
   let server_router =
     crate::server::ServerRouter::build(server_routing_table);
@@ -466,6 +483,7 @@ async fn handle_h3_connection(
     match accept_result {
       Ok(Some(resolver)) => {
         let server_router = server_router.clone();
+        let sni = sni.clone();
         let stream_shutdown = stream_tracker.shutdown_handle();
         stream_tracker.register(async move {
           match resolver.resolve_request().await {
@@ -477,6 +495,7 @@ async fn handle_h3_connection(
                 stream_shutdown,
                 client_addr,
                 local_addr,
+                sni,
               )
               .await;
             }
@@ -1005,98 +1024,9 @@ mod tests {
   fn test_build_error_response_421_misdirected() {
     let resp = build_error_response(
       http::StatusCode::MISDIRECTED_REQUEST,
-      "Misdirected Request: SNI does not match Host header",
+      "Misdirected Request: SNI does not match request authority",
     );
     assert_eq!(resp.status(), http::StatusCode::MISDIRECTED_REQUEST);
-  }
-
-  // ============== H3 Authority/Host Mismatch Tests ==============
-
-  #[test]
-  fn test_check_h3_authority_host_mismatch_no_mismatch() {
-    // Authority and Host match - no mismatch
-    let req = http::Request::builder()
-      .uri("http://api.example.com/test")
-      .header(http::header::HOST, "api.example.com")
-      .body(())
-      .unwrap();
-    assert!(!check_h3_authority_host_mismatch(&req));
-  }
-
-  #[test]
-  fn test_check_h3_authority_host_mismatch_has_mismatch() {
-    // Authority and Host differ - mismatch
-    let req = http::Request::builder()
-      .uri("http://api.example.com/test")
-      .header(http::header::HOST, "other.example.com")
-      .body(())
-      .unwrap();
-    assert!(check_h3_authority_host_mismatch(&req));
-  }
-
-  #[test]
-  fn test_check_h3_authority_host_mismatch_case_insensitive() {
-    // Authority and Host match (case-insensitive) - no mismatch
-    let req = http::Request::builder()
-      .uri("http://API.EXAMPLE.COM/test")
-      .header(http::header::HOST, "api.example.com")
-      .body(())
-      .unwrap();
-    assert!(!check_h3_authority_host_mismatch(&req));
-  }
-
-  #[test]
-  fn test_check_h3_authority_host_mismatch_with_port() {
-    // Host has port - should strip and match
-    let req = http::Request::builder()
-      .uri("http://api.example.com/test")
-      .header(http::header::HOST, "api.example.com:443")
-      .body(())
-      .unwrap();
-    assert!(!check_h3_authority_host_mismatch(&req));
-  }
-
-  #[test]
-  fn test_check_h3_authority_host_mismatch_no_host() {
-    // No Host header - no mismatch check
-    let req = http::Request::builder()
-      .uri("http://api.example.com/test")
-      .body(())
-      .unwrap();
-    assert!(!check_h3_authority_host_mismatch(&req));
-  }
-
-  #[test]
-  fn test_check_h3_authority_host_mismatch_no_authority() {
-    // No authority in URI - no mismatch check
-    let req = http::Request::builder()
-      .uri("/test")
-      .header(http::header::HOST, "api.example.com")
-      .body(())
-      .unwrap();
-    assert!(!check_h3_authority_host_mismatch(&req));
-  }
-
-  #[test]
-  fn test_check_h3_authority_host_mismatch_ipv4() {
-    // IPv4 addresses should match
-    let req = http::Request::builder()
-      .uri("http://192.168.1.1/test")
-      .header(http::header::HOST, "192.168.1.1")
-      .body(())
-      .unwrap();
-    assert!(!check_h3_authority_host_mismatch(&req));
-  }
-
-  #[test]
-  fn test_check_h3_authority_host_mismatch_ipv4_with_port() {
-    // IPv4 with port should match after stripping port
-    let req = http::Request::builder()
-      .uri("http://192.168.1.1/test")
-      .header(http::header::HOST, "192.168.1.1:8443")
-      .body(())
-      .unwrap();
-    assert!(!check_h3_authority_host_mismatch(&req));
   }
 
   // ============== Listener Name Tests ==============

@@ -5,11 +5,12 @@
 #
 # Prerequisites:
 #   1. Run ./generate_certs.sh to generate certificates
-#   2. server.crt now contains full chain (server cert + CA cert)
-#   3. Restart neoproxy after regenerating certificates
+#   2. Add to /etc/hosts: 127.0.0.1 proxy.example.com http3.example.com
+#   3. server.crt now contains full chain (server cert + CA cert)
+#   4. Restart neoproxy after regenerating certificates
 #
-# Quick test without proxy chain:
-#   curl http://127.0.0.1:8081/test  (echo server, returns request info)
+# Quick test (HTTP proxy, no auth):
+#   curl --proxy http://127.0.0.1:8080 https://httpbin.org/ip
 
 # -----------------------------------------------------------------------------
 # Global Settings
@@ -72,7 +73,7 @@ listeners:
         - username: "admin"
           password: "secret"
 
-  # HTTP listener on alternate port (for entry_proxy)
+  # HTTP listener on alternate port (for connect_proxy)
   - name: http_alt
     kind: http
     addresses: ["127.0.0.1:10080"]
@@ -82,7 +83,7 @@ listeners:
     kind: https
     addresses: ["127.0.0.1:10443"]
 
-  # HTTP/3 listener on alternate port (for http3_proxy)
+  # HTTP/3 listener on alternate port (for connect_proxy)
   - name: http3_alt
     kind: http3
     addresses: ["127.0.0.1:10443"]
@@ -106,16 +107,6 @@ services:
   - name: echo
     kind: echo.echo
     args: {}
-
-  # HTTP CONNECT TCP tunnel service
-  # Handles HTTP CONNECT requests for HTTPS proxying
-  - name: connect_tcp
-    kind: connect_tcp.connect_tcp
-    args:
-      # Timeout for TCP connect to target server (default: 10s)
-      connect_timeout: "10s"
-      # Idle timeout for tunnel data transfer (default: 60s)
-      idle_timeout: "60s"
 
   # HTTP/3 chain proxy service
   # Forwards requests to upstream proxy servers via HTTP/3
@@ -147,7 +138,7 @@ services:
             server_ca_path: conf/certs/server-ca.crt
 
   # Connect TCP service with basic auth layer
-  - name: connect_tcp_with_auth
+  - name: connect_tcp
     kind: connect_tcp.connect_tcp
     args:
       connect_timeout: "10s"
@@ -182,16 +173,30 @@ services:
 
 servers:
   # ---------------------------------------------------------------------------
-  # HTTP/3 Proxy Server
+  # Connect Proxy Server (with auth and client certificate)
   # ---------------------------------------------------------------------------
-  # curl example:
-  #   # Connect through HTTP/3 proxy (requires client certificate)
-  #   curl --proxy https://127.0.0.1:9443 \
-  #        --cacert conf/certs/server-ca.crt \
-  #        --cert conf/certs/client.crt \
-  #        --key conf/certs/client.key \
-  #        -U "h3_user:h3_pass" \
+  # curl examples:
+  #   # HTTP proxy (with basic auth)
+  #   curl --proxy http://127.0.0.1:10080 -U "admin:secret" https://httpbin.org/ip
+  #
+  #   # HTTPS proxy (with basic auth and client certificate)
+  #   curl --proxy https://proxy.example.com:10443 \
+  #        --proxy-cacert conf/certs/server-ca.crt \
+  #        --proxy-cert conf/certs/client.crt \
+  #        --proxy-key conf/certs/client.key \
+  #        -U "admin:secret" \
   #        https://httpbin.org/ip
+  #
+  #   # HTTP/3 proxy (with basic auth and client certificate)
+  #   curl --proxy https://proxy.example.com:10443 --http3 \
+  #        --proxy-cacert conf/certs/server-ca.crt \
+  #        --proxy-cert conf/certs/client.crt \
+  #        --proxy-key conf/certs/client.key \
+  #        -U "admin:secret" \
+  #        https://httpbin.org/ip
+  #
+  #   # SOCKS5 proxy (with auth)
+  #   curl --socks5 127.0.0.1:11080 --proxy-user admin:secret https://httpbin.org/ip
   - name: connect_proxy
     tls:
       certificates:
@@ -207,20 +212,25 @@ servers:
     service: connect_tcp
 
   # ---------------------------------------------------------------------------
-  # Default Entry Proxy (no auth required)
+  # Chain Proxy Server (no auth required on this node)
   # ---------------------------------------------------------------------------
   # curl examples:
   #   # HTTP proxy
   #   curl --proxy http://127.0.0.1:8080 https://httpbin.org/ip
   #
-  #   # SOCKS5 proxy (with auth)
-  #   curl --socks5 127.0.0.1:1081 --proxy-user socks_user:socks_pass https://httpbin.org/ip
-  #
   #   # HTTPS proxy (encrypted connection to proxy)
-  #   curl --proxy https://127.0.0.1:8443 \
+  #   curl --proxy https://proxy.example.com:8443 \
   #        --proxy-cacert conf/certs/server-ca.crt \
   #        https://httpbin.org/ip
-  - name: main_proxy
+  #
+  #   # HTTP/3 proxy (encrypted connection to proxy)
+  #   curl --proxy https://proxy.example.com:8443 --http3 \
+  #        --proxy-cacert conf/certs/server-ca.crt \
+  #        https://httpbin.org/ip
+  #
+  #   # SOCKS5 proxy (with auth, configured in socks5_main listener)
+  #   curl --socks5 127.0.0.1:9080 --proxy-user admin:secret https://httpbin.org/ip
+  - name: chain_proxy
     tls:
       certificates:
         - cert_path: conf/certs/server.crt

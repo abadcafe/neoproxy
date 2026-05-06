@@ -1,15 +1,29 @@
 //! Auth plugin.
 
-pub mod auth_type;
-pub mod user_password_auth;
-
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-pub use auth_type::AuthType;
-pub use user_password_auth::UserPasswordAuth;
+pub use crate::auth::UserPasswordAuth;
+
+/// Authentication type used for the request.
+/// Internal to auth plugin - written as string to RequestContext.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AuthType {
+  #[default]
+  None,
+  Password,
+}
+
+impl std::fmt::Display for AuthType {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      AuthType::None => write!(f, "none"),
+      AuthType::Password => write!(f, "password"),
+    }
+  }
+}
 
 use crate::config::SerializedArgs;
 use crate::context::RequestContext;
@@ -59,7 +73,7 @@ impl AuthPlugin {
         }
 
         let config: AuthConfig = serde_yaml::from_value(args)?;
-        let auth = user_password_auth::UserPasswordAuth::from_users(
+        let auth = UserPasswordAuth::from_users(
           &config.users,
         );
         Ok(Layer::new(AuthLayer { auth }))
@@ -88,7 +102,7 @@ pub fn create_plugin() -> Box<dyn Plugin> {
 
 /// Layer that creates AuthMiddleware instances.
 struct AuthLayer {
-  auth: user_password_auth::UserPasswordAuth,
+  auth: UserPasswordAuth,
 }
 
 impl tower::Layer<Service> for AuthLayer {
@@ -103,7 +117,7 @@ impl tower::Layer<Service> for AuthLayer {
 #[derive(Clone)]
 struct AuthMiddleware {
   inner: Service,
-  auth: user_password_auth::UserPasswordAuth,
+  auth: UserPasswordAuth,
 }
 
 impl tower::Service<Request> for AuthMiddleware {
@@ -560,5 +574,20 @@ mod middleware_tests {
         http::StatusCode::PROXY_AUTHENTICATION_REQUIRED
       );
     });
+  }
+}
+
+#[cfg(test)]
+mod auth_type_tests {
+  use super::*;
+
+  #[test]
+  fn test_auth_type_to_string_none() {
+    assert_eq!(AuthType::None.to_string(), "none");
+  }
+
+  #[test]
+  fn test_auth_type_to_string_password() {
+    assert_eq!(AuthType::Password.to_string(), "password");
   }
 }

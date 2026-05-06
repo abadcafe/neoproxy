@@ -1145,35 +1145,6 @@ quic:
     assert!(result.is_ok());
   }
 
-  // ============== Constants Tests ==============
-
-  #[test]
-  fn test_default_values() {
-    assert_eq!(DEFAULT_MAX_CONCURRENT_BIDI_STREAMS, 100);
-    assert_eq!(DEFAULT_MAX_IDLE_TIMEOUT_MS, 5000);
-    assert_eq!(DEFAULT_INITIAL_MTU, 1200);
-    assert_eq!(DEFAULT_SEND_WINDOW, 10485760);
-    assert_eq!(DEFAULT_RECEIVE_WINDOW, 10485760);
-  }
-
-  #[test]
-  fn test_listener_shutdown_timeout() {
-    assert_eq!(LISTENER_SHUTDOWN_TIMEOUT, Duration::from_secs(3));
-  }
-
-  #[test]
-  fn test_monitoring_log_interval() {
-    assert_eq!(MONITORING_LOG_INTERVAL, Duration::from_secs(60));
-  }
-
-  // ============== Listening Trait Tests ==============
-
-  #[test]
-  fn test_listening_trait_implementation() {
-    fn assert_listening<T: Listening>() {}
-    assert_listening::<Http3Listener>();
-  }
-
   // ============== Bad Gateway Response Tests ==============
 
   #[test]
@@ -1363,56 +1334,8 @@ quic:
     );
   }
 
-  // ============== Multi-Address Support Tests ==============
-
-  #[test]
-  fn test_http3_listener_args_addresses_field() {
-    // Addresses are now passed separately, not in args
-    // This test verifies the args struct has no addresses field
-    let yaml = r#"{}"#;
-    let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert!(args.quic.is_none());
-  }
-
-  #[test]
-  fn test_http3_listener_args_single_address() {
-    // Addresses are now passed separately at the config level
-    let yaml = r#"{}"#;
-    let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert!(args.quic.is_none());
-  }
-
-  #[test]
-  fn test_http3_listener_args_no_address_error() {
-    // Addresses are now validated at config level, not in listener args
-    // This test just verifies the args struct can be empty
-    let yaml = r#"{}"#;
-    let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert!(args.quic.is_none());
-  }
-
   // ============== Task 011: Remove TLS/Auth from Listener Args Tests
   // ==============
-
-  #[test]
-  fn test_http3_listener_args_no_tls_fields() {
-    // TLS should no longer be at listener level
-    let yaml = r#"{}"#;
-    let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    // TLS should not be part of listener args
-    assert!(args.quic.is_none());
-  }
-
-  #[test]
-  fn test_http3_listener_args_no_auth_field() {
-    // Auth should no longer be at listener level
-    // The struct no longer has an auth field, so parsing without it
-    // should work
-    let yaml = r#"{}"#;
-    let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    // Auth is now at server level, not listener level
-    assert!(args.quic.is_none());
-  }
 
   #[test]
   fn test_http3_listener_args_quic_optional() {

@@ -131,12 +131,6 @@ mod tests {
   }
 
   #[test]
-  fn test_access_log_writer_new() {
-    let writer = AccessLogWriter::new();
-    let _ = writer;
-  }
-
-  #[test]
   fn test_access_log_writer_has_no_file_before_flush() {
     let writer = AccessLogWriter::new();
     assert!(writer.current_file.is_none());

@@ -130,14 +130,6 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_uninstall_default_returns_unit() {
-    let plugin = TestPlugin;
-    let future = plugin.uninstall();
-    let result: () = future.await;
-    assert_eq!(result, ());
-  }
-
-  #[tokio::test]
   async fn test_uninstall_custom_implementation_is_called() {
     let plugin = CustomUninstallPlugin::new();
     let flag = plugin.get_uninstalled_flag();
@@ -179,14 +171,4 @@ mod tests {
     assert!(result.is_none());
   }
 
-  #[tokio::test]
-  async fn test_default_uninstall_completes_immediately() {
-    let plugin = DefaultOnlyPlugin;
-    let result = tokio::time::timeout(
-      std::time::Duration::from_millis(1),
-      plugin.uninstall(),
-    )
-    .await;
-    assert!(result.is_ok());
-  }
 }

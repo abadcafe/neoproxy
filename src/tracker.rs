@@ -129,12 +129,6 @@ mod tests {
     assert_eq!(tracker.connection_count(), 0);
   }
 
-  #[test]
-  fn test_stream_tracker_default() {
-    let tracker = StreamTracker::default();
-    assert_eq!(tracker.active_count(), 0);
-  }
-
   #[tokio::test]
   async fn test_stream_tracker_register() {
     let local_set = tokio::task::LocalSet::new();
@@ -211,12 +205,6 @@ mod tests {
     let tracker = StreamTracker::new();
     tracker.abort_all();
     assert_eq!(tracker.active_count(), 0);
-  }
-
-  #[test]
-  fn test_stream_tracker_shutdown_handle() {
-    let tracker = StreamTracker::new();
-    let _handle = tracker.shutdown_handle();
   }
 
   #[tokio::test]

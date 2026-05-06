@@ -162,13 +162,6 @@ mod layer_tests {
   }
 
   #[test]
-  fn test_layer_new() {
-    let layer = Layer::new(TestLayer);
-    // Just verify it can be created
-    let _ = layer;
-  }
-
-  #[test]
   fn test_layer_wraps_service() {
     let inner = crate::server::placeholder_service();
     let layer = Layer::new(TestLayer);

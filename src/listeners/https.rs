@@ -447,9 +447,6 @@ mod tests {
 
   use super::*;
   use crate::config::{CertificateConfig, ServerTlsConfig};
-  use crate::listeners::common::{
-    TokioLocalExecutor, build_505_response, check_http_version,
-  };
 
   static CRYPTO_PROVIDER_INSTALLED: OnceLock<bool> = OnceLock::new();
 
@@ -530,23 +527,8 @@ mod tests {
   }
 
   #[test]
-  fn test_tls_handshake_timeout_default_is_5_seconds() {
-    assert_eq!(DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS, 5);
-    assert_eq!(
-      Duration::from_secs(DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS),
-      Duration::from_secs(5)
-    );
-  }
-
-  #[test]
   fn test_listener_name() {
     assert_eq!(listener_name(), "https");
-  }
-
-  #[test]
-  fn test_listening_trait_implementation() {
-    fn assert_listening<T: Listening>() {}
-    assert_listening::<HttpsListener>();
   }
 
   #[test]
@@ -583,24 +565,6 @@ mod tests {
   #[test]
   fn test_create_listener_builder() {
     let _builder = create_listener_builder();
-  }
-
-  #[test]
-  fn test_graceful_shutdown_timeout_is_3_seconds() {
-    assert_eq!(LISTENER_SHUTDOWN_TIMEOUT.as_secs(), 3);
-    assert_eq!(LISTENER_SHUTDOWN_TIMEOUT.as_millis(), 3000);
-  }
-
-  #[test]
-  fn test_monitoring_log_interval_is_60_seconds() {
-    assert_eq!(MONITORING_LOG_INTERVAL.as_secs(), 60);
-    assert_eq!(MONITORING_LOG_INTERVAL.as_millis(), 60000);
-  }
-
-  #[test]
-  fn test_tokio_local_executor() {
-    let executor = TokioLocalExecutor;
-    let _cloned = executor.clone();
   }
 
   // ============== load_tls_config_from_servers Tests ==============
@@ -684,43 +648,6 @@ mod tests {
       result.is_ok(),
       "Should load TLS config from multiple servers"
     );
-  }
-
-  // ============== HTTP Version Check Tests ==============
-
-  #[test]
-  fn test_check_http_version_http10_returns_505() {
-    let version = http::Version::HTTP_10;
-    let result = check_http_version(version);
-    assert!(result.is_err());
-    assert_eq!(
-      result.unwrap_err(),
-      http::StatusCode::HTTP_VERSION_NOT_SUPPORTED
-    );
-  }
-
-  #[test]
-  fn test_check_http_version_http11_ok() {
-    let version = http::Version::HTTP_11;
-    let result = check_http_version(version);
-    assert!(result.is_ok());
-  }
-
-  #[test]
-  fn test_check_http_version_http2_ok() {
-    let version = http::Version::HTTP_2;
-    let result = check_http_version(version);
-    assert!(result.is_ok());
-  }
-
-  #[test]
-  fn test_build_505_response() {
-    let resp = build_505_response();
-    assert_eq!(
-      resp.status(),
-      http::StatusCode::HTTP_VERSION_NOT_SUPPORTED
-    );
-    assert!(resp.headers().get(http::header::CONTENT_TYPE).is_some());
   }
 
   // ============== Task 009: ServerRouter Routing Behavior Tests

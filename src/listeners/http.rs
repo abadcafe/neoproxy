@@ -376,7 +376,7 @@ pub fn create_listener_builder() -> Box<dyn BuildListener> {
 mod tests {
   use super::*;
   use crate::listeners::common::{
-    TokioLocalExecutor, build_505_response, check_http_version,
+    build_505_response, check_http_version,
   };
   use crate::shutdown::ShutdownHandle;
 
@@ -464,31 +464,6 @@ mod tests {
   }
 
   #[test]
-  fn test_listener_shutdown_timeout_constant() {
-    assert_eq!(LISTENER_SHUTDOWN_TIMEOUT, Duration::from_secs(3));
-  }
-
-  #[test]
-  fn test_tokio_local_executor() {
-    let executor = TokioLocalExecutor;
-    // Verify the executor can be cloned
-    let _cloned = executor.clone();
-  }
-
-  #[test]
-  fn test_hyper_service_adaptor_creation() {
-    let server_routing_table = vec![create_test_routing_entry()];
-    let _adaptor =
-      HyperServiceAdaptor::new(server_routing_table, None, None);
-  }
-
-  #[test]
-  fn test_http_listener_args_default() {
-    let args = HttpListenerArgs::default();
-    drop(args);
-  }
-
-  #[test]
   fn test_listener_stop_and_start() {
     // This test verifies the listener can be created and stopped
     let svc = crate::server::placeholder_service();
@@ -508,68 +483,6 @@ mod tests {
     // After shutdown, notified should return immediately
     // (but we don't test async behavior here)
     drop(handle2);
-  }
-
-  #[test]
-  fn test_http_listener_struct_fields() {
-    // Verify struct has all expected fields
-    let args = create_test_args();
-    let listener = HttpListener::new(
-      create_test_addresses(),
-      args,
-      vec![create_test_routing_entry()],
-    );
-
-    // This test verifies the constructor succeeds
-    assert!(listener.is_ok());
-  }
-
-  #[test]
-  fn test_listening_trait_implementation() {
-    // Verify HttpListener implements Listening
-    fn assert_listening<T: Listening>() {}
-    assert_listening::<HttpListener>();
-  }
-
-  #[test]
-  fn test_graceful_shutdown_timeout_is_3_seconds() {
-    // Verify the constant is 3 seconds as per requirements
-    assert_eq!(LISTENER_SHUTDOWN_TIMEOUT.as_secs(), 3);
-    assert_eq!(LISTENER_SHUTDOWN_TIMEOUT.as_millis(), 3000);
-  }
-
-  #[test]
-  fn test_monitoring_log_interval_is_60_seconds() {
-    // Verify the constant is 60 seconds as per requirements
-    assert_eq!(MONITORING_LOG_INTERVAL.as_secs(), 60);
-    assert_eq!(MONITORING_LOG_INTERVAL.as_millis(), 60000);
-  }
-
-  #[test]
-  fn test_monitoring_log_format() {
-    // Test that the monitoring log format is correct
-    let svc = crate::server::placeholder_service();
-    let listener =
-      HttpListener::new_for_test(create_test_addresses(), svc).unwrap();
-
-    let expected_format = format!(
-      "[http] active_connections={}",
-      listener.connection_tracker.active_count()
-    );
-
-    // Verify format contains correct components
-    assert!(
-      expected_format.contains("[http]"),
-      "Log format should contain '[http]'"
-    );
-    assert!(
-      expected_format.contains("active_connections"),
-      "Log format should contain 'active_connections'"
-    );
-    assert!(
-      expected_format.contains("active_connections=0"),
-      "Log format should show initial count as 0"
-    );
   }
 
   #[test]

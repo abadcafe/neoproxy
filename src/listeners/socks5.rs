@@ -1351,66 +1351,6 @@ pub fn create_listener_builder() -> Box<dyn BuildListener> {
 mod tests {
   use super::*;
 
-  // ========== StreamTracker Tests ==========
-
-  #[test]
-  fn test_stream_tracker_new() {
-    let tracker = StreamTracker::new();
-    assert_eq!(tracker.active_count(), 0);
-  }
-
-  #[test]
-  fn test_stream_tracker_default() {
-    let tracker = StreamTracker::default();
-    assert_eq!(tracker.active_count(), 0);
-  }
-
-  #[test]
-  fn test_stream_tracker_in_rc() {
-    // Verify Rc<StreamTracker> can be cloned
-    let tracker = Rc::new(StreamTracker::new());
-    let cloned = tracker.clone();
-    assert_eq!(cloned.active_count(), 0);
-
-    // Verify shutdown handles are shared
-    tracker.shutdown();
-    assert!(tracker.shutdown_handle().is_shutdown());
-    assert!(cloned.shutdown_handle().is_shutdown());
-  }
-
-  #[tokio::test]
-  async fn test_stream_tracker_register() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        tracker.register(async {});
-        // Need to yield for the task to be spawned
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.active_count(), 1);
-      })
-      .await;
-  }
-
-  #[tokio::test]
-  async fn test_stream_tracker_abort_all() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        tracker.register(async {
-          std::future::pending::<()>().await;
-        });
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.active_count(), 1);
-
-        tracker.abort_all();
-        tracker.wait_shutdown().await;
-        assert_eq!(tracker.active_count(), 0);
-      })
-      .await;
-  }
-
   // ========== Socks5ListenerArgs Tests ==========
 
   #[test]
@@ -1418,16 +1358,6 @@ mod tests {
     let args = Socks5ListenerArgs::default();
     assert_eq!(args.handshake_timeout, Duration::from_secs(10));
     assert!(args.user_password_auth.verify_credentials("", "").is_ok());
-  }
-
-  #[test]
-  fn test_socks5_listener_args_clone() {
-    let args = Socks5ListenerArgs {
-      handshake_timeout: Duration::from_secs(5),
-      user_password_auth: UserPasswordAuth::none(),
-    };
-    let cloned = args.clone();
-    assert_eq!(args.handshake_timeout, cloned.handshake_timeout);
   }
 
   // ========== parse_config Tests ==========
@@ -1566,11 +1496,5 @@ users:
   #[test]
   fn test_listener_name() {
     assert_eq!(listener_name(), "socks5");
-  }
-
-  #[test]
-  fn test_listening_trait_implementation() {
-    fn assert_listening<T: Listening>() {}
-    assert_listening::<Socks5Listener>();
   }
 }

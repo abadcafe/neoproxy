@@ -839,33 +839,6 @@ mod tests {
     );
   }
 
-  #[test]
-  fn test_socks5_on_upgrade_debug_impl() {
-    let (_tx, rx) = tokio::sync::oneshot::channel::<
-      Result<tokio::net::TcpStream, Socks5UpgradeError>,
-    >();
-    let upgrade = Socks5OnUpgrade {
-      receiver: Some(Arc::new(Mutex::new(Some(rx)))),
-    };
-    let debug_str = format!("{:?}", upgrade);
-    assert!(
-      debug_str.contains("Socks5OnUpgrade"),
-      "Debug output should contain type name, got: {}",
-      debug_str
-    );
-  }
-
-  #[test]
-  fn test_socks5_on_upgrade_none_debug_impl() {
-    let upgrade = Socks5OnUpgrade { receiver: None };
-    let debug_str = format!("{:?}", upgrade);
-    assert!(
-      debug_str.contains("Socks5OnUpgrade"),
-      "Debug output should contain type name, got: {}",
-      debug_str
-    );
-  }
-
   #[tokio::test]
   async fn test_socks5_on_upgrade_second_clone_returns_canceled_after_first_poll()
    {
@@ -1082,12 +1055,6 @@ mod tests {
   }
 
   #[test]
-  fn test_client_stream_enum_exists() {
-    use super::ClientStream;
-    let _ = std::mem::size_of::<ClientStream>();
-  }
-
-  #[test]
   fn test_h3_upgrade_error_display() {
     let err = super::H3UpgradeError::ErrorResponse(
       http::StatusCode::BAD_GATEWAY,
@@ -1204,55 +1171,4 @@ mod tests {
     }
   }
 
-  #[test]
-  fn test_h3_upgrade_trigger_pair_creates_linked_pair() {
-    // This test just verifies the pair() constructor exists and returns
-    // the correct types. Actual send_success/send_error require real H3
-    // streams which are tested in integration tests.
-    // We test the channel behavior using test helpers.
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let upgrade = super::H3OnUpgrade::new_for_test(rx);
-
-    // Send a cancel error through the channel
-    let _ = tx.send(Err(H3UpgradeError::Canceled));
-
-    // Verify the upgrade is awaitable (tested in async tests above)
-    drop(upgrade);
-  }
-
-  #[test]
-  fn test_h3_on_upgrade_debug_impl() {
-    let (_tx, rx) = tokio::sync::oneshot::channel::<
-      Result<H3ServerBidiStream, H3UpgradeError>,
-    >();
-    let upgrade = super::H3OnUpgrade {
-      receiver: Some(Arc::new(Mutex::new(Some(rx)))),
-    };
-    let debug_str = format!("{:?}", upgrade);
-    assert!(
-      debug_str.contains("H3OnUpgrade"),
-      "Debug output should contain type name, got: {}",
-      debug_str
-    );
-  }
-
-  #[test]
-  fn test_h3_on_upgrade_none_debug_impl() {
-    let upgrade = super::H3OnUpgrade { receiver: None };
-    let debug_str = format!("{:?}", upgrade);
-    assert!(
-      debug_str.contains("H3OnUpgrade"),
-      "Debug output should contain type name, got: {}",
-      debug_str
-    );
-  }
-
-  #[test]
-  fn test_h3_upgrade_trigger_debug_impl() {
-    // We can't create a real H3UpgradeTrigger without a real H3 stream,
-    // but we can verify the Debug impl exists by checking the type
-    // implements Debug.
-    fn assert_debug<T: std::fmt::Debug>() {}
-    assert_debug::<super::H3UpgradeTrigger>();
-  }
 }

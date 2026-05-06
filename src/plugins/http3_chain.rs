@@ -523,7 +523,7 @@ struct Http3ChainServiceArgsProxyGroup {
   tls: Option<ClientTlsConfig>,
 }
 
-#[derive(Deserialize, Default, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 struct Http3ChainServiceArgs {
   proxy_group: Vec<Http3ChainServiceArgsProxyGroup>,
@@ -532,8 +532,22 @@ struct Http3ChainServiceArgs {
   #[serde(default)]
   default_tls: Option<ClientTlsConfig>,
   /// Idle timeout for tunnel data transfer.
-  #[serde(default = "default_idle_timeout")]
+  #[serde(
+    with = "humantime_serde",
+    default = "default_idle_timeout"
+  )]
   idle_timeout: Duration,
+}
+
+impl Default for Http3ChainServiceArgs {
+  fn default() -> Self {
+    Self {
+      proxy_group: vec![],
+      default_user: None,
+      default_tls: None,
+      idle_timeout: default_idle_timeout(),
+    }
+  }
 }
 
 fn default_idle_timeout() -> Duration {

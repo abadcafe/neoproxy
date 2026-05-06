@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use byte_unit::Byte;
 use bytes::Bytes;
 use h3::server;
 use http_body_util::BodyExt;
@@ -38,17 +39,19 @@ use crate::tracker::StreamTracker;
 /// Default maximum concurrent bidirectional streams
 const DEFAULT_MAX_CONCURRENT_BIDI_STREAMS: u64 = 100;
 
-/// Default maximum idle timeout in milliseconds
-const DEFAULT_MAX_IDLE_TIMEOUT_MS: u64 = 5000;
+/// Default maximum idle timeout
+const DEFAULT_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Default initial MTU
 const DEFAULT_INITIAL_MTU: u16 = 1200;
 
-/// Default send window size (10MB)
-const DEFAULT_SEND_WINDOW: u64 = 10485760;
+/// Default send window size (10MiB)
+const DEFAULT_SEND_WINDOW: Byte =
+  Byte::from_u64(10485760);
 
-/// Default receive window size (10MB)
-const DEFAULT_RECEIVE_WINDOW: u64 = 10485760;
+/// Default receive window size (10MiB)
+const DEFAULT_RECEIVE_WINDOW: Byte =
+  Byte::from_u64(10485760);
 
 /// H3_NO_ERROR error code for CONNECTION_CLOSE frame
 /// See: https://www.rfc-editor.org/rfc/rfc9114.html#errors
@@ -74,29 +77,43 @@ pub struct Http3ListenerArgs {
 pub struct QuicConfigArgs {
   /// Maximum concurrent bidirectional streams (default: 100, range:
   /// 1-10000)
-  pub max_concurrent_bidi_streams: Option<u64>,
-  /// Maximum idle timeout in milliseconds (default: 5000)
-  pub max_idle_timeout_ms: Option<u64>,
+  #[serde(default = "default_max_concurrent_bidi_streams")]
+  pub max_concurrent_bidi_streams: u64,
+  /// Maximum idle timeout (default: 5s)
+  #[serde(
+    with = "humantime_serde",
+    default = "default_max_idle_timeout"
+  )]
+  pub max_idle_timeout: Duration,
   /// Initial MTU (default: 1200, range: 1200-9000)
-  pub initial_mtu: Option<u16>,
-  /// Send window size in bytes (default: 10MB)
-  pub send_window: Option<u64>,
-  /// Receive window size in bytes (default: 10MB)
-  pub receive_window: Option<u64>,
+  #[serde(default = "default_initial_mtu")]
+  pub initial_mtu: u16,
+  /// Send window size (default: 10MiB)
+  #[serde(default = "default_send_window")]
+  pub send_window: Byte,
+  /// Receive window size (default: 10MiB)
+  #[serde(default = "default_receive_window")]
+  pub receive_window: Byte,
 }
 
-impl Default for QuicConfigArgs {
-  fn default() -> Self {
-    Self {
-      max_concurrent_bidi_streams: Some(
-        DEFAULT_MAX_CONCURRENT_BIDI_STREAMS,
-      ),
-      max_idle_timeout_ms: Some(DEFAULT_MAX_IDLE_TIMEOUT_MS),
-      initial_mtu: Some(DEFAULT_INITIAL_MTU),
-      send_window: Some(DEFAULT_SEND_WINDOW),
-      receive_window: Some(DEFAULT_RECEIVE_WINDOW),
-    }
-  }
+fn default_max_concurrent_bidi_streams() -> u64 {
+  DEFAULT_MAX_CONCURRENT_BIDI_STREAMS
+}
+
+fn default_max_idle_timeout() -> Duration {
+  DEFAULT_MAX_IDLE_TIMEOUT
+}
+
+fn default_initial_mtu() -> u16 {
+  DEFAULT_INITIAL_MTU
+}
+
+fn default_send_window() -> Byte {
+  DEFAULT_SEND_WINDOW
+}
+
+fn default_receive_window() -> Byte {
+  DEFAULT_RECEIVE_WINDOW
 }
 
 impl QuicConfigArgs {
@@ -105,55 +122,39 @@ impl QuicConfigArgs {
   /// Returns validated configuration with defaults applied where
   /// needed. Invalid values return an error, rejecting startup.
   pub fn validate_and_apply_defaults(&self) -> Result<QuicConfig> {
-    let max_concurrent_bidi_streams =
-      match self.max_concurrent_bidi_streams {
-        Some(v) if (1..=10000).contains(&v) => v,
-        Some(v) => {
-          bail!(
-            "Invalid max_concurrent_bidi_streams: {}, expected range \
-             1-10000",
-            v
-          );
-        }
-        None => DEFAULT_MAX_CONCURRENT_BIDI_STREAMS,
-      };
+    if !(1..=10000).contains(&self.max_concurrent_bidi_streams) {
+      bail!(
+        "Invalid max_concurrent_bidi_streams: {}, expected range 1-10000",
+        self.max_concurrent_bidi_streams
+      );
+    }
 
-    let max_idle_timeout_ms = match self.max_idle_timeout_ms {
-      Some(v) if v > 0 => v,
-      Some(v) => {
-        bail!("Invalid max_idle_timeout_ms: {}, expected value > 0", v);
-      }
-      None => DEFAULT_MAX_IDLE_TIMEOUT_MS,
-    };
+    let max_idle_timeout_ms = self.max_idle_timeout.as_millis() as u64;
+    if max_idle_timeout_ms == 0 {
+      bail!("Invalid max_idle_timeout: must be > 0ms");
+    }
 
-    let initial_mtu = match self.initial_mtu {
-      Some(v) if (1200..=9000).contains(&v) => v,
-      Some(v) => {
-        bail!("Invalid initial_mtu: {}, expected range 1200-9000", v);
-      }
-      None => DEFAULT_INITIAL_MTU,
-    };
+    if !(1200..=9000).contains(&self.initial_mtu) {
+      bail!(
+        "Invalid initial_mtu: {}, expected range 1200-9000",
+        self.initial_mtu
+      );
+    }
 
-    let send_window = match self.send_window {
-      Some(v) if v > 0 => v,
-      Some(v) => {
-        bail!("Invalid send_window: {}, expected value > 0", v);
-      }
-      None => DEFAULT_SEND_WINDOW,
-    };
+    let send_window = self.send_window.as_u64();
+    if send_window == 0 {
+      bail!("Invalid send_window: must be > 0");
+    }
 
-    let receive_window = match self.receive_window {
-      Some(v) if v > 0 => v,
-      Some(v) => {
-        bail!("Invalid receive_window: {}, expected value > 0", v);
-      }
-      None => DEFAULT_RECEIVE_WINDOW,
-    };
+    let receive_window = self.receive_window.as_u64();
+    if receive_window == 0 {
+      bail!("Invalid receive_window: must be > 0");
+    }
 
     Ok(QuicConfig {
-      max_concurrent_bidi_streams,
+      max_concurrent_bidi_streams: self.max_concurrent_bidi_streams,
       max_idle_timeout_ms,
-      initial_mtu,
+      initial_mtu: self.initial_mtu,
       send_window,
       receive_window,
     })
@@ -172,9 +173,13 @@ pub struct QuicConfig {
 
 impl Default for QuicConfig {
   fn default() -> Self {
-    QuicConfigArgs::default()
-      .validate_and_apply_defaults()
-      .expect("Default QuicConfigArgs should always be valid")
+    Self {
+      max_concurrent_bidi_streams: DEFAULT_MAX_CONCURRENT_BIDI_STREAMS,
+      max_idle_timeout_ms: DEFAULT_MAX_IDLE_TIMEOUT.as_millis() as u64,
+      initial_mtu: DEFAULT_INITIAL_MTU,
+      send_window: DEFAULT_SEND_WINDOW.as_u64(),
+      receive_window: DEFAULT_RECEIVE_WINDOW.as_u64(),
+    }
   }
 }
 
@@ -810,30 +815,38 @@ mod tests {
 
   // ============== QuicConfigArgs Tests ==============
 
+  fn default_quic_config_args() -> QuicConfigArgs {
+    QuicConfigArgs {
+      max_concurrent_bidi_streams: DEFAULT_MAX_CONCURRENT_BIDI_STREAMS,
+      max_idle_timeout: DEFAULT_MAX_IDLE_TIMEOUT,
+      initial_mtu: DEFAULT_INITIAL_MTU,
+      send_window: DEFAULT_SEND_WINDOW,
+      receive_window: DEFAULT_RECEIVE_WINDOW,
+    }
+  }
+
   #[test]
-  fn test_quic_config_args_default() {
-    let args = QuicConfigArgs::default();
+  fn test_quic_config_args_deserialize_default() {
+    let yaml = r#"{}"#;
+    let args: QuicConfigArgs = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(
       args.max_concurrent_bidi_streams,
-      Some(DEFAULT_MAX_CONCURRENT_BIDI_STREAMS)
+      DEFAULT_MAX_CONCURRENT_BIDI_STREAMS
     );
-    assert_eq!(
-      args.max_idle_timeout_ms,
-      Some(DEFAULT_MAX_IDLE_TIMEOUT_MS)
-    );
-    assert_eq!(args.initial_mtu, Some(DEFAULT_INITIAL_MTU));
-    assert_eq!(args.send_window, Some(DEFAULT_SEND_WINDOW));
-    assert_eq!(args.receive_window, Some(DEFAULT_RECEIVE_WINDOW));
+    assert_eq!(args.max_idle_timeout, DEFAULT_MAX_IDLE_TIMEOUT);
+    assert_eq!(args.initial_mtu, DEFAULT_INITIAL_MTU);
+    assert_eq!(args.send_window, DEFAULT_SEND_WINDOW);
+    assert_eq!(args.receive_window, DEFAULT_RECEIVE_WINDOW);
   }
 
   #[test]
   fn test_quic_config_args_validate_and_apply_defaults_valid() {
     let args = QuicConfigArgs {
-      max_concurrent_bidi_streams: Some(200),
-      max_idle_timeout_ms: Some(60000),
-      initial_mtu: Some(1400),
-      send_window: Some(20971520),
-      receive_window: Some(20971520),
+      max_concurrent_bidi_streams: 200,
+      max_idle_timeout: Duration::from_secs(60),
+      initial_mtu: 1400,
+      send_window: Byte::from_u64(20971520),
+      receive_window: Byte::from_u64(20971520),
     };
     let config = args.validate_and_apply_defaults().unwrap();
     assert_eq!(config.max_concurrent_bidi_streams, 200);
@@ -847,8 +860,8 @@ mod tests {
   fn test_quic_config_args_validate_invalid_max_concurrent_bidi_streams_low()
    {
     let args = QuicConfigArgs {
-      max_concurrent_bidi_streams: Some(0),
-      ..Default::default()
+      max_concurrent_bidi_streams: 0,
+      ..default_quic_config_args()
     };
     let result = args.validate_and_apply_defaults();
     assert!(result.is_err());
@@ -861,8 +874,8 @@ mod tests {
   fn test_quic_config_args_validate_invalid_max_concurrent_bidi_streams_high()
    {
     let args = QuicConfigArgs {
-      max_concurrent_bidi_streams: Some(10001),
-      ..Default::default()
+      max_concurrent_bidi_streams: 10001,
+      ..default_quic_config_args()
     };
     let result = args.validate_and_apply_defaults();
     assert!(result.is_err());
@@ -874,20 +887,22 @@ mod tests {
   #[test]
   fn test_quic_config_args_validate_invalid_max_idle_timeout() {
     let args = QuicConfigArgs {
-      max_idle_timeout_ms: Some(0),
-      ..Default::default()
+      max_idle_timeout: Duration::ZERO,
+      ..default_quic_config_args()
     };
     let result = args.validate_and_apply_defaults();
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("max_idle_timeout_ms"));
-    assert!(err.contains("expected value > 0"));
+    assert!(err.contains("max_idle_timeout"));
+    assert!(err.contains("must be > 0ms"));
   }
 
   #[test]
   fn test_quic_config_args_validate_invalid_initial_mtu_low() {
-    let args =
-      QuicConfigArgs { initial_mtu: Some(100), ..Default::default() };
+    let args = QuicConfigArgs {
+      initial_mtu: 100,
+      ..default_quic_config_args()
+    };
     let result = args.validate_and_apply_defaults();
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -897,8 +912,10 @@ mod tests {
 
   #[test]
   fn test_quic_config_args_validate_invalid_initial_mtu_high() {
-    let args =
-      QuicConfigArgs { initial_mtu: Some(10000), ..Default::default() };
+    let args = QuicConfigArgs {
+      initial_mtu: 10000,
+      ..default_quic_config_args()
+    };
     let result = args.validate_and_apply_defaults();
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -908,44 +925,28 @@ mod tests {
 
   #[test]
   fn test_quic_config_args_validate_invalid_send_window() {
-    let args =
-      QuicConfigArgs { send_window: Some(0), ..Default::default() };
+    let args = QuicConfigArgs {
+      send_window: Byte::from_u64(0),
+      ..default_quic_config_args()
+    };
     let result = args.validate_and_apply_defaults();
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("send_window"));
-    assert!(err.contains("expected value > 0"));
+    assert!(err.contains("must be > 0"));
   }
 
   #[test]
   fn test_quic_config_args_validate_invalid_receive_window() {
-    let args =
-      QuicConfigArgs { receive_window: Some(0), ..Default::default() };
+    let args = QuicConfigArgs {
+      receive_window: Byte::from_u64(0),
+      ..default_quic_config_args()
+    };
     let result = args.validate_and_apply_defaults();
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("receive_window"));
-    assert!(err.contains("expected value > 0"));
-  }
-
-  #[test]
-  fn test_quic_config_args_validate_none_values_use_defaults() {
-    let args = QuicConfigArgs {
-      max_concurrent_bidi_streams: None,
-      max_idle_timeout_ms: None,
-      initial_mtu: None,
-      send_window: None,
-      receive_window: None,
-    };
-    let config = args.validate_and_apply_defaults().unwrap();
-    assert_eq!(
-      config.max_concurrent_bidi_streams,
-      DEFAULT_MAX_CONCURRENT_BIDI_STREAMS
-    );
-    assert_eq!(config.max_idle_timeout_ms, DEFAULT_MAX_IDLE_TIMEOUT_MS);
-    assert_eq!(config.initial_mtu, DEFAULT_INITIAL_MTU);
-    assert_eq!(config.send_window, DEFAULT_SEND_WINDOW);
-    assert_eq!(config.receive_window, DEFAULT_RECEIVE_WINDOW);
+    assert!(err.contains("must be > 0"));
   }
 
   #[test]
@@ -955,10 +956,13 @@ mod tests {
       config.max_concurrent_bidi_streams,
       DEFAULT_MAX_CONCURRENT_BIDI_STREAMS
     );
-    assert_eq!(config.max_idle_timeout_ms, DEFAULT_MAX_IDLE_TIMEOUT_MS);
+    assert_eq!(
+      config.max_idle_timeout_ms,
+      DEFAULT_MAX_IDLE_TIMEOUT.as_millis() as u64
+    );
     assert_eq!(config.initial_mtu, DEFAULT_INITIAL_MTU);
-    assert_eq!(config.send_window, DEFAULT_SEND_WINDOW);
-    assert_eq!(config.receive_window, DEFAULT_RECEIVE_WINDOW);
+    assert_eq!(config.send_window, DEFAULT_SEND_WINDOW.as_u64());
+    assert_eq!(config.receive_window, DEFAULT_RECEIVE_WINDOW.as_u64());
   }
 
   // ============== Error Response Tests ==============
@@ -1118,21 +1122,21 @@ mod tests {
 
   #[test]
   fn test_http3_listener_args_deserialize_full() {
-    // TLS and auth are no longer at listener level
-    // Only QUIC config remains as listener-specific
     let yaml = r#"
 quic:
   max_concurrent_bidi_streams: 200
-  max_idle_timeout_ms: 60000
+  max_idle_timeout: "60s"
   initial_mtu: 1400
-  send_window: 20971520
-  receive_window: 20971520
+  send_window: "20MiB"
+  receive_window: "20MiB"
 "#;
     let args: Http3ListenerArgs = serde_yaml::from_str(yaml).unwrap();
     assert!(args.quic.is_some());
     let quic = args.quic.unwrap();
-    assert_eq!(quic.max_concurrent_bidi_streams, Some(200));
-    assert_eq!(quic.max_idle_timeout_ms, Some(60000));
+    assert_eq!(quic.max_concurrent_bidi_streams, 200);
+    assert_eq!(quic.max_idle_timeout, Duration::from_secs(60));
+    assert_eq!(quic.send_window, Byte::from_u64(20971520));
+    assert_eq!(quic.receive_window, Byte::from_u64(20971520));
   }
 
   #[test]
@@ -1348,7 +1352,7 @@ quic:
     assert!(args.quic.is_some());
     assert_eq!(
       args.quic.as_ref().unwrap().max_concurrent_bidi_streams,
-      Some(200)
+      200
     );
   }
 }

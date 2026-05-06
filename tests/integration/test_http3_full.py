@@ -720,7 +720,7 @@ class TestHTTP3ConfigValidationFull:
 
             # Invalid: extremely large value
             quic_config = """      max_concurrent_bidi_streams: 999999999
-      max_idle_timeout_ms: 30000"""
+      max_idle_timeout: "30s""""
 
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,
@@ -742,7 +742,7 @@ class TestHTTP3ConfigValidationFull:
 
     def test_invalid_quic_timeout_uses_default(self, shared_test_certs) -> None:
         """
-        TC-H3-CFG-005: Invalid max_idle_timeout_ms uses default.
+        TC-H3-CFG-005: Invalid max_idle_timeout uses default.
 
         Target: Verify HTTP/3 listener uses default for invalid timeout.
         """
@@ -756,7 +756,7 @@ class TestHTTP3ConfigValidationFull:
 
             # Test with zero timeout (invalid, rejected at startup)
             quic_config = """      max_concurrent_bidi_streams: 100
-      max_idle_timeout_ms: 0"""
+      max_idle_timeout: "0s""""
 
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,
@@ -768,7 +768,7 @@ class TestHTTP3ConfigValidationFull:
             # Invalid timeout is rejected at startup (bail!)
             proxy_proc.wait(timeout=10)
             assert proxy_proc.returncode != 0, \
-                "HTTP/3 listener should reject invalid max_idle_timeout_ms"
+                "HTTP/3 listener should reject invalid max_idle_timeout"
 
         finally:
             if proxy_proc:
@@ -850,10 +850,10 @@ servers:
 
             # Test minimum valid values
             quic_config = """      max_concurrent_bidi_streams: 1
-      max_idle_timeout_ms: 1
+      max_idle_timeout: "1ms"
       initial_mtu: 1200
-      send_window: 1
-      receive_window: 1"""
+      send_window: "1B"
+      receive_window: "1B"""
 
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,
@@ -891,10 +891,10 @@ servers:
 
             # Test maximum valid values per design doc
             quic_config = """      max_concurrent_bidi_streams: 10000
-      max_idle_timeout_ms: 300000
+      max_idle_timeout: "300s"
       initial_mtu: 9000
-      send_window: 104857600
-      receive_window: 104857600"""
+      send_window: "100MiB"
+      receive_window: "100MiB"""
 
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,
@@ -933,7 +933,7 @@ servers:
             # Note: YAML may not parse negative values correctly for unsigned types
             # This tests that the system handles invalid input gracefully
             quic_config = """      max_concurrent_bidi_streams: 100
-      max_idle_timeout_ms: 30000"""
+      max_idle_timeout: "30s""""
 
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,

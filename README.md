@@ -45,7 +45,6 @@ cargo build --release
 worker_threads: 1
 
 # 日志目录（默认: logs/）
-log_directory: logs/
 
 # 服务定义
 services:
@@ -139,10 +138,10 @@ HTTP/3 (QUIC) 监听器，提供更快的连接建立和更好的弱网表现。
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `max_concurrent_bidi_streams` | `u64` | 100 | 最大并发双向流 (1-10000) |
-| `max_idle_timeout_ms` | `u64` | 30000 | 最大空闲超时（毫秒） |
+| `max_idle_timeout` | `Duration` | 5s | 最大空闲超时 |
 | `initial_mtu` | `u16` | 1200 | 初始 MTU (1200-9000) |
-| `send_window` | `u64` | 10485760 | 发送窗口大小（字节） |
-| `receive_window` | `u64` | 10485760 | 接收窗口大小（字节） |
+| `send_window` | `Byte` | 10MiB | 发送窗口大小 |
+| `receive_window` | `Byte` | 10MiB | 接收窗口大小 |
 
 #### 认证配置
 
@@ -434,7 +433,6 @@ curl -X POST -d "Hello World" http://127.0.0.1:8080
 
 ```yaml
 worker_threads: 2
-log_directory: logs/
 
 services:
   - name: tunnel
@@ -454,7 +452,6 @@ servers:
 
 ```yaml
 worker_threads: 2
-log_directory: logs/
 
 services:
   - name: tunnel
@@ -478,7 +475,6 @@ servers:
 
 ```yaml
 worker_threads: 2
-log_directory: logs/
 
 services:
   - name: tunnel
@@ -505,7 +501,6 @@ servers:
 
 ```yaml
 worker_threads: 2
-log_directory: logs/
 
 services:
   - name: chain
@@ -529,7 +524,6 @@ servers:
 
 ```yaml
 worker_threads: 2
-log_directory: logs/
 
 services:
   - name: tunnel
@@ -550,7 +544,7 @@ servers:
 
 ## 日志
 
-日志文件按日期滚动，存储在 `log_directory` 配置的目录中。
+日志文件按日期滚动，存储在 `logs/` 目录中。
 
 日志级别通过环境变量 `NEOPROXY_LOG` 控制：
 

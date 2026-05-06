@@ -708,7 +708,7 @@ class TestHTTP3ConfigValidation:
 
             # Invalid QUIC config: max_concurrent_bidi_streams = 0
             quic_config = """      max_concurrent_bidi_streams: 0
-      max_idle_timeout_ms: 30000"""
+      max_idle_timeout: "30s""""
 
             config_path = create_http3_listener_config(
                 proxy_port, cert_path, key_path, temp_dir,

@@ -1,14 +1,32 @@
 # H1/H3 Listener Consistency Test Configuration
 #
-# This configuration uses the new listener kinds (http, https, http3) and
-# server-level configuration for TLS, users, and hostnames.
+# This configuration uses top-level listeners and server-level
+# configuration for TLS, hostnames, and layers.
 #
-# NOTE: This config will fail to load until the listener kinds are implemented.
-# The integration tests use dynamically generated configs with unique ports.
-# This file serves as documentation and for manual testing.
+# NOTE: The integration tests use dynamically generated configs with
+# unique ports. This file serves as documentation and for manual testing.
 
 server_threads: 2
-log_directory: "logs/"
+
+listeners:
+  - name: http_main
+    kind: http
+    addresses: ["127.0.0.1:18080"]
+
+  - name: http_alt
+    kind: http
+    addresses: ["127.0.0.1:18081"]
+
+  - name: https_main
+    kind: https
+    addresses: ["127.0.0.1:18443"]
+
+  - name: http3_main
+    kind: http3
+    addresses: ["127.0.0.1:18444"]
+    args:
+      quic:
+        max_concurrent_bidi_streams: 100
 
 services:
   - name: echo
@@ -16,18 +34,14 @@ services:
     args: {}
 
 servers:
-  # Server with new http listener kind
+  # Server with http listener
   - name: http_server
     hostnames: ["http.example.com"]
-    users:
-      - username: "admin"
-        password: "secret"
     listeners:
-      - kind: http
-        addresses: ["127.0.0.1:18080"]
+      - http_main
     service: echo
 
-  # Server with new https listener kind
+  # Server with https listener
   - name: https_server
     hostnames: ["https.example.com"]
     tls:
@@ -35,11 +49,10 @@ servers:
         - cert_path: conf/certs/server.crt
           key_path: conf/certs/server.key
     listeners:
-      - kind: https
-        addresses: ["127.0.0.1:18443"]
+      - https_main
     service: echo
 
-  # Server with http3 listener (multi-address)
+  # Server with http3 listener
   - name: http3_server
     hostnames: ["h3.example.com"]
     tls:
@@ -47,16 +60,11 @@ servers:
         - cert_path: conf/certs/server.crt
           key_path: conf/certs/server.key
     listeners:
-      - kind: http3
-        addresses: ["127.0.0.1:18444"]
-        args:
-          quic:
-            max_concurrent_bidi_streams: 100
+      - http3_main
     service: echo
 
   # Default server (no hostnames)
   - name: default_server
     listeners:
-      - kind: http
-        addresses: ["127.0.0.1:18081"]
+      - http_alt
     service: echo

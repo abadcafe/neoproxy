@@ -11,7 +11,7 @@ use serde::Deserialize;
 use tokio::{self, net};
 use tracing::warn;
 
-use super::tunnel::{self, DEFAULT_IDLE_TIMEOUT_SECS};
+use super::tunnel;
 use crate::config::SerializedArgs;
 use crate::connect_utils::{self as utils, ConnectTargetError};
 use crate::context::RequestContext;
@@ -23,26 +23,32 @@ use crate::service::{BuildService, Service};
 use crate::stream::{H3OnUpgrade, Socks5OnUpgrade};
 use crate::tracker::StreamTracker;
 
-/// Default TCP connect timeout in seconds.
-const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
+/// Default TCP connect timeout.
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[derive(Deserialize, Default, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 struct ConnectTcpServiceArgs {
   /// Timeout for TCP connect to target server.
-  #[serde(default = "default_connect_timeout")]
+  #[serde(
+    with = "humantime_serde",
+    default = "default_connect_timeout"
+  )]
   connect_timeout: Duration,
   /// Idle timeout for tunnel data transfer.
-  #[serde(default = "default_idle_timeout")]
+  #[serde(
+    with = "humantime_serde",
+    default = "default_idle_timeout"
+  )]
   idle_timeout: Duration,
 }
 
 fn default_connect_timeout() -> Duration {
-  Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS)
+  DEFAULT_CONNECT_TIMEOUT
 }
 
 fn default_idle_timeout() -> Duration {
-  Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS)
+  Duration::from_secs(tunnel::DEFAULT_IDLE_TIMEOUT_SECS)
 }
 
 #[derive(Clone)]
@@ -78,10 +84,8 @@ impl ConnectTcpService {
   fn new_for_test() -> Self {
     Self {
       stream_tracker: Rc::new(StreamTracker::new()),
-      connect_timeout: Duration::from_secs(
-        DEFAULT_CONNECT_TIMEOUT_SECS,
-      ),
-      idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
+      connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+      idle_timeout: Duration::from_secs(tunnel::DEFAULT_IDLE_TIMEOUT_SECS),
     }
   }
 }

@@ -39,29 +39,31 @@ use crate::server::{Server, ServerRouter};
 use crate::tls::build_tls_server_config;
 use crate::tracker::StreamTracker;
 
-/// Default TLS handshake timeout in seconds.
-const DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS: u64 = 5;
+/// Default TLS handshake timeout.
+const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration =
+  Duration::from_secs(5);
 
 /// HTTPS Listener configuration arguments.
 #[derive(Deserialize, Clone, Debug)]
 pub struct HttpsListenerArgs {
-  /// TLS handshake timeout in seconds (default: 5).
+  /// TLS handshake timeout (default: 5s).
   /// Protects against slow clients holding connections during TLS
   /// negotiation.
-  #[serde(default = "default_tls_handshake_timeout_secs")]
-  pub tls_handshake_timeout_secs: u64,
+  #[serde(
+    with = "humantime_serde",
+    default = "default_tls_handshake_timeout"
+  )]
+  pub tls_handshake_timeout: Duration,
 }
 
 impl Default for HttpsListenerArgs {
   fn default() -> Self {
-    Self {
-      tls_handshake_timeout_secs: DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS,
-    }
+    Self { tls_handshake_timeout: DEFAULT_TLS_HANDSHAKE_TIMEOUT }
   }
 }
 
-fn default_tls_handshake_timeout_secs() -> u64 {
-  DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS
+fn default_tls_handshake_timeout() -> Duration {
+  DEFAULT_TLS_HANDSHAKE_TIMEOUT
 }
 
 /// Load TLS server configuration from server routing table.
@@ -227,8 +229,7 @@ impl HttpsListener {
   ) -> Result<Listener> {
     let _args: HttpsListenerArgs = serde_yaml::from_value(sargs)?;
 
-    let tls_handshake_timeout =
-      Duration::from_secs(_args.tls_handshake_timeout_secs);
+    let tls_handshake_timeout = _args.tls_handshake_timeout;
 
     // TLS config is required for https listener
     // Check that at least one server has TLS configured
@@ -505,8 +506,8 @@ mod tests {
     let yaml = r#"{}"#;
     let args: HttpsListenerArgs = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(
-      args.tls_handshake_timeout_secs,
-      DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS
+      args.tls_handshake_timeout,
+      DEFAULT_TLS_HANDSHAKE_TIMEOUT
     );
   }
 
@@ -514,16 +515,16 @@ mod tests {
   fn test_https_listener_args_default() {
     let args = HttpsListenerArgs::default();
     assert_eq!(
-      args.tls_handshake_timeout_secs,
-      DEFAULT_TLS_HANDSHAKE_TIMEOUT_SECS
+      args.tls_handshake_timeout,
+      DEFAULT_TLS_HANDSHAKE_TIMEOUT
     );
   }
 
   #[test]
   fn test_https_listener_args_custom_timeout() {
-    let yaml = r#"tls_handshake_timeout_secs: 10"#;
+    let yaml = r#"tls_handshake_timeout: "10s""#;
     let args: HttpsListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(args.tls_handshake_timeout_secs, 10);
+    assert_eq!(args.tls_handshake_timeout, Duration::from_secs(10));
   }
 
   #[test]

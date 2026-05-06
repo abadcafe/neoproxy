@@ -37,6 +37,7 @@ fast-socks5 = "1.0.0"
 subtle = "2"
 x509-parser = "0.16"
 humantime = "2.1"
+humantime-serde = "1"
 byte-unit = { version = "5.1", features = ["serde"] }
 
 [dev-dependencies]

@@ -1079,6 +1079,10 @@ pub async fn perform_handshake(
   }
 }
 
+/// Default handshake timeout.
+const DEFAULT_HANDSHAKE_TIMEOUT: Duration =
+  Duration::from_secs(DEFAULT_HANDSHAKE_TIMEOUT_SECS);
+
 /// SOCKS5 listener configuration arguments.
 #[derive(Clone, Debug)]
 pub struct Socks5ListenerArgs {
@@ -1091,9 +1095,7 @@ pub struct Socks5ListenerArgs {
 impl Default for Socks5ListenerArgs {
   fn default() -> Self {
     Self {
-      handshake_timeout: Duration::from_secs(
-        DEFAULT_HANDSHAKE_TIMEOUT_SECS,
-      ),
+      handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
       user_password_auth: UserPasswordAuth::none(),
     }
   }
@@ -1101,21 +1103,11 @@ impl Default for Socks5ListenerArgs {
 
 /// Parses SOCKS5 listener configuration from YAML.
 ///
-/// # Arguments
-///
-/// * `args` - The serialized YAML configuration (addresses are passed
-///   separately)
-///
-/// # Returns
-///
-/// The parsed `Socks5ListenerArgs` on success, or an error if
-/// configuration is invalid.
-///
 /// # Errors
 ///
 /// Returns an error if:
 /// - `users` is empty (must have at least one user if specified)
-/// - `handshake_timeout` is not a valid string format (e.g., "10s")
+/// - `handshake_timeout` is not a valid humantime format (e.g., "10s")
 /// - Username length is not in range 1-255 bytes
 /// - Any other YAML parsing error occurs
 pub fn parse_config(
@@ -1124,25 +1116,26 @@ pub fn parse_config(
   #[derive(Deserialize, Debug)]
   #[serde(deny_unknown_fields)]
   struct ConfigYaml {
-    #[serde(default)]
-    handshake_timeout: Option<String>,
+    #[serde(
+      with = "humantime_serde",
+      default = "default_handshake_timeout"
+    )]
+    handshake_timeout: Duration,
     #[serde(default)]
     users: Option<Vec<crate::config::UserCredential>>,
+  }
+
+  fn default_handshake_timeout() -> Duration {
+    DEFAULT_HANDSHAKE_TIMEOUT
   }
 
   let config: ConfigYaml = serde_yaml::from_value(args)
     .context("failed to parse SOCKS5 listener config")?;
 
-  // Parse handshake timeout (string format like "10s")
-  let handshake_timeout =
-    parse_handshake_timeout(config.handshake_timeout)?;
-
-  // Parse users directly (no nested auth layer)
   let user_password_auth = match config.users {
     None => UserPasswordAuth::none(),
     Some(users) if users.is_empty() => UserPasswordAuth::none(),
     Some(users) => {
-      // Validate users: username and password must be non-empty
       for (idx, user) in users.iter().enumerate() {
         if user.username.is_empty() {
           bail!("users[{}].username cannot be empty", idx);
@@ -1162,49 +1155,10 @@ pub fn parse_config(
     }
   };
 
-  Ok(Socks5ListenerArgs { handshake_timeout, user_password_auth })
-}
-
-/// Parses handshake timeout string format.
-///
-/// # Arguments
-///
-/// * `timeout_str` - Optional timeout string (e.g., "10s")
-///
-/// # Returns
-///
-/// Parsed Duration on success, or an error if format is invalid.
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - String does not end with 's'
-/// - Numeric part is not a valid number
-/// - Numeric part would overflow
-fn parse_handshake_timeout(
-  timeout_str: Option<String>,
-) -> Result<Duration> {
-  match timeout_str {
-    None => Ok(Duration::from_secs(DEFAULT_HANDSHAKE_TIMEOUT_SECS)),
-    Some(s) => {
-      // Validate format: must end with 's' (seconds)
-      if !s.ends_with('s') {
-        bail!(
-          "invalid handshake_timeout format '{}': expected format \
-           like \"10s\"",
-          s
-        );
-      }
-
-      // Strip 's' suffix and parse number
-      let num_str = &s[..s.len() - 1];
-      let secs: u64 = num_str.parse().with_context(|| {
-        format!("invalid handshake_timeout value: {}", s)
-      })?;
-
-      Ok(Duration::from_secs(secs))
-    }
-  }
+  Ok(Socks5ListenerArgs {
+    handshake_timeout: config.handshake_timeout,
+    user_password_auth,
+  })
 }
 
 /// Determines if an accept error is fatal and should stop the listener.
@@ -1475,22 +1429,16 @@ users:
   }
 
   #[test]
-  fn test_parse_handshake_timeout_default() {
-    let result = parse_handshake_timeout(None).unwrap();
-    assert_eq!(result, Duration::from_secs(10));
-  }
+  fn test_parse_config_invalid_handshake_timeout() {
+    let yaml = serde_yaml::from_str(
+      r#"
+handshake_timeout: "not_a_duration"
+"#,
+    )
+    .unwrap();
 
-  #[test]
-  fn test_parse_handshake_timeout_valid() {
-    let result =
-      parse_handshake_timeout(Some("5s".to_string())).unwrap();
-    assert_eq!(result, Duration::from_secs(5));
-  }
-
-  #[test]
-  fn test_parse_handshake_timeout_invalid_format() {
-    let result = parse_handshake_timeout(Some("5".to_string()));
-    assert!(result.is_err());
+    let result = parse_config(yaml);
+    assert!(result.is_err(), "Should reject invalid duration format");
   }
 
   #[test]

@@ -308,7 +308,7 @@ class TestHTTPConnect:
             if proxy_proc:
                 # Use SIGTERM for graceful shutdown and wait longer
                 # since tunnel tasks may need time to cleanup
-                proxy_proc.send_signal(signal.SIGTERM)
+                proxy_proc.kill()
                 try:
                     proxy_proc.wait(timeout=15)
                 except subprocess.TimeoutExpired:

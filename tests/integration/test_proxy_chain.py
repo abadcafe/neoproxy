@@ -13,7 +13,6 @@ Test matrix:
 
 import subprocess
 import os
-import signal
 import tempfile
 import shutil
 import socket
@@ -460,11 +459,11 @@ def run_proxy_chain_test(
 
     finally:
         if entry_proc:
-            entry_proc.send_signal(signal.SIGTERM)
-            entry_proc.wait(timeout=10)
+            entry_proc.kill()
+            entry_proc.wait(timeout=5)
         if upstream_proc:
-            upstream_proc.send_signal(signal.SIGTERM)
-            upstream_proc.wait(timeout=10)
+            upstream_proc.kill()
+            upstream_proc.wait(timeout=5)
         if target_socket:
             target_socket.close()
         shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -884,11 +883,11 @@ class TestNegativeAuthHTTPEntry:
 
         finally:
             if entry_proc:
-                entry_proc.send_signal(signal.SIGTERM)
-                entry_proc.wait(timeout=10)
+                entry_proc.kill()
+                entry_proc.wait(timeout=5)
             if upstream_proc:
-                upstream_proc.send_signal(signal.SIGTERM)
-                upstream_proc.wait(timeout=10)
+                upstream_proc.kill()
+                upstream_proc.wait(timeout=5)
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
@@ -951,11 +950,11 @@ class TestNegativeAuthHTTPEntry:
 
         finally:
             if entry_proc:
-                entry_proc.send_signal(signal.SIGTERM)
-                entry_proc.wait(timeout=10)
+                entry_proc.kill()
+                entry_proc.wait(timeout=5)
             if upstream_proc:
-                upstream_proc.send_signal(signal.SIGTERM)
-                upstream_proc.wait(timeout=10)
+                upstream_proc.kill()
+                upstream_proc.wait(timeout=5)
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
@@ -1020,11 +1019,11 @@ class TestNegativeAuthSOCKS5Entry:
 
         finally:
             if entry_proc:
-                entry_proc.send_signal(signal.SIGTERM)
-                entry_proc.wait(timeout=10)
+                entry_proc.kill()
+                entry_proc.wait(timeout=5)
             if upstream_proc:
-                upstream_proc.send_signal(signal.SIGTERM)
-                upstream_proc.wait(timeout=10)
+                upstream_proc.kill()
+                upstream_proc.wait(timeout=5)
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
@@ -1092,10 +1091,10 @@ class TestNegativeAuthUpstream:
 
         finally:
             if entry_proc:
-                entry_proc.send_signal(signal.SIGTERM)
-                entry_proc.wait(timeout=10)
+                entry_proc.kill()
+                entry_proc.wait(timeout=5)
             if upstream_proc:
-                upstream_proc.send_signal(signal.SIGTERM)
-                upstream_proc.wait(timeout=10)
+                upstream_proc.kill()
+                upstream_proc.wait(timeout=5)
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)

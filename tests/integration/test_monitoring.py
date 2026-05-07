@@ -154,8 +154,8 @@ class TestMonitoring:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_log_files_created(self) -> None:
@@ -186,8 +186,8 @@ class TestMonitoring:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_startup_log_content(self) -> None:
@@ -225,8 +225,8 @@ class TestMonitoring:
                     wait_for_log_contains(first_log_path, "INFO", timeout=3.0)
 
             # Send SIGTERM
-            proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.kill()
+            proxy_proc.wait(timeout=5)
 
             # Read log content
             log_content = ""
@@ -322,8 +322,8 @@ class TestMonitoring:
                     wait_for_log_contains(first_log_path, "connect", timeout=3.0)
 
             # Send SIGTERM
-            proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.kill()
+            proxy_proc.wait(timeout=5)
 
             # Read log content
             log_dir = os.path.join(temp_dir, "logs")
@@ -445,8 +445,8 @@ class TestMonitoring:
                     )
 
             # Graceful shutdown
-            proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.kill()
+            proxy_proc.wait(timeout=5)
 
             # Read logs
             log_dir = os.path.join(temp_dir, "logs")
@@ -519,8 +519,8 @@ class TestHTTP3Monitoring:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_http3_startup_log_content(self, shared_test_certs: dict) -> None:
@@ -553,8 +553,8 @@ class TestHTTP3Monitoring:
                     first_log_path = os.path.join(log_dir, log_files[0])
                     wait_for_log_contains(first_log_path, "INFO", timeout=3.0)
 
-            proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.kill()
+            proxy_proc.wait(timeout=5)
 
             log_dir = os.path.join(temp_dir, "logs")
             log_content = ""
@@ -603,8 +603,8 @@ class TestHTTP3Monitoring:
                     wait_for_log_contains(first_log_path, "INFO", timeout=3.0)
 
             # Graceful shutdown
-            proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.kill()
+            proxy_proc.wait(timeout=5)
 
             # Read logs
             log_dir = os.path.join(temp_dir, "logs")
@@ -673,7 +673,7 @@ servers:
                 cwd=temp_dir,
             )
 
-            proc.wait(timeout=10)
+            proc.wait(timeout=5)
 
             # Process should exit with non-zero code for config error
             assert proc.returncode != 0, \
@@ -733,8 +733,8 @@ servers:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -789,8 +789,8 @@ class TestMonitoringLogCycle:
                     wait_for_log_contains(first_log_path, "INFO", timeout=3.0)
 
             # Graceful shutdown
-            proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.kill()
+            proxy_proc.wait(timeout=5)
 
             # Read logs
             log_dir = os.path.join(temp_dir, "logs")
@@ -861,8 +861,8 @@ class TestMonitoringLogCycle:
                     wait_for_log_contains(first_log_path, "INFO", timeout=3.0)
 
             # Graceful shutdown
-            proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.kill()
+            proxy_proc.wait(timeout=5)
 
             # Read logs
             log_dir = os.path.join(temp_dir, "logs")
@@ -933,8 +933,8 @@ class TestHttpListenerMonitoring:
                     wait_for_log_contains(first_log_path, "INFO", timeout=3.0)
 
             # Graceful shutdown
-            proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.kill()
+            proxy_proc.wait(timeout=5)
 
             # Read logs
             log_dir = os.path.join(temp_dir, "logs")
@@ -1030,8 +1030,8 @@ class TestHttpListenerMonitoring:
             time.sleep(1)
 
             # Graceful shutdown
-            proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.kill()
+            proxy_proc.wait(timeout=5)
 
             # Read logs
             log_dir = os.path.join(temp_dir, "logs")
@@ -1110,8 +1110,8 @@ class TestSocks5ListenerMonitoring:
                     wait_for_log_contains(first_log_path, "INFO", timeout=3.0)
 
             # Graceful shutdown
-            proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.kill()
+            proxy_proc.wait(timeout=5)
 
             # Read logs
             log_dir = os.path.join(temp_dir, "logs")
@@ -1209,8 +1209,8 @@ class TestSocks5ListenerMonitoring:
             time.sleep(1)
 
             # Graceful shutdown
-            proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.kill()
+            proxy_proc.wait(timeout=5)
 
             # Read logs
             log_dir = os.path.join(temp_dir, "logs")
@@ -1324,8 +1324,8 @@ servers:
                     wait_for_log_contains(first_log_path, "INFO", timeout=3.0)
 
             # Graceful shutdown
-            proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.kill()
+            proxy_proc.wait(timeout=5)
 
             # Read logs
             log_dir = os.path.join(temp_dir, "logs")

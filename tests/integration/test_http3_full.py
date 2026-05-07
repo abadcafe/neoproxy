@@ -100,8 +100,8 @@ class TestHTTP3FullConnection:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_http3_connect_request_success(self, shared_test_certs) -> None:
@@ -169,8 +169,8 @@ class TestHTTP3FullConnection:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -278,8 +278,8 @@ class TestHTTP3FullConnection:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -438,11 +438,11 @@ class TestFullHTTP3ProxyChain:
 
         finally:
             if chain_proc:
-                chain_proc.send_signal(signal.SIGTERM)
-                chain_proc.wait(timeout=10)
+                chain_proc.kill()
+                chain_proc.wait(timeout=5)
             if h3_proc:
-                h3_proc.send_signal(signal.SIGTERM)
-                h3_proc.wait(timeout=10)
+                h3_proc.kill()
+                h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -575,8 +575,8 @@ class TestHTTP3ErrorHandling:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_invalid_target_returns_400(self, shared_test_certs) -> None:
@@ -635,8 +635,8 @@ class TestHTTP3ErrorHandling:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_target_unreachable_returns_502(self, shared_test_certs) -> None:
@@ -690,8 +690,8 @@ class TestHTTP3ErrorHandling:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -729,14 +729,14 @@ class TestHTTP3ConfigValidationFull:
             proxy_proc = start_proxy(config_path)
 
             # Invalid value is rejected at startup (bail!)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.wait(timeout=5)
             assert proxy_proc.returncode != 0, \
                 "HTTP/3 listener should reject invalid max_concurrent_bidi_streams"
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_invalid_quic_timeout_uses_default(self, shared_test_certs) -> None:
@@ -765,14 +765,14 @@ class TestHTTP3ConfigValidationFull:
             proxy_proc = start_proxy(config_path)
 
             # Invalid timeout is rejected at startup (bail!)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.wait(timeout=5)
             assert proxy_proc.returncode != 0, \
                 "HTTP/3 listener should reject invalid max_idle_timeout"
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_valid_plaintext_password_accepted(self, shared_test_certs) -> None:
@@ -829,8 +829,8 @@ servers:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_quic_params_boundary_min_values(self, shared_test_certs) -> None:
@@ -878,8 +878,8 @@ servers:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_quic_params_boundary_max_values(self, shared_test_certs) -> None:
@@ -927,8 +927,8 @@ servers:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_quic_params_negative_values_uses_default(self, shared_test_certs) -> None:
@@ -962,8 +962,8 @@ servers:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -1090,11 +1090,11 @@ class TestFullHTTP3ProxyChainDataTransfer:
 
         finally:
             if chain_proc:
-                chain_proc.send_signal(signal.SIGTERM)
-                chain_proc.wait(timeout=10)
+                chain_proc.kill()
+                chain_proc.wait(timeout=5)
             if h3_proc:
-                h3_proc.send_signal(signal.SIGTERM)
-                h3_proc.wait(timeout=10)
+                h3_proc.kill()
+                h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -1267,8 +1267,8 @@ class TestHTTP3Performance:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1330,8 +1330,8 @@ class TestHTTP3Performance:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_h3_data_throughput(self, shared_test_certs) -> None:
@@ -1412,8 +1412,8 @@ class TestHTTP3Performance:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)

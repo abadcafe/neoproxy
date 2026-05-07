@@ -16,7 +16,6 @@ import tempfile
 import shutil
 import time
 import os
-import signal
 import pytest
 from typing import Optional, List, Dict, Any
 
@@ -199,8 +198,8 @@ class TestHttp3ListenerNewFieldNames:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -250,8 +249,8 @@ class TestHttp3ChainDefaultTlsServerCa:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_chain_starts_with_per_proxy_server_ca(self, shared_test_certs: dict) -> None:
@@ -291,8 +290,8 @@ class TestHttp3ChainDefaultTlsServerCa:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -376,11 +375,11 @@ class TestTlsDeepMerge:
 
         finally:
             if chain_proc:
-                chain_proc.send_signal(signal.SIGTERM)
-                chain_proc.wait(timeout=10)
+                chain_proc.kill()
+                chain_proc.wait(timeout=5)
             if h3_proc:
-                h3_proc.send_signal(signal.SIGTERM)
-                h3_proc.wait(timeout=10)
+                h3_proc.kill()
+                h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -462,11 +461,11 @@ class TestTlsDeepMerge:
 
         finally:
             if chain_proc:
-                chain_proc.send_signal(signal.SIGTERM)
-                chain_proc.wait(timeout=10)
+                chain_proc.kill()
+                chain_proc.wait(timeout=5)
             if h3_proc:
-                h3_proc.send_signal(signal.SIGTERM)
-                h3_proc.wait(timeout=10)
+                h3_proc.kill()
+                h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -514,8 +513,8 @@ class TestTlsDeepMerge:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -578,7 +577,7 @@ servers:
             )
 
             try:
-                return_code = proc.wait(timeout=10)
+                return_code = proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()

@@ -18,9 +18,9 @@ import tempfile
 import shutil
 import time
 import os
-import signal
 import base64
 import asyncio
+import signal
 import pytest
 from typing import Optional, Tuple, List
 
@@ -312,8 +312,8 @@ class TestHTTP3PasswordAuth:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_password_auth_valid_credentials(self, shared_test_certs) -> None:
@@ -395,8 +395,8 @@ class TestHTTP3PasswordAuth:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -479,8 +479,8 @@ class TestHTTP3PasswordAuth:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -527,8 +527,8 @@ class TestHTTP3TLSClientCertAuth:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_tls_client_cert_missing_ca_rejected(self, shared_test_certs) -> None:
@@ -621,14 +621,14 @@ servers:
 
             # Verify graceful shutdown works with TLS client cert auth
             proxy_proc.send_signal(signal.SIGTERM)
-            return_code = proxy_proc.wait(timeout=10)
+            return_code = proxy_proc.wait(timeout=5)
 
             assert return_code == 0, \
                 f"Expected exit code 0, got {return_code}"
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
-                proxy_proc.terminate()
+                proxy_proc.kill()
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -685,8 +685,8 @@ servers:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_tls_client_cert_invalid_cert_rejected(self, shared_test_certs) -> None:
@@ -757,7 +757,7 @@ servers:
                     ca_path=ca_path,
                     client_cert_path=invalid_client_cert_path,
                     client_key_path=invalid_client_key_path,
-                    timeout=15.0
+                    timeout=5.0
                 )
                 return success, status_code, message
 
@@ -769,16 +769,20 @@ servers:
                 loop.close()
 
             # CRITICAL ASSERTION: Invalid client certificates (signed by untrusted CA)
-            # are still rejected at the TLS layer. The connection must fail.
-            # success=True indicates a security vulnerability (invalid cert accepted).
+            # are rejected at the TLS layer. The connection must fail.
             assert not success, \
                 f"SECURITY VIOLATION: Connection with invalid client cert should be rejected. " \
                 f"Server accepted invalid certificate signed by untrusted CA. Message: {message}"
 
+            # The rejection should happen at TLS layer with a specific error message,
+            # not as an HTTP timeout.
+            assert "TLS handshake failed" in message or "invalid peer certificate" in message, \
+                f"Expected TLS-layer rejection, got: {message}"
+
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_tls_client_cert_no_cert_returns_403(self, shared_test_certs) -> None:
@@ -839,8 +843,8 @@ servers:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -929,8 +933,8 @@ class TestHTTP3DualAuth:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -999,8 +1003,8 @@ class TestHTTP3DualAuth:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1077,8 +1081,8 @@ class TestHTTP3DualAuth:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1154,8 +1158,8 @@ class TestHTTP3DualAuth:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1219,7 +1223,7 @@ class TestHTTP3DualAuth:
                     ca_path=ca_path,
                     client_cert_path=invalid_cert_path,
                     client_key_path=invalid_key_path,
-                    timeout=15.0,
+                    timeout=5.0,
                 )
                 return success, status_code, message
 
@@ -1236,10 +1240,14 @@ class TestHTTP3DualAuth:
                 f"SECURITY: Invalid cert should be rejected at transport layer " \
                 f"even in dual-auth mode. No password fallback. Message: {message}"
 
+            # The rejection should happen at TLS layer with a specific error message
+            assert "TLS handshake failed" in message or "invalid peer certificate" in message, \
+                f"Expected TLS-layer rejection, got: {message}"
+
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -1342,8 +1350,8 @@ servers:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_multiple_users_accepted(self, shared_test_certs) -> None:
@@ -1379,6 +1387,6 @@ servers:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)

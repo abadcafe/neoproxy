@@ -162,9 +162,9 @@ class TestMonitoringAPI:
             client_sock.sendall(b"TEST")
             time.sleep(0.5)
 
-            # Graceful shutdown
+            # Graceful shutdown - use SIGTERM to trigger shutdown logs
             proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.wait(timeout=5)
 
             # Read logs
             log_dir = os.path.join(temp_dir, "logs")
@@ -224,7 +224,7 @@ class TestMonitoringAPI:
 
             # Graceful shutdown
             proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.wait(timeout=5)
 
             # Read logs
             log_dir = os.path.join(temp_dir, "logs")
@@ -285,9 +285,9 @@ class TestHTTP3MonitoringAPI:
             # Wait for logs to be written
             time.sleep(2)
 
-            # Graceful shutdown
+            # Graceful shutdown - use SIGTERM to trigger shutdown logs
             proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.wait(timeout=5)
 
             # Read logs
             log_dir = os.path.join(temp_dir, "logs")
@@ -340,8 +340,8 @@ class TestHTTP3MonitoringAPI:
             time.sleep(1)
 
             # Graceful shutdown
-            proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.kill()
+            proxy_proc.wait(timeout=5)
 
             # Read logs
             log_dir = os.path.join(temp_dir, "logs")
@@ -453,7 +453,7 @@ class TestInternalMonitoringAPI:
             time.sleep(0.5)
 
             # Graceful shutdown
-            proxy_proc.send_signal(signal.SIGTERM)
+            proxy_proc.kill()
             proxy_proc.wait(timeout=15)
 
             # Read logs
@@ -523,8 +523,8 @@ class TestInternalMonitoringAPI:
             time.sleep(0.5)
 
             # Graceful shutdown
-            proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.kill()
+            proxy_proc.wait(timeout=5)
 
             # Read logs
             log_dir = os.path.join(temp_dir, "logs")
@@ -578,8 +578,8 @@ class TestErrorMonitoring:
             sock.close()
 
             # Graceful shutdown
-            proxy_proc.send_signal(signal.SIGTERM)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.kill()
+            proxy_proc.wait(timeout=5)
 
             # Read logs
             log_dir = os.path.join(temp_dir, "logs")
@@ -632,7 +632,7 @@ servers:
                 cwd=temp_dir,
             )
 
-            return_code = proc.wait(timeout=10)
+            return_code = proc.wait(timeout=5)
 
             # Should fail with error
             assert return_code != 0, "Should fail with invalid config"

@@ -389,8 +389,8 @@ class TestHTTP3BasicConnection:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_http3_listener_graceful_shutdown(self, shared_test_certs: dict) -> None:
@@ -420,7 +420,7 @@ class TestHTTP3BasicConnection:
 
             # Wait for graceful shutdown
             try:
-                return_code = proxy_proc.wait(timeout=10)
+                return_code = proxy_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proxy_proc.kill()
                 proxy_proc.wait()
@@ -474,8 +474,8 @@ class TestHTTP3Authentication:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -537,7 +537,7 @@ servers:
             )
 
             try:
-                return_code = proc.wait(timeout=10)
+                return_code = proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
@@ -596,7 +596,7 @@ servers:
             )
 
             try:
-                return_code = proc.wait(timeout=10)
+                return_code = proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
@@ -663,7 +663,7 @@ servers:
             )
 
             try:
-                return_code = proc.wait(timeout=10)
+                return_code = proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
@@ -718,14 +718,14 @@ class TestHTTP3ConfigValidation:
             proxy_proc = start_proxy(config_path)
 
             # Invalid value is rejected at startup (bail!)
-            proxy_proc.wait(timeout=10)
+            proxy_proc.wait(timeout=5)
             assert proxy_proc.returncode != 0, \
                 "HTTP/3 listener should reject invalid max_concurrent_bidi_streams"
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_missing_required_fields(self) -> None:
@@ -768,7 +768,7 @@ servers:
             )
 
             try:
-                return_code = proc.wait(timeout=10)
+                return_code = proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
@@ -825,7 +825,7 @@ servers:
             )
 
             try:
-                return_code = proc.wait(timeout=10)
+                return_code = proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
@@ -871,7 +871,7 @@ class TestHTTP3GracefulShutdown:
             start_time = time.time()
             proxy_proc.send_signal(signal.SIGTERM)
 
-            return_code = proxy_proc.wait(timeout=10)
+            return_code = proxy_proc.wait(timeout=5)
             elapsed = time.time() - start_time
 
             assert return_code == 0, \
@@ -1026,8 +1026,8 @@ class TestHTTP3ServiceDelegation:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -1129,8 +1129,8 @@ servers:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
 
             # Check log files for errors
             log_dir = os.path.join(temp_dir, "logs")

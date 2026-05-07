@@ -25,7 +25,11 @@ from aioquic.h3.events import (
     H3Event,
 )
 from aioquic.quic.configuration import QuicConfiguration
-from aioquic.quic.events import QuicEvent, StreamDataReceived
+from aioquic.quic.events import (
+    QuicEvent,
+    StreamDataReceived,
+    ConnectionTerminated,
+)
 from aioquic.quic.connection import QuicConnection
 
 import ipaddress
@@ -1295,8 +1299,14 @@ async def perform_h3_tls_client_cert_test(
         ) -> None:
             super().__init__(quic, stream_handler)
             self._h3: Optional[H3Connection] = None
+            self._termination_reason: str = ""
+            self._terminated = asyncio.Event()
 
         def quic_event_received(self, event: QuicEvent) -> None:
+            if isinstance(event, ConnectionTerminated):
+                self._termination_reason = event.reason_phrase or f"error_code={event.error_code}"
+                self._terminated.set()
+
             if isinstance(event, StreamDataReceived):
                 reader = self._stream_readers.get(event.stream_id, None)
                 if reader is not None:
@@ -1321,8 +1331,7 @@ async def perform_h3_tls_client_cert_test(
             ) as protocol:
                 await protocol.wait_connected()
 
-                # Create H3 connection and send a simple GET request
-                # to verify TLS handshake completed successfully
+                # Create H3 connection immediately
                 quic_connection = protocol._quic
                 h3_conn = H3Connection(quic_connection)
                 protocol._h3 = h3_conn
@@ -1340,13 +1349,21 @@ async def perform_h3_tls_client_cert_test(
                 h3_conn.send_headers(stream_id, headers, end_stream=True)
                 protocol.transmit()
 
-                # Wait for response
+                # Wait for either HTTP response or connection termination
+                # In QUIC/TLS 1.3, server verifies client certs AFTER
+                # HandshakeCompleted. If cert is invalid, we'll receive
+                # ConnectionTerminated event instead of HTTP response.
                 status_code: int = 0
                 response_received: bool = False
                 start_time = asyncio.get_event_loop().time()
                 event_timeout: float = 5.0
 
                 while asyncio.get_event_loop().time() - start_time < event_timeout:
+                    # Check for connection termination first (cert rejected)
+                    if protocol._terminated.is_set():
+                        return False, 0, f"TLS handshake failed: {protocol._termination_reason}"
+
+                    # Check for HTTP response
                     events = h3_events_store.get(stream_id, [])
                     for h3_event in events:
                         if isinstance(h3_event, HeadersReceived):
@@ -1360,10 +1377,12 @@ async def perform_h3_tls_client_cert_test(
                             break
                     if response_received:
                         break
+
+                    # Wait for either response event or termination
                     try:
                         await asyncio.wait_for(
                             h3_events_received[stream_id].wait(),
-                            timeout=0.5
+                            timeout=0.1
                         )
                         h3_events_received[stream_id].clear()
                     except asyncio.TimeoutError:

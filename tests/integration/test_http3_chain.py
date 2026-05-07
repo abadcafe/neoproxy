@@ -90,8 +90,8 @@ class TestHTTP3ChainProxy:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_http3_chain_graceful_shutdown(self, shared_test_certs) -> None:
@@ -125,7 +125,7 @@ class TestHTTP3ChainProxy:
             start_time = time.time()
             proxy_proc.send_signal(signal.SIGTERM)
 
-            return_code = proxy_proc.wait(timeout=10)
+            return_code = proxy_proc.wait(timeout=5)
             elapsed = time.time() - start_time
 
             assert return_code == 0, \
@@ -180,8 +180,8 @@ class TestHTTP3ChainProxy:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_http3_chain_missing_ca(self, shared_test_certs) -> None:
@@ -246,8 +246,8 @@ servers:
                     f"Service should start with missing CA in default_tls, got exit code {return_code}"
             except subprocess.TimeoutExpired:
                 # Service started successfully - this is expected with new format
-                proc.send_signal(signal.SIGTERM)
-                proc.wait(timeout=10)
+                proc.kill()
+                proc.wait(timeout=5)
 
         finally:
             if proc and proc.poll() is None:
@@ -322,11 +322,11 @@ servers:
 
         finally:
             if chain_proc:
-                chain_proc.send_signal(signal.SIGTERM)
-                chain_proc.wait(timeout=10)
+                chain_proc.kill()
+                chain_proc.wait(timeout=5)
             if h3_proc:
-                h3_proc.send_signal(signal.SIGTERM)
-                h3_proc.wait(timeout=10)
+                h3_proc.kill()
+                h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -392,11 +392,11 @@ class TestFullProxyChain:
 
         finally:
             if chain_proc:
-                chain_proc.send_signal(signal.SIGTERM)
-                chain_proc.wait(timeout=10)
+                chain_proc.kill()
+                chain_proc.wait(timeout=5)
             if h3_proc:
-                h3_proc.send_signal(signal.SIGTERM)
-                h3_proc.wait(timeout=10)
+                h3_proc.kill()
+                h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -448,11 +448,11 @@ class TestFullProxyChain:
 
             # Shutdown chain first
             chain_proc.send_signal(signal.SIGTERM)
-            return_code1 = chain_proc.wait(timeout=10)
+            return_code1 = chain_proc.wait(timeout=5)
 
             # Shutdown H3 listener
             h3_proc.send_signal(signal.SIGTERM)
-            return_code2 = h3_proc.wait(timeout=10)
+            return_code2 = h3_proc.wait(timeout=5)
 
             assert return_code1 == 0, f"Chain exit code: {return_code1}"
             assert return_code2 == 0, f"H3 listener exit code: {return_code2}"
@@ -521,7 +521,7 @@ class TestHTTP3ChainGracefulShutdown:
             # Shutdown chain (no active streams)
             start_time = time.time()
             chain_proc.send_signal(signal.SIGTERM)
-            return_code = chain_proc.wait(timeout=10)
+            return_code = chain_proc.wait(timeout=5)
             elapsed = time.time() - start_time
 
             assert return_code == 0, f"Chain exit code: {return_code}"
@@ -534,8 +534,8 @@ class TestHTTP3ChainGracefulShutdown:
                 chain_proc.terminate()
                 chain_proc.wait(timeout=5)
             if h3_proc:
-                h3_proc.send_signal(signal.SIGTERM)
-                h3_proc.wait(timeout=10)
+                h3_proc.kill()
+                h3_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_chain_uninstall_with_active_stream(self, shared_test_certs) -> None:
@@ -618,8 +618,8 @@ class TestHTTP3ChainGracefulShutdown:
                 chain_proc.terminate()
                 chain_proc.wait(timeout=5)
             if h3_proc:
-                h3_proc.send_signal(signal.SIGTERM)
-                h3_proc.wait(timeout=10)
+                h3_proc.kill()
+                h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -759,14 +759,14 @@ class TestWRRLoadBalancing:
 
         finally:
             if chain_proc:
-                chain_proc.send_signal(signal.SIGTERM)
-                chain_proc.wait(timeout=10)
+                chain_proc.kill()
+                chain_proc.wait(timeout=5)
             if h3_proc1:
-                h3_proc1.send_signal(signal.SIGTERM)
-                h3_proc1.wait(timeout=10)
+                h3_proc1.kill()
+                h3_proc1.wait(timeout=5)
             if h3_proc2:
-                h3_proc2.send_signal(signal.SIGTERM)
-                h3_proc2.wait(timeout=10)
+                h3_proc2.kill()
+                h3_proc2.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)

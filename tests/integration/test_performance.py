@@ -15,7 +15,6 @@ import tempfile
 import shutil
 import time
 import os
-import signal
 from typing import Optional, Tuple, List, Dict
 
 from .utils.helpers import (
@@ -143,8 +142,8 @@ class TestPerformance:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -219,8 +218,8 @@ class TestPerformance:
             if client_sock:
                 client_sock.close()
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -317,8 +316,8 @@ class TestPerformance:
             if client_sock:
                 client_sock.close()
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -394,8 +393,8 @@ class TestPerformance:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
-                proxy_proc.wait(timeout=10)
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -511,7 +510,7 @@ class TestPerformance:
 
         finally:
             if proxy_proc:
-                proxy_proc.send_signal(signal.SIGTERM)
+                proxy_proc.kill()
                 proxy_proc.wait(timeout=15)
             if target_socket:
                 target_socket.close()

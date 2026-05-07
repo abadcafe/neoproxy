@@ -12,6 +12,20 @@ import os
 from .utils.helpers import curl_request, curl_request_with_headers
 
 
+def wait_for_log_file(log_path: str, timeout: float = 2.0, contains: str | None = None) -> bool:
+    """Poll for log file to exist (and optionally contain specific text)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.exists(log_path):
+            if contains is None:
+                return True
+            with open(log_path) as f:
+                if contains in f.read():
+                    return True
+        time.sleep(0.05)
+    return os.path.exists(log_path) and (contains is None or contains in open(log_path).read())
+
+
 class TestAuthLayer:
     """Verify auth.basic_auth layer works."""
 
@@ -198,11 +212,9 @@ class TestAccessLogLayer:
             status = curl_request("http://example.com/", proxy.port)
             assert status == 200
 
-            # Wait for log flush (writer flushes every 1 second)
-            time.sleep(2)
-
+            # Poll for log file to be written
             log_path = os.path.join(proxy.working_dir, "logs", "access.log")
-            assert os.path.exists(log_path), f"Log file should exist at {log_path}"
+            assert wait_for_log_file(log_path), f"Log file should exist at {log_path}"
 
     def test_access_log_without_context_fields(self, proxy_with_config) -> None:
         """Access log layer with empty context_fields should still log base fields."""
@@ -228,10 +240,8 @@ class TestAccessLogLayer:
             status = curl_request("http://example.com/", proxy.port)
             assert status == 200
 
-            time.sleep(2)
-
             log_path = os.path.join(proxy.working_dir, "logs", "access.log")
-            assert os.path.exists(log_path)
+            assert wait_for_log_file(log_path), f"Log file should exist at {log_path}"
 
 
 class TestCombinedLayers:
@@ -282,14 +292,11 @@ class TestCombinedLayers:
             )
             assert status == 200
 
-            # Wait for log flush and verify log contains entries
-            time.sleep(2)
+            # Wait for log file to contain entries
             log_path = os.path.join(proxy.working_dir, "logs", "access.log")
-            assert os.path.exists(log_path)
-            with open(log_path) as f:
-                log_content = f.read()
-            # Log should contain entries for both requests
-            assert "407" in log_content or "200" in log_content
+            # Wait for either 407 or 200 to appear in log
+            assert wait_for_log_file(log_path, contains="407") or wait_for_log_file(log_path, contains="200"), \
+                f"Log should contain request entries"
 
 
 class TestAccessLogErrorHandling:
@@ -350,16 +357,12 @@ class TestAccessLogErrorHandling:
             assert status >= 500, f"Expected 5xx error, got {status}"
 
             # Verify the proxy is still alive after the error
-            # (error didn't crash the proxy)
-            time.sleep(1)
-            # Wait for log flush
-            time.sleep(2)
+            assert proxy.process.poll() is None, "Proxy should still be running"
+
+            # Wait for log file to contain error entry
             log_path = os.path.join(proxy.working_dir, "logs", "access.log")
-            assert os.path.exists(log_path)
-            with open(log_path) as f:
-                log_content = f.read()
-            # Log should contain the error entry with status 500 or 502
-            assert "500" in log_content or "502" in log_content
+            assert wait_for_log_file(log_path, contains="500") or wait_for_log_file(log_path, contains="502"), \
+                f"Log should contain error status"
 
 
 class TestLayerOrdering:
@@ -399,9 +402,9 @@ class TestLayerOrdering:
             assert status == 407
 
             # Access log should still record this (outer layer)
-            time.sleep(2)
             log_path = os.path.join(proxy.working_dir, "logs", "access.log")
-            assert os.path.exists(log_path)
+            assert wait_for_log_file(log_path, contains="407"), \
+                f"Log should contain 407 status"
 
 
 class TestMultiThreadedAccessLog:
@@ -448,15 +451,18 @@ class TestMultiThreadedAccessLog:
             for i, status in enumerate(results):
                 assert status == 200, f"Request {i} got status {status}"
 
-            # Wait for log flush
-            time.sleep(3)
-
+            # Poll for log file with enough lines
             log_path = os.path.join(proxy.working_dir, "logs", "access.log")
-            assert os.path.exists(log_path)
-
-            with open(log_path) as f:
-                log_content = f.read()
-            lines = [line.strip() for line in log_content.strip().split('\n') if line.strip()]
+            deadline = time.time() + 3.0
+            lines = []
+            while time.time() < deadline:
+                if os.path.exists(log_path):
+                    with open(log_path) as f:
+                        log_content = f.read()
+                    lines = [line.strip() for line in log_content.strip().split('\n') if line.strip()]
+                    if len(lines) >= num_requests:
+                        break
+                time.sleep(0.1)
 
             # Each line should contain all expected fields (not interleaved)
             for i, line in enumerate(lines):

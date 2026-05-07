@@ -592,7 +592,7 @@ class TestHTTP3ChainAuthFailure:
                 temp_dir=temp_dir2
             )
             chain_proc = start_proxy(chain_config)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=2.0, proc=chain_proc)
 
             # Make a request - should fail with connection error (NOT auth fallback)
             # Clear no_proxy to force proxy usage for localhost
@@ -601,7 +601,7 @@ class TestHTTP3ChainAuthFailure:
                 ["curl", "-s", "-p",
                     "-x", f"http://127.0.0.1:{http_port}",
                     "http://example.com:80/",
-                    "--connect-timeout", "5"
+                    "--connect-timeout", "1"
                 ],
                 capture_output=True,
                 text=True,

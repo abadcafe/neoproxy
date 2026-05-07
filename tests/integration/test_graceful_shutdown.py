@@ -48,7 +48,7 @@ class TestGracefulShutdown:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Send SIGINT
@@ -90,7 +90,7 @@ class TestGracefulShutdown:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Send SIGTERM
@@ -129,7 +129,7 @@ class TestGracefulShutdown:
             config_path = create_echo_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Create an idle HTTP connection
@@ -139,13 +139,10 @@ class TestGracefulShutdown:
 
             # Keep connection open without sending data (idle)
 
-            # Give it a moment
-            time.sleep(0.5)
-
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
 
-            # Wait for process to exit
+            # Wait for process to exit (graceful shutdown needs time)
             try:
                 return_code = proxy_proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
@@ -162,7 +159,7 @@ class TestGracefulShutdown:
                 client_sock.close()
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                proxy_proc.wait(timeout=2)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_shutdown_with_active_tunnel(self) -> None:
@@ -200,7 +197,7 @@ class TestGracefulShutdown:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Establish CONNECT tunnel
@@ -289,7 +286,7 @@ class TestGracefulShutdown:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Establish CONNECT tunnel

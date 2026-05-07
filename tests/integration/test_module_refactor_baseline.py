@@ -5,6 +5,7 @@ throughout the refactoring. They run against the compiled binary.
 """
 import os
 import subprocess
+import time
 from .utils.helpers import (
     NEOPROXY_BINARY,
     start_proxy,
@@ -102,17 +103,17 @@ servers: []
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    try:
-        proc.wait(timeout=3)
-        # Exit code 0: no servers means nothing to instantiate
-        assert proc.returncode == 0, \
-            f"Expected exit code 0, got {proc.returncode}"
-    except subprocess.TimeoutExpired:
-        # Process waits for signal when no servers - this is expected
-        # Verify the process was still alive (not crashed) before terminating
-        assert proc.poll() is None, \
-            "Process should still be running (waiting for signal)"
-        terminate_process(proc)
-        # After graceful termination, exit code should not be a panic (1)
+    # Poll briefly to check if process exits immediately (config error)
+    time.sleep(0.2)
+    poll_result = proc.poll()
+
+    if poll_result is not None:
+        # Process exited - exit code 0: no servers means nothing to instantiate
+        assert poll_result == 0, \
+            f"Expected exit code 0, got {poll_result}"
+    else:
+        # Process is still running - this is expected (waiting for signal)
+        terminate_process(proc, timeout=0.5, force=True)
+        # After termination, exit code should not be a panic (1)
         assert proc.returncode != 1, \
             f"Process panicked during shutdown (exit code 1)"

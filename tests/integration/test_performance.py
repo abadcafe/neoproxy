@@ -76,7 +76,7 @@ class TestPerformance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Create 100 concurrent connections
@@ -182,7 +182,7 @@ class TestPerformance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Establish tunnel
@@ -263,7 +263,7 @@ class TestPerformance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Establish tunnel
@@ -353,7 +353,7 @@ class TestPerformance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Rapid connection cycle
@@ -439,7 +439,7 @@ class TestPerformance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Create 1000 concurrent connections

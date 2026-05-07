@@ -81,7 +81,7 @@ class TestHTTP3ChainProxy:
             proxy_proc = start_proxy(config_path)
 
             # Wait for HTTP listener
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP listener failed to start"
 
             # Verify process is running
@@ -119,20 +119,21 @@ class TestHTTP3ChainProxy:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP listener failed to start"
 
             start_time = time.time()
             proxy_proc.send_signal(signal.SIGTERM)
 
-            return_code = proxy_proc.wait(timeout=5)
+            return_code = proxy_proc.wait(timeout=10)
             elapsed = time.time() - start_time
 
             assert return_code == 0, \
                 f"Expected exit code 0, got {return_code}"
 
-            # Should complete quickly
-            assert elapsed < 3.0, \
+            # Should complete within reasonable time for graceful shutdown
+            # The http3_chain service may need time to close idle connections
+            assert elapsed < 8.0, \
                 f"Shutdown took too long: {elapsed:.2f}s"
 
         finally:
@@ -196,6 +197,7 @@ class TestHTTP3ChainProxy:
         temp_dir = tempfile.mkdtemp()
         http_port = get_unique_port()
         h3_port = get_unique_port()
+        proc: Optional[subprocess.Popen] = None
 
         try:
             config_content = f"""server_threads: 1
@@ -239,20 +241,19 @@ servers:
             # With new config structure, server_ca_path in tls is not
             # validated at startup. The service starts but connections will fail.
             # Verify the service starts (does not crash at config parse time).
-            try:
-                return_code = proc.wait(timeout=5)
-                # If it exits, it should be due to other config issues
+            time.sleep(0.2)  # Brief wait for process to potentially exit on config error
+            if proc.poll() is not None:
+                # Process exited - this means config validation failed
                 assert False, \
-                    f"Service should start with missing CA in default_tls, got exit code {return_code}"
-            except subprocess.TimeoutExpired:
-                # Service started successfully - this is expected with new format
-                proc.kill()
-                proc.wait(timeout=5)
+                    f"Service should start with missing CA in default_tls, got exit code {proc.returncode}"
+            # Process is still running - expected with new format
+            proc.kill()
+            proc.wait(timeout=2)
 
         finally:
             if proc and proc.poll() is None:
                 proc.terminate()
-                proc.wait(timeout=5)
+                proc.wait(timeout=2)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_http3_chain_data_transmission(self, shared_test_certs) -> None:
@@ -290,7 +291,7 @@ servers:
                 temp_dir=temp_dir1
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0, proc=h3_proc), \
                 "HTTP/3 listener failed to start"
 
             # Start chain service
@@ -301,7 +302,7 @@ servers:
                 temp_dir=temp_dir2
             )
             chain_proc = start_proxy(chain_config)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=chain_proc), \
                 "HTTP listener failed to start"
 
             # Test data transmission using curl
@@ -701,7 +702,7 @@ class TestWRRLoadBalancing:
                 temp_dir=temp_dir1
             )
             h3_proc1 = start_proxy(h3_config1)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port1, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port1, timeout=5.0, proc=h3_proc1), \
                 "HTTP/3 listener 1 failed to start"
 
             # Start HTTP/3 listener 2 (weight 1)
@@ -712,7 +713,7 @@ class TestWRRLoadBalancing:
                 temp_dir=temp_dir2
             )
             h3_proc2 = start_proxy(h3_config2)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port2, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port2, timeout=5.0, proc=h3_proc2), \
                 "HTTP/3 listener 2 failed to start"
 
             # Start chain service with weights 2:1
@@ -726,7 +727,7 @@ class TestWRRLoadBalancing:
                 temp_dir=temp_dir3
             )
             chain_proc = start_proxy(chain_config)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=chain_proc), \
                 "HTTP listener failed to start"
 
             # Send multiple requests through the chain

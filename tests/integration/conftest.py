@@ -137,15 +137,15 @@ def proxy_with_config(temp_dir: str) -> Generator:
             stderr=subprocess.PIPE,
             cwd=temp_dir,
         )
-        if not wait_for_proxy("127.0.0.1", port, timeout=10.0):
-            terminate_process(proc)
+        if not wait_for_proxy("127.0.0.1", port, timeout=2.0, proc=proc):
+            terminate_process(proc, timeout=0.5, force=True)
             raise RuntimeError(f"Proxy did not start on port {port}")
 
         ctx = ProxyContext(proc, port, temp_dir)
         try:
             yield ctx
         finally:
-            terminate_process(proc)
+            terminate_process(proc, timeout=0.5, force=True)
 
     yield _proxy_with_config
 

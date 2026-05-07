@@ -304,7 +304,7 @@ class TestHTTP3PasswordAuth:
             proxy_proc = start_proxy(config_path)
 
             # Verify process starts and stays running
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start with password auth"
 
             assert proxy_proc.poll() is None, \
@@ -366,7 +366,7 @@ class TestHTTP3PasswordAuth:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Test with real HTTP/3 client using valid credentials
@@ -450,7 +450,7 @@ class TestHTTP3PasswordAuth:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Test with wrong password
@@ -519,7 +519,7 @@ class TestHTTP3TLSClientCertAuth:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start with TLS client cert auth"
 
             assert proxy_proc.poll() is None, \
@@ -616,7 +616,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Verify graceful shutdown works with TLS client cert auth
@@ -660,7 +660,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Test with real HTTP/3 client using valid client certificate
@@ -747,7 +747,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Test with HTTP/3 client using INVALID client certificate
@@ -815,7 +815,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Test with HTTP/3 client without client certificate
@@ -896,7 +896,7 @@ class TestHTTP3DualAuth:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Use H3Client with client cert AND password
@@ -973,7 +973,7 @@ class TestHTTP3DualAuth:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Connect WITHOUT client cert - should fail at transport layer
@@ -1044,7 +1044,7 @@ class TestHTTP3DualAuth:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Use H3Client with valid client cert but WRONG password
@@ -1122,7 +1122,7 @@ class TestHTTP3DualAuth:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Use H3Client with valid client cert but NO password
@@ -1213,7 +1213,7 @@ class TestHTTP3DualAuth:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Connect with INVALID cert - should fail at transport
@@ -1345,7 +1345,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener should start with plaintext password"
 
         finally:
@@ -1382,7 +1382,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener should start with multiple users"
 
         finally:

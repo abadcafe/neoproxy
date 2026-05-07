@@ -273,10 +273,10 @@ def proxy_with_capture(
         )
 
         # Wait for HTTP listener to be ready using polling
-        http_ready = wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
+        http_ready = wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=proc)
 
         # Wait for HTTP3 listener to be ready using polling
-        h3_ready = wait_for_udp_port_bound("127.0.0.1", http3_port, timeout=5.0)
+        h3_ready = wait_for_udp_port_bound("127.0.0.1", http3_port, timeout=5.0, proc=proc)
 
         # If process exited or listeners not ready, capture stderr
         if proc.poll() is not None or not http_ready or not h3_ready:
@@ -504,9 +504,9 @@ class TestHTTP3MultiAddress:
             proxy_proc = start_proxy(config_path)
 
             # Wait for both UDP ports to be bound
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port1, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port1, timeout=5.0, proc=proxy_proc), \
                 f"HTTP/3 listener failed to start on port {proxy_port1}"
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port2, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port2, timeout=5.0, proc=proxy_proc), \
                 f"HTTP/3 listener failed to start on port {proxy_port2}"
 
             # Verify process is still running
@@ -545,7 +545,7 @@ class TestHTTP3ConnectOnlyUpgrade:
             )
 
             # Wait for server to start using polling
-            if not wait_for_proxy("127.0.0.1", default_port, timeout=5.0):
+            if not wait_for_proxy("127.0.0.1", default_port, timeout=5.0, proc=proc):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -607,7 +607,7 @@ class TestHTTPVersionCheck:
             )
 
             # Wait for server to start using polling
-            if not wait_for_proxy("127.0.0.1", default_port, timeout=5.0):
+            if not wait_for_proxy("127.0.0.1", default_port, timeout=5.0, proc=proc):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -661,7 +661,7 @@ class TestSNIHostMismatch:
             )
 
             # Wait for server to start using polling
-            if not wait_for_proxy("127.0.0.1", https_port, timeout=5.0):
+            if not wait_for_proxy("127.0.0.1", https_port, timeout=5.0, proc=proc):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -722,7 +722,7 @@ class TestSNIHostMismatch:
             )
 
             # Wait for server to start using polling
-            if not wait_for_proxy("127.0.0.1", https_port, timeout=5.0):
+            if not wait_for_proxy("127.0.0.1", https_port, timeout=5.0, proc=proc):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -834,7 +834,7 @@ class TestHTTP3SNIHostMismatch:
             )
 
             # Wait for HTTP/3 listener
-            if not wait_for_udp_port_bound("127.0.0.1", http3_port, timeout=5.0):
+            if not wait_for_udp_port_bound("127.0.0.1", http3_port, timeout=5.0, proc=proc):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -940,7 +940,7 @@ class TestHTTP3SNIHostMismatch:
             )
 
             # Wait for HTTP/3 listener
-            if not wait_for_udp_port_bound("127.0.0.1", http3_port, timeout=5.0):
+            if not wait_for_udp_port_bound("127.0.0.1", http3_port, timeout=5.0, proc=proc):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")

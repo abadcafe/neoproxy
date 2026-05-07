@@ -29,6 +29,8 @@ from aioquic.quic.events import (
     QuicEvent,
     StreamDataReceived,
     ConnectionTerminated,
+    StreamReset,
+    StopSendingReceived,
 )
 from aioquic.quic.connection import QuicConnection
 
@@ -1448,6 +1450,8 @@ async def perform_h3_request_with_custom_authority(
 
     h3_events_store: Dict[int, List[H3Event]] = defaultdict(list)
     h3_events_received: Dict[int, asyncio.Event] = defaultdict(asyncio.Event)
+    stream_reset: Dict[int, int] = {}  # stream_id -> error_code
+    connection_terminated: str = ""
 
     class H3CustomAuthProtocol(QuicConnectionProtocol):
         """Protocol for HTTP/3 with custom authority."""
@@ -1461,7 +1465,13 @@ async def perform_h3_request_with_custom_authority(
             self._h3: Optional[H3Connection] = None
 
         def quic_event_received(self, event: QuicEvent) -> None:
-            if isinstance(event, StreamDataReceived):
+            if isinstance(event, StreamReset):
+                stream_reset[event.stream_id] = event.error_code
+                h3_events_received[event.stream_id].set()
+            elif isinstance(event, ConnectionTerminated):
+                nonlocal connection_terminated
+                connection_terminated = event.reason_phrase or f"error_code={event.error_code}"
+            elif isinstance(event, StreamDataReceived):
                 reader = self._stream_readers.get(event.stream_id, None)
                 if reader is not None:
                     reader.feed_data(event.data)
@@ -1519,6 +1529,24 @@ async def perform_h3_request_with_custom_authority(
                 start_time = asyncio.get_event_loop().time()
 
                 while asyncio.get_event_loop().time() - start_time < event_timeout:
+                    # Check for stream reset (protocol error, malformed request, etc.)
+                    if stream_id in stream_reset:
+                        return H3Response(
+                            status_code=0,
+                            headers={},
+                            body=f"Stream reset with error_code={stream_reset[stream_id]}".encode(),
+                            stream_id=stream_id
+                        )
+
+                    # Check for connection termination
+                    if connection_terminated:
+                        return H3Response(
+                            status_code=0,
+                            headers={},
+                            body=f"Connection terminated: {connection_terminated}".encode(),
+                            stream_id=stream_id
+                        )
+
                     events = h3_events_store.get(stream_id, [])
 
                     # Only process new events

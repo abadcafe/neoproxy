@@ -64,7 +64,7 @@ class TestNormalShutdown:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Send SIGINT
@@ -102,7 +102,7 @@ class TestNormalShutdown:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Send SIGTERM
@@ -141,7 +141,7 @@ class TestNormalShutdown:
             config_path = create_echo_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Create an idle HTTP connection
@@ -150,12 +150,11 @@ class TestNormalShutdown:
             client_sock.connect(("127.0.0.1", proxy_port))
 
             # Keep connection open without sending data (idle)
-            time.sleep(0.5)
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
 
-            # Wait for process to exit
+            # Wait for process to exit (graceful shutdown needs time)
             try:
                 return_code = proxy_proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
@@ -172,7 +171,7 @@ class TestNormalShutdown:
                 client_sock.close()
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                proxy_proc.wait(timeout=2)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -198,7 +197,7 @@ class TestRepeatedSignal:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Send multiple SIGINT signals rapidly
@@ -273,7 +272,7 @@ class TestShutdownTimeout:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Establish CONNECT tunnel
@@ -351,18 +350,20 @@ class TestErrorExit:
             config_path1 = create_test_config(proxy_port, temp_dir1)
             first_proc = start_proxy(config_path1)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=first_proc), \
                 "First proxy server failed to start"
 
             # Try to start second process with same port
             config_path2 = create_test_config(proxy_port, temp_dir2)
             second_proc = start_proxy(config_path2)
 
-            # Wait briefly to see if it exits
-            time.sleep(2)
-
-            # Check if second process has exited
-            poll_result = second_proc.poll()
+            # Poll to see if second process exits (check for ~0.5s)
+            poll_result = None
+            for _ in range(10):
+                poll_result = second_proc.poll()
+                if poll_result is not None:
+                    break
+                time.sleep(0.05)
 
             if poll_result is not None:
                 # Process exited - verify error code
@@ -375,7 +376,7 @@ class TestErrorExit:
                 # Document this as potentially incorrect per design doc
                 second_proc.send_signal(signal.SIGTERM)
                 try:
-                    return_code = second_proc.wait(timeout=10)
+                    return_code = second_proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     second_proc.kill()
                     second_proc.wait()
@@ -444,7 +445,7 @@ class TestConnectTunnel:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Establish CONNECT tunnel
@@ -507,7 +508,7 @@ class TestResourceCleanup:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Send SIGTERM
@@ -559,7 +560,7 @@ class TestResourceCleanup:
             config_path = create_echo_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Create multiple idle connections
@@ -570,12 +571,10 @@ class TestResourceCleanup:
                 sock.connect(("127.0.0.1", proxy_port))
                 client_socks.append(sock)
 
-            time.sleep(0.5)
-
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
 
-            # Wait for process to exit
+            # Wait for process to exit (graceful shutdown needs time)
             try:
                 return_code = proxy_proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
@@ -592,7 +591,7 @@ class TestResourceCleanup:
                 sock.close()
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                proxy_proc.wait(timeout=2)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -732,7 +731,7 @@ class TestMultipleWorkerThreads:
             )
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Send SIGTERM
@@ -793,7 +792,7 @@ class TestMultipleWorkerThreads:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Establish multiple tunnels

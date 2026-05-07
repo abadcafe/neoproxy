@@ -262,15 +262,15 @@ class TestHTTPConnect:
             proxy_proc = start_proxy(config_path)
 
             # 3. 等待代理服务器就绪
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # 4. 发送 CONNECT 请求到不可达地址
-            # 使用 198.51.100.1 (TEST-NET-2, 用于文档目的, 不可路由)
-            request = b"CONNECT 198.51.100.1:9999 HTTP/1.1\r\nHost: 198.51.100.1:9999\r\n\r\n"
+            # 使用本地不存在的端口，会立即收到 connection refused
+            request = b"CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5.0)  # 使用较短超时
+            sock.settimeout(5.0)
             try:
                 sock.connect(("127.0.0.1", proxy_port))
                 sock.sendall(request)
@@ -293,11 +293,13 @@ class TestHTTPConnect:
 
             # 5. 验证行为
             # 代理服务器应返回错误响应或关闭连接
-            # 允许 200（先返回200后连接失败）、502（连接失败）、或空响应
+            # 允许 200（先返回200后连接失败）、502（连接失败）、504（网关超时）、或空响应
             is_valid_response = (
                 b"200" in response or
                 b"502" in response or
+                b"504" in response or
                 b"Bad Gateway" in response or
+                b"Gateway Timeout" in response or
                 len(response) == 0
             )
             assert is_valid_response, \
@@ -306,14 +308,8 @@ class TestHTTPConnect:
         finally:
             # 6. 清理资源
             if proxy_proc:
-                # Use SIGTERM for graceful shutdown and wait longer
-                # since tunnel tasks may need time to cleanup
                 proxy_proc.kill()
-                try:
-                    proxy_proc.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    proxy_proc.kill()
-                    proxy_proc.wait()
+                proxy_proc.wait(timeout=2)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_tc005_concurrent_tunnels(self) -> None:

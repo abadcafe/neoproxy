@@ -144,7 +144,7 @@ class TestMonitoring:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Check log directory exists
@@ -172,7 +172,7 @@ class TestMonitoring:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Wait for log files to be created using polling
@@ -204,7 +204,7 @@ class TestMonitoring:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Wait for log directory and files to be created
@@ -289,7 +289,7 @@ class TestMonitoring:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Make a connection
@@ -386,7 +386,7 @@ class TestMonitoring:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Create multiple connections
@@ -510,7 +510,7 @@ class TestHTTP3Monitoring:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             log_dir = os.path.join(temp_dir, "logs")
@@ -542,7 +542,7 @@ class TestHTTP3Monitoring:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Wait for log content using polling
@@ -591,7 +591,7 @@ class TestHTTP3Monitoring:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Wait for HTTP/3 log content using polling
@@ -712,7 +712,7 @@ servers:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Try to connect and immediately disconnect
@@ -775,7 +775,7 @@ class TestMonitoringLogCycle:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Wait for log content using polling
@@ -849,7 +849,7 @@ class TestMonitoringLogCycle:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Wait for log content using polling
@@ -921,7 +921,7 @@ class TestHttpListenerMonitoring:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Wait for log content using polling
@@ -1001,7 +1001,7 @@ class TestHttpListenerMonitoring:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Create multiple connections
@@ -1098,7 +1098,7 @@ class TestSocks5ListenerMonitoring:
             )
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "SOCKS5 listener failed to start"
 
             # Wait for log content using polling
@@ -1186,7 +1186,7 @@ class TestSocks5ListenerMonitoring:
             )
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "SOCKS5 listener failed to start"
 
             # Create multiple SOCKS5 connections
@@ -1308,11 +1308,11 @@ servers:
             proxy_proc = start_proxy(config_path)
 
             # Wait for all listeners to start
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP listener failed to start"
-            assert wait_for_proxy("127.0.0.1", socks5_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", socks5_port, timeout=5.0, proc=proxy_proc), \
                 "SOCKS5 listener failed to start"
-            assert wait_for_udp_port_bound("127.0.0.1", http3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", http3_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Wait for log content using polling

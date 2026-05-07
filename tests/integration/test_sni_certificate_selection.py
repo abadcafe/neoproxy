@@ -432,7 +432,7 @@ class TestSniCertificateSelection:
 
             # Start proxy
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy failed to start"
 
             # Test SNI=api.test.local -> should get server A's cert
@@ -476,7 +476,7 @@ class TestSniCertificateSelection:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy failed to start"
 
             # Test SNI=foo.test.local -> should succeed
@@ -515,7 +515,7 @@ class TestSniCertificateSelection:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy failed to start"
 
             # Test SNI=test.local -> should succeed (bare domain match via wildcard)
@@ -555,7 +555,7 @@ class TestSniCertificateSelection:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy failed to start"
 
             # Test SNI=bar.foo.test.local -> should FAIL (multi-level)
@@ -597,7 +597,7 @@ class TestSniCertificateSelection:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy failed to start"
 
             # Test SNI=unknown.test.local -> should FAIL
@@ -665,7 +665,7 @@ class TestSniCertificateSelection:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy failed to start"
 
             # Test SNI=api.test.local -> should get exact cert (not wildcard)

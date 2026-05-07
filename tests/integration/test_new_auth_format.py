@@ -11,10 +11,7 @@ Tests validate that the new configuration format works correctly:
 
 import os
 import subprocess
-import time
 from typing import Optional, List
-
-import pytest
 
 from .conftest import get_unique_port
 from .utils.helpers import (
@@ -87,7 +84,7 @@ servers:
         config_path = write_config(temp_dir, config)
         proc = start_proxy(config_path)
         try:
-            assert wait_for_proxy("127.0.0.1", port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", port, timeout=2.0, proc=proc), \
                 "Proxy should start with new auth format"
 
             # Test: unauthenticated request should get 407
@@ -110,7 +107,7 @@ servers:
             assert result.stdout.strip() != "407", \
                 f"Expected non-407 with valid auth, got {result.stdout.strip()}"
         finally:
-            terminate_process(proc)
+            terminate_process(proc, timeout=0.5, force=True)
 
 
 # ==============================================================================
@@ -158,7 +155,7 @@ servers:
         config_path = write_config(temp_dir, config)
         proc = start_proxy(config_path)
         try:
-            assert wait_for_proxy("127.0.0.1", port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", port, timeout=2.0, proc=proc), \
                 "Proxy should start with new SOCKS5 auth format"
 
             # Test: SOCKS5 with correct credentials should not fail auth.
@@ -180,7 +177,7 @@ servers:
             assert "rejected" not in result.stderr.lower(), \
                 f"SOCKS5 auth failed with correct credentials: {result.stderr}"
         finally:
-            terminate_process(proc)
+            terminate_process(proc, timeout=0.5, force=True)
 
 
 # ==============================================================================
@@ -230,11 +227,11 @@ servers:
         proc = start_proxy(config_path)
         try:
             # HTTP listener should start and ignore the server-level TLS config
-            started = wait_for_proxy("127.0.0.1", port, timeout=5.0)
+            started = wait_for_proxy("127.0.0.1", port, timeout=2.0, proc=proc)
             assert started, \
                 "HTTP listener should start and ignore server-level TLS config"
         finally:
-            terminate_process(proc)
+            terminate_process(proc, timeout=0.5, force=True)
 
     def test_client_ca_path_rejected_on_socks5_listener(self, temp_dir: str) -> None:
         """
@@ -266,11 +263,12 @@ servers:
         config_path = write_config(temp_dir, config)
         proc = start_proxy(config_path)
         try:
-            started = wait_for_proxy("127.0.0.1", port, timeout=3.0)
+            # Process should exit quickly due to config validation error
+            started = wait_for_proxy("127.0.0.1", port, timeout=2.0, proc=proc)
             assert not started, \
                 "Proxy should NOT start with client_ca_path on socks5 listener"
         finally:
-            terminate_process(proc)
+            terminate_process(proc, timeout=0.5, force=True)
 
 
 # ==============================================================================
@@ -401,14 +399,13 @@ servers:
 
         upstream_proc = start_proxy(upstream_config)
         try:
-            assert wait_for_udp_port_bound("127.0.0.1", upstream_port, timeout=5.0), \
-                "Upstream HTTP/3 proxy should start"
+            assert wait_for_udp_port_bound("127.0.0.1", upstream_port, timeout=2.0, proc=upstream_proc), \
+                f"Upstream HTTP/3 proxy should start, stderr: {upstream_proc.stderr.read().decode() if upstream_proc.stderr else 'N/A'}"
 
             chain_proc = start_proxy(chain_config)
             try:
-                assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
-                    "Chain proxy should start with new user/tls format"
-
+                assert wait_for_proxy("127.0.0.1", http_port, timeout=2.0, proc=chain_proc), \
+                    f"Chain proxy should start with new user/tls format, stderr: {chain_proc.stderr.read().decode() if chain_proc.stderr else 'N/A'}"
 
                 # Test: Request through chain should succeed (auth should work)
                 env = get_curl_env_without_no_proxy()
@@ -417,7 +414,7 @@ servers:
                         "-x", f"http://127.0.0.1:{http_port}",
                         f"http://127.0.0.1:{target_port}/",
                         "-d", "test_default_tls",
-                        "--connect-timeout", "10",
+                        "--connect-timeout", "3",
                         "--max-time", "2"
                     ],
                     capture_output=True, text=True, env=env
@@ -427,9 +424,9 @@ servers:
                     f"Expected echo data (auth should work with new format), " \
                     f"got stdout: {result.stdout}, stderr: {result.stderr}"
             finally:
-                terminate_process(chain_proc)
+                terminate_process(chain_proc, timeout=0.5, force=True)
         finally:
-            terminate_process(upstream_proc)
+            terminate_process(upstream_proc, timeout=0.5, force=True)
             target_socket.close()
 
     def test_http3_chain_per_proxy_credential_override(self, temp_dir: str, shared_test_certs: dict) -> None:
@@ -502,12 +499,12 @@ servers:
 
         upstream_proc = start_proxy(upstream_config)
         try:
-            assert wait_for_udp_port_bound("127.0.0.1", upstream_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", upstream_port, timeout=2.0, proc=upstream_proc), \
                 "Upstream HTTP/3 proxy should start"
 
             chain_proc = start_proxy(chain_config)
             try:
-                assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
+                assert wait_for_proxy("127.0.0.1", http_port, timeout=2.0, proc=chain_proc), \
                     "Chain proxy should start with per-proxy credential override"
 
 
@@ -518,7 +515,7 @@ servers:
                         "-x", f"http://127.0.0.1:{http_port}",
                         f"http://127.0.0.1:{target_port}/",
                         "-d", "test_per_proxy_credential",
-                        "--connect-timeout", "10",
+                        "--connect-timeout", "3",
                         "--max-time", "2"
                     ],
                     capture_output=True, text=True, env=env
@@ -528,9 +525,9 @@ servers:
                     f"Expected echo data (per-proxy credential should work), " \
                     f"got stdout: {result.stdout}, stderr: {result.stderr}"
             finally:
-                terminate_process(chain_proc)
+                terminate_process(chain_proc, timeout=0.5, force=True)
         finally:
-            terminate_process(upstream_proc)
+            terminate_process(upstream_proc, timeout=0.5, force=True)
             target_socket.close()
 
     def test_http3_chain_credential_user_format(self, temp_dir: str, shared_test_certs: dict) -> None:
@@ -604,12 +601,12 @@ servers:
 
         upstream_proc = start_proxy(upstream_config)
         try:
-            assert wait_for_udp_port_bound("127.0.0.1", upstream_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", upstream_port, timeout=2.0, proc=upstream_proc), \
                 "Upstream HTTP/3 proxy should start"
 
             chain_proc = start_proxy(chain_config)
             try:
-                assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
+                assert wait_for_proxy("127.0.0.1", http_port, timeout=2.0, proc=chain_proc), \
                     "Chain proxy should start with new user format"
 
 
@@ -620,7 +617,7 @@ servers:
                         "-x", f"http://127.0.0.1:{http_port}",
                         f"http://127.0.0.1:{target_port}/",
                         "-d", "test_user",
-                        "--connect-timeout", "10",
+                        "--connect-timeout", "3",
                         "--max-time", "2"
                     ],
                     capture_output=True, text=True, env=env
@@ -630,9 +627,9 @@ servers:
                     f"Expected echo data (user should provide auth), " \
                     f"got stdout: {result.stdout}, stderr: {result.stderr}"
             finally:
-                terminate_process(chain_proc)
+                terminate_process(chain_proc, timeout=0.5, force=True)
         finally:
-            terminate_process(upstream_proc)
+            terminate_process(upstream_proc, timeout=0.5, force=True)
             target_socket.close()
 
     def test_http3_chain_default_user_inheritance(self, temp_dir: str, shared_test_certs: dict) -> None:
@@ -707,12 +704,12 @@ servers:
 
         upstream_proc = start_proxy(upstream_config)
         try:
-            assert wait_for_udp_port_bound("127.0.0.1", upstream_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", upstream_port, timeout=2.0, proc=upstream_proc), \
                 "Upstream HTTP/3 proxy should start"
 
             chain_proc = start_proxy(chain_config)
             try:
-                assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
+                assert wait_for_proxy("127.0.0.1", http_port, timeout=2.0, proc=chain_proc), \
                     "Chain proxy should start with default_user inheritance"
 
 
@@ -723,7 +720,7 @@ servers:
                         "-x", f"http://127.0.0.1:{http_port}",
                         f"http://127.0.0.1:{target_port}/",
                         "-d", "test_default_user",
-                        "--connect-timeout", "10",
+                        "--connect-timeout", "3",
                         "--max-time", "2"
                     ],
                     capture_output=True, text=True, env=env
@@ -733,9 +730,9 @@ servers:
                     f"Expected echo data (default_user should work), " \
                     f"got stdout: {result.stdout}, stderr: {result.stderr}"
             finally:
-                terminate_process(chain_proc)
+                terminate_process(chain_proc, timeout=0.5, force=True)
         finally:
-            terminate_process(upstream_proc)
+            terminate_process(upstream_proc, timeout=0.5, force=True)
             target_socket.close()
 
     def test_http3_chain_no_user_no_default(self, temp_dir: str, shared_test_certs: dict) -> None:
@@ -805,12 +802,12 @@ servers:
 
         upstream_proc = start_proxy(upstream_config)
         try:
-            assert wait_for_udp_port_bound("127.0.0.1", upstream_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", upstream_port, timeout=2.0, proc=upstream_proc), \
                 "Upstream HTTP/3 proxy should start"
 
             chain_proc = start_proxy(chain_config)
             try:
-                assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
+                assert wait_for_proxy("127.0.0.1", http_port, timeout=2.0, proc=chain_proc), \
                     "Chain proxy should start with no user"
 
 
@@ -821,7 +818,7 @@ servers:
                         "-x", f"http://127.0.0.1:{http_port}",
                         f"http://127.0.0.1:{target_port}/",
                         "-d", "test_no_user",
-                        "--connect-timeout", "10",
+                        "--connect-timeout", "3",
                         "--max-time", "2"
                     ],
                     capture_output=True, text=True, env=env
@@ -833,7 +830,7 @@ servers:
                     f"but got data, meaning OLD format ignored the override. " \
                     f"stdout: {result.stdout}, stderr: {result.stderr}"
             finally:
-                terminate_process(chain_proc)
+                terminate_process(chain_proc, timeout=0.5, force=True)
         finally:
-            terminate_process(upstream_proc)
+            terminate_process(upstream_proc, timeout=0.5, force=True)
             target_socket.close()

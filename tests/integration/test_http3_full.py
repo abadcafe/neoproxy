@@ -82,7 +82,7 @@ class TestHTTP3FullConnection:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Use real HTTP/3 client to verify QUIC handshake
@@ -143,7 +143,7 @@ class TestHTTP3FullConnection:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Send CONNECT request using real HTTP/3 client
@@ -224,7 +224,7 @@ class TestHTTP3FullConnection:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Test actual data transfer through HTTP/3 tunnel
@@ -314,7 +314,7 @@ class TestHTTP3GracefulShutdownWithConnections:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Give the listener some time to be "active"
@@ -359,7 +359,7 @@ class TestHTTP3GracefulShutdownWithConnections:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Graceful shutdown - should complete within timeout
@@ -417,7 +417,7 @@ class TestFullHTTP3ProxyChain:
             )
             h3_proc = start_proxy(h3_config)
 
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0, proc=h3_proc), \
                 "HTTP/3 listener failed to start"
 
             # Create HTTP/3 chain service (machine 1 - the frontend)
@@ -429,7 +429,7 @@ class TestFullHTTP3ProxyChain:
             )
             chain_proc = start_proxy(chain_config)
 
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=chain_proc), \
                 "HTTP listener failed to start"
 
             # Both should be running
@@ -478,7 +478,7 @@ class TestFullHTTP3ProxyChain:
             )
             h3_proc = start_proxy(h3_config)
 
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0, proc=h3_proc), \
                 "HTTP/3 listener failed to start"
 
             # Start chain service
@@ -490,7 +490,7 @@ class TestFullHTTP3ProxyChain:
             )
             chain_proc = start_proxy(chain_config)
 
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=chain_proc), \
                 "HTTP listener failed to start"
 
             # Shutdown chain first (frontend)
@@ -544,7 +544,7 @@ class TestHTTP3ErrorHandling:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Send a GET request (non-CONNECT) using HTTP/3 client
@@ -599,7 +599,7 @@ class TestHTTP3ErrorHandling:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # CONNECT to an invalid target (port 0 is invalid)
@@ -653,13 +653,37 @@ class TestHTTP3ErrorHandling:
             cert_path = shared_test_certs['cert_path']
             key_path = shared_test_certs['key_path']
             ca_path = shared_test_certs['ca_path']
-            config_path = create_http3_listener_config(
-                proxy_port, cert_path, key_path, temp_dir
-            )
+
+            # Create config with short connect_timeout to make test faster
+            config_content = f"""server_threads: 1
+
+listeners:
+- name: h3_main
+  kind: http3
+  addresses: ["0.0.0.0:{proxy_port}"]
+
+services:
+- name: connect_tcp
+  kind: connect_tcp.connect_tcp
+  args:
+    connect_timeout: "1s"
+
+servers:
+- name: http3_server
+  tls:
+    certificates:
+    - cert_path: "{cert_path}"
+      key_path: "{key_path}"
+  listeners: ["h3_main"]
+  service: connect_tcp
+"""
+            config_path = os.path.join(temp_dir, "config.yaml")
+            with open(config_path, "w") as f:
+                f.write(config_content)
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # CONNECT to an unreachable target
@@ -670,7 +694,7 @@ class TestHTTP3ErrorHandling:
                     "127.0.0.1", proxy_port,
                     "198.51.100.1", 9999,
                     ca_path=ca_path,
-                    timeout=30.0
+                    timeout=10.0  # Shorter timeout since connect_timeout is 2s
                 )
                 return result
 
@@ -682,11 +706,11 @@ class TestHTTP3ErrorHandling:
             finally:
                 loop.close()
 
-            # The proxy should return 502 for unreachable target
-            # If connection times out, status_code will be 0
-            # Accept either 502 or timeout (status_code 0) as valid behavior
-            assert result.status_code == 502 or result.status_code == 0, \
-                f"Expected 502 or timeout (0), got {result.status_code}. Message: {result.message}"
+            # The proxy should return 502 (bad gateway) or 504 (gateway timeout)
+            # for unreachable targets. If the client times out before the proxy
+            # responds, status_code will be 0.
+            assert result.status_code in (502, 504, 0), \
+                f"Expected 502/504/timeout, got {result.status_code}. Message: {result.message}"
 
         finally:
             if proxy_proc:
@@ -824,7 +848,7 @@ servers:
             proxy_proc = start_proxy(config_path)
 
             # Should start successfully with valid plaintext password
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener should start with valid plaintext password"
 
         finally:
@@ -862,7 +886,7 @@ servers:
             proxy_proc = start_proxy(config_path)
 
             # Should start with minimum valid values
-            if not wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0):
+            if not wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc):
                 if proxy_proc.poll() is not None:
                     _, stderr_data = proxy_proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -911,7 +935,7 @@ servers:
             proxy_proc = start_proxy(config_path)
 
             # Should start with maximum valid values
-            if not wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0):
+            if not wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc):
                 if proxy_proc.poll() is not None:
                     _, stderr_data = proxy_proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -957,7 +981,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener should start"
 
         finally:
@@ -1015,7 +1039,7 @@ class TestFullHTTP3ProxyChainDataTransfer:
             )
             h3_proc = start_proxy(h3_config)
 
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0, proc=h3_proc), \
                 "HTTP/3 listener failed to start"
 
             # Create target server that echoes data
@@ -1044,7 +1068,7 @@ class TestFullHTTP3ProxyChainDataTransfer:
             )
             chain_proc = start_proxy(chain_config)
 
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=chain_proc), \
                 "HTTP listener failed to start"
 
             # Wait for services to be fully ready
@@ -1149,7 +1173,7 @@ class TestHTTP3GracefulShutdownTimeout:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Send SIGTERM while server is running (no active streams, but tests timeout)
@@ -1225,7 +1249,7 @@ class TestHTTP3Performance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Test concurrent connections
@@ -1294,7 +1318,7 @@ class TestHTTP3Performance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Measure connection latency
@@ -1376,7 +1400,7 @@ class TestHTTP3Performance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             time.sleep(0.5)

@@ -447,7 +447,7 @@ class TestSocks5BasicConnection:
 
             # Start proxy
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Connect and perform SOCKS5 handshake
@@ -521,7 +521,7 @@ class TestSocks5BasicConnection:
 
             # Start proxy
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Connect and authenticate
@@ -575,7 +575,7 @@ class TestSocks5BasicConnection:
 
             # Start proxy
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Connect and try wrong password
@@ -621,7 +621,7 @@ class TestSocks5BasicConnection:
 
             # Start proxy
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Request unsupported method (GSSAPI)
@@ -736,17 +736,17 @@ class TestSocks5HandshakeTimeout:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            # Use 2 second timeout for faster test
+            # Use 0.5 second timeout for faster test
             config_path = create_socks5_config(
-                proxy_port, temp_dir, handshake_timeout="2s"
+                proxy_port, temp_dir, handshake_timeout="0.5s"
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
+            sock.settimeout(3.0)
             try:
                 sock.connect(("127.0.0.1", proxy_port))
 
@@ -761,16 +761,16 @@ class TestSocks5HandshakeTimeout:
                     pass
 
                 elapsed = time.time() - start_time
-                # Should timeout around 2 seconds
-                assert elapsed >= 1.5, \
-                    f"Timeout too fast: {elapsed}s (expected ~2s)"
+                # Should timeout around 0.5 seconds
+                assert elapsed >= 0.3, \
+                    f"Timeout too fast: {elapsed}s (expected ~0.5s)"
 
             finally:
                 sock.close()
 
         finally:
             if proxy_proc:
-                terminate_process(proxy_proc)
+                terminate_process(proxy_proc, timeout=0.5, force=True)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_handshake_timeout_partial_data(self) -> None:
@@ -786,15 +786,15 @@ class TestSocks5HandshakeTimeout:
 
         try:
             config_path = create_socks5_config(
-                proxy_port, temp_dir, handshake_timeout="2s"
+                proxy_port, temp_dir, handshake_timeout="0.5s"
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
+            sock.settimeout(3.0)
             try:
                 sock.connect(("127.0.0.1", proxy_port))
 
@@ -812,15 +812,15 @@ class TestSocks5HandshakeTimeout:
                     pass
 
                 elapsed = time.time() - start_time
-                assert elapsed >= 1.5, \
-                    f"Timeout too fast: {elapsed}s (expected ~2s)"
+                assert elapsed >= 0.3, \
+                    f"Timeout too fast: {elapsed}s (expected ~0.5s)"
 
             finally:
                 sock.close()
 
         finally:
             if proxy_proc:
-                terminate_process(proxy_proc)
+                terminate_process(proxy_proc, timeout=0.5, force=True)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_custom_handshake_timeout(self) -> None:
@@ -834,17 +834,17 @@ class TestSocks5HandshakeTimeout:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            # Use 3 second timeout
+            # Use 0.5 second timeout
             config_path = create_socks5_config(
-                proxy_port, temp_dir, handshake_timeout="3s"
+                proxy_port, temp_dir, handshake_timeout="0.5s"
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(15.0)  # Longer than handshake timeout
+            sock.settimeout(3.0)  # Longer than handshake timeout
             try:
                 sock.connect(("127.0.0.1", proxy_port))
 
@@ -856,16 +856,16 @@ class TestSocks5HandshakeTimeout:
                     pass
 
                 elapsed = time.time() - start_time
-                # Should timeout around 3 seconds
-                assert 2.5 <= elapsed <= 5.0, \
-                    f"Timeout not matching config: {elapsed}s (expected ~3s)"
+                # Should timeout around 0.5 second
+                assert 0.3 <= elapsed <= 1.5, \
+                    f"Timeout not matching config: {elapsed}s (expected ~0.5s)"
 
             finally:
                 sock.close()
 
         finally:
             if proxy_proc:
-                terminate_process(proxy_proc)
+                terminate_process(proxy_proc, timeout=0.5, force=True)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -1384,11 +1384,11 @@ class TestSocks5DomainBoundary:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
+            sock.settimeout(5.0)  # DNS resolution can take time
             try:
                 sock.connect(("127.0.0.1", proxy_port))
                 assert socks5_handshake_no_auth(sock), "Handshake failed"
@@ -1403,7 +1403,7 @@ class TestSocks5DomainBoundary:
 
         finally:
             if proxy_proc:
-                terminate_process(proxy_proc)
+                terminate_process(proxy_proc, timeout=0.5, force=True)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -2212,24 +2212,24 @@ class TestSocks5HandshakeTimeoutFormat:
         """
         TC-S5-038: Handshake timeout string format
 
-        Test that handshake timeout string format (e.g., "5s") is correctly parsed.
+        Test that handshake timeout string format (e.g., "0.5s") is correctly parsed.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            # Use 5 second timeout in string format
+            # Use 0.5 second timeout in string format to verify parsing works
             config_path = create_socks5_config(
-                proxy_port, temp_dir, handshake_timeout="5s"
+                proxy_port, temp_dir, handshake_timeout="0.5s"
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(15.0)
+            sock.settimeout(3.0)
             try:
                 sock.connect(("127.0.0.1", proxy_port))
 
@@ -2242,16 +2242,16 @@ class TestSocks5HandshakeTimeoutFormat:
                     pass
 
                 elapsed = time.time() - start_time
-                # Should timeout around 5 seconds
-                assert 4.0 <= elapsed <= 8.0, \
-                    f"Timeout not matching config: {elapsed}s (expected ~5s)"
+                # Should timeout around 0.5 second
+                assert 0.3 <= elapsed <= 1.5, \
+                    f"Timeout not matching config: {elapsed}s (expected ~0.5s)"
 
             finally:
                 sock.close()
 
         finally:
             if proxy_proc:
-                terminate_process(proxy_proc)
+                terminate_process(proxy_proc, timeout=0.5, force=True)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_handshake_timeout_default(self) -> None:

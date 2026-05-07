@@ -194,7 +194,8 @@ def wait_for_proxy(
     host: str,
     port: int,
     timeout: float = 5.0,
-    interval: float = 0.1
+    interval: float = 0.1,
+    proc: Optional[subprocess.Popen] = None
 ) -> bool:
     """
     Wait for proxy server to be ready.
@@ -204,12 +205,18 @@ def wait_for_proxy(
         port: Proxy server port
         timeout: Maximum wait time in seconds
         interval: Check interval in seconds
+        proc: Optional process to check for early termination.
+              If process exits, returns False immediately.
 
     Returns:
-        bool: True if server is ready, False if timeout
+        bool: True if server is ready, False if timeout or process exited
     """
     start_time = time.time()
     while time.time() - start_time < timeout:
+        # Check if process has exited (if provided)
+        if proc is not None and proc.poll() is not None:
+            return False
+
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(1.0)
@@ -254,16 +261,24 @@ def wait_for_process_exit(
     return return_code, elapsed
 
 
-def terminate_process(proc: subprocess.Popen, timeout: float = 5.0) -> None:
+def terminate_process(
+    proc: subprocess.Popen,
+    timeout: float = 5.0,
+    force: bool = False
+) -> None:
     """
     Terminate a process gracefully, then kill if needed.
 
     Args:
         proc: Process to terminate
         timeout: Time to wait for graceful termination
+        force: If True, send SIGKILL immediately (no graceful shutdown)
     """
     if proc.poll() is None:
-        proc.terminate()
+        if force:
+            proc.kill()
+        else:
+            proc.terminate()
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -743,7 +758,8 @@ def wait_for_udp_port_bound(
     host: str,
     port: int,
     timeout: float = 5.0,
-    interval: float = 0.1
+    interval: float = 0.1,
+    proc: Optional[subprocess.Popen] = None
 ) -> bool:
     """
     Wait for UDP port to be bound (indicating server started).
@@ -756,12 +772,18 @@ def wait_for_udp_port_bound(
         port: Port number
         timeout: Maximum wait time in seconds
         interval: Check interval in seconds
+        proc: Optional process to check for early termination.
+              If process exits, returns False immediately.
 
     Returns:
-        bool: True if port is bound by another process, False if timeout
+        bool: True if port is bound by another process, False if timeout or process exited
     """
     start_time = time.time()
     while time.time() - start_time < timeout:
+        # Check if process has exited (if provided)
+        if proc is not None and proc.poll() is not None:
+            return False
+
         try:
             test_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:

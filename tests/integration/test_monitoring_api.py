@@ -35,6 +35,7 @@ from .utils.helpers import (
     create_test_config,
     create_target_server,
     wait_for_udp_port_bound,
+    wait_for_log_contains,
 )
 
 from .test_http3_listener import (
@@ -133,7 +134,7 @@ class TestMonitoringAPI:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Establish a connection
@@ -210,6 +211,9 @@ class TestMonitoringAPI:
         TC-MON-API-002: Shutdown logs connection summary.
 
         Target: Verify that shutdown logs contain connection summary.
+
+        Note: Logs are written asynchronously via tracing. After process exit,
+        we need to wait for pending log flushes to complete before reading.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
@@ -219,17 +223,38 @@ class TestMonitoringAPI:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
+
+            # Get log file path before shutdown
+            log_dir = os.path.join(temp_dir, "logs")
 
             # Graceful shutdown
             proxy_proc.send_signal(signal.SIGTERM)
             proxy_proc.wait(timeout=5)
 
-            # Read logs
-            log_dir = os.path.join(temp_dir, "logs")
+            # Wait for log files to exist and contain expected content
+            # Logs are written asynchronously, so we poll for the patterns
+            log_files = []
+            for _ in range(20):  # Wait up to 2 seconds for log files
+                if os.path.exists(log_dir):
+                    log_files = os.listdir(log_dir)
+                    if log_files:
+                        break
+                time.sleep(0.1)
+
+            assert log_files, "Log files should be created"
+
+            # Poll for expected shutdown log content
+            # Logs are async flushed, so content may not be immediately available
+            first_log_path = os.path.join(log_dir, log_files[0])
+            wait_for_log_contains(
+                first_log_path, "received shutdown signal", timeout=2.0
+            )
+
+            # Read all log files for full verification
             log_content = ""
-            for log_file in os.listdir(log_dir):
+            for log_file in log_files:
                 log_path = os.path.join(log_dir, log_file)
                 with open(log_path, "r", errors="ignore") as f:
                     log_content += f.read()
@@ -279,7 +304,7 @@ class TestHTTP3MonitoringAPI:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Wait for logs to be written
@@ -332,7 +357,7 @@ class TestHTTP3MonitoringAPI:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
             # Wait for periodic logging (every 60 seconds per design)
@@ -414,7 +439,7 @@ class TestInternalMonitoringAPI:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Establish multiple connections
@@ -511,7 +536,7 @@ class TestInternalMonitoringAPI:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Make a connection
@@ -566,7 +591,7 @@ class TestErrorMonitoring:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             # Try to send invalid request

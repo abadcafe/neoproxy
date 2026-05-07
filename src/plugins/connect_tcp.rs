@@ -11,7 +11,7 @@ use serde::Deserialize;
 use tokio::{self, net};
 use tracing::warn;
 
-use super::tunnel;
+use crate::stream::{self as tunnel};
 use crate::config::SerializedArgs;
 use crate::connect_utils::{self as utils, ConnectTargetError};
 use crate::context::RequestContext;
@@ -20,7 +20,7 @@ use crate::http_utils::{
 };
 use crate::plugin::Plugin;
 use crate::service::{BuildService, Service};
-use crate::stream::{H3OnUpgrade, Socks5OnUpgrade};
+use crate::stream::OnUpgrade;
 use crate::tracker::StreamTracker;
 
 /// Default TCP connect timeout.
@@ -111,15 +111,12 @@ impl tower::Service<Request> for ConnectTcpService {
       .cloned()
       .expect("RequestContext should be present");
 
-    // Check for SOCKS5 upgrade
-    let socks5_upgrade = Socks5OnUpgrade::on(&mut req);
+    // Check for our upgrade (SOCKS5 or H3)
+    let upgrade = OnUpgrade::on(&mut req);
 
-    // Check for H3 upgrade
-    let h3_upgrade = H3OnUpgrade::on(&mut req);
-
-    // Check for HTTP upgrade (only if no SOCKS5 and no H3)
+    // Check for HTTP upgrade (only if no our upgrade)
     let http_upgrade =
-      if socks5_upgrade.is_none() && h3_upgrade.is_none() {
+      if upgrade.is_none() {
         Some(hyper::upgrade::on(&mut req))
       } else {
         None
@@ -202,8 +199,7 @@ impl tower::Service<Request> for ConnectTcpService {
       // Background task: wait for upgrade, then bidirectional transfer
       stream_tracker.register(async move {
         let mut client = match tunnel::resolve_client_stream(
-          socks5_upgrade,
-          h3_upgrade,
+          upgrade,
           http_upgrade,
         )
         .await
@@ -946,75 +942,11 @@ mod tests {
       .await;
   }
 
-  // ============== Unified SOCKS5 Upgrade Tests ==============
+  // ============== Unified Upgrade Tests ==============
 
   #[tokio::test]
-  async fn test_service_call_socks5_upgrade_mode_returns_200() {
-    use crate::stream::Socks5OnUpgrade;
-
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let service = ConnectTcpService::new_for_test();
-        let mut service = RuntimeService::new(service);
-
-        // Create a request with Socks5OnUpgrade in extensions
-        let (_tx, rx) = tokio::sync::oneshot::channel();
-        let upgrade = Socks5OnUpgrade::new_for_test(rx);
-
-        let mut req =
-          make_connect_request(http::Method::CONNECT, "baidu.com:443");
-        req.extensions_mut().insert(upgrade);
-
-        let resp = service.call(req).await.unwrap();
-        // Result depends on network availability and timeout.
-        assert!(
-          resp.status() == http::StatusCode::OK
-            || resp.status() == http::StatusCode::BAD_GATEWAY
-            || resp.status() == http::StatusCode::GATEWAY_TIMEOUT
-        );
-      })
-      .await;
-  }
-
-  #[tokio::test]
-  async fn test_service_call_socks5_upgrade_refused_returns_bad_gateway()
-   {
-    use crate::stream::Socks5OnUpgrade;
-
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        // Get a port that is NOT listening
-        let listener =
-          tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-
-        let service = ConnectTcpService::new_for_test();
-        let mut service = RuntimeService::new(service);
-
-        let (_tx, rx) = tokio::sync::oneshot::channel();
-        let upgrade = Socks5OnUpgrade::new_for_test(rx);
-
-        let mut req = make_connect_request(
-          http::Method::CONNECT,
-          &format!("127.0.0.1:{}", addr.port()),
-        );
-        req.extensions_mut().insert(upgrade);
-
-        let resp = service.call(req).await.unwrap();
-        // Connection refused -> BAD_GATEWAY
-        assert_eq!(resp.status(), http::StatusCode::BAD_GATEWAY);
-      })
-      .await;
-  }
-
-  // ============== H3 Upgrade Tests ==============
-
-  #[tokio::test]
-  async fn test_service_call_with_h3_upgrade_extracts_upgrade() {
-    use crate::stream::H3OnUpgrade;
+  async fn test_service_call_with_upgrade_extracts_upgrade() {
+    use crate::stream::OnUpgrade;
 
     let local_set = tokio::task::LocalSet::new();
     local_set
@@ -1030,14 +962,14 @@ mod tests {
         let stream_tracker = service.stream_tracker.clone();
         let mut service = RuntimeService::new(service);
 
-        // Create H3OnUpgrade with a LIVE sender (don't drop tx).
-        // If the service correctly extracts H3OnUpgrade, the background
+        // Create OnUpgrade with a LIVE sender (don't drop tx).
+        // If the service correctly extracts OnUpgrade, the background
         // tunnel task will await it and block (sender alive = pending).
         // If the service does NOT extract it, it falls through to
         // hyper::upgrade::on() which fails immediately on a synthetic
         // request, causing the tunnel task to exit.
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let upgrade = H3OnUpgrade::new_for_test(rx);
+        let upgrade = OnUpgrade::new_for_test(rx);
 
         let mut req = make_connect_request(
           http::Method::CONNECT,
@@ -1059,15 +991,15 @@ mod tests {
         tokio::task::yield_now().await;
 
         // KEY ASSERTION: The tunnel task is still alive, blocked on
-        // h3.await (because tx is alive). This proves the H3 upgrade
+        // upgrade.await (because tx is alive). This proves the upgrade
         // path was taken. If the service fell through to HTTP upgrade,
         // the task would have already exited (upgrade fails on
         // synthetic request) and active_count would be 0.
         assert_eq!(
           stream_tracker.active_count(),
           1,
-          "Tunnel task should be alive, blocked on H3 upgrade await. \
-           If 0, the service did not extract H3OnUpgrade and fell \
+          "Tunnel task should be alive, blocked on upgrade await. \
+           If 0, the service did not extract OnUpgrade and fell \
            through to the HTTP upgrade path which fails immediately."
         );
 
@@ -1080,8 +1012,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_service_call_h3_upgrade_refused_returns_bad_gateway() {
-    use crate::stream::H3OnUpgrade;
+  async fn test_service_call_upgrade_refused_returns_bad_gateway() {
+    use crate::stream::OnUpgrade;
 
     let local_set = tokio::task::LocalSet::new();
     local_set
@@ -1096,7 +1028,7 @@ mod tests {
         let mut service = RuntimeService::new(service);
 
         let (_tx, rx) = tokio::sync::oneshot::channel();
-        let upgrade = H3OnUpgrade::new_for_test(rx);
+        let upgrade = OnUpgrade::new_for_test(rx);
 
         let mut req = make_connect_request(
           http::Method::CONNECT,

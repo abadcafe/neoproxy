@@ -1206,7 +1206,7 @@ quic:
   async fn test_h3_upgrade_trigger_only_for_connect() {
     use http::Method;
 
-    use crate::stream::H3OnUpgrade;
+    use crate::stream::OnUpgrade;
 
     // Simulate the decision logic from handle_h3_stream
     fn should_insert_on_upgrade(method: &Method) -> bool {
@@ -1214,13 +1214,13 @@ quic:
       *method == Method::CONNECT
     }
 
-    // Verify CONNECT method should insert H3OnUpgrade
+    // Verify CONNECT method should insert OnUpgrade
     assert!(
       should_insert_on_upgrade(&Method::CONNECT),
-      "CONNECT method should insert H3OnUpgrade into extensions"
+      "CONNECT method should insert OnUpgrade into extensions"
     );
 
-    // Verify non-CONNECT methods should NOT insert H3OnUpgrade
+    // Verify non-CONNECT methods should NOT insert OnUpgrade
     let non_connect_methods = [
       Method::GET,
       Method::POST,
@@ -1235,13 +1235,13 @@ quic:
     for method in &non_connect_methods {
       assert!(
         !should_insert_on_upgrade(method),
-        "Method {} should NOT insert H3OnUpgrade into extensions",
+        "Method {} should NOT insert OnUpgrade into extensions",
         method
       );
     }
 
     // Additional verification: simulate the request building logic
-    // to ensure H3OnUpgrade detection works correctly
+    // to ensure OnUpgrade detection works correctly
     let mut request = http::Request::builder()
       .method(Method::CONNECT)
       .uri("example.com:443")
@@ -1250,41 +1250,38 @@ quic:
       )))
       .expect("failed to build request");
 
-    // Verify H3OnUpgrade is NOT in extensions initially
+    // Verify OnUpgrade is NOT in extensions initially
     assert!(
-      !H3OnUpgrade::is_available(&request),
-      "H3OnUpgrade should NOT be in extensions before insertion"
+      !OnUpgrade::is_available(&request),
+      "OnUpgrade should NOT be in extensions before insertion"
     );
 
     // Simulate insertion (what handle_h3_stream does for CONNECT)
     let (_tx, rx) = tokio::sync::oneshot::channel::<
-      Result<
-        crate::h3_stream::H3ServerBidiStream,
-        crate::stream::H3UpgradeError,
-      >,
+      Result<Box<dyn crate::stream::Io>>,
     >();
-    let upgrade = H3OnUpgrade::new_for_test(rx);
+    let upgrade = OnUpgrade::new_for_test(rx);
     request.extensions_mut().insert(upgrade);
 
-    // Verify H3OnUpgrade IS in extensions after insertion
+    // Verify OnUpgrade IS in extensions after insertion
     assert!(
-      H3OnUpgrade::is_available(&request),
-      "H3OnUpgrade should be in extensions after insertion for CONNECT"
+      OnUpgrade::is_available(&request),
+      "OnUpgrade should be in extensions after insertion for CONNECT"
     );
 
     // Verify extraction works (what Service does)
-    let extracted = H3OnUpgrade::on(&mut request);
+    let extracted = OnUpgrade::on(&mut request);
     assert!(
       extracted.is_some(),
-      "H3OnUpgrade should be extractable for CONNECT"
+      "OnUpgrade should be extractable for CONNECT"
     );
 
     // Verify second extraction returns None (single-extraction
     // contract)
-    let second = H3OnUpgrade::on(&mut request);
+    let second = OnUpgrade::on(&mut request);
     assert!(
       second.is_none(),
-      "H3OnUpgrade should only be extractable once"
+      "OnUpgrade should only be extractable once"
     );
   }
 

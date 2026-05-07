@@ -12,7 +12,6 @@ pub mod auth;
 pub mod connect_tcp;
 pub mod echo;
 pub mod http3_chain;
-pub mod tunnel;
 
 /// Manages plugin lifecycle: registers all plugins at construction,
 /// builds services/layers on demand.

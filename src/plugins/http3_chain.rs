@@ -31,7 +31,7 @@ use crate::http_utils::{
 };
 use crate::plugin::Plugin;
 use crate::service::{BuildService, Service};
-use crate::stream::{H3OnUpgrade, Socks5OnUpgrade};
+use crate::stream::OnUpgrade;
 use crate::tracker::StreamTracker;
 
 /// Error indicating proxy authentication failure (HTTP 407)
@@ -551,7 +551,7 @@ impl Default for Http3ChainServiceArgs {
 }
 
 fn default_idle_timeout() -> Duration {
-  Duration::from_secs(super::tunnel::DEFAULT_IDLE_TIMEOUT_SECS)
+  Duration::from_secs(crate::stream::DEFAULT_IDLE_TIMEOUT_SECS)
 }
 
 impl Http3ChainServiceArgs {
@@ -714,15 +714,12 @@ impl tower::Service<Request> for Http3ChainService {
       .cloned()
       .expect("RequestContext should be present");
 
-    // Check for SOCKS5 upgrade
-    let socks5_upgrade = Socks5OnUpgrade::on(&mut req);
+    // Check for our upgrade (SOCKS5 or H3)
+    let upgrade = OnUpgrade::on(&mut req);
 
-    // Check for H3 upgrade
-    let h3_upgrade = H3OnUpgrade::on(&mut req);
-
-    // Check for HTTP upgrade (only if no SOCKS5 and no H3)
+    // Check for HTTP upgrade (only if no our upgrade)
     let http_upgrade =
-      if socks5_upgrade.is_none() && h3_upgrade.is_none() {
+      if upgrade.is_none() {
         Some(hyper::upgrade::on(&mut req))
       } else {
         None
@@ -786,8 +783,7 @@ impl tower::Service<Request> for Http3ChainService {
         port,
         &user_password_credential,
         &st,
-        socks5_upgrade,
-        h3_upgrade,
+        upgrade,
         http_upgrade,
         &ctx,
         idle_timeout,
@@ -804,8 +800,7 @@ async fn send_connect_and_tunnel_with_credential(
   port: u16,
   user_password_credential: &UserPasswordCredential,
   st: &Rc<StreamTracker>,
-  socks5_upgrade: Option<Socks5OnUpgrade>,
-  h3_upgrade: Option<H3OnUpgrade>,
+  upgrade: Option<OnUpgrade>,
   http_upgrade: Option<hyper::upgrade::OnUpgrade>,
   ctx: &RequestContext,
   idle_timeout: Duration,
@@ -847,8 +842,7 @@ async fn send_connect_and_tunnel_with_credential(
     sending_stream,
     receiving_stream,
     st,
-    socks5_upgrade,
-    h3_upgrade,
+    upgrade,
     http_upgrade,
     proxy_ms,
     ctx,
@@ -865,8 +859,7 @@ async fn complete_tunnel(
   >,
   receiving_stream: h3_cli::RequestStream<h3_quinn::RecvStream, Bytes>,
   st: &Rc<StreamTracker>,
-  socks5_upgrade: Option<Socks5OnUpgrade>,
-  h3_upgrade: Option<H3OnUpgrade>,
+  upgrade: Option<OnUpgrade>,
   http_upgrade: Option<hyper::upgrade::OnUpgrade>,
   connect_ms: u64,
   ctx: &RequestContext,
@@ -883,9 +876,8 @@ async fn complete_tunnel(
   let addr = "http3_chain".to_string();
 
   st.register(async move {
-    let mut client = match super::tunnel::resolve_client_stream(
-      socks5_upgrade,
-      h3_upgrade,
+    let mut client = match crate::stream::resolve_client_stream(
+      upgrade,
       http_upgrade,
     )
     .await
@@ -900,7 +892,7 @@ async fn complete_tunnel(
     let mut h3_stream =
       H3ClientBidiStream::new(sending_stream, receiving_stream);
 
-    super::tunnel::run_tunnel(
+    crate::stream::run_tunnel(
       &mut client,
       &mut h3_stream,
       shutdown_handle,

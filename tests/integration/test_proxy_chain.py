@@ -800,8 +800,7 @@ def _is_407_response(result: subprocess.CompletedProcess) -> bool:
 
     For CONNECT tunnels (HTTPS through HTTP proxy), curl reports 'response 407'
     in stderr while %{http_code} shows '000'. The exit code varies by curl
-    version: older versions use 56 (CURLE_RECV_ERROR), newer versions (8.x)
-    use 7 (CURLE_FAILED_CONNECT). Both are acceptable indicators.
+    version and should NOT be relied upon for specific values.
 
     For plain HTTP proxy requests, curl returns HTTP code 407 normally.
 
@@ -811,13 +810,13 @@ def _is_407_response(result: subprocess.CompletedProcess) -> bool:
     Returns:
         True if the response indicates 407 Proxy Authentication Required
     """
-    # Case 1: Plain HTTP proxy request - HTTP status code 407
+    # Case 1: Plain HTTP proxy request - HTTP status code 407 in stdout
     if result.stdout.strip() == "407":
         return True
-    # Case 2: CONNECT tunnel - curl exit code 7 or 56 with "407" in stderr.
-    # NOT a network issue — curl successfully connected to the proxy but the
-    # proxy returned 407 before the tunnel was established.
-    if result.returncode in (7, 56) and "407" in result.stderr:
+    # Case 2: CONNECT tunnel - check stderr for "response 407" pattern.
+    # Do NOT check specific exit codes (7, 56, etc.) - they vary by curl version.
+    # The "response 407" pattern is specific enough to avoid false positives.
+    if "response 407" in result.stderr.lower():
         return True
     return False
 

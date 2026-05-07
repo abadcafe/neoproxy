@@ -549,7 +549,9 @@ class TestHTTP3ChainAuthFailure:
             )
 
             # Should receive 407 Proxy Authentication Required
-            assert result.returncode != 0 or "407" in result.stdout or "407" in result.stderr, \
+            # Note: returncode != 0 is reliable for detecting failure,
+            # but specific exit codes (7, 56, etc.) vary by curl version.
+            assert result.returncode != 0 or "407" in result.stdout, \
                 f"Expected 407 error, got stdout: {result.stdout}, stderr: {result.stderr}"
 
         finally:
@@ -614,8 +616,8 @@ class TestHTTP3ChainAuthFailure:
             # NOT 407 (which would indicate auth fallback was attempted)
             assert "407" not in result.stdout, \
                 "Should NOT attempt auth fallback for connection errors"
-            # Either bad gateway or curl error is acceptable
-            assert result.returncode != 0 or "502" in result.stdout or "502" in result.stderr, \
+            # Either 502 or curl failure is acceptable (connection refused)
+            assert result.returncode != 0 or "502" in result.stdout, \
                 f"Expected 502 error for connection failure, got stdout: {result.stdout}, stderr: {result.stderr}"
 
         finally:

@@ -24,15 +24,12 @@ import socket
 import tempfile
 import shutil
 import os
-import signal
-import pytest
 from typing import Optional, Tuple, List
 
 from .utils.helpers import (
-    NEOPROXY_BINARY,
     start_proxy,
     wait_for_proxy,
-    echo_handler,
+    one_shot_echo_handler,
     create_target_server,
     get_curl_env_without_no_proxy,
     wait_for_udp_port_bound,
@@ -47,7 +44,6 @@ from .test_http3_listener import (
 from .test_http3_auth import (
     create_http3_listener_config_with_password_auth,
     create_http3_listener_config_with_tls_client_cert,
-    create_http3_listener_config_with_mtls_and_password,
 )
 
 
@@ -165,7 +161,7 @@ class TestHTTP3ChainPerProxyPasswordAuth:
             key_path = shared_test_certs['key_path']
             ca_path = shared_test_certs['ca_path']
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
+            _, target_socket = create_target_server("127.0.0.1", target_port, one_shot_echo_handler)
 
             # Start HTTP/3 listener with password auth
             h3_config = create_http3_listener_config_with_password_auth(
@@ -213,11 +209,11 @@ class TestHTTP3ChainPerProxyPasswordAuth:
 
         finally:
             if chain_proc:
-                chain_proc.send_signal(signal.SIGTERM)
-                chain_proc.wait(timeout=10)
+                chain_proc.kill()
+                chain_proc.wait(timeout=5)
             if h3_proc:
-                h3_proc.send_signal(signal.SIGTERM)
-                h3_proc.wait(timeout=10)
+                h3_proc.kill()
+                h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -257,7 +253,7 @@ class TestHTTP3ChainPerProxyTlsCertAuth:
             client_cert_path = shared_client_cert['client_cert_path']
             client_key_path = shared_client_cert['client_key_path']
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
+            _, target_socket = create_target_server("127.0.0.1", target_port, one_shot_echo_handler)
 
             # Start HTTP/3 listener with TLS client cert auth (mTLS)
             h3_config = create_http3_listener_config_with_tls_client_cert(
@@ -305,11 +301,11 @@ class TestHTTP3ChainPerProxyTlsCertAuth:
 
         finally:
             if chain_proc:
-                chain_proc.send_signal(signal.SIGTERM)
-                chain_proc.wait(timeout=10)
+                chain_proc.kill()
+                chain_proc.wait(timeout=5)
             if h3_proc:
-                h3_proc.send_signal(signal.SIGTERM)
-                h3_proc.wait(timeout=10)
+                h3_proc.kill()
+                h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -346,7 +342,7 @@ class TestHTTP3ChainAuthInheritance:
             key_path = shared_test_certs['key_path']
             ca_path = shared_test_certs['ca_path']
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
+            _, target_socket = create_target_server("127.0.0.1", target_port, one_shot_echo_handler)
 
             h3_config = create_http3_listener_config_with_password_auth(
                 proxy_port=h3_port,
@@ -389,11 +385,11 @@ class TestHTTP3ChainAuthInheritance:
 
         finally:
             if chain_proc:
-                chain_proc.send_signal(signal.SIGTERM)
-                chain_proc.wait(timeout=10)
+                chain_proc.kill()
+                chain_proc.wait(timeout=5)
             if h3_proc:
-                h3_proc.send_signal(signal.SIGTERM)
-                h3_proc.wait(timeout=10)
+                h3_proc.kill()
+                h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -430,7 +426,7 @@ class TestHTTP3ChainAuthNone:
             key_path = shared_test_certs['key_path']
             ca_path = shared_test_certs['ca_path']
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
+            _, target_socket = create_target_server("127.0.0.1", target_port, one_shot_echo_handler)
 
             # Start H3 listener WITHOUT any auth requirement
             h3_config = create_http3_listener_config(
@@ -472,11 +468,11 @@ class TestHTTP3ChainAuthNone:
 
         finally:
             if chain_proc:
-                chain_proc.send_signal(signal.SIGTERM)
-                chain_proc.wait(timeout=10)
+                chain_proc.kill()
+                chain_proc.wait(timeout=5)
             if h3_proc:
-                h3_proc.send_signal(signal.SIGTERM)
-                h3_proc.wait(timeout=10)
+                h3_proc.kill()
+                h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -556,11 +552,11 @@ class TestHTTP3ChainAuthFailure:
 
         finally:
             if chain_proc:
-                chain_proc.send_signal(signal.SIGTERM)
-                chain_proc.wait(timeout=10)
+                chain_proc.kill()
+                chain_proc.wait(timeout=5)
             if h3_proc:
-                h3_proc.send_signal(signal.SIGTERM)
-                h3_proc.wait(timeout=10)
+                h3_proc.kill()
+                h3_proc.wait(timeout=5)
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
@@ -622,7 +618,7 @@ class TestHTTP3ChainAuthFailure:
 
         finally:
             if chain_proc:
-                chain_proc.send_signal(signal.SIGTERM)
-                chain_proc.wait(timeout=10)
+                chain_proc.kill()
+                chain_proc.wait(timeout=5)
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)

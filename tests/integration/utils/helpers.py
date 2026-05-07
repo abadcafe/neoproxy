@@ -543,6 +543,27 @@ def echo_handler(conn: socket.socket) -> None:
         conn.close()
 
 
+def one_shot_echo_handler(conn: socket.socket) -> None:
+    """
+    Echo handler that closes after one response.
+
+    Use this instead of echo_handler when:
+    - Testing with curl --http0.9 (which waits for connection close)
+    - You only need to verify data transmission, not persistent connections
+
+    Args:
+        conn: Client connection socket
+    """
+    try:
+        data = conn.recv(1024)
+        if data:
+            conn.send(b"ECHO:" + data)
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
 def blocking_handler(conn: socket.socket, block_time: float = 60.0) -> None:
     """
     Blocking handler that keeps connection open for specified time.

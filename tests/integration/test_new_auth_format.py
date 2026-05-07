@@ -162,19 +162,23 @@ servers:
                 "Proxy should start with new SOCKS5 auth format"
 
             # Test: SOCKS5 with correct credentials should not fail auth.
-            # Use a local unreachable target to avoid DNS/timeout issues;
-            # the test only checks that SOCKS5 auth succeeds (not returncode 97).
+            # Use a local unreachable target to avoid DNS/timeout issues.
+            # curl returns 97 for both auth failure and connection failure,
+            # so we check stderr to distinguish:
+            # - Auth failure: "User was rejected by the SOCKS5 server"
+            # - Connection failure: "cannot complete SOCKS5 connection"
             result = subprocess.run(
-                ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                ["curl", "-o", "/dev/null", "-w", "%{http_code}",
                  "--socks5", f"127.0.0.1:{port}",
                  "--proxy-user", "socks_user:socks_pass",
                  "--connect-timeout", "3",
                  "http://127.0.0.1:1"],
                 capture_output=True, text=True, timeout=10
             )
-            # Should not get connection refused or auth error
-            assert result.returncode != 97, \
-                "SOCKS5 auth should not fail with correct credentials"
+            # Check that auth succeeded by verifying stderr doesn't contain
+            # "rejected" which indicates authentication failure
+            assert "rejected" not in result.stderr.lower(), \
+                f"SOCKS5 auth failed with correct credentials: {result.stderr}"
         finally:
             terminate_process(proc)
 

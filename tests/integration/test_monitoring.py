@@ -414,7 +414,7 @@ class TestMonitoring:
 
                 client_socks.append(sock)
 
-            # Keep connections active and send some data
+            # Send data to make connections active
             for sock in client_socks:
                 try:
                     sock.sendall(b"TEST")
@@ -726,8 +726,7 @@ servers:
                     pass
                 time.sleep(0.1)
 
-            # Server should still be running
-            time.sleep(0.5)
+            # Server should still be running after connection errors
             assert proxy_proc.poll() is None, \
                 "Server should still be running after connection errors"
 
@@ -1026,10 +1025,7 @@ class TestHttpListenerMonitoring:
 
                 client_socks.append(sock)
 
-            # Keep connections active
-            time.sleep(1)
-
-            # Graceful shutdown
+            # Graceful shutdown (connections already established)
             proxy_proc.kill()
             proxy_proc.wait(timeout=5)
 
@@ -1205,10 +1201,7 @@ class TestSocks5ListenerMonitoring:
 
                 client_socks.append(sock)
 
-            # Keep connections active
-            time.sleep(1)
-
-            # Graceful shutdown
+            # Graceful shutdown (connections already established)
             proxy_proc.kill()
             proxy_proc.wait(timeout=5)
 

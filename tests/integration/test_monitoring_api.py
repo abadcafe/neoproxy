@@ -307,8 +307,12 @@ class TestHTTP3MonitoringAPI:
             assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
 
-            # Wait for logs to be written
-            time.sleep(2)
+            # Wait for logs to be written - poll for log content
+            log_dir = os.path.join(temp_dir, "logs")
+            for _ in range(20):  # Wait up to 2 seconds
+                if os.path.exists(log_dir) and os.listdir(log_dir):
+                    break
+                time.sleep(0.1)
 
             # Graceful shutdown - use SIGTERM to trigger shutdown logs
             proxy_proc.send_signal(signal.SIGTERM)

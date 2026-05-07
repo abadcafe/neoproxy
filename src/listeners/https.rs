@@ -141,30 +141,18 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       });
     }
 
-    // Step 2: Check SNI vs authority mismatch
-    // For CONNECT requests, authority contains the target server,
+    // Step 2: Check SNI vs Host header mismatch
+    // For CONNECT requests, the target is the destination server,
     // not the proxy server, so mismatch is expected.
     if req.method() != http::Method::CONNECT {
       if let Some(ref sni) = self.sni {
-        // For HTTP/1.1, authority comes from:
-        // 1. URI authority (for absolute URIs like http://host/path)
-        // 2. Host header (for relative URIs like /path)
-        let authority_host = req
-          .uri()
-          .authority()
-          .map(|a| a.host())
-          .or_else(|| {
-            req.headers()
-              .get(http::header::HOST)
-              .and_then(|h| h.to_str().ok())
-              .map(|h| h.split(':').next().unwrap_or(h))
-          });
-
-        if let Some(host) = authority_host {
-          if super::common::check_sni_vs_authority(sni, host) {
-            return Box::pin(async {
-              Ok(super::common::build_421_misdirected_response())
-            });
+        if let Some(host_header) = req.headers().get(http::header::HOST) {
+          if let Ok(host_str) = host_header.to_str() {
+            if super::common::check_sni_vs_host(sni, host_str) {
+              return Box::pin(async {
+                Ok(super::common::build_421_misdirected_response())
+              });
+            }
           }
         }
       }

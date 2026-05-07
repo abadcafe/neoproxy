@@ -80,6 +80,28 @@ pub fn check_sni_vs_authority(sni: &str, authority_host: &str) -> bool {
   sni.to_lowercase() != authority_host.to_lowercase()
 }
 
+/// Check if SNI matches the Host header for HTTPS requests.
+///
+/// For HTTP/1.1 requests with relative URIs, the authority comes from
+/// the Host header rather than the URI. This function extracts the
+/// hostname from the Host header (stripping port if present) and
+/// compares it with the SNI.
+///
+/// # Arguments
+/// * `sni` - The SNI hostname from TLS handshake
+/// * `host_header` - The raw Host header value (e.g., "example.com" or "example.com:443")
+///
+/// # Returns
+/// `true` if SNI does NOT match Host (mismatch), `false` otherwise
+pub fn check_sni_vs_host(sni: &str, host_header: &str) -> bool {
+  if sni.is_empty() || host_header.is_empty() {
+    return false;
+  }
+  // Strip port from Host header if present
+  let host = host_header.split(':').next().unwrap_or(host_header);
+  sni.to_lowercase() != host.to_lowercase()
+}
+
 /// Check if authority and Host header values differ.
 ///
 /// Per RFC 9114 §4.3.1, if both `:authority` and Host are present,

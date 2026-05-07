@@ -747,7 +747,6 @@ class TestWRRLoadBalancing:
                 )
                 if f"request_{i}" in result.stdout:
                     successful_requests += 1
-                time.sleep(0.2)
 
             # Verify that requests succeeded through the chain
             # This proves the chain can use the weighted proxy group

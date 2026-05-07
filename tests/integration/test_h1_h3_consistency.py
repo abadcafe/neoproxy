@@ -575,8 +575,8 @@ class TestHTTP3ConnectOnlyUpgrade:
         finally:
             if proc is not None:
                 # Check stderr for upgrade-related errors
-                # Non-blocking read of stderr
-                terminate_process(proc)
+                # Use force=True for fast cleanup (no graceful shutdown needed)
+                terminate_process(proc, force=True)
 
 
 class TestHTTPVersionCheck:

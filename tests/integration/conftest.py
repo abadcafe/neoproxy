@@ -45,8 +45,15 @@ def get_unique_port() -> int:
     Get a unique port number for testing.
 
     This function verifies that the port is actually available by attempting
-    to bind to it. If the port is not available (e.g., in TIME_WAIT state),
-    it will try the next port until an available one is found.
+    to bind to it WITHOUT SO_REUSEADDR. This ensures the port is truly free
+    (not in TIME_WAIT state). If the port is not available, it tries the next
+    port until an available one is found.
+
+    Why no SO_REUSEADDR:
+    - neoproxy server does NOT set SO_REUSEADDR on its listening sockets
+    - If we used SO_REUSEADDR here, we could bind ports in TIME_WAIT state
+    - But neoproxy would then fail to bind those same ports
+    - This caused "works in suite, fails alone" bugs
 
     Returns:
         int: Available port number
@@ -61,15 +68,19 @@ def get_unique_port() -> int:
             port = _port_counter
 
             # Verify the port is actually available by trying to bind
+            # Do NOT use SO_REUSEADDR - we want truly free ports
             test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
-                test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                # Don't use SO_REUSEADDR - this ensures port is truly free
                 test_sock.bind(("0.0.0.0", port))
                 test_sock.close()
                 return port
             except OSError:
                 # Port is not available, try next one
-                test_sock.close()
+                try:
+                    test_sock.close()
+                except Exception:
+                    pass
                 continue
 
         raise RuntimeError("Could not find an available port after 100 attempts")

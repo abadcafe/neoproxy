@@ -38,7 +38,6 @@ from .utils.helpers import (
     create_target_server,
     wait_for_udp_port_bound,
     wait_for_log_contains,
-    wait_for_metric_value,
 )
 
 from .test_http3_listener import (
@@ -420,29 +419,6 @@ class TestMonitoring:
                     sock.sendall(b"TEST")
                 except Exception:
                     pass
-
-            # Wait for connection-related metrics to appear in logs
-            log_dir = os.path.join(temp_dir, "logs")
-            if os.path.exists(log_dir) and os.listdir(log_dir):
-                log_files = os.listdir(log_dir)
-                if log_files:
-                    first_log_path = os.path.join(log_dir, log_files[0])
-
-                    def fetch_log_content() -> str:
-                        """Fetch current log content for metric checking."""
-                        try:
-                            with open(first_log_path, "r", errors="ignore") as f:
-                                return f.read()
-                        except Exception:
-                            return ""
-
-                    # Use wait_for_metric_value to wait for connection metrics
-                    # This is more efficient than fixed sleep
-                    wait_for_metric_value(
-                        fetch_log_content,
-                        "connection",  # Wait for any connection-related log
-                        timeout=3.0
-                    )
 
             # Graceful shutdown
             proxy_proc.kill()

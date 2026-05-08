@@ -269,8 +269,7 @@ class TestHTTP3FullConnection:
                 f"Per design section 2.1.3, bidirectional data transfer is required."
 
             # Verify target server received the data (confirms forward path)
-            # Give a moment for async operations to complete
-            time.sleep(0.2)
+            # Client already received echo, so target has processed the data
             total_received = sum(len(d) for d in received_data)
             assert total_received == len(test_data), \
                 f"Target server received {total_received} bytes, expected {len(test_data)} bytes. " \
@@ -316,9 +315,6 @@ class TestHTTP3GracefulShutdownWithConnections:
 
             assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
-
-            # Give the listener some time to be "active"
-            time.sleep(1)
 
             # Graceful shutdown
             start_time = time.time()
@@ -1071,9 +1067,6 @@ class TestFullHTTP3ProxyChainDataTransfer:
             assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=chain_proc), \
                 "HTTP listener failed to start"
 
-            # Wait for services to be fully ready
-            time.sleep(1.0)
-
             # Verify both services are running
             assert h3_proc.poll() is None, "HTTP/3 listener should be running"
             assert chain_proc.poll() is None, "HTTP/3 chain should be running"
@@ -1402,8 +1395,6 @@ class TestHTTP3Performance:
 
             assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "HTTP/3 listener failed to start"
-
-            time.sleep(0.5)
 
             # Test throughput with large data transfer
             large_data = b"X" * (100 * 1024)  # 100KB

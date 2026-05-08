@@ -161,10 +161,10 @@ struct HttpListener {
   addresses: Vec<SocketAddr>,
   /// Server routing table for hostname-based routing
   server_routing_table: Vec<Server>,
-  /// Stream tracker for connection management
+  /// Stream tracker for graceful shutdown
   listening_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
-  /// Connection tracker for graceful shutdown
-  connection_tracker: Rc<StreamTracker>,
+  /// Stream tracker for graceful shutdown
+  stream_tracker: Rc<StreamTracker>,
   /// Graceful shutdown timeout
   graceful_shutdown_timeout: Duration,
 }
@@ -189,7 +189,7 @@ impl HttpListener {
       addresses,
       server_routing_table,
       listening_set: Rc::new(RefCell::new(task::JoinSet::new())),
-      connection_tracker: Rc::new(StreamTracker::new()),
+      stream_tracker: Rc::new(StreamTracker::new()),
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
     })
   }
@@ -231,8 +231,8 @@ impl HttpListener {
     socket.set_reuseport(true)?;
     socket.bind(addr)?;
     let listener = socket.listen(1024)?;
-    let connection_tracker = self.connection_tracker.clone();
-    let shutdown_handle = self.connection_tracker.shutdown_handle();
+    let stream_tracker = self.stream_tracker.clone();
+    let shutdown_handle = self.stream_tracker.shutdown_handle();
     let server_routing_table = self.server_routing_table.clone();
     let accepting_fut = async move {
       // Log listener startup event
@@ -253,7 +253,7 @@ impl HttpListener {
               local_addr,
             );
             let builder = conn_util::Builder::new(TokioLocalExecutor);
-            connection_tracker.register(async move {
+            stream_tracker.register(async move {
               // Do not need any graceful shutdown actions here for
               // connections. The `Service`s should do this instead.
               let conn =
@@ -297,8 +297,8 @@ impl Listening for HttpListener {
       listening_set.borrow_mut().spawn_local(serve_addr_fut);
     }
 
-    let connection_tracker = self.connection_tracker.clone();
-    let shutdown = self.connection_tracker.shutdown_handle();
+    let stream_tracker = self.stream_tracker.clone();
+    let shutdown = self.stream_tracker.shutdown_handle();
     let graceful_timeout = self.graceful_shutdown_timeout;
     Box::pin(async move {
       // Waiting for graceful shutdown.
@@ -320,7 +320,7 @@ impl Listening for HttpListener {
 
       // Wait for active connections with timeout
       let wait_result = timeout(graceful_timeout, async {
-        connection_tracker.wait_shutdown().await;
+        stream_tracker.wait_shutdown().await;
       })
       .await;
 
@@ -330,9 +330,9 @@ impl Listening for HttpListener {
           "graceful shutdown timeout ({:?}) expired, aborting {} \
            remaining connections",
           graceful_timeout,
-          connection_tracker.active_count()
+          stream_tracker.active_count()
         );
-        connection_tracker.abort_all();
+        stream_tracker.abort_all();
       }
 
       Ok(())
@@ -340,7 +340,7 @@ impl Listening for HttpListener {
   }
 
   fn stop(&self) {
-    self.connection_tracker.shutdown()
+    self.stream_tracker.shutdown()
   }
 }
 
@@ -448,7 +448,7 @@ mod tests {
     let listener =
       HttpListener::new_for_test(create_test_addresses(), svc).unwrap();
     // active_connections should be 0 initially
-    assert_eq!(listener.connection_tracker.active_count(), 0);
+    assert_eq!(listener.stream_tracker.active_count(), 0);
   }
 
   #[test]

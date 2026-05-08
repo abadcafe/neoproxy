@@ -30,6 +30,7 @@ from .utils.helpers import (
     create_target_server,
     terminate_process,
     wait_for_udp_port_bound,
+    wait_for_process_running,
 )
 
 from .utils.http_echo import http_echo_handler
@@ -241,8 +242,8 @@ servers:
             # With new config structure, server_ca_path in tls is not
             # validated at startup. The service starts but connections will fail.
             # Verify the service starts (does not crash at config parse time).
-            time.sleep(0.2)  # Brief wait for process to potentially exit on config error
-            if proc.poll() is not None:
+            running = wait_for_process_running(proc, timeout=0.5)
+            if not running:
                 # Process exited - this means config validation failed
                 assert False, \
                     f"Service should start with missing CA in default_tls, got exit code {proc.returncode}"

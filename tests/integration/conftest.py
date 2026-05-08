@@ -271,7 +271,8 @@ def target_http_server(available_port: Callable[[], int]) -> Generator:
         port = available_port()
         from .utils.helpers import http_echo_handler
         thread, sock = create_target_server("127.0.0.1", port, http_echo_handler)
-        time.sleep(0.1)  # Wait for server to start
+        assert wait_for_proxy("127.0.0.1", port, timeout=2.0), \
+            f"Target HTTP server failed to start on port {port}"
         info = ServerInfo(port, sock)
         try:
             yield info

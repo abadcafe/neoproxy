@@ -361,8 +361,8 @@ class TestAccessLogErrorHandling:
 
             # Wait for log file to contain error entry
             log_path = os.path.join(proxy.working_dir, "logs", "access.log")
-            assert wait_for_log_file(log_path, contains="500") or wait_for_log_file(log_path, contains="502"), \
-                f"Log should contain error status"
+            assert wait_for_log_file(log_path, contains=str(status)), \
+                f"Log should contain status {status}"
 
 
 class TestLayerOrdering:

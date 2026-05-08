@@ -44,7 +44,7 @@ use crate::stream::{
 use crate::tracker::StreamTracker;
 
 /// Default handshake timeout in seconds.
-const DEFAULT_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_HANDSHAKE_TIMEOUT_SECS: u64 = 3;
 
 /// SOCKS5 listener implementation.
 ///
@@ -53,9 +53,9 @@ const DEFAULT_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 pub struct Socks5Listener {
   /// Resolved listening addresses.
   addresses: Vec<SocketAddr>,
-  /// Connection tracker for graceful shutdown.
+  /// Stream tracker for graceful shutdown.
   /// This also serves as the shutdown handle for the listener itself.
-  connection_tracker: Rc<StreamTracker>,
+  stream_tracker: Rc<StreamTracker>,
   /// Associated service for handling connections.
   service: RuntimeService,
   /// Graceful shutdown timeout.
@@ -117,7 +117,7 @@ impl Socks5Listener {
 
     Ok(Listener::new(Self {
       addresses,
-      connection_tracker: Rc::new(StreamTracker::new()),
+      stream_tracker: Rc::new(StreamTracker::new()),
       service,
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
       handshake_timeout: args.handshake_timeout,
@@ -132,7 +132,7 @@ impl Socks5Listener {
   ///
   /// * `addr` - Socket address to bind to
   /// * `service` - Service for handling connections
-  /// * `connection_tracker` - Tracker for active connections
+  /// * `stream_tracker` - Tracker for active stream tasks
   /// * `shutdown_handle` - Shutdown notification handle
   /// * `handshake_timeout` - Timeout for SOCKS5 handshake
   /// * `user_password_auth` - User password authentication
@@ -145,7 +145,7 @@ impl Socks5Listener {
     &self,
     addr: SocketAddr,
     service: RuntimeService,
-    connection_tracker: Rc<StreamTracker>,
+    stream_tracker: Rc<StreamTracker>,
     shutdown_handle: ShutdownHandle,
     handshake_timeout: Duration,
     user_password_auth: UserPasswordAuth,
@@ -174,7 +174,7 @@ impl Socks5Listener {
 
       // Clone handles for use in accept loop
       let shutdown_handle = shutdown_handle;
-      let connection_tracker = connection_tracker;
+      let stream_tracker = stream_tracker;
       let service = service;
       let service_name = service_name;
 
@@ -214,7 +214,7 @@ impl Socks5Listener {
             let service_name = service_name.clone();
 
             // Register connection handler
-            connection_tracker.register(async move {
+            stream_tracker.register(async move {
               // Capture local address before handshake consumes the
               // stream
               let local_addr = match stream.local_addr() {
@@ -465,8 +465,8 @@ impl Listening for Socks5Listener {
   ) -> std::pin::Pin<Box<dyn Future<Output = Result<()>>>> {
     use std::future;
 
-    // Get the shared shutdown handle from connection tracker
-    let shutdown_handle = self.connection_tracker.shutdown_handle();
+    // Get the shared shutdown handle from stream tracker
+    let shutdown_handle = self.stream_tracker.shutdown_handle();
 
     // Check if shutdown was already triggered before we even started
     if shutdown_handle.is_shutdown() {
@@ -480,7 +480,7 @@ impl Listening for Socks5Listener {
     for addr in &self.addresses {
       let addr = *addr;
       let service = self.service.clone();
-      let connection_tracker = self.connection_tracker.clone();
+      let stream_tracker = self.stream_tracker.clone();
       let shutdown_handle = shutdown_handle.clone();
       let handshake_timeout = self.handshake_timeout;
       let user_password_auth = self.user_password_auth.clone();
@@ -489,7 +489,7 @@ impl Listening for Socks5Listener {
       match self.serve_addr(
         addr,
         service,
-        connection_tracker,
+        stream_tracker,
         shutdown_handle,
         handshake_timeout,
         user_password_auth,
@@ -517,10 +517,10 @@ impl Listening for Socks5Listener {
       ))));
     }
 
-    let connection_tracker = self.connection_tracker.clone();
+    let stream_tracker = self.stream_tracker.clone();
     let graceful_timeout = self.graceful_shutdown_timeout;
 
-    // Spawn all listening tasks in the connection tracker
+    // Spawn all listening tasks in the stream tracker
     // We use a separate JoinSet for listening tasks
     let listening_set = std::rc::Rc::new(std::cell::RefCell::new(
       tokio::task::JoinSet::new(),
@@ -551,7 +551,7 @@ impl Listening for Socks5Listener {
 
       // Wait for active connections with timeout
       let wait_result = tokio::time::timeout(graceful_timeout, async {
-        connection_tracker.wait_shutdown().await;
+        stream_tracker.wait_shutdown().await;
       })
       .await;
 
@@ -561,9 +561,9 @@ impl Listening for Socks5Listener {
           "graceful shutdown timeout ({:?}) expired, aborting {} \
            remaining connections",
           graceful_timeout,
-          connection_tracker.active_count()
+          stream_tracker.active_count()
         );
-        connection_tracker.abort_all();
+        stream_tracker.abort_all();
       }
 
       Ok(())
@@ -574,7 +574,7 @@ impl Listening for Socks5Listener {
   ///
   /// Triggers graceful shutdown notification.
   fn stop(&self) {
-    self.connection_tracker.shutdown();
+    self.stream_tracker.shutdown();
   }
 }
 
@@ -586,7 +586,7 @@ impl Clone for Socks5Listener {
   fn clone(&self) -> Self {
     Self {
       addresses: self.addresses.clone(),
-      connection_tracker: self.connection_tracker.clone(),
+      stream_tracker: self.stream_tracker.clone(),
       service: self.service.clone(),
       graceful_shutdown_timeout: self.graceful_shutdown_timeout,
       handshake_timeout: self.handshake_timeout,
@@ -966,7 +966,7 @@ impl From<fast_socks5::server::SocksServerError> for HandshakeError {
 /// ```ignore
 /// use tokio::time::timeout;
 ///
-/// let result = perform_handshake(stream, Duration::from_secs(10), &user_password_auth).await;
+/// let result = perform_handshake(stream, Duration::from_secs(3), &user_password_auth).await;
 /// match result {
 ///   Ok(handshake_result) => {
 ///     // Handshake succeeded, continue with command reading
@@ -1298,7 +1298,10 @@ mod tests {
   #[test]
   fn test_socks5_listener_args_default() {
     let args = Socks5ListenerArgs::default();
-    assert_eq!(args.handshake_timeout, Duration::from_secs(10));
+    assert_eq!(
+      args.handshake_timeout,
+      Duration::from_secs(DEFAULT_HANDSHAKE_TIMEOUT_SECS)
+    );
     assert!(args.user_password_auth.verify_credentials("", "").is_ok());
   }
 
@@ -1309,7 +1312,10 @@ mod tests {
     let yaml = serde_yaml::from_str(r#"{}"#).unwrap();
 
     let args = parse_config(yaml).unwrap();
-    assert_eq!(args.handshake_timeout, Duration::from_secs(10));
+    assert_eq!(
+      args.handshake_timeout,
+      Duration::from_secs(DEFAULT_HANDSHAKE_TIMEOUT_SECS)
+    );
   }
 
   #[test]

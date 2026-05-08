@@ -66,8 +66,8 @@ listeners:
     kind: socks5
     addresses: ["127.0.0.1:9080"]
     args:
-      # Handshake timeout (default: 10s)
-      handshake_timeout: "10s"
+      # Handshake timeout (default: 3s)
+      handshake_timeout: "3s"
       # User/password authentication (omit for no auth)
       users:
         - username: "admin"

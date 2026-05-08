@@ -415,6 +415,48 @@ class TestServerLevelConfig:
 
         assert proc.poll() is None, "Process should be running with server-level hostnames"
 
+    def test_http_listener_ignores_server_level_tls(self, shared_test_certs: dict) -> None:
+        """
+        Test that HTTP listener ignores server-level TLS config.
+
+        HTTP is a plaintext protocol. When server-level TLS config
+        is present on an HTTP server, the listener should start normally
+        and ignore the TLS configuration.
+        """
+        cert_path = shared_test_certs['cert_path']
+        key_path = shared_test_certs['key_path']
+        ca_path = shared_test_certs['ca_path']
+        port = get_unique_port()
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            config = {
+                "server_threads": 1,
+                "services": [{"name": "connect_tcp", "kind": "connect_tcp.connect_tcp"}],
+                "listeners": [{"name": "http_main", "kind": "http", "addresses": [f"127.0.0.1:{port}"]}],
+                "servers": [{
+                    "name": "test",
+                    "tls": {
+                        "certificates": [{"cert_path": cert_path, "key_path": key_path}],
+                        "client_ca_certs": [ca_path],
+                    },
+                    "listeners": ["http_main"],
+                    "service": "connect_tcp",
+                }],
+            }
+            config_path = os.path.join(temp_dir, "config.yaml")
+            with open(config_path, "w") as f:
+                yaml.dump(config, f)
+
+            proc = start_proxy(config_path)
+            try:
+                assert wait_for_proxy("127.0.0.1", port, timeout=5.0, proc=proc), \
+                    "HTTP listener should start and ignore server-level TLS config"
+            finally:
+                terminate_process(proc)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 class TestHTTP3MultiAddress:
     """Test HTTP/3 listener multi-address support."""

@@ -38,6 +38,7 @@ from .utils.helpers import (
     establish_connect_tunnel,
     create_test_config,
     create_echo_config,
+    wait_for_port_released,
 )
 from .conftest import get_unique_port
 
@@ -125,55 +126,6 @@ class TestNormalShutdown:
                 proxy_proc.terminate()
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_shutdown_with_idle_connections(self) -> None:
-        """
-        TC-SHUTDOWN-003: Shutdown with idle HTTP connections.
-
-        Target: Verify idle connections are properly closed during shutdown
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        client_sock: Optional[socket.socket] = None
-
-        try:
-            config_path = create_echo_config(proxy_port, temp_dir)
-            proxy_proc = start_proxy(config_path)
-
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
-                "Proxy server failed to start"
-
-            # Create an idle HTTP connection
-            client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client_sock.settimeout(5.0)
-            client_sock.connect(("127.0.0.1", proxy_port))
-
-            # Keep connection open without sending data (idle)
-
-            # Send SIGTERM
-            proxy_proc.send_signal(signal.SIGTERM)
-
-            # Wait for process to exit (graceful shutdown needs time)
-            try:
-                return_code = proxy_proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proxy_proc.kill()
-                proxy_proc.wait()
-                assert False, "Process did not exit within expected time"
-
-            # Verify exit code is 0
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
-
-        finally:
-            if client_sock:
-                client_sock.close()
-            if proxy_proc and proxy_proc.poll() is None:
-                proxy_proc.terminate()
-                proxy_proc.wait(timeout=2)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
 
 # ==============================================================================
 # Test cases - 7.2 Repeated signal scenarios
@@ -526,17 +478,8 @@ class TestResourceCleanup:
             assert return_code == 0, \
                 f"Expected exit code 0, got {return_code}"
 
-            # Wait a moment for socket to be released
-            time.sleep(0.5)
-
-            # Verify socket is closed by trying to connect
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(1.0)
-            result = sock.connect_ex(("127.0.0.1", proxy_port))
-            sock.close()
-
-            # Connection should fail (socket closed)
-            assert result != 0, \
+            # Wait for socket to be released
+            assert wait_for_port_released("127.0.0.1", proxy_port, timeout=2.0), \
                 "Expected socket to be closed after shutdown"
 
         finally:

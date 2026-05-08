@@ -57,18 +57,18 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const H3_NO_ERROR_CODE: u32 = 0x100;
 
 // ============================================================================
-// Active Connection Management
+// Upstream Connection Management
 // ============================================================================
 
-/// An active QUIC connection that can be closed gracefully.
+/// An upstream QUIC connection that can be closed gracefully.
 /// This struct holds a reference to the underlying quinn::Connection
 /// so that we can send CONNECTION_CLOSE frames during shutdown.
-struct ActiveConnection {
+struct UpstreamConnection {
   /// The underlying QUIC connection
   conn: quinn::Connection,
 }
 
-impl ActiveConnection {
+impl UpstreamConnection {
   fn new(conn: quinn::Connection) -> Self {
     Self { conn }
   }
@@ -82,11 +82,12 @@ impl ActiveConnection {
   }
 }
 
-/// Tracker for active QUIC connections.
+/// Tracker for upstream QUIC connections.
 ///
-/// This allows us to close all connections gracefully during shutdown.
-/// The tracker maintains references to all active connections so they
-/// can be properly closed with H3_NO_ERROR during graceful shutdown.
+/// This allows us to close all upstream connections gracefully during
+/// shutdown. The tracker maintains references to all upstream connections
+/// so they can be properly closed with H3_NO_ERROR during graceful
+/// shutdown.
 ///
 /// # Usage Pattern
 ///
@@ -101,11 +102,11 @@ impl ActiveConnection {
 /// without `close_all()` will leave connections open but untracked,
 /// potentially causing resource leaks.
 #[derive(Clone, Default)]
-struct ActiveConnectionTracker {
-  connections: Rc<RefCell<Vec<ActiveConnection>>>,
+struct UpstreamConnectionTracker {
+  connections: Rc<RefCell<Vec<UpstreamConnection>>>,
 }
 
-impl ActiveConnectionTracker {
+impl UpstreamConnectionTracker {
   fn new() -> Self {
     Self::default()
   }
@@ -114,7 +115,7 @@ impl ActiveConnectionTracker {
   ///
   /// Call this when a new QUIC connection is successfully established.
   fn register(&self, conn: quinn::Connection) {
-    self.connections.borrow_mut().push(ActiveConnection::new(conn));
+    self.connections.borrow_mut().push(UpstreamConnection::new(conn));
   }
 
   /// Close all registered connections with H3_NO_ERROR.
@@ -131,7 +132,7 @@ impl ActiveConnectionTracker {
       conn.close();
     }
     info!(
-      "ActiveConnectionTracker: closed {} connections",
+      "UpstreamConnectionTracker: closed {} connections",
       connections.len()
     );
   }
@@ -434,7 +435,7 @@ impl ProxyGroup {
   async fn get_proxy_conn(
     &mut self,
     stream_tracker: &StreamTracker,
-    conn_tracker: &ActiveConnectionTracker,
+    conn_tracker: &UpstreamConnectionTracker,
   ) -> Result<(
     h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>,
     usize,
@@ -626,7 +627,7 @@ impl Http3ChainServiceArgs {
 struct Http3ChainService {
   proxy_group: Arc<Mutex<ProxyGroup>>,
   stream_tracker: Rc<StreamTracker>,
-  conn_tracker: ActiveConnectionTracker,
+  conn_tracker: UpstreamConnectionTracker,
   idle_timeout: Duration,
 }
 
@@ -635,7 +636,7 @@ impl Http3ChainService {
   fn new(
     sargs: SerializedArgs,
     stream_tracker: Rc<StreamTracker>,
-    conn_tracker: ActiveConnectionTracker,
+    conn_tracker: UpstreamConnectionTracker,
   ) -> Result<Service> {
     let args: Http3ChainServiceArgs = serde_yaml::from_value(sargs)?;
     args.validate()?;
@@ -897,7 +898,7 @@ async fn complete_tunnel(
 struct Http3ChainPlugin {
   service_builders: HashMap<&'static str, Box<dyn BuildService>>,
   stream_tracker: Rc<StreamTracker>,
-  conn_tracker: ActiveConnectionTracker,
+  conn_tracker: UpstreamConnectionTracker,
   /// Flag to ensure uninstall is idempotent
   is_uninstalled: Rc<AtomicBool>,
 }
@@ -905,7 +906,7 @@ struct Http3ChainPlugin {
 impl Http3ChainPlugin {
   fn new() -> Self {
     let stream_tracker = Rc::new(StreamTracker::new());
-    let conn_tracker = ActiveConnectionTracker::new();
+    let conn_tracker = UpstreamConnectionTracker::new();
     let st_clone = stream_tracker.clone();
     let ct_clone = conn_tracker.clone();
     let builder: Box<dyn BuildService> = Box::new(move |a| {
@@ -927,7 +928,7 @@ impl Http3ChainPlugin {
   /// does not exceed 5 seconds.
   async fn do_graceful_shutdown(
     stream_tracker: &Rc<StreamTracker>,
-    conn_tracker: &ActiveConnectionTracker,
+    conn_tracker: &UpstreamConnectionTracker,
   ) {
     // Trigger shutdown notification for streams
     stream_tracker.shutdown();

@@ -12,6 +12,7 @@ This test module covers:
 
 import socket
 import ssl
+import subprocess
 import tempfile
 import shutil
 import os
@@ -322,7 +323,7 @@ class TestSniCertificateSelection:
 
         finally:
             if proxy_proc:
-                terminate_process(proxy_proc)
+                terminate_process(proxy_proc, force=True)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_wildcard_certificate_matches_subdomain(self) -> None:
@@ -362,7 +363,7 @@ class TestSniCertificateSelection:
 
         finally:
             if proxy_proc:
-                terminate_process(proxy_proc)
+                terminate_process(proxy_proc, force=True)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_wildcard_certificate_matches_bare_domain(self) -> None:
@@ -403,7 +404,7 @@ class TestSniCertificateSelection:
 
         finally:
             if proxy_proc:
-                terminate_process(proxy_proc)
+                terminate_process(proxy_proc, force=True)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_wildcard_certificate_not_match_multi_level(self) -> None:
@@ -443,7 +444,7 @@ class TestSniCertificateSelection:
 
         finally:
             if proxy_proc:
-                terminate_process(proxy_proc)
+                terminate_process(proxy_proc, force=True)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_unknown_sni_rejected(self) -> None:
@@ -484,7 +485,7 @@ class TestSniCertificateSelection:
 
         finally:
             if proxy_proc:
-                terminate_process(proxy_proc)
+                terminate_process(proxy_proc, force=True)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_exact_match_priority_over_wildcard(self) -> None:
@@ -555,5 +556,5 @@ class TestSniCertificateSelection:
 
         finally:
             if proxy_proc:
-                terminate_process(proxy_proc)
+                terminate_process(proxy_proc, force=True)
             shutil.rmtree(temp_dir, ignore_errors=True)

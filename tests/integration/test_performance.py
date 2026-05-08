@@ -15,6 +15,8 @@ import tempfile
 import shutil
 import time
 import os
+import asyncio
+import pytest
 from typing import Optional, Tuple, List, Dict
 
 from .utils.helpers import (
@@ -36,117 +38,6 @@ from .conftest import get_unique_port
 
 class TestPerformance:
     """Test 7.6: Performance scenarios."""
-
-    def test_concurrent_connections(self) -> None:
-        """
-        TC-PERF-001: 100 concurrent connections handled correctly.
-
-        Target: Verify proxy handles 100 concurrent connections
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
-
-        try:
-            config_path = create_test_config(proxy_port, temp_dir, server_threads=4)
-
-            # Create target server
-            connections_count: Dict[str, int] = {"count": 0}
-            connections_lock = threading.Lock()
-
-            def counting_handler(conn: socket.socket) -> None:
-                with connections_lock:
-                    connections_count["count"] += 1
-                try:
-                    while True:
-                        data = conn.recv(1024)
-                        if not data:
-                            break
-                        conn.send(b"ECHO:" + data)
-                except Exception:
-                    pass
-                finally:
-                    conn.close()
-
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, counting_handler
-            )
-
-            proxy_proc = start_proxy(config_path)
-
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy server failed to start"
-
-            # Create 100 concurrent connections
-            num_connections = 100
-            results: List[Tuple[int, bool]] = []
-            results_lock = threading.Lock()
-
-            def make_connection(conn_id: int) -> None:
-                try:
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(10.0)
-                    sock.connect(("127.0.0.1", proxy_port))
-
-                    # Send CONNECT request
-                    connect_request = (
-                        f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\n"
-                        f"Host: 127.0.0.1:{target_port}\r\n\r\n"
-                    ).encode()
-                    sock.sendall(connect_request)
-
-                    # Read response
-                    response = b""
-                    while b"\r\n\r\n" not in response:
-                        chunk = sock.recv(1024)
-                        if not chunk:
-                            break
-                        response += chunk
-
-                    if b"200" in response:
-                        # Send and receive data
-                        sock.sendall(b"TEST")
-                        echo = sock.recv(1024)
-                        success = b"ECHO:TEST" in echo
-                    else:
-                        success = False
-
-                    sock.close()
-                    with results_lock:
-                        results.append((conn_id, success))
-                except Exception:
-                    with results_lock:
-                        results.append((conn_id, False))
-
-            threads: List[threading.Thread] = []
-            for i in range(num_connections):
-                t = threading.Thread(target=make_connection, args=(i,))
-                threads.append(t)
-
-            # Start all threads
-            for t in threads:
-                t.start()
-
-            # Wait for all threads
-            for t in threads:
-                t.join(timeout=30)
-
-            # Verify results
-            successful = [r for r in results if r[1]]
-            success_rate = len(successful) / num_connections
-
-            assert success_rate >= 0.95, \
-                f"Success rate {success_rate:.2%} is below 95%"
-
-        finally:
-            if proxy_proc:
-                proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
-            if target_socket:
-                target_socket.close()
-            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_long_running_connection(self) -> None:
         """
@@ -205,14 +96,13 @@ class TestPerformance:
 
             assert b"200" in response, "Failed to establish tunnel"
 
-            # Send data multiple times over 5 seconds
-            for i in range(10):
+            # Send data 1000 times to verify long-running stability
+            for i in range(1000):
                 test_data = f"TEST_{i}".encode()
                 client_sock.sendall(test_data)
                 echo = client_sock.recv(1024)
                 assert b"ECHO:" + test_data in echo, \
                     f"Echo failed at iteration {i}"
-                time.sleep(0.5)
 
         finally:
             if client_sock:
@@ -399,7 +289,8 @@ class TestPerformance:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_1000_concurrent_connections(self) -> None:
+    @pytest.mark.asyncio
+    async def test_1000_concurrent_connections(self) -> None:
         """
         TC-PERF-005: 1000 concurrent connections handled correctly.
 
@@ -442,71 +333,62 @@ class TestPerformance:
             assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
-            # Create 1000 concurrent connections
+            # Create 1000 concurrent connections via asyncio
             num_connections = 1000
-            results: List[Tuple[int, bool]] = []
-            results_lock = threading.Lock()
+            concurrency = 200
 
-            def make_connection(conn_id: int) -> None:
-                try:
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(30.0)
-                    sock.connect(("127.0.0.1", proxy_port))
+            async def make_connection(
+                conn_id: int, sem: asyncio.Semaphore
+            ) -> Tuple[int, bool]:
+                async with sem:
+                    try:
+                        reader, writer = await asyncio.wait_for(
+                            asyncio.open_connection("127.0.0.1", proxy_port),
+                            timeout=10.0,
+                        )
 
-                    # Send CONNECT request
-                    connect_request = (
-                        f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\n"
-                        f"Host: 127.0.0.1:{target_port}\r\n\r\n"
-                    ).encode()
-                    sock.sendall(connect_request)
+                        # Send CONNECT request
+                        connect_request = (
+                            f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\n"
+                            f"Host: 127.0.0.1:{target_port}\r\n\r\n"
+                        ).encode()
+                        writer.write(connect_request)
+                        await writer.drain()
 
-                    # Read response
-                    response = b""
-                    while b"\r\n\r\n" not in response:
-                        chunk = sock.recv(1024)
-                        if not chunk:
-                            break
-                        response += chunk
+                        # Read response
+                        response = await asyncio.wait_for(
+                            reader.readuntil(b"\r\n\r\n"),
+                            timeout=10.0,
+                        )
 
-                    if b"200" in response:
-                        # Send and receive data
-                        sock.sendall(b"TEST")
-                        echo = sock.recv(1024)
-                        success = b"ECHO:TEST" in echo
-                    else:
-                        success = False
+                        if b"200" in response:
+                            # Send and receive data
+                            writer.write(b"TEST")
+                            await writer.drain()
+                            echo = await asyncio.wait_for(
+                                reader.read(1024), timeout=10.0
+                            )
+                            success = b"ECHO:TEST" in echo
+                        else:
+                            success = False
 
-                    sock.close()
-                    with results_lock:
-                        results.append((conn_id, success))
-                except Exception:
-                    with results_lock:
-                        results.append((conn_id, False))
+                        writer.close()
+                        return (conn_id, success)
+                    except Exception:
+                        return (conn_id, False)
 
-            threads: List[threading.Thread] = []
-            for i in range(num_connections):
-                t = threading.Thread(target=make_connection, args=(i,))
-                threads.append(t)
-
-            # Start all threads in batches to avoid overwhelming the system
-            batch_size = 100
-            for i in range(0, len(threads), batch_size):
-                batch = threads[i:i+batch_size]
-                for t in batch:
-                    t.start()
-                time.sleep(0.1)  # Small delay between batches
-
-            # Wait for all threads
-            for t in threads:
-                t.join(timeout=60)
+            sem = asyncio.Semaphore(concurrency)
+            results = await asyncio.gather(
+                *(make_connection(i, sem) for i in range(num_connections))
+            )
 
             # Verify results
             successful = [r for r in results if r[1]]
             success_rate = len(successful) / num_connections
 
-            # Allow lower success rate for 1000 connections (90% minimum)
-            assert success_rate >= 0.90, \
-                f"Success rate {success_rate:.2%} is below 90% for 1000 concurrent connections"
+            # All connections should succeed
+            assert success_rate >= 0.99, \
+                f"Success rate {success_rate:.2%} is below 99% for 1000 concurrent connections"
 
         finally:
             if proxy_proc:

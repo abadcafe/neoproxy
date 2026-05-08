@@ -622,3 +622,163 @@ class TestHTTP3ChainAuthFailure:
                 chain_proc.wait(timeout=5)
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
+
+
+# ==============================================================================
+# Test cases - TLS deep merge and inheritance
+# ==============================================================================
+
+
+class TestTlsDeepMerge:
+    """Verify deep merge behavior between proxy tls and default_tls."""
+
+    def test_per_proxy_ca_overrides_default(self, shared_test_certs: dict) -> None:
+        """
+        TC-CERT-REFACTOR-005: Per-proxy server_ca_path overrides default_tls.
+
+        Verifies that when proxy has its own server_ca_path in tls,
+        it overrides the one from default_tls. End-to-end data test.
+        """
+        temp_dir1 = tempfile.mkdtemp()
+        temp_dir2 = tempfile.mkdtemp()
+
+        http_port = get_unique_port()
+        h3_port = get_unique_port()
+        target_port = get_unique_port()
+
+        chain_proc: Optional[subprocess.Popen] = None
+        h3_proc: Optional[subprocess.Popen] = None
+        target_socket: Optional[socket.socket] = None
+
+        try:
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
+
+            _, target_socket = create_target_server("127.0.0.1", target_port, one_shot_echo_handler)
+
+            h3_config = create_http3_listener_config(
+                proxy_port=h3_port,
+                cert_path=cert_path,
+                key_path=key_path,
+                temp_dir=temp_dir1,
+            )
+            h3_proc = start_proxy(h3_config)
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0)
+
+            # Chain: default_tls has WRONG ca, per-proxy tls has CORRECT ca
+            config_content = f"""server_threads: 1
+
+services:
+- name: http3_chain
+  kind: http3_chain.http3_chain
+  args:
+    proxy_group:
+    - address: 127.0.0.1:{h3_port}
+      hostname: localhost
+      weight: 1
+      tls:
+        server_ca_path: "{ca_path}"
+    default_tls:
+      server_ca_path: "/nonexistent/wrong_ca.pem"
+
+listeners:
+- name: http_main
+  kind: http
+  addresses: ["0.0.0.0:{http_port}"]
+
+servers:
+- name: http_proxy
+  listeners: ["http_main"]
+  service: http3_chain
+"""
+            config_path = os.path.join(temp_dir2, "chain_config.yaml")
+            with open(config_path, "w") as f:
+                f.write(config_content)
+
+            chain_proc = start_proxy(config_path)
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
+
+            env = get_curl_env_without_no_proxy()
+            result = subprocess.run(
+                ["curl", "-s", "-p", "--http0.9",
+                    "-x", f"http://127.0.0.1:{http_port}",
+                    f"http://127.0.0.1:{target_port}/",
+                    "-d", "override_test",
+                    "--connect-timeout", "10",
+                    "--max-time", "2"
+                ],
+                capture_output=True,
+                text=True,
+                env=env
+            )
+
+            assert "override_test" in result.stdout, \
+                f"Expected echo data (per-proxy CA should override default), " \
+                f"got stdout: {result.stdout}, stderr: {result.stderr}"
+
+        finally:
+            if chain_proc:
+                chain_proc.kill()
+                chain_proc.wait(timeout=5)
+            if h3_proc:
+                h3_proc.kill()
+                h3_proc.wait(timeout=5)
+            if target_socket:
+                target_socket.close()
+            shutil.rmtree(temp_dir1, ignore_errors=True)
+            shutil.rmtree(temp_dir2, ignore_errors=True)
+
+    def test_default_tls_inherited(self, shared_test_certs: dict) -> None:
+        """
+        TC-CERT-REFACTOR-006: Proxy inherits TLS from default_tls via deep merge.
+
+        Verifies that when proxy has no tls config,
+        server_ca_path is inherited from default_tls.
+        """
+        temp_dir = tempfile.mkdtemp()
+
+        http_port = get_unique_port()
+        h3_port = get_unique_port()
+
+        proxy_proc: Optional[subprocess.Popen] = None
+        h3_proc: Optional[subprocess.Popen] = None
+
+        try:
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
+
+            h3_config = create_http3_listener_config(
+                proxy_port=h3_port,
+                cert_path=cert_path,
+                key_path=key_path,
+                temp_dir=temp_dir,
+            )
+            h3_proc = start_proxy(h3_config)
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0)
+
+            # Proxy has no tls - should inherit from default_tls
+            user_yaml = """
+          username: "proxy_user"
+          password: "proxy_pass"
+"""
+            chain_config = create_http3_chain_config_with_per_proxy_auth(
+                http_port=http_port,
+                proxy_group=[("127.0.0.1", h3_port, 1, user_yaml, None)],
+                ca_path=ca_path,
+                temp_dir=temp_dir,
+            )
+            proxy_proc = start_proxy(chain_config)
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
+            assert proxy_proc.poll() is None, \
+                "Chain service should be running with deep-merged tls config"
+
+        finally:
+            if proxy_proc:
+                proxy_proc.kill()
+                proxy_proc.wait(timeout=5)
+            if h3_proc:
+                h3_proc.kill()
+                h3_proc.wait(timeout=5)
+            shutil.rmtree(temp_dir, ignore_errors=True)

@@ -28,6 +28,7 @@ from .utils.helpers import (
     wait_for_proxy,
     create_target_server,
     create_test_config,
+    wait_for_process_running,
 )
 from .conftest import get_unique_port
 
@@ -91,11 +92,8 @@ class TestBoundaryConditions:
             config_path = create_empty_config(temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            # Wait a moment for process to start
-            time.sleep(0.5)
-
-            # Verify process is running
-            assert proxy_proc.poll() is None, \
+            # Wait for process to start and confirm it's running
+            assert wait_for_process_running(proxy_proc, timeout=1.0), \
                 "Process should be running with no worker threads"
 
             # Record start time
@@ -142,8 +140,9 @@ class TestBoundaryConditions:
             config_path = create_empty_config(temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            # Wait a moment for process to start
-            time.sleep(0.5)
+            # Wait for process to start and confirm it's running
+            assert wait_for_process_running(proxy_proc, timeout=1.0), \
+                "Process should be running before sending SIGINT"
 
             # Send SIGINT
             proxy_proc.send_signal(signal.SIGINT)
@@ -248,8 +247,13 @@ class TestLogVerification:
             assert return_code == 0, \
                 f"Expected exit code 0, got {return_code}"
 
-            # Wait a moment for logs to be flushed
-            time.sleep(0.5)
+            # Wait for log directory to be flushed to disk
+            log_dir = os.path.join(temp_dir, "logs")
+            start_wait = time.time()
+            while time.time() - start_wait < 2.0:
+                if os.path.exists(log_dir):
+                    break
+                time.sleep(0.05)
 
             # Check log directory exists
             log_dir = os.path.join(temp_dir, "logs")

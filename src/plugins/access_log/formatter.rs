@@ -101,13 +101,13 @@ mod tests {
     let mut entry = make_entry();
     entry
       .extensions
-      .insert("auth.basic_auth.user".to_string(), "admin".to_string());
+      .insert("basic_auth.user".to_string(), "admin".to_string());
     let output = crate::plugins::access_log::formatter::format_entry(
       &entry,
       LogFormat::Text,
     );
     let text = String::from_utf8(output).unwrap();
-    assert!(text.contains("auth.basic_auth.user=admin"));
+    assert!(text.contains("basic_auth.user=admin"));
   }
 
   #[test]

@@ -323,8 +323,7 @@ class TestAccessLogGracefulShutdown:
             terminate_process(proc)
 
         # After shutdown, logs should have been flushed
-        time.sleep(0.5)
-        lines = read_access_log_lines(test_env["log_dir"])
+        lines = wait_for_access_log(test_env["log_dir"], min_lines=1, timeout=2.0)
         assert len(lines) >= 1, \
             "Logs should be flushed on graceful shutdown"
 
@@ -427,8 +426,8 @@ class TestAccessLogDisabled:
         finally:
             terminate_process(proc)
 
-        # No access log files should be created
-        time.sleep(1)
+        # No access log files should be created (proxy already terminated,
+        # no more log entries can appear)
         lines = read_access_log_lines(test_env["log_dir"])
         assert len(lines) == 0, \
             "Without access_log layer, no log lines should be produced"

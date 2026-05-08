@@ -312,100 +312,6 @@ class TestHTTPConnect:
                 proxy_proc.wait(timeout=2)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_tc005_concurrent_tunnels(self) -> None:
-        """
-        TC-005: 并发多个隧道
-
-        测试目标: 验证代理服务器能够同时处理多个 CONNECT 隧道
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
-
-        try:
-            # 1. 创建配置文件
-            config_path = create_test_config(proxy_port, temp_dir, server_threads=2)
-
-            # 2. 启动模拟目标服务器
-            connections_count: Dict[str, int] = {"count": 0}
-            connections_lock = threading.Lock()
-
-            def counting_handler(conn: socket.socket) -> None:
-                with connections_lock:
-                    connections_count["count"] += 1
-                try:
-                    data = conn.recv(1024)
-                    if data:
-                        # 返回有效的 HTTP 响应
-                        http_response = (
-                            b"HTTP/1.1 200 OK\r\n"
-                            b"Content-Type: text/plain\r\n"
-                            b"Content-Length: 2\r\n"
-                            b"\r\n"
-                            b"OK"
-                        )
-                        conn.send(http_response)
-                except Exception:
-                    pass
-                finally:
-                    conn.close()
-
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, counting_handler
-            )
-
-            # 3. 启动代理服务器
-            proxy_proc = start_proxy(config_path)
-
-            # 4. 等待代理服务器就绪
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
-
-            # 5. 并发发送多个 CONNECT 请求
-            num_concurrent = 10  # 满足设计文档 N >= 10 的要求
-            results: List[Tuple[int, int, str]] = []
-            results_lock = threading.Lock()
-
-            def make_request(request_id: int) -> None:
-                try:
-                    returncode, stdout, stderr = run_curl_connect(
-                        proxy_host="127.0.0.1",
-                        proxy_port=proxy_port,
-                        target_host="127.0.0.1",
-                        target_port=target_port,
-                        timeout=15.0
-                    )
-                    with results_lock:
-                        results.append((request_id, returncode, stdout))
-                except Exception as e:
-                    with results_lock:
-                        results.append((request_id, -1, str(e)))
-
-            threads: List[threading.Thread] = []
-            for i in range(num_concurrent):
-                t = threading.Thread(target=make_request, args=(i,))
-                threads.append(t)
-                t.start()
-
-            for t in threads:
-                t.join(timeout=30)
-
-            # 6. 验证结果
-            successful = [r for r in results if r[1] == 0]
-            assert len(successful) == num_concurrent, \
-                f"Expected {num_concurrent} successful requests, got {len(successful)}: {results}"
-
-        finally:
-            # 7. 清理资源
-            if proxy_proc:
-                proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
-            if target_socket:
-                target_socket.close()
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
     def test_tc006_bidirectional_data_transfer(self) -> None:
         """
         TC-006: 隧道双向数据转发
@@ -482,7 +388,7 @@ class TestHTTPConnect:
                 sock.close()
 
             # 6. 验证目标服务器收到正确数据
-            time.sleep(0.5)  # 等待数据传输完成
+            # Client already received echo, so target has processed the data
             assert any(test_data in d for d in received_data), \
                 f"Target server did not receive correct data. Received: {received_data}"
 

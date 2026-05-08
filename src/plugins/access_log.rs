@@ -216,7 +216,11 @@ fn build_log_entry(
 
   let extensions: HashMap<String, String> = context_fields
     .iter()
-    .filter_map(|key| ctx.get(key).map(|v| (key.clone(), v)))
+    .filter_map(|key| ctx.get(key).map(|v| {
+      let display_key =
+        key.split_once('.').map(|(_, rest)| rest).unwrap_or(key);
+      (display_key.to_string(), v)
+    }))
     .collect();
 
   match result {
@@ -380,11 +384,11 @@ mod build_log_entry_tests {
       "/",
     );
     assert_eq!(
-      entry.extensions.get("auth.basic_auth.user"),
+      entry.extensions.get("basic_auth.user"),
       Some(&"admin".to_string())
     );
     assert_eq!(
-      entry.extensions.get("connect_tcp.connect_tcp.connect_ms"),
+      entry.extensions.get("connect_tcp.connect_ms"),
       Some(&"42".to_string())
     );
   }
@@ -454,7 +458,7 @@ mod build_log_entry_tests {
       "/",
     );
     assert_eq!(entry.extensions.len(), 1);
-    assert!(entry.extensions.contains_key("auth.basic_auth.user"));
+    assert!(entry.extensions.contains_key("basic_auth.user"));
     assert!(!entry.extensions.contains_key("other.key"));
   }
 }

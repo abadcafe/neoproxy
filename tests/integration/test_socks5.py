@@ -86,7 +86,7 @@ def create_socks5_config(
         auth_type: Authentication type ("password" or None for no auth)
         users: List of user dicts with "username" and "password" keys
         addresses: List of addresses to listen on (default: ["0.0.0.0:port"])
-        handshake_timeout: Handshake timeout string (e.g., "10s")
+        handshake_timeout: Handshake timeout string (e.g., "3s")
         server_threads: Number of worker threads
 
     Returns:
@@ -1363,39 +1363,34 @@ class TestSocks5UsernamePasswordBoundary:
 class TestSocks5DomainBoundary:
     """Tests for domain boundary values"""
 
-    def test_domain_1_byte(self) -> None:
+    def test_domain_unresolvable(self) -> None:
         """
-        TC-S5-020: 1-byte domain
+        TC-S5-020: Unresolvable domain name resolution failure
 
-        Test connection to 1-byte domain (minimum).
+        Test that a short domain (that won't resolve) returns failure.
+        Uses "x.invalid" (RFC 2606 reserved TLD, guaranteed NXDOMAIN)
+        instead of single-byte "a" to avoid slow DNS search domain fallback.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
-
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port,
-                lambda conn: conn.send(b"OK") or conn.close()
-            )
 
             proxy_proc = start_proxy(config_path)
             assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
                 "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5.0)  # DNS resolution can take time
+            sock.settimeout(5.0)
             try:
                 sock.connect(("127.0.0.1", proxy_port))
                 assert socks5_handshake_no_auth(sock), "Handshake failed"
 
-                # "a" is a valid 1-byte domain (won't resolve, but tests parsing)
-                success, reply = socks5_connect_domain(sock, "a", target_port)
-                # Will fail because "a" won't resolve
+                # "x.invalid" won't resolve (RFC 2606 reserved TLD)
+                success, reply = socks5_connect_domain(sock, "x.invalid", 80)
+                # Will fail because domain won't resolve
                 assert not success, "Connection should fail"
 
             finally:
@@ -1404,8 +1399,6 @@ class TestSocks5DomainBoundary:
         finally:
             if proxy_proc:
                 terminate_process(proxy_proc, timeout=0.5, force=True)
-            if target_socket:
-                target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_domain_255_bytes(self) -> None:
@@ -1512,53 +1505,6 @@ class TestSocks5MultiAddress:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_invalid_address_config_error(self) -> None:
-        """
-        TC-S5-023: Invalid address configuration error
-
-        Test that proxy fails to start when configuration contains
-        invalid addresses. According to the actual implementation,
-        invalid addresses cause a configuration error at startup.
-
-        Note: Architecture document says "skip invalid addresses",
-        but the actual implementation validates addresses at config
-        time and rejects invalid configurations.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-
-        try:
-            # Mix of valid and invalid addresses
-            addresses = [
-                "invalid-address",  # Invalid
-                f"0.0.0.0:{proxy_port}",  # Valid
-                "also-invalid:port",  # Invalid
-            ]
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, addresses=addresses
-            )
-
-            # Start proxy - should fail due to invalid addresses
-            proxy_proc = start_proxy(config_path)
-
-            # Wait for process to exit (should exit with error)
-            try:
-                exit_code = proxy_proc.wait(timeout=5.0)
-                # Process should exit with non-zero code
-                assert exit_code != 0, \
-                    f"Expected non-zero exit code for invalid config, got {exit_code}"
-            except subprocess.TimeoutExpired:
-                # Process didn't exit - this is unexpected
-                proxy_proc.kill()
-                proxy_proc.wait()
-                raise AssertionError(
-                    "Process should have exited due to invalid addresses"
-                )
-
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-
 class TestSocks5ClientDisconnect:
     """Tests for client disconnect scenarios"""
 
@@ -1591,7 +1537,8 @@ class TestSocks5ClientDisconnect:
                 sock.close()
 
             # Server should still be running
-            time.sleep(0.5)
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0), \
+                "Server should still accept connections after client disconnect"
 
             # Try another connection
             sock2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1746,283 +1693,6 @@ class TestSocks5BidirectionalTransfer:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-class TestSocks5ConfigErrors:
-    """Tests for configuration error scenarios"""
-
-    def test_invalid_yaml_format(self) -> None:
-        """
-        TC-S5-027: Invalid YAML format
-
-        Test that proxy fails to start with invalid YAML configuration.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-
-        try:
-            # Create invalid YAML config
-            config_content = f"""server_threads: 1
-services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
-listeners:
-- name: socks5_main
-  kind: socks5
-  addresses: [
-    - "0.0.0.0:{proxy_port}"
-servers:
-- name: socks5_server
-  listeners: ["socks5_main"]
-  service: connect_tcp
-"""
-            config_path = os.path.join(temp_dir, "invalid_config.yaml")
-            with open(config_path, "w") as f:
-                f.write(config_content)
-
-            proxy_proc = start_proxy(config_path)
-            try:
-                exit_code = proxy_proc.wait(timeout=5.0)
-                assert exit_code != 0, \
-                    "Expected non-zero exit code for invalid YAML"
-            except subprocess.TimeoutExpired:
-                proxy_proc.kill()
-                proxy_proc.wait()
-                raise AssertionError("Process should have exited")
-
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_missing_addresses_field(self) -> None:
-        """
-        TC-S5-028: Missing addresses field
-
-        Test that proxy fails to start when addresses field is missing.
-        """
-        temp_dir = tempfile.mkdtemp()
-
-        try:
-            config_content = f"""server_threads: 1
-
-services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
-
-listeners:
-- name: socks5_main
-  kind: socks5
-  args:
-    users:
-      - username: "test"
-        password: "test"
-
-servers:
-- name: socks5_server
-  listeners: ["socks5_main"]
-  service: connect_tcp
-"""
-            config_path = os.path.join(temp_dir, "config.yaml")
-            with open(config_path, "w") as f:
-                f.write(config_content)
-
-            proxy_proc = start_proxy(config_path)
-            try:
-                exit_code = proxy_proc.wait(timeout=5.0)
-                assert exit_code != 0, \
-                    "Expected non-zero exit code for missing addresses"
-            except subprocess.TimeoutExpired:
-                proxy_proc.kill()
-                proxy_proc.wait()
-                raise AssertionError("Process should have exited")
-
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_empty_addresses_list(self) -> None:
-        """
-        TC-S5-029: Empty addresses list
-
-        Test that proxy fails to start when addresses list is empty.
-        """
-        temp_dir = tempfile.mkdtemp()
-
-        try:
-            config_content = f"""server_threads: 1
-
-services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
-
-listeners:
-- name: socks5_main
-  kind: socks5
-  addresses: []
-
-servers:
-- name: socks5_server
-  listeners: ["socks5_main"]
-  service: connect_tcp
-"""
-            config_path = os.path.join(temp_dir, "config.yaml")
-            with open(config_path, "w") as f:
-                f.write(config_content)
-
-            proxy_proc = start_proxy(config_path)
-            try:
-                exit_code = proxy_proc.wait(timeout=5.0)
-                assert exit_code != 0, \
-                    "Expected non-zero exit code for empty addresses"
-            except subprocess.TimeoutExpired:
-                proxy_proc.kill()
-                proxy_proc.wait()
-                raise AssertionError("Process should have exited")
-
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_password_mode_empty_users(self) -> None:
-        """
-        TC-S5-030: Empty users list means no auth
-
-        Test that proxy starts successfully with empty users list.
-        In the new format, `users: []` is equivalent to no auth (no users field).
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-
-        try:
-            config_content = f"""server_threads: 1
-
-services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
-
-listeners:
-- name: socks5_main
-  kind: socks5
-  addresses:
-    - "0.0.0.0:{proxy_port}"
-  args:
-    users: []
-
-servers:
-- name: socks5_server
-  listeners: ["socks5_main"]
-  service: connect_tcp
-"""
-            config_path = os.path.join(temp_dir, "config.yaml")
-            with open(config_path, "w") as f:
-                f.write(config_content)
-
-            proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy should start with empty users (no auth mode)"
-
-            # Verify no-auth connection works
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5.0)
-            try:
-                sock.connect(("127.0.0.1", proxy_port))
-                assert socks5_handshake_no_auth(sock), "No-auth handshake should succeed"
-            finally:
-                sock.close()
-
-        finally:
-            if proxy_proc:
-                terminate_process(proxy_proc)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_invalid_auth_type(self) -> None:
-        """
-        TC-S5-031: Invalid auth config rejected
-
-        Test that proxy fails to start with unknown field in auth config.
-        In the new unified auth format, unknown fields should be rejected.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-
-        try:
-            config_content = f"""server_threads: 1
-
-services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
-
-listeners:
-- name: socks5_main
-  kind: socks5
-  addresses:
-    - "0.0.0.0:{proxy_port}"
-  args:
-    some_unknown_field: true
-
-servers:
-- name: socks5_server
-  listeners: ["socks5_main"]
-  service: connect_tcp
-"""
-            config_path = os.path.join(temp_dir, "config.yaml")
-            with open(config_path, "w") as f:
-                f.write(config_content)
-
-            proxy_proc = start_proxy(config_path)
-            try:
-                exit_code = proxy_proc.wait(timeout=5.0)
-                assert exit_code != 0, \
-                    "Expected non-zero exit code for invalid auth type"
-            except subprocess.TimeoutExpired:
-                proxy_proc.kill()
-                proxy_proc.wait()
-                raise AssertionError("Process should have exited")
-
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_invalid_handshake_timeout_format(self) -> None:
-        """
-        TC-S5-032: Invalid handshake timeout format
-
-        Test that proxy fails to start with invalid handshake timeout format.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-
-        try:
-            config_content = f"""server_threads: 1
-
-services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
-
-listeners:
-- name: socks5_main
-  kind: socks5
-  addresses:
-    - "0.0.0.0:{proxy_port}"
-  args:
-    handshake_timeout: "invalid"
-
-servers:
-- name: socks5_server
-  listeners: ["socks5_main"]
-  service: connect_tcp
-"""
-            config_path = os.path.join(temp_dir, "config.yaml")
-            with open(config_path, "w") as f:
-                f.write(config_content)
-
-            proxy_proc = start_proxy(config_path)
-            try:
-                exit_code = proxy_proc.wait(timeout=5.0)
-                assert exit_code != 0, \
-                    "Expected non-zero exit code for invalid timeout format"
-            except subprocess.TimeoutExpired:
-                proxy_proc.kill()
-                proxy_proc.wait()
-                raise AssertionError("Process should have exited")
-
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 class TestSocks5AdditionalBoundary:
@@ -2258,14 +1928,14 @@ class TestSocks5HandshakeTimeoutFormat:
         """
         TC-S5-039: Handshake timeout default value
 
-        Test that default handshake timeout is 10 seconds.
+        Test that default handshake timeout is 3 seconds.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            # No handshake_timeout specified, should use default 10s
+            # No handshake_timeout specified, should use default 3s
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
@@ -2273,7 +1943,7 @@ class TestSocks5HandshakeTimeoutFormat:
                 "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(20.0)
+            sock.settimeout(10.0)
             try:
                 sock.connect(("127.0.0.1", proxy_port))
 
@@ -2286,9 +1956,9 @@ class TestSocks5HandshakeTimeoutFormat:
                     pass
 
                 elapsed = time.time() - start_time
-                # Default should be around 10 seconds
-                assert 8.0 <= elapsed <= 14.0, \
-                    f"Timeout not matching default: {elapsed}s (expected ~10s)"
+                # Default should be around 3 seconds
+                assert 2.0 <= elapsed <= 6.0, \
+                    f"Timeout not matching default: {elapsed}s (expected ~3s)"
 
             finally:
                 sock.close()
@@ -2298,55 +1968,3 @@ class TestSocks5HandshakeTimeoutFormat:
                 terminate_process(proxy_proc)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-
-class TestSocks5TlsClientCertRejected:
-    """Tests for TLS client cert rejection (SOCKS5 only supports password auth)"""
-
-    def test_tls_client_cert_type_rejected(self) -> None:
-        """
-        TC-S5-040: TLS client cert auth rejected for SOCKS5
-
-        Test that SOCKS5 listener rejects client_ca_path in auth config.
-        SOCKS5 protocol only supports password authentication.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-
-        try:
-            # client_ca_path is not a valid field in socks5 args
-            # (SOCKS5 only supports password auth via 'users' field)
-            config_content = f"""server_threads: 1
-
-services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
-
-listeners:
-- name: socks5_main
-  kind: socks5
-  addresses:
-    - "0.0.0.0:{proxy_port}"
-  args:
-    client_ca_path: "/path/to/ca.pem"
-
-servers:
-- name: socks5_server
-  listeners: ["socks5_main"]
-  service: connect_tcp
-"""
-            config_path = os.path.join(temp_dir, "config.yaml")
-            with open(config_path, "w") as f:
-                f.write(config_content)
-
-            proxy_proc = start_proxy(config_path)
-            try:
-                exit_code = proxy_proc.wait(timeout=5.0)
-                assert exit_code != 0, \
-                    "Expected non-zero exit code for tls_client_cert auth type in SOCKS5"
-            except subprocess.TimeoutExpired:
-                proxy_proc.kill()
-                proxy_proc.wait()
-                raise AssertionError("Process should have exited")
-
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)

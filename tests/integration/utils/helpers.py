@@ -261,6 +261,69 @@ def wait_for_process_exit(
     return return_code, elapsed
 
 
+def wait_for_process_running(
+    proc: subprocess.Popen,
+    timeout: float = 1.0,
+    interval: float = 0.05
+) -> bool:
+    """
+    Wait for a process to be running (not exited).
+
+    Polls proc.poll() at short intervals. Returns True if the process
+    is still running after polling for the timeout duration.
+    Returns False if the process exits during the wait.
+
+    Args:
+        proc: Process to check
+        timeout: Maximum time to confirm the process stays running
+        interval: Poll interval in seconds
+
+    Returns:
+        bool: True if process is still running, False if it exited
+    """
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        if proc.poll() is not None:
+            return False
+        time.sleep(interval)
+    return proc.poll() is None
+
+
+def wait_for_port_released(
+    host: str,
+    port: int,
+    timeout: float = 2.0,
+    interval: float = 0.05
+) -> bool:
+    """
+    Wait for a port to be released (no longer accepting connections).
+
+    Polls connect_ex until it fails (port released) or timeout expires.
+
+    Args:
+        host: Host to check
+        port: Port to check
+        timeout: Maximum wait time in seconds
+        interval: Poll interval in seconds
+
+    Returns:
+        bool: True if port was released, False on timeout
+    """
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.5)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            if result != 0:
+                return True
+        except Exception:
+            return True
+        time.sleep(interval)
+    return False
+
+
 def terminate_process(
     proc: subprocess.Popen,
     timeout: float = 5.0,
@@ -310,7 +373,7 @@ def create_target_server(
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind((host, port))
-    server_socket.listen(5)
+    server_socket.listen(1024)
 
     running = threading.Event()
     running.set()

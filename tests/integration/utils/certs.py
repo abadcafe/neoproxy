@@ -13,20 +13,20 @@ from typing import List, Tuple
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
 
 
-def _make_key() -> rsa.RSAPrivateKey:
-  return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+def _make_key() -> ec.EllipticCurvePrivateKey:
+  return ec.generate_private_key(ec.SECP256R1())
 
 
-def _write_key(path: str, key: rsa.RSAPrivateKey) -> None:
+def _write_key(path: str, key: ec.EllipticCurvePrivateKey) -> None:
   with open(path, "wb") as f:
     f.write(
       key.private_bytes(
         serialization.Encoding.PEM,
-        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
       )
     )
@@ -39,7 +39,7 @@ def _write_cert(path: str, cert: x509.Certificate) -> None:
 
 def _load_ca(
     ca_cert_path: str, ca_key_path: str
-) -> Tuple[x509.Certificate, rsa.RSAPrivateKey]:
+) -> Tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
   with open(ca_cert_path, "rb") as f:
     ca_cert = x509.load_pem_x509_certificate(f.read())
   with open(ca_key_path, "rb") as f:
@@ -140,7 +140,7 @@ def generate_server_cert(
     )
     .add_extension(
       x509.KeyUsage(
-        digital_signature=True, key_encipherment=True,
+        digital_signature=True, key_encipherment=False,
         key_cert_sign=False, crl_sign=False,
         content_commitment=False, data_encipherment=False,
         key_agreement=False, encipher_only=False, decipher_only=False,

@@ -26,10 +26,7 @@ from .utils.helpers import (
     wait_for_udp_port_bound,
 )
 
-from .test_http3_listener import (
-    generate_test_certificates,
-    generate_client_certificate,
-)
+from .utils.certs import generate_test_certificates, generate_client_cert
 
 from .utils.http_echo import http_echo_handler
 
@@ -376,7 +373,7 @@ def run_proxy_chain_test(
                 client_cert_path = shared_client_cert['client_cert_path']
                 client_key_path = shared_client_cert['client_key_path']
             else:
-                client_cert_path, client_key_path = generate_client_certificate(
+                client_cert_path, client_key_path = generate_client_cert(
                     temp_dir1, ca_path, ca_key_path
                 )
 

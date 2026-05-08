@@ -24,6 +24,8 @@ import os
 import signal
 import pytest
 from typing import Optional, Tuple, List, Callable
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import serialization
 
 from .utils.helpers import (
     NEOPROXY_BINARY,
@@ -32,6 +34,10 @@ from .utils.helpers import (
     create_target_server,
     terminate_process,
     wait_for_udp_port_bound,
+)
+from .utils.certs import (
+    generate_test_certificates,
+    generate_client_cert,
 )
 
 from .conftest import get_unique_port
@@ -42,149 +48,6 @@ from .conftest import get_unique_port
 # ==============================================================================
 # Test helper functions (unique to this module)
 # ==============================================================================
-
-
-def generate_test_certificates(temp_dir: str) -> Tuple[str, str, str, str]:
-    """
-    Generate self-signed test certificates for HTTP/3 testing.
-
-    Creates a proper CA certificate and a server certificate signed by that CA.
-    This is required because rustls enforces proper certificate chain validation.
-
-    Args:
-        temp_dir: Temporary directory to store certificates
-
-    Returns:
-        Tuple[str, str, str, str]: (server_cert_path, server_key_path, ca_cert_path, ca_key_path)
-    """
-    ca_key_path = os.path.join(temp_dir, "ca.key")
-    ca_cert_path = os.path.join(temp_dir, "ca.crt")
-    server_key_path = os.path.join(temp_dir, "server.key")
-    server_csr_path = os.path.join(temp_dir, "server.csr")
-    server_cert_path = os.path.join(temp_dir, "server.crt")
-
-    # Step 1: Generate CA private key
-    subprocess.run(
-        ["openssl", "genrsa", "-out", ca_key_path, "2048"],
-        check=True,
-        capture_output=True
-    )
-
-    # Step 2: Generate CA certificate (with CA:TRUE)
-    subprocess.run(
-        [
-            "openssl", "req", "-new", "-x509",
-            "-key", ca_key_path,
-            "-out", ca_cert_path,
-            "-days", "1",
-            "-subj", "/CN=Test CA",
-            "-addext", "basicConstraints=critical,CA:TRUE"
-        ],
-        check=True,
-        capture_output=True
-    )
-
-    # Step 3: Generate server private key
-    subprocess.run(
-        ["openssl", "genrsa", "-out", server_key_path, "2048"],
-        check=True,
-        capture_output=True
-    )
-
-    # Step 4: Generate server CSR
-    subprocess.run(
-        [
-            "openssl", "req", "-new",
-            "-key", server_key_path,
-            "-out", server_csr_path,
-            "-subj", "/CN=localhost"
-        ],
-        check=True,
-        capture_output=True
-    )
-
-    # Step 5: Create extensions config for server cert
-    ext_config_path = os.path.join(temp_dir, "server_ext.cnf")
-    with open(ext_config_path, "w") as f:
-        f.write("subjectAltName=DNS:localhost,IP:127.0.0.1\n")
-        f.write("basicConstraints=critical,CA:FALSE\n")
-
-    # Step 6: Sign server certificate with CA
-    subprocess.run(
-        [
-            "openssl", "x509", "-req",
-            "-in", server_csr_path,
-            "-CA", ca_cert_path,
-            "-CAkey", ca_key_path,
-            "-CAcreateserial",
-            "-out", server_cert_path,
-            "-days", "1",
-            "-extfile", ext_config_path
-        ],
-        check=True,
-        capture_output=True
-    )
-
-    return server_cert_path, server_key_path, ca_cert_path, ca_key_path
-
-
-def generate_client_certificate(
-    temp_dir: str,
-    ca_cert_path: str,
-    ca_key_path: str,
-    client_name: str = "testclient"
-) -> Tuple[str, str]:
-    """
-    Generate client certificate for TLS client auth testing.
-
-    Args:
-        temp_dir: Temporary directory
-        ca_cert_path: CA certificate path
-        ca_key_path: CA private key path
-        client_name: Common name for the client certificate (default: "testclient")
-
-    Returns:
-        Tuple[str, str]: (client_cert_path, client_key_path)
-    """
-    client_key_path = os.path.join(temp_dir, f"{client_name}.key")
-    client_csr_path = os.path.join(temp_dir, f"{client_name}.csr")
-    client_cert_path = os.path.join(temp_dir, f"{client_name}.crt")
-
-    # Generate client private key
-    subprocess.run(
-        ["openssl", "genrsa", "-out", client_key_path, "2048"],
-        check=True,
-        capture_output=True
-    )
-
-    # Generate CSR
-    subprocess.run(
-        [
-            "openssl", "req", "-new",
-            "-key", client_key_path,
-            "-out", client_csr_path,
-            "-subj", f"/CN={client_name}"
-        ],
-        check=True,
-        capture_output=True
-    )
-
-    # Sign with CA
-    subprocess.run(
-        [
-            "openssl", "x509", "-req",
-            "-in", client_csr_path,
-            "-CA", ca_cert_path,
-            "-CAkey", ca_key_path,
-            "-CAcreateserial",
-            "-out", client_cert_path,
-            "-days", "1"
-        ],
-        check=True,
-        capture_output=True
-    )
-
-    return client_cert_path, client_key_path
 
 
 def create_http3_listener_config(
@@ -624,11 +487,13 @@ servers:
 
             # Generate another key
             key_path2 = os.path.join(temp_dir, "wrong.key")
-            subprocess.run(
-                ["openssl", "genrsa", "-out", key_path2, "2048"],
-                check=True,
-                capture_output=True
-            )
+            _key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            with open(key_path2, "wb") as _f:
+                _f.write(_key.private_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PrivateFormat.TraditionalOpenSSL,
+                    serialization.NoEncryption(),
+                ))
 
             # NEW config format: server-level TLS with mismatched cert/key
             config_content = f"""server_threads: 1

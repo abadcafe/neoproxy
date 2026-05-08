@@ -1,0 +1,17 @@
+[project]
+name = "neoproxy-integration-tests"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "requests",
+    "PyYAML",
+    "aioquic",
+    "cryptography",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/integration"]

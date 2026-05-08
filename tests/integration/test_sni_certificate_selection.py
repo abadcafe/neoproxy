@@ -10,7 +10,6 @@ This test module covers:
 - SNI mismatch rejection (no default certificate)
 """
 
-import subprocess
 import socket
 import ssl
 import tempfile
@@ -23,133 +22,9 @@ from .utils.helpers import (
     wait_for_proxy,
     terminate_process,
 )
+from .utils.certs import generate_ca, generate_server_cert
 
 from .conftest import get_unique_port
-
-
-# ==============================================================================
-# Certificate Generation Helpers
-# ==============================================================================
-
-
-def generate_ca_certificate(temp_dir: str, ca_name: str = "Test CA") -> Tuple[str, str]:
-    """
-    Generate a CA certificate with proper extensions.
-
-    Returns:
-        Tuple[str, str]: (ca_cert_path, ca_key_path)
-    """
-    ca_key_path = os.path.join(temp_dir, "ca.key")
-    ca_cert_path = os.path.join(temp_dir, "ca.crt")
-
-    # Generate CA private key
-    subprocess.run(
-        ["openssl", "genrsa", "-out", ca_key_path, "2048"],
-        check=True,
-        capture_output=True
-    )
-
-    # Create CA config with proper extensions
-    ca_config_path = os.path.join(temp_dir, "ca.cnf")
-    with open(ca_config_path, "w") as f:
-        f.write(f"""
-[req]
-distinguished_name = req_distinguished_name
-x509_extensions = v3_ca
-prompt = no
-
-[req_distinguished_name]
-CN = {ca_name}
-
-[v3_ca]
-basicConstraints = critical, CA:TRUE
-keyUsage = critical, keyCertSign, cRLSign
-subjectKeyIdentifier = hash
-""")
-
-    subprocess.run(
-        [
-            "openssl", "req", "-new", "-x509",
-            "-key", ca_key_path,
-            "-out", ca_cert_path,
-            "-days", "1",
-            "-config", ca_config_path
-        ],
-        check=True,
-        capture_output=True
-    )
-
-    return ca_cert_path, ca_key_path
-
-
-def generate_server_certificate(
-    temp_dir: str,
-    ca_cert_path: str,
-    ca_key_path: str,
-    san_entries: List[str],
-    cert_name: str = "server"
-) -> Tuple[str, str]:
-    """
-    Generate a server certificate with specified SAN entries.
-
-    Args:
-        temp_dir: Temporary directory
-        ca_cert_path: CA certificate path
-        ca_key_path: CA private key path
-        san_entries: List of SAN entries (e.g., ["api.example.com", "*.example.com"])
-        cert_name: Name prefix for certificate files
-
-    Returns:
-        Tuple[str, str]: (server_cert_path, server_key_path)
-    """
-    server_key_path = os.path.join(temp_dir, f"{cert_name}.key")
-    server_csr_path = os.path.join(temp_dir, f"{cert_name}.csr")
-    server_cert_path = os.path.join(temp_dir, f"{cert_name}.crt")
-
-    # Generate server private key
-    subprocess.run(
-        ["openssl", "genrsa", "-out", server_key_path, "2048"],
-        check=True,
-        capture_output=True
-    )
-
-    # Generate server CSR
-    subprocess.run(
-        [
-            "openssl", "req", "-new",
-            "-key", server_key_path,
-            "-out", server_csr_path,
-            "-subj", f"/CN={san_entries[0]}"
-        ],
-        check=True,
-        capture_output=True
-    )
-
-    # Create extensions config
-    ext_config_path = os.path.join(temp_dir, f"{cert_name}_ext.cnf")
-    with open(ext_config_path, "w") as f:
-        san_list = ",".join(f"DNS:{san}" for san in san_entries)
-        f.write(f"subjectAltName={san_list}\n")
-        f.write("basicConstraints=critical,CA:FALSE\n")
-        f.write("keyUsage=critical,digitalSignature,keyEncipherment\n")
-
-    # Sign server certificate with CA
-    subprocess.run(
-        [
-            "openssl", "x509", "-req",
-            "-in", server_csr_path,
-            "-CA", ca_cert_path,
-            "-CAkey", ca_key_path,
-            "-CAcreateserial",
-            "-out", server_cert_path,
-            "-days", "1",
-            "-extfile", ext_config_path
-        ],
-        check=True,
-        capture_output=True
-    )
-
-    return server_cert_path, server_key_path
 
 
 def create_multi_server_config(
@@ -396,16 +271,16 @@ class TestSniCertificateSelection:
 
         try:
             # Generate CA
-            ca_cert_path, ca_key_path = generate_ca_certificate(temp_dir)
+            ca_cert_path, ca_key_path = generate_ca(temp_dir)
 
             # Generate two different server certificates
-            cert_a_path, key_a_path = generate_server_certificate(
+            cert_a_path, key_a_path = generate_server_cert(
                 temp_dir, ca_cert_path, ca_key_path,
                 san_entries=["api.test.local"],
                 cert_name="server_a"
             )
 
-            cert_b_path, key_b_path = generate_server_certificate(
+            cert_b_path, key_b_path = generate_server_cert(
                 temp_dir, ca_cert_path, ca_key_path,
                 san_entries=["web.test.local"],
                 cert_name="server_b"
@@ -462,10 +337,10 @@ class TestSniCertificateSelection:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            ca_cert_path, ca_key_path = generate_ca_certificate(temp_dir)
+            ca_cert_path, ca_key_path = generate_ca(temp_dir)
 
             # Generate wildcard certificate
-            cert_path, key_path = generate_server_certificate(
+            cert_path, key_path = generate_server_cert(
                 temp_dir, ca_cert_path, ca_key_path,
                 san_entries=["*.test.local"],
                 cert_name="wildcard"
@@ -501,10 +376,10 @@ class TestSniCertificateSelection:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            ca_cert_path, ca_key_path = generate_ca_certificate(temp_dir)
+            ca_cert_path, ca_key_path = generate_ca(temp_dir)
 
             # Include both wildcard and bare domain in SAN for OpenSSL client verification
-            cert_path, key_path = generate_server_certificate(
+            cert_path, key_path = generate_server_cert(
                 temp_dir, ca_cert_path, ca_key_path,
                 san_entries=["*.test.local", "test.local"],
                 cert_name="wildcard"
@@ -542,9 +417,9 @@ class TestSniCertificateSelection:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            ca_cert_path, ca_key_path = generate_ca_certificate(temp_dir)
+            ca_cert_path, ca_key_path = generate_ca(temp_dir)
 
-            cert_path, key_path = generate_server_certificate(
+            cert_path, key_path = generate_server_cert(
                 temp_dir, ca_cert_path, ca_key_path,
                 san_entries=["*.test.local"],
                 cert_name="wildcard"
@@ -582,10 +457,10 @@ class TestSniCertificateSelection:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            ca_cert_path, ca_key_path = generate_ca_certificate(temp_dir)
+            ca_cert_path, ca_key_path = generate_ca(temp_dir)
 
             # Generate certificate for specific domain only
-            cert_path, key_path = generate_server_certificate(
+            cert_path, key_path = generate_server_cert(
                 temp_dir, ca_cert_path, ca_key_path,
                 san_entries=["known.test.local"],
                 cert_name="known"
@@ -629,17 +504,17 @@ class TestSniCertificateSelection:
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
-            ca_cert_path, ca_key_path = generate_ca_certificate(temp_dir)
+            ca_cert_path, ca_key_path = generate_ca(temp_dir)
 
             # Generate wildcard certificate
-            wildcard_cert_path, wildcard_key_path = generate_server_certificate(
+            wildcard_cert_path, wildcard_key_path = generate_server_cert(
                 temp_dir, ca_cert_path, ca_key_path,
                 san_entries=["*.test.local"],
                 cert_name="wildcard"
             )
 
             # Generate exact match certificate
-            exact_cert_path, exact_key_path = generate_server_certificate(
+            exact_cert_path, exact_key_path = generate_server_cert(
                 temp_dir, ca_cert_path, ca_key_path,
                 san_entries=["api.test.local"],
                 cert_name="exact"

@@ -35,9 +35,12 @@ from .utils.helpers import (
 )
 
 from .test_http3_listener import (
-    generate_test_certificates,
-    generate_client_certificate,
     create_http3_listener_config,
+)
+from .utils.certs import (
+    generate_test_certificates,
+    generate_client_cert,
+    generate_ca,
 )
 
 from .conftest import get_unique_port
@@ -713,27 +716,12 @@ servers:
 
             # Generate a different CA and client cert (not signed by server's CA)
             # This is intentionally NOT using shared certs - we need an invalid cert
-            other_ca_cert_path = os.path.join(temp_dir, "other_ca.crt")
-            other_ca_key_path = os.path.join(temp_dir, "other_ca.key")
-            subprocess.run(
-                ["openssl", "genrsa", "-out", other_ca_key_path, "2048"],
-                check=True,
-                capture_output=True
-            )
-            subprocess.run(
-                [
-                    "openssl", "req", "-new", "-x509",
-                    "-key", other_ca_key_path,
-                    "-out", other_ca_cert_path,
-                    "-days", "1",
-                    "-subj", "/CN=OtherCA"
-                ],
-                check=True,
-                capture_output=True
+            other_ca_cert_path, other_ca_key_path = generate_ca(
+                temp_dir, cn="OtherCA"
             )
 
             # Generate client cert signed by the OTHER CA (invalid for this server)
-            invalid_client_cert_path, invalid_client_key_path = generate_client_certificate(
+            invalid_client_cert_path, invalid_client_key_path = generate_client_cert(
                 temp_dir, other_ca_cert_path, other_ca_key_path
             )
 
@@ -1183,23 +1171,10 @@ class TestHTTP3DualAuth:
 
             # Generate a DIFFERENT CA and client cert (not trusted by server)
             # This is intentionally NOT using shared certs - we need an invalid cert
-            other_ca_key_path = os.path.join(temp_dir, "other_ca.key")
-            other_ca_cert_path = os.path.join(temp_dir, "other_ca.crt")
-            subprocess.run(
-                ["openssl", "genrsa", "-out", other_ca_key_path, "2048"],
-                check=True, capture_output=True
+            other_ca_cert_path, other_ca_key_path = generate_ca(
+                temp_dir, cn="OtherCA"
             )
-            subprocess.run(
-                [
-                    "openssl", "req", "-new", "-x509",
-                    "-key", other_ca_key_path,
-                    "-out", other_ca_cert_path,
-                    "-days", "1",
-                    "-subj", "/CN=OtherCA"
-                ],
-                check=True, capture_output=True
-            )
-            invalid_cert_path, invalid_key_path = generate_client_certificate(
+            invalid_cert_path, invalid_key_path = generate_client_cert(
                 temp_dir, other_ca_cert_path, other_ca_key_path
             )
 

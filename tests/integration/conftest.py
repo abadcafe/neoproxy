@@ -559,7 +559,7 @@ def shared_test_certs(shared_certs_dir: str) -> Dict[str, str]:
     Returns:
         Dict with keys: cert_path, key_path, ca_path, ca_key_path
     """
-    from .test_http3_listener import generate_test_certificates
+    from .utils.certs import generate_test_certificates
     cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(
         shared_certs_dir
     )
@@ -582,8 +582,8 @@ def shared_client_cert(shared_certs_dir: str, shared_test_certs: Dict[str, str])
     Returns:
         Dict with keys: client_cert_path, client_key_path
     """
-    from .test_http3_listener import generate_client_certificate
-    client_cert_path, client_key_path = generate_client_certificate(
+    from .utils.certs import generate_client_cert
+    client_cert_path, client_key_path = generate_client_cert(
         shared_certs_dir,
         shared_test_certs['ca_path'],
         shared_test_certs['ca_key_path'],

@@ -186,18 +186,10 @@ class TestSocks5UpgradeConnectTcp:
     def _get_closed_port(self) -> int:
         """Get a port guaranteed to refuse connections.
 
-        Binds a socket to port 0 (OS-assigned), reads the port number,
-        and keeps the socket bound (but NOT listening). A bound-but-not-listening
-        socket causes ConnectionRefused for any connection attempt.
-
-        The socket is registered in self.sockets for cleanup.
+        Uses port 1 which is reserved and never has a listening service,
+        ensuring immediate connection refused on all platforms.
         """
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-        # Do NOT call listen() -- this ensures connection attempts are refused
-        self.sockets.append(sock)
-        return port
+        return 1
 
     def test_socks5_connect_ipv4_bidirectional_transfer(self) -> None:
         """SOCKS5 CONNECT to IPv4 target with bidirectional data transfer."""

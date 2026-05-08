@@ -28,9 +28,9 @@ from .utils.helpers import (
 )
 
 from .test_http3_listener import (
-    generate_test_certificates,
     create_http3_chain_config,
 )
+from .utils.certs import generate_test_certificates
 
 
 from .conftest import get_unique_port

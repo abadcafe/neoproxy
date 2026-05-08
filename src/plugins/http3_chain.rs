@@ -31,7 +31,7 @@ use crate::http_utils::{
 };
 use crate::plugin::Plugin;
 use crate::service::{BuildService, Service};
-use crate::stream::OnUpgrade;
+use crate::stream::Io;
 use crate::tracker::StreamTracker;
 
 /// Error indicating proxy authentication failure (HTTP 407)
@@ -714,16 +714,8 @@ impl tower::Service<Request> for Http3ChainService {
       .cloned()
       .expect("RequestContext should be present");
 
-    // Check for our upgrade (SOCKS5 or H3)
-    let upgrade = OnUpgrade::on(&mut req);
-
-    // Check for HTTP upgrade (only if no our upgrade)
-    let http_upgrade =
-      if upgrade.is_none() {
-        Some(hyper::upgrade::on(&mut req))
-      } else {
-        None
-      };
+    // Extract upgrade future: prefer our custom upgrade, fallback to hyper
+    let upgrade = crate::stream::extract_upgrade(&mut req);
 
     let (req_headers, _req_body) = req.into_parts();
 
@@ -784,7 +776,6 @@ impl tower::Service<Request> for Http3ChainService {
         &user_password_credential,
         &st,
         upgrade,
-        http_upgrade,
         &ctx,
         idle_timeout,
       )
@@ -800,8 +791,7 @@ async fn send_connect_and_tunnel_with_credential(
   port: u16,
   user_password_credential: &UserPasswordCredential,
   st: &Rc<StreamTracker>,
-  upgrade: Option<OnUpgrade>,
-  http_upgrade: Option<hyper::upgrade::OnUpgrade>,
+  upgrade: Option<Pin<Box<dyn Future<Output = Result<Box<dyn Io>>>>>>,
   ctx: &RequestContext,
   idle_timeout: Duration,
 ) -> Result<Response> {
@@ -843,7 +833,6 @@ async fn send_connect_and_tunnel_with_credential(
     receiving_stream,
     st,
     upgrade,
-    http_upgrade,
     proxy_ms,
     ctx,
     idle_timeout,
@@ -859,8 +848,7 @@ async fn complete_tunnel(
   >,
   receiving_stream: h3_cli::RequestStream<h3_quinn::RecvStream, Bytes>,
   st: &Rc<StreamTracker>,
-  upgrade: Option<OnUpgrade>,
-  http_upgrade: Option<hyper::upgrade::OnUpgrade>,
+  upgrade: Option<Pin<Box<dyn Future<Output = Result<Box<dyn Io>>>>>>,
   connect_ms: u64,
   ctx: &RequestContext,
   idle_timeout: Duration,
@@ -876,15 +864,16 @@ async fn complete_tunnel(
   let addr = "http3_chain".to_string();
 
   st.register(async move {
-    let mut client = match crate::stream::resolve_client_stream(
-      upgrade,
-      http_upgrade,
-    )
-    .await
-    {
-      Ok(c) => c,
-      Err(e) => {
-        warn!("tunnel to {addr} upgrade failed: {e}");
+    let mut client = match upgrade {
+      Some(u) => match u.await {
+        Ok(c) => c,
+        Err(e) => {
+          warn!("tunnel to {addr} upgrade failed: {e}");
+          return;
+        }
+      },
+      None => {
+        warn!("tunnel to {addr}: no upgrade available");
         return;
       }
     };

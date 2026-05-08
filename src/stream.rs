@@ -12,8 +12,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use anyhow::Result;
-use bytes::Bytes;
 use hyper_util::rt::TokioIo;
+use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::oneshot;
 use tracing::{error, info, warn};
@@ -318,21 +318,25 @@ pub fn http_status_to_socks5_error(
 /// Default idle timeout for tunnel data transfer (60 seconds).
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 60;
 
-/// Resolve upgrade futures into a type-erased stream.
+/// Extract an upgrade future from the request.
 ///
-/// Attempts our `OnUpgrade` first, then hyper's HTTP upgrade.
-/// Returns `Err` with a description if none succeed.
-pub async fn resolve_client_stream(
-  upgrade: Option<OnUpgrade>,
-  http_upgrade: Option<hyper::upgrade::OnUpgrade>,
-) -> Result<Box<dyn Io>> {
-  if let Some(upgrade) = upgrade {
-    upgrade.await
-  } else if let Some(http_upgrade) = http_upgrade {
-    let upgraded = http_upgrade.await?;
-    Ok(Box::new(TokioIo::new(upgraded)))
-  } else {
-    Err(anyhow::anyhow!("no upgrade available"))
+/// Prefers our custom `OnUpgrade` (SOCKS5/H3), falls back to hyper's
+/// HTTP upgrade. Returns `None` if no upgrade is available.
+pub fn extract_upgrade(
+  req: &mut http::Request<crate::http_utils::RequestBody>,
+) -> Option<Pin<Box<dyn Future<Output = Result<Box<dyn Io>>>>>> {
+  if let Some(u) = OnUpgrade::on(req) {
+    return Some(Box::pin(u));
+  }
+  match req.extensions().get::<hyper::upgrade::OnUpgrade>() {
+    Some(_) => {
+      let http_upgrade = hyper::upgrade::on(req);
+      Some(Box::pin(async move {
+        let upgraded = http_upgrade.await?;
+        Ok(Box::new(TokioIo::new(upgraded)) as Box<dyn Io>)
+      }))
+    }
+    None => None,
   }
 }
 

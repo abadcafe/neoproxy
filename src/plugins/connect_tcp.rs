@@ -11,7 +11,7 @@ use serde::Deserialize;
 use tokio::{self, net};
 use tracing::warn;
 
-use crate::stream::{self as tunnel};
+use crate::stream;
 use crate::config::SerializedArgs;
 use crate::connect_utils::{self as utils, ConnectTargetError};
 use crate::context::RequestContext;
@@ -20,7 +20,6 @@ use crate::http_utils::{
 };
 use crate::plugin::Plugin;
 use crate::service::{BuildService, Service};
-use crate::stream::OnUpgrade;
 use crate::tracker::StreamTracker;
 
 /// Default TCP connect timeout.
@@ -48,7 +47,7 @@ fn default_connect_timeout() -> Duration {
 }
 
 fn default_idle_timeout() -> Duration {
-  Duration::from_secs(tunnel::DEFAULT_IDLE_TIMEOUT_SECS)
+  Duration::from_secs(stream::DEFAULT_IDLE_TIMEOUT_SECS)
 }
 
 #[derive(Clone)]
@@ -85,7 +84,7 @@ impl ConnectTcpService {
     Self {
       stream_tracker: Rc::new(StreamTracker::new()),
       connect_timeout: DEFAULT_CONNECT_TIMEOUT,
-      idle_timeout: Duration::from_secs(tunnel::DEFAULT_IDLE_TIMEOUT_SECS),
+      idle_timeout: Duration::from_secs(stream::DEFAULT_IDLE_TIMEOUT_SECS),
     }
   }
 }
@@ -111,16 +110,8 @@ impl tower::Service<Request> for ConnectTcpService {
       .cloned()
       .expect("RequestContext should be present");
 
-    // Check for our upgrade (SOCKS5 or H3)
-    let upgrade = OnUpgrade::on(&mut req);
-
-    // Check for HTTP upgrade (only if no our upgrade)
-    let http_upgrade =
-      if upgrade.is_none() {
-        Some(hyper::upgrade::on(&mut req))
-      } else {
-        None
-      };
+    // Extract upgrade future: prefer our custom upgrade, fallback to hyper
+    let upgrade = stream::extract_upgrade(&mut req);
 
     // Parse target address
     let (parts, _body) = req.into_parts();
@@ -198,22 +189,23 @@ impl tower::Service<Request> for ConnectTcpService {
 
       // Background task: wait for upgrade, then bidirectional transfer
       stream_tracker.register(async move {
-        let mut client = match tunnel::resolve_client_stream(
-          upgrade,
-          http_upgrade,
-        )
-        .await
-        {
-          Ok(c) => c,
-          Err(e) => {
-            warn!("tunnel to {addr} upgrade failed: {e}");
+        let mut client = match upgrade {
+          Some(u) => match u.await {
+            Ok(c) => c,
+            Err(e) => {
+              warn!("tunnel to {addr} upgrade failed: {e}");
+              return;
+            }
+          },
+          None => {
+            warn!("tunnel to {addr}: no upgrade available");
             return;
           }
         };
 
         let mut target_stream = target_stream;
 
-        tunnel::run_tunnel(
+        stream::run_tunnel(
           &mut client,
           &mut target_stream,
           shutdown_handle,

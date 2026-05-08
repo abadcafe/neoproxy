@@ -34,7 +34,7 @@ use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };
 use crate::listeners::common::{
-  LISTENER_SHUTDOWN_TIMEOUT, MONITORING_LOG_INTERVAL,
+  LISTENER_SHUTDOWN_TIMEOUT,
 };
 use crate::service::Service as RuntimeService;
 use crate::shutdown::ShutdownHandle;
@@ -177,11 +177,6 @@ impl Socks5Listener {
       let connection_tracker = connection_tracker;
       let service = service;
       let service_name = service_name;
-
-      // Create monitoring interval timer
-      let mut monitoring_interval =
-        tokio::time::interval(MONITORING_LOG_INTERVAL);
-      monitoring_interval.tick().await; // Skip first immediate tick
 
       // Define accepting and shutdown as closures for reuse in loop
       let accepting = || async {
@@ -441,13 +436,6 @@ impl Socks5Listener {
               break;
             }
             // Continue accepting connections
-          }
-          _ = monitoring_interval.tick() => {
-            // Log monitoring info
-            tracing::info!(
-              "[socks5] active_connections={}",
-              connection_tracker.active_count()
-            );
           }
           _ = shutdown() => {
             // Graceful shutdown for the TcpListener

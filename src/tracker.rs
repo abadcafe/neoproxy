@@ -105,11 +105,6 @@ impl StreamTracker {
   pub fn active_count(&self) -> usize {
     self.streams.borrow().len()
   }
-
-  /// Count of active connection tasks.
-  pub fn connection_count(&self) -> usize {
-    self.connections.borrow().len()
-  }
 }
 
 impl Default for StreamTracker {
@@ -126,7 +121,6 @@ mod tests {
   fn test_stream_tracker_new() {
     let tracker = StreamTracker::new();
     assert_eq!(tracker.active_count(), 0);
-    assert_eq!(tracker.connection_count(), 0);
   }
 
   #[tokio::test]
@@ -207,17 +201,4 @@ mod tests {
     assert_eq!(tracker.active_count(), 0);
   }
 
-  #[tokio::test]
-  async fn test_stream_tracker_connection_count() {
-    let local_set = tokio::task::LocalSet::new();
-    local_set
-      .run_until(async {
-        let tracker = StreamTracker::new();
-        tracker.register_connection(async {});
-        tokio::task::yield_now().await;
-        assert_eq!(tracker.connection_count(), 1);
-        assert_eq!(tracker.active_count(), 0);
-      })
-      .await;
-  }
 }

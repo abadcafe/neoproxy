@@ -12,9 +12,6 @@ use crate::http_utils::{BytesBufBodyWrapper, Response, ResponseBody};
 /// This is the timeout for Phase 1 of graceful shutdown.
 pub const LISTENER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Monitoring log interval in seconds.
-pub const MONITORING_LOG_INTERVAL: Duration = Duration::from_secs(60);
-
 /// Executor for spawning tasks on the current tokio LocalSet.
 #[derive(Clone)]
 pub struct TokioLocalExecutor;

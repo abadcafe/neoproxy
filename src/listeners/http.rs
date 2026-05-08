@@ -25,7 +25,7 @@ use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };
 use crate::listeners::common::{
-  LISTENER_SHUTDOWN_TIMEOUT, MONITORING_LOG_INTERVAL,
+  LISTENER_SHUTDOWN_TIMEOUT,
   TokioLocalExecutor,
 };
 use crate::server::{Server, ServerRouter};
@@ -238,11 +238,6 @@ impl HttpListener {
       // Log listener startup event
       info!("HTTP listener started on {}", addr);
 
-      // Create monitoring interval timer
-      let mut monitoring_interval =
-        tokio::time::interval(MONITORING_LOG_INTERVAL);
-      monitoring_interval.tick().await; // Skip first immediate tick
-
       let shutdown = async move || shutdown_handle.notified().await;
       let accepting = || async {
         match listener.accept().await {
@@ -274,13 +269,6 @@ impl HttpListener {
       loop {
         tokio::select! {
           _ = accepting() => {},
-          _ = monitoring_interval.tick() => {
-            // Log monitoring info
-            info!(
-              "[http] active_connections={}",
-              connection_tracker.active_count()
-            );
-          }
           _ = shutdown() => {
             // Graceful shutdown for the TcpListener.
             info!("HTTP listener on {} shutting down", addr);

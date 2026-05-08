@@ -25,7 +25,7 @@ use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };
 use crate::listeners::common::{
-  LISTENER_SHUTDOWN_TIMEOUT, MONITORING_LOG_INTERVAL,
+  LISTENER_SHUTDOWN_TIMEOUT,
 };
 use crate::shutdown::ShutdownHandle;
 use crate::stream::H3UpgradeTrigger;
@@ -709,26 +709,10 @@ impl Listening for Http3Listener {
       // tasks end
       drop(conn_tx);
 
-      // Monitoring is integrated into the accept loop below
-      // to avoid Send requirements with spawn_local
-
-      // Accept connections loop with integrated monitoring
-      let mut monitoring_interval =
-        tokio::time::interval(MONITORING_LOG_INTERVAL);
-      monitoring_interval.tick().await; // Skip first immediate tick
-
+      // Accept connections loop
       loop {
         let accept_result = tokio::select! {
           res = conn_rx.recv() => res,
-          _ = monitoring_interval.tick() => {
-            // Log monitoring info
-            info!(
-              "[http3] active_connections={}, active_streams={}",
-              stream_tracker.connection_count(),
-              stream_tracker.active_count()
-            );
-            continue;
-          }
           _ = shutdown_handle.notified() => {
             // Graceful shutdown
             break;

@@ -32,7 +32,7 @@ use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };
 use crate::listeners::common::{
-  LISTENER_SHUTDOWN_TIMEOUT, MONITORING_LOG_INTERVAL,
+  LISTENER_SHUTDOWN_TIMEOUT,
   TokioLocalExecutor,
 };
 use crate::server::{Server, ServerRouter};
@@ -311,10 +311,6 @@ impl HttpsListener {
     let accepting_fut = async move {
       info!("HTTPS listener started on {}", addr);
 
-      let mut monitoring_interval =
-        tokio::time::interval(MONITORING_LOG_INTERVAL);
-      monitoring_interval.tick().await;
-
       let shutdown = async move || shutdown_handle.notified().await;
       let accepting = || async {
         match listener.accept().await {
@@ -377,12 +373,6 @@ impl HttpsListener {
       loop {
         tokio::select! {
             _ = accepting() => {},
-            _ = monitoring_interval.tick() => {
-                info!(
-                    "[https.listener] active_connections={}",
-                    connection_tracker.active_count()
-                );
-            }
             _ = shutdown() => {
                 info!("HTTPS listener on {} shutting down", addr);
                 break;

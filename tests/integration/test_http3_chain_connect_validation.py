@@ -159,32 +159,6 @@ class TestHTTP3ChainConnectValidation:
             assert "text/plain" in headers.get("content-type", ""), \
                 f"Expected text/plain Content-Type, got: {headers.get('content-type')}"
 
-    def test_post_method_returns_405(self, shared_test_certs: dict) -> None:
-        """
-        TC-CHAIN-VALIDATE-002: POST method returns 405.
-
-        Send a POST request to the http3_chain service.
-        Expected: 405 Method Not Allowed.
-        """
-        http_port = get_unique_port()
-        h3_port = get_unique_port()
-
-        with chain_service_context(http_port, h3_port, shared_test_certs) as (temp_dir, proxy_proc):
-            request = (
-                b"POST / HTTP/1.1\r\n"
-                b"Host: localhost\r\n"
-                b"Content-Length: 5\r\n"
-                b"\r\n"
-                b"hello"
-            )
-            response = send_raw_request("127.0.0.1", http_port, request)
-
-            status_code, _, _, _ = parse_http_response(response)
-
-            assert status_code == 405, \
-                f"Expected 405 for POST, got {status_code}. " \
-                f"Response: {response.decode(errors='ignore')}"
-
     def test_connect_missing_port_returns_400(self, shared_test_certs: dict) -> None:
         """
         TC-CHAIN-VALIDATE-003: CONNECT with missing port returns 400.

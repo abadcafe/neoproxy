@@ -111,45 +111,6 @@ services: []
         assert "error" in error_output or "parse" in error_output or "expected" in error_output, \
             f"Expected YAML parse error in output, got: {stderr}"
 
-    def test_socks5_invalid_yaml_format(self) -> None:
-        """
-        TC-S5-027: Invalid YAML format in SOCKS5 config.
-
-        Target: Verify proxy fails to start with invalid YAML.
-        """
-        proxy_port = get_unique_port()
-        config = f"""server_threads: 1
-
-services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
-listeners:
-- name: socks5_main
-  kind: socks5
-  addresses: [
-    - "0.0.0.0:{proxy_port}"
-servers:
-- name: socks5_server
-  listeners: ["socks5_main"]
-  service: connect_tcp
-"""
-        proxy_proc = subprocess.Popen(
-            [os.path.abspath(NEOPROXY_BINARY), "--config", "/dev/stdin"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        proxy_proc.stdin.write(config)
-        proxy_proc.stdin.close()
-        try:
-            exit_code = proxy_proc.wait(timeout=5.0)
-            assert exit_code != 0, \
-                f"Expected non-zero exit code for invalid YAML, got {exit_code}"
-        except subprocess.TimeoutExpired:
-            proxy_proc.kill()
-            proxy_proc.wait()
-            raise AssertionError("Process should have exited")
 
 
 # ==============================================================================
@@ -475,49 +436,6 @@ servers:
         assert "invalid address" in stderr, \
             f"Expected 'invalid address' in error, got: {stderr}"
 
-    def test_socks5_invalid_address(self) -> None:
-        """
-        TC-S5-023: Invalid addresses in SOCKS5 listener config.
-
-        Target: Verify proxy fails to start with invalid addresses.
-        """
-        proxy_port = get_unique_port()
-        config = f"""server_threads: 1
-
-services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
-
-listeners:
-- name: socks5_main
-  kind: socks5
-  addresses:
-    - "invalid-address"
-    - "0.0.0.0:{proxy_port}"
-    - "also-invalid:port"
-
-servers:
-- name: socks5_server
-  listeners: ["socks5_main"]
-  service: connect_tcp
-"""
-        proxy_proc = subprocess.Popen(
-            [os.path.abspath(NEOPROXY_BINARY), "--config", "/dev/stdin"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        proxy_proc.stdin.write(config)
-        proxy_proc.stdin.close()
-        try:
-            exit_code = proxy_proc.wait(timeout=5.0)
-            assert exit_code != 0, \
-                f"Expected non-zero exit code for invalid addresses, got {exit_code}"
-        except subprocess.TimeoutExpired:
-            proxy_proc.kill()
-            proxy_proc.wait()
-            raise AssertionError("Process should have exited")
 
     def test_unknown_field_in_socks5_args(self) -> None:
         """

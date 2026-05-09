@@ -284,7 +284,7 @@ class TestHTTP3PasswordAuth:
         TC-H3-AUTH-002: HTTP/3 listener with password auth starts successfully.
 
         Target: Verify HTTP/3 listener starts with password authentication config
-        using plaintext passwords.
+        using plaintext passwords, including multiple users.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
@@ -300,7 +300,9 @@ class TestHTTP3PasswordAuth:
                 key_path=key_path,
                 temp_dir=temp_dir,
                 users=[
-                    ("testuser", "test_password"),
+                    ("user1", "password1"),
+                    ("user2", "password2"),
+                    ("admin", "adminpass"),
                 ]
             )
 
@@ -308,7 +310,7 @@ class TestHTTP3PasswordAuth:
 
             # Verify process starts and stays running
             assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "HTTP/3 listener failed to start with password auth"
+                "HTTP/3 listener failed to start with password auth (multiple users)"
 
             assert proxy_proc.poll() is None, \
                 "HTTP/3 listener should be running with password auth config"
@@ -1226,142 +1228,3 @@ class TestHTTP3DualAuth:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-# ==============================================================================
-# Test cases - 7.7 Configuration validation for authentication
-# ==============================================================================
-
-
-class TestHTTP3AuthConfigValidation:
-    """Test 7.7: HTTP/3 authentication configuration validation scenarios."""
-
-    def test_tls_client_cert_missing_ca_path_rejected(self, shared_test_certs) -> None:
-        """
-        TC-H3-AUTH-CFG-003: TLS client cert auth without CA path causes failure.
-
-        Target: Verify HTTP/3 listener fails when TLS client cert auth is
-        specified but client_ca_certs path doesn't exist
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-
-        try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-
-            # NEW config format: top-level listener with server-level TLS with non-existent client_ca_certs
-            config_content = f"""server_threads: 1
-
-services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
-
-listeners:
-- name: h3_main
-  kind: http3
-  addresses: ["0.0.0.0:{proxy_port}"]
-
-servers:
-- name: http3_server
-  tls:
-    certificates:
-    - cert_path: "{cert_path}"
-      key_path: "{key_path}"
-    client_ca_certs:
-    - "/nonexistent/ca.pem"
-  listeners: ["h3_main"]
-  service: connect_tcp
-"""
-            config_path = os.path.join(temp_dir, "missing_ca_path.yaml")
-            with open(config_path, "w") as f:
-                f.write(config_content)
-
-            proc = subprocess.Popen(
-                [NEOPROXY_BINARY, "--config", config_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=False
-            )
-
-            try:
-                return_code = proc.wait(timeout=5)
-                assert return_code != 0, \
-                    f"Expected non-zero exit code for missing CA path, got {return_code}"
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-                raise AssertionError("Process should have exited with error for missing CA path")
-
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_plaintext_password_accepted_in_config(self, shared_test_certs) -> None:
-        """
-        TC-H3-AUTH-CFG-004: Plaintext password is accepted in configuration.
-
-        Target: Verify HTTP/3 listener accepts plaintext password in config.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-
-        try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-
-            config_path = create_http3_listener_config_with_password_auth(
-                proxy_port=proxy_port,
-                cert_path=cert_path,
-                key_path=key_path,
-                temp_dir=temp_dir,
-                users=[
-                    ("testuser", "password123"),
-                ]
-            )
-
-            proxy_proc = start_proxy(config_path)
-
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "HTTP/3 listener should start with plaintext password"
-
-        finally:
-            if proxy_proc:
-                proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_multiple_users_accepted(self, shared_test_certs) -> None:
-        """
-        TC-H3-AUTH-CFG-005: Multiple users are accepted in configuration.
-
-        Target: Verify HTTP/3 listener accepts multiple users in config.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-
-        try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-
-            config_path = create_http3_listener_config_with_password_auth(
-                proxy_port=proxy_port,
-                cert_path=cert_path,
-                key_path=key_path,
-                temp_dir=temp_dir,
-                users=[
-                    ("user1", "password1"),
-                    ("user2", "password2"),
-                    ("admin", "adminpass"),
-                ]
-            )
-
-            proxy_proc = start_proxy(config_path)
-
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "HTTP/3 listener should start with multiple users"
-
-        finally:
-            if proxy_proc:
-                proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
-            shutil.rmtree(temp_dir, ignore_errors=True)

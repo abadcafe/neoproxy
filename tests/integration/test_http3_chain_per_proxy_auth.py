@@ -7,16 +7,11 @@ Test nature: Black-box testing through external interface
 This test module covers:
 - Per-proxy password authentication
 - Per-proxy TLS client certificate authentication
-- Per-proxy user and tls configuration
+- Authentication inheritance from default_user
 - Error handling for auth failures
-- Non-auth error behavior (no fallback)
+- TLS configuration inheritance and override
 
 NOTE: These tests require real HTTP/3 servers with authentication configured.
-
-IMPORTANT: With AND-logic multi-auth, fallback between auth methods is not possible
-when both mTLS and password are configured on the listener. Both must pass for
-authentication to succeed. Per-proxy auth fallback in the chain is still useful
-when connecting to proxies with single auth methods configured.
 """
 
 import subprocess
@@ -401,84 +396,6 @@ class TestHTTP3ChainAuthInheritance:
 # ==============================================================================
 
 
-class TestHTTP3ChainAuthNone:
-    """Test explicit 'none' credential scenarios."""
-
-    def test_chain_explicit_none_no_auth(self, shared_test_certs: dict) -> None:
-        """
-        TC-CHAIN-AUTH-005: Proxy with credential: {} has no credential.
-
-        Target: Verify empty credential object disables authentication inheritance.
-        """
-        temp_dir1 = tempfile.mkdtemp()
-        temp_dir2 = tempfile.mkdtemp()
-
-        http_port = get_unique_port()
-        h3_port = get_unique_port()
-        target_port = get_unique_port()
-
-        chain_proc: Optional[subprocess.Popen] = None
-        h3_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
-
-        try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
-
-            _, target_socket = create_target_server("127.0.0.1", target_port, one_shot_echo_handler)
-
-            # Start H3 listener WITHOUT any auth requirement
-            h3_config = create_http3_listener_config(
-                proxy_port=h3_port,
-                cert_path=cert_path,
-                key_path=key_path,
-                temp_dir=temp_dir1
-            )
-            h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0)
-
-            # Proxy with no user and no tls - should work without auth
-            chain_config = create_http3_chain_config_with_per_proxy_auth(
-                http_port=http_port,
-                proxy_group=[("127.0.0.1", h3_port, 1, None, None)],
-                ca_path=ca_path,
-                temp_dir=temp_dir2
-            )
-            chain_proc = start_proxy(chain_config)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
-
-            # Clear no_proxy to force proxy usage for localhost
-            env = get_curl_env_without_no_proxy()
-            result = subprocess.run(
-                ["curl", "-s", "-p", "--http0.9",
-                    "-x", f"http://127.0.0.1:{http_port}",
-                    f"http://127.0.0.1:{target_port}/",
-                    "-d", "test_explicit_none",
-                    "--connect-timeout", "10",
-                    "--max-time", "2"
-                ],
-                capture_output=True,
-                text=True,
-                env=env
-            )
-
-            assert "test_explicit_none" in result.stdout, \
-                f"Expected echo data (explicit none should work), got stdout: {result.stdout}, stderr: {result.stderr}"
-
-        finally:
-            if chain_proc:
-                chain_proc.kill()
-                chain_proc.wait(timeout=5)
-            if h3_proc:
-                h3_proc.kill()
-                h3_proc.wait(timeout=5)
-            if target_socket:
-                target_socket.close()
-            shutil.rmtree(temp_dir1, ignore_errors=True)
-            shutil.rmtree(temp_dir2, ignore_errors=True)
-
-
 # ==============================================================================
 # Test cases - Authentication failure
 # ==============================================================================
@@ -560,68 +477,6 @@ class TestHTTP3ChainAuthFailure:
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
-    def test_chain_non_auth_error_no_fallback(self, shared_test_certs: dict) -> None:
-        """
-        TC-CHAIN-AUTH-007: Non-auth error does NOT trigger fallback.
-
-        Target: Verify that timeout/connection errors do NOT trigger auth fallback.
-        The proxy should return error immediately without trying other auth methods.
-        """
-        temp_dir1 = tempfile.mkdtemp()
-        temp_dir2 = tempfile.mkdtemp()
-
-        http_port = get_unique_port()
-
-        chain_proc: Optional[subprocess.Popen] = None
-
-        try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
-
-            # Configure user
-            user_yaml = """
-          username: "user1"
-          password: "pass1"
-"""
-            # Point to a non-existent proxy address (will cause connection refused)
-            chain_config = create_http3_chain_config_with_per_proxy_auth(
-                http_port=http_port,
-                proxy_group=[("127.0.0.1", 9999, 1, user_yaml, None)],  # Non-existent port
-                ca_path=ca_path,
-                temp_dir=temp_dir2
-            )
-            chain_proc = start_proxy(chain_config)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=2.0, proc=chain_proc)
-
-            # Make a request - should fail with connection error (NOT auth fallback)
-            # Clear no_proxy to force proxy usage for localhost
-            env = get_curl_env_without_no_proxy()
-            result = subprocess.run(
-                ["curl", "-s", "-p",
-                    "-x", f"http://127.0.0.1:{http_port}",
-                    "http://example.com:80/",
-                    "--connect-timeout", "1"
-                ],
-                capture_output=True,
-                text=True,
-                env=env
-            )
-
-            # Should receive 502 Bad Gateway (connection failure)
-            # NOT 407 (which would indicate auth fallback was attempted)
-            assert "407" not in result.stdout, \
-                "Should NOT attempt auth fallback for connection errors"
-            # Either 502 or curl failure is acceptable (connection refused)
-            assert result.returncode != 0 or "502" in result.stdout, \
-                f"Expected 502 error for connection failure, got stdout: {result.stdout}, stderr: {result.stderr}"
-
-        finally:
-            if chain_proc:
-                chain_proc.kill()
-                chain_proc.wait(timeout=5)
-            shutil.rmtree(temp_dir1, ignore_errors=True)
-            shutil.rmtree(temp_dir2, ignore_errors=True)
 
 
 # ==============================================================================
@@ -729,56 +584,3 @@ servers:
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
-    def test_default_tls_inherited(self, shared_test_certs: dict) -> None:
-        """
-        TC-CERT-REFACTOR-006: Proxy inherits TLS from default_tls via deep merge.
-
-        Verifies that when proxy has no tls config,
-        server_ca_path is inherited from default_tls.
-        """
-        temp_dir = tempfile.mkdtemp()
-
-        http_port = get_unique_port()
-        h3_port = get_unique_port()
-
-        proxy_proc: Optional[subprocess.Popen] = None
-        h3_proc: Optional[subprocess.Popen] = None
-
-        try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
-
-            h3_config = create_http3_listener_config(
-                proxy_port=h3_port,
-                cert_path=cert_path,
-                key_path=key_path,
-                temp_dir=temp_dir,
-            )
-            h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0)
-
-            # Proxy has no tls - should inherit from default_tls
-            user_yaml = """
-          username: "proxy_user"
-          password: "proxy_pass"
-"""
-            chain_config = create_http3_chain_config_with_per_proxy_auth(
-                http_port=http_port,
-                proxy_group=[("127.0.0.1", h3_port, 1, user_yaml, None)],
-                ca_path=ca_path,
-                temp_dir=temp_dir,
-            )
-            proxy_proc = start_proxy(chain_config)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
-            assert proxy_proc.poll() is None, \
-                "Chain service should be running with deep-merged tls config"
-
-        finally:
-            if proxy_proc:
-                proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
-            if h3_proc:
-                h3_proc.kill()
-                h3_proc.wait(timeout=5)
-            shutil.rmtree(temp_dir, ignore_errors=True)

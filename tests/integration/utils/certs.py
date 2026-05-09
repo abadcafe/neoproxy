@@ -13,15 +13,16 @@ from typing import List, Tuple
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
 
 
-def _make_key() -> ec.EllipticCurvePrivateKey:
-  return ec.generate_private_key(ec.SECP256R1())
+def _make_key() -> rsa.RSAPrivateKey:
+  return rsa.generate_private_key(65537, 2048)
 
 
-def _write_key(path: str, key: ec.EllipticCurvePrivateKey) -> None:
+def _write_key(path: str, key: RSAPrivateKey) -> None:
   with open(path, "wb") as f:
     f.write(
       key.private_bytes(
@@ -39,7 +40,7 @@ def _write_cert(path: str, cert: x509.Certificate) -> None:
 
 def _load_ca(
     ca_cert_path: str, ca_key_path: str
-) -> Tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
+) -> Tuple[x509.Certificate, RSAPrivateKey]:
   with open(ca_cert_path, "rb") as f:
     ca_cert = x509.load_pem_x509_certificate(f.read())
   with open(ca_key_path, "rb") as f:

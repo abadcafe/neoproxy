@@ -849,6 +849,7 @@ async fn send_connect_and_tunnel_with_credential(
   complete_tunnel(
     sending_stream,
     receiving_stream,
+    requester,
     st,
     upgrade,
     proxy_ms,
@@ -865,6 +866,7 @@ async fn complete_tunnel(
     Bytes,
   >,
   receiving_stream: h3_cli::RequestStream<h3_quinn::RecvStream, Bytes>,
+  requester: h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>,
   st: &Rc<StreamTracker>,
   upgrade: Option<Pin<Box<dyn Future<Output = Result<Box<dyn Io>>>>>>,
   connect_ms: u64,
@@ -882,6 +884,11 @@ async fn complete_tunnel(
   let addr = "http3_chain".to_string();
 
   st.register(async move {
+    // Hold requester alive for the tunnel's lifetime.
+    // SendRequest::drop() sets a connection error when sender_count
+    // reaches 0, killing all streams on this H3 connection.
+    let _requester = requester;
+
     let mut client = match upgrade {
       Some(u) => match u.await {
         Ok(c) => c,

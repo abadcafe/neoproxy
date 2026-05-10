@@ -12,6 +12,17 @@ pub mod auth;
 pub mod connect_tcp;
 pub mod echo;
 pub mod http3_chain;
+pub mod utils;
+
+/// Flush and join all writer threads that were saved by `uninstall()`.
+///
+/// Must be called after ALL server threads have exited (i.e., after
+/// `main_loop` returns) to ensure writer threads can flush their
+/// buffers before the process exits. See `access_log::flush_writer_threads()`
+/// for details.
+pub fn flush_writer_threads() {
+  access_log::flush_writer_threads();
+}
 
 /// Manages plugin lifecycle: registers all plugins at construction,
 /// builds services/layers on demand.
@@ -20,18 +31,29 @@ pub struct PluginManager {
 }
 
 impl PluginManager {
-  pub fn new() -> Self {
+  pub fn new(plugins_config: HashMap<String, SerializedArgs>) -> Self {
     let mut plugins: HashMap<&'static str, Box<dyn plugin::Plugin>> =
       HashMap::new();
-    plugins
-      .insert(connect_tcp::plugin_name(), connect_tcp::create_plugin());
-    plugins.insert(echo::plugin_name(), echo::create_plugin());
-    plugins
-      .insert(http3_chain::plugin_name(), http3_chain::create_plugin());
-    plugins.insert(auth::plugin_name(), auth::create_plugin());
+
+    plugins.insert(
+      connect_tcp::plugin_name(),
+      connect_tcp::create_plugin(plugins_config.get("connect_tcp")),
+    );
+    plugins.insert(
+      echo::plugin_name(),
+      echo::create_plugin(plugins_config.get("echo")),
+    );
+    plugins.insert(
+      http3_chain::plugin_name(),
+      http3_chain::create_plugin(plugins_config.get("http3_chain")),
+    );
+    plugins.insert(
+      auth::plugin_name(),
+      auth::create_plugin(plugins_config.get("auth")),
+    );
     plugins.insert(
       access_log::AccessLogPlugin::plugin_name(),
-      access_log::AccessLogPlugin::create_plugin(),
+      access_log::AccessLogPlugin::create_plugin(plugins_config.get("access_log")),
     );
     Self { plugins }
   }
@@ -100,13 +122,13 @@ mod tests {
   #[test]
   fn test_auth_plugin_name_and_create() {
     assert_eq!(auth::plugin_name(), "auth");
-    let plugin = auth::create_plugin();
+    let plugin = auth::create_plugin(None);
     assert!(plugin.layer_builder("basic_auth").is_some());
   }
 
   #[test]
   fn test_plugin_manager_new_has_all_plugins() {
-    let pm = PluginManager::new();
+    let pm = PluginManager::new(HashMap::new());
     assert!(pm.plugins.contains_key("echo"));
     assert!(pm.plugins.contains_key("auth"));
     assert!(pm.plugins.contains_key("access_log"));
@@ -116,7 +138,7 @@ mod tests {
 
   #[test]
   fn test_plugin_manager_build_service_not_found() {
-    let pm = PluginManager::new();
+    let pm = PluginManager::new(HashMap::new());
     let result =
       pm.build_service("nonexistent", "svc", serde_yaml::Value::Null);
     assert!(result.is_err());
@@ -130,7 +152,7 @@ mod tests {
 
   #[test]
   fn test_plugin_manager_build_layer_not_found() {
-    let pm = PluginManager::new();
+    let pm = PluginManager::new(HashMap::new());
     let result =
       pm.build_layer("nonexistent", "layer", serde_yaml::Value::Null);
     assert!(result.is_err());

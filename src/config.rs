@@ -12,6 +12,7 @@ mod listener;
 mod service;
 mod tls;
 
+use std::collections::HashMap;
 use std::sync::{LazyLock, OnceLock};
 
 use anyhow::{Context, Result};
@@ -105,6 +106,8 @@ pub struct ConfigRaw {
   pub server_threads: usize,
   pub services: Vec<ServiceRaw>,
   pub servers: Vec<Server>,
+  #[serde(default)]
+  pub plugins: HashMap<String, SerializedArgs>,
 }
 
 fn default_server_threads() -> usize {
@@ -118,6 +121,7 @@ pub struct Config {
   pub listeners: Vec<ListenerConfig>,
   pub services: Vec<Service>,
   pub servers: Vec<Server>,
+  pub plugins: HashMap<String, SerializedArgs>,
 }
 
 impl Default for Config {
@@ -127,6 +131,7 @@ impl Default for Config {
       listeners: vec![],
       services: vec![],
       servers: vec![],
+      plugins: HashMap::new(),
     }
   }
 }
@@ -139,6 +144,7 @@ impl Config {
     self.server_threads = raw.server_threads;
     self.listeners = raw.listeners;
     self.servers = raw.servers;
+    self.plugins = raw.plugins;
 
     // Convert ServiceRaw -> Service using parse methods
     self.services = raw
@@ -301,6 +307,7 @@ mod tests {
     assert!(config.listeners.is_empty());
     assert!(config.services.is_empty());
     assert!(config.servers.is_empty());
+    assert!(config.plugins.is_empty());
   }
 
   #[test]
@@ -407,6 +414,7 @@ servers:
       listeners: vec![],
       services: vec![],
       servers: vec![],
+      plugins: HashMap::new(),
     };
     let cloned = config.clone();
     assert_eq!(cloned.server_threads, 2);
@@ -811,5 +819,48 @@ services:
     assert_eq!(raw.listeners[0].name, "http_main");
     assert_eq!(raw.servers[0].listeners, vec!["http_main"]);
     assert_eq!(raw.server_threads, 4); // default
+  }
+
+  #[test]
+  fn test_config_raw_plugins_default_empty() {
+    let yaml = r#"
+services: []
+servers: []
+"#;
+    let raw: ConfigRaw = serde_yaml::from_str(yaml).unwrap();
+    assert!(raw.plugins.is_empty());
+  }
+
+  #[test]
+  fn test_config_raw_plugins_parsed() {
+    let yaml = r#"
+plugins:
+  access_log:
+    writers:
+      - path_prefix: "logs/audit"
+services: []
+servers: []
+"#;
+    let raw: ConfigRaw = serde_yaml::from_str(yaml).unwrap();
+    assert!(raw.plugins.contains_key("access_log"));
+    let access_log_config = &raw.plugins["access_log"];
+    assert!(access_log_config.as_mapping().is_some());
+    let mapping = access_log_config.as_mapping().unwrap();
+    assert!(mapping.contains_key(&serde_yaml::Value::String("writers".to_string())));
+  }
+
+  #[test]
+  fn test_config_raw_plugins_preserved_in_parse_string() {
+    let yaml = r#"
+plugins:
+  access_log:
+    writers:
+      - path_prefix: "logs/audit"
+services: []
+servers: []
+"#;
+    let mut config = Config::default();
+    config.parse_string(yaml).unwrap();
+    assert!(config.plugins.contains_key("access_log"));
   }
 }

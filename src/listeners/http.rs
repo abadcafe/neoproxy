@@ -24,7 +24,7 @@ use crate::http_utils::{
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };
-use crate::listeners::common::{
+use crate::listeners::utils::{
   LISTENER_SHUTDOWN_TIMEOUT,
   TokioLocalExecutor,
 };
@@ -108,10 +108,10 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
     // Step 1: Check HTTP version FIRST
     // HTTP/1.0 is not supported - return 505 HTTP Version Not Supported
     if let Err(_status) =
-      super::common::check_http_version(req.version())
+      super::utils::check_http_version(req.version())
     {
       return Box::pin(async {
-        Ok(super::common::build_505_response())
+        Ok(super::utils::build_505_response())
       });
     }
 
@@ -126,7 +126,7 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       Some(entry) => entry,
       None => {
         return Box::pin(async {
-          Ok(super::common::build_404_response())
+          Ok(super::utils::build_404_response())
         });
       }
     };
@@ -363,7 +363,7 @@ pub fn create_listener_builder() -> Box<dyn BuildListener> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::listeners::common::{
+  use crate::listeners::utils::{
     build_505_response, check_http_version,
   };
   use crate::shutdown::ShutdownHandle;
@@ -475,7 +475,7 @@ mod tests {
 
   #[test]
   fn test_build_404_response() {
-    let resp = super::super::common::build_404_response();
+    let resp = super::super::utils::build_404_response();
     assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
   }
 

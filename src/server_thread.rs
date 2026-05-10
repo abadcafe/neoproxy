@@ -132,7 +132,7 @@ pub fn run_server_thread(
 
   rt.block_on(local_set.run_until(async {
     // Each thread builds its own PluginManager and listeners
-    let mut plugin_manager = PluginManager::new();
+    let mut plugin_manager = PluginManager::new(Config::global().plugins.clone());
     let listener_manager = ListenerManager::new();
 
     let listeners = build_listeners(
@@ -158,6 +158,16 @@ pub fn run_server_thread(
     }
 
     while join_set.join_next().await.is_some() {}
+
+    // Drop listeners first so middleware instances (which hold mpsc::Sender
+    // clones for access_log writer threads) are released before uninstall().
+    // This ensures the Sender clones are dropped early, allowing writer
+    // threads to see channel close and begin their final flush. uninstall()
+    // then drops the registry's Sender handles and saves JoinHandles to
+    // PENDING_WRITER_JOINS. The actual thread join happens later in
+    // flush_writer_threads(), called from main.rs after all server threads
+    // have exited (see CR-014 two-phase shutdown design).
+    drop(listeners);
 
     // Uninstall plugins at shutdown
     plugin_manager.uninstall_all().await;
@@ -350,14 +360,14 @@ mod tests {
   }
 
   fn make_test_plugin_manager() -> PluginManager {
-    PluginManager::new()
+    PluginManager::new(HashMap::new())
   }
 
   fn make_test_plugin_manager_with_layers(
     counters: &[Arc<AtomicUsize>],
     names: &[&'static str],
   ) -> PluginManager {
-    let mut pm = PluginManager::new();
+    let mut pm = PluginManager::new(HashMap::new());
     let mut plugin = TestAssemblyPlugin::new();
     for (name, counter) in names.iter().zip(counters.iter()) {
       plugin = plugin.with_layer(*name, counter.clone());
@@ -372,7 +382,7 @@ mod tests {
 
   #[test]
   fn test_build_service_with_layers_not_found() {
-    let pm = PluginManager::new();
+    let pm = PluginManager::new(HashMap::new());
     let config = Config::default();
     let result = build_service_with_layers(&pm, &config, "nonexistent");
     assert!(result.is_err());
@@ -386,7 +396,7 @@ mod tests {
 
   #[test]
   fn test_build_listeners_empty_config() {
-    let pm = PluginManager::new();
+    let pm = PluginManager::new(HashMap::new());
     let config = Config::default();
     let listener_manager = ListenerManager::new();
     let result = build_listeners(&pm, &config, &listener_manager);
@@ -636,7 +646,7 @@ mod tests {
 
   #[test]
   fn test_build_service_with_layers_plugin_not_found() {
-    let pm = PluginManager::new();
+    let pm = PluginManager::new(HashMap::new());
     let config = Config {
       services: vec![ServiceConfig {
         name: "svc".to_string(),

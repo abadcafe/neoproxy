@@ -13,7 +13,7 @@ use tracing::warn;
 
 use crate::stream;
 use crate::config::SerializedArgs;
-use crate::connect_utils::{self as utils, ConnectTargetError};
+use super::utils::{self as utils, ConnectTargetError};
 use crate::context::RequestContext;
 use crate::http_utils::{
   Request, Response, build_empty_response, build_error_response,
@@ -177,7 +177,7 @@ impl tower::Service<Request> for ConnectTcpService {
 
       // Write metrics to RequestContext
       ctx.insert(
-        "connect_tcp.connect_tcp.connect_ms",
+        "connect_tcp.connect_ms",
         connect_ms.to_string(),
       );
 
@@ -292,7 +292,7 @@ pub fn plugin_name() -> &'static str {
   "connect_tcp"
 }
 
-pub fn create_plugin() -> Box<dyn Plugin> {
+pub fn create_plugin(_config: Option<&SerializedArgs>) -> Box<dyn Plugin> {
   Box::new(ConnectTcpPlugin::new())
 }
 
@@ -384,7 +384,7 @@ mod tests {
 
   #[test]
   fn test_create_plugin() {
-    let plugin = create_plugin();
+    let plugin = create_plugin(None);
     assert!(plugin.service_builder("connect_tcp").is_some());
   }
 
@@ -1071,11 +1071,11 @@ mod tests {
         );
 
         // RequestContext should have connect_ms
-        let connect_ms = ctx.get("connect_tcp.connect_tcp.connect_ms");
+        let connect_ms = ctx.get("connect_tcp.connect_ms");
         assert!(
           connect_ms.is_some(),
           "RequestContext should contain \
-           connect_tcp.connect_tcp.connect_ms"
+           connect_tcp.connect_ms"
         );
         // connect_ms should be a valid number
         let ms: u64 = connect_ms.unwrap().parse().unwrap();

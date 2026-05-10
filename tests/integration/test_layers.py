@@ -4,6 +4,7 @@ All HTTP requests use subprocess.run(["curl", ...]) instead of Python requests l
 This matches real-world proxy usage more closely.
 """
 import base64
+import glob
 import socket
 import threading
 import time
@@ -12,18 +13,83 @@ import os
 from .utils.helpers import curl_request, curl_request_with_headers
 
 
-def wait_for_log_file(log_path: str, timeout: float = 2.0, contains: str | None = None) -> bool:
-    """Poll for log file to exist (and optionally contain specific text)."""
+def _find_access_log(log_dir: str, prefix: str = "access") -> str | None:
+    """Find the first access log file matching the prefix in the log directory.
+
+    With rotate_daily=true (default), the file is named '{prefix}.{date}'.
+    With rotate_daily=false, the file is named '{prefix}' (no extension).
+
+    Returns:
+        Path to the log file, or None if not found.
+    """
+    if not os.path.isdir(log_dir):
+        return None
+    # Try exact prefix match first (rotate_daily=false: logs/access)
+    exact = os.path.join(log_dir, prefix)
+    if os.path.isfile(exact):
+        return exact
+    # Try glob for date-suffixed files (rotate_daily=true: logs/access.2026-05-10)
+    matches = sorted(glob.glob(os.path.join(log_dir, f"{prefix}.*")))
+    for m in matches:
+        if os.path.isfile(m):
+            return m
+    return None
+
+
+def wait_for_log_file(
+    log_dir: str,
+    prefix: str = "access",
+    timeout: float = 2.0,
+    contains: str | None = None,
+) -> bool:
+    """Poll for log file to exist (and optionally contain specific text).
+
+    Args:
+        log_dir: Directory to search for the log file.
+        prefix: File name prefix (default: "access").
+        timeout: Maximum wait time in seconds.
+        contains: Optional text to search for in the file.
+
+    Returns:
+        True if the log file exists (and contains the text if specified).
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if os.path.exists(log_path):
+        log_path = _find_access_log(log_dir, prefix)
+        if log_path is not None:
             if contains is None:
                 return True
             with open(log_path) as f:
                 if contains in f.read():
                     return True
         time.sleep(0.05)
-    return os.path.exists(log_path) and (contains is None or contains in open(log_path).read())
+    log_path = _find_access_log(log_dir, prefix)
+    if log_path is None:
+        return False
+    if contains is None:
+        return True
+    with open(log_path) as f:
+        return contains in f.read()
+
+
+def _access_log_layer_args(
+    writer: str = "logs/access",
+    context_fields: list[str] | None = None,
+) -> dict:
+    """Build access_log.file layer args with the required writer field."""
+    args: dict = {"writer": writer}
+    if context_fields:
+        args["context_fields"] = context_fields
+    return args
+
+
+def _access_log_plugins(writer: str = "logs/access") -> dict:
+    """Build plugins dict with access_log writer definition."""
+    return {
+        "access_log": {
+            "writers": [{"path_prefix": writer}],
+        }
+    }
 
 
 class TestAuthLayer:
@@ -201,11 +267,14 @@ class TestAccessLogLayer:
                     "layers": [
                         {
                             "kind": "access_log.file",
-                            "args": {"context_fields": ["auth.basic_auth.user"]},
+                            "args": _access_log_layer_args(
+                                context_fields=["basic_auth.user"],
+                            ),
                         }
                     ],
                 }
             ],
+            "plugins": _access_log_plugins(),
         }
 
         with proxy_with_config(config) as proxy:
@@ -213,8 +282,8 @@ class TestAccessLogLayer:
             assert status == 200
 
             # Poll for log file to be written
-            log_path = os.path.join(proxy.working_dir, "logs", "access.log")
-            assert wait_for_log_file(log_path), f"Log file should exist at {log_path}"
+            log_dir = os.path.join(proxy.working_dir, "logs")
+            assert wait_for_log_file(log_dir), f"Log file should exist in {log_dir}"
 
     def test_access_log_without_context_fields(self, proxy_with_config) -> None:
         """Access log layer with empty context_fields should still log base fields."""
@@ -230,18 +299,19 @@ class TestAccessLogLayer:
                     "name": "echo_svc",
                     "kind": "echo.echo",
                     "layers": [
-                        {"kind": "access_log.file", "args": {}},
+                        {"kind": "access_log.file", "args": _access_log_layer_args()},
                     ],
                 }
             ],
+            "plugins": _access_log_plugins(),
         }
 
         with proxy_with_config(config) as proxy:
             status = curl_request("http://example.com/", proxy.port)
             assert status == 200
 
-            log_path = os.path.join(proxy.working_dir, "logs", "access.log")
-            assert wait_for_log_file(log_path), f"Log file should exist at {log_path}"
+            log_dir = os.path.join(proxy.working_dir, "logs")
+            assert wait_for_log_file(log_dir), f"Log file should exist in {log_dir}"
 
 
 class TestCombinedLayers:
@@ -263,12 +333,12 @@ class TestCombinedLayers:
                     "layers": [
                         {
                             "kind": "access_log.file",
-                            "args": {
-                                "context_fields": [
-                                    "auth.basic_auth.user",
-                                    "auth.basic_auth.auth_type",
-                                ]
-                            },
+                            "args": _access_log_layer_args(
+                                context_fields=[
+                                    "basic_auth.user",
+                                    "basic_auth.auth_type",
+                                ],
+                            ),
                         },
                         {
                             "kind": "auth.basic_auth",
@@ -277,6 +347,7 @@ class TestCombinedLayers:
                     ],
                 }
             ],
+            "plugins": _access_log_plugins(),
         }
 
         with proxy_with_config(config) as proxy:
@@ -293,9 +364,9 @@ class TestCombinedLayers:
             assert status == 200
 
             # Wait for log file to contain entries
-            log_path = os.path.join(proxy.working_dir, "logs", "access.log")
+            log_dir = os.path.join(proxy.working_dir, "logs")
             # Wait for either 407 or 200 to appear in log
-            assert wait_for_log_file(log_path, contains="407") or wait_for_log_file(log_path, contains="200"), \
+            assert wait_for_log_file(log_dir, contains="407") or wait_for_log_file(log_dir, contains="200"), \
                 f"Log should contain request entries"
 
 
@@ -322,10 +393,11 @@ class TestAccessLogErrorHandling:
                     "name": "tcp_svc",
                     "kind": "connect_tcp.connect_tcp",
                     "layers": [
-                        {"kind": "access_log.file", "args": {}},
+                        {"kind": "access_log.file", "args": _access_log_layer_args()},
                     ],
                 }
             ],
+            "plugins": _access_log_plugins(),
         }
 
         with proxy_with_config(config) as proxy:
@@ -360,8 +432,8 @@ class TestAccessLogErrorHandling:
             assert proxy.process.poll() is None, "Proxy should still be running"
 
             # Wait for log file to contain error entry
-            log_path = os.path.join(proxy.working_dir, "logs", "access.log")
-            assert wait_for_log_file(log_path, contains=str(status)), \
+            log_dir = os.path.join(proxy.working_dir, "logs")
+            assert wait_for_log_file(log_dir, contains=str(status)), \
                 f"Log should contain status {status}"
 
 
@@ -386,7 +458,7 @@ class TestLayerOrdering:
                     "name": "echo_svc",
                     "kind": "echo.echo",
                     "layers": [
-                        {"kind": "access_log.file", "args": {}},
+                        {"kind": "access_log.file", "args": _access_log_layer_args()},
                         {
                             "kind": "auth.basic_auth",
                             "args": {"users": [{"username": "admin", "password": "secret"}]},
@@ -394,6 +466,7 @@ class TestLayerOrdering:
                     ],
                 }
             ],
+            "plugins": _access_log_plugins(),
         }
 
         with proxy_with_config(config) as proxy:
@@ -402,8 +475,8 @@ class TestLayerOrdering:
             assert status == 407
 
             # Access log should still record this (outer layer)
-            log_path = os.path.join(proxy.working_dir, "logs", "access.log")
-            assert wait_for_log_file(log_path, contains="407"), \
+            log_dir = os.path.join(proxy.working_dir, "logs")
+            assert wait_for_log_file(log_dir, contains="407"), \
                 f"Log should contain 407 status"
 
 
@@ -428,10 +501,11 @@ class TestMultiThreadedAccessLog:
                     "name": "echo_svc",
                     "kind": "echo.echo",
                     "layers": [
-                        {"kind": "access_log.file", "args": {}},
+                        {"kind": "access_log.file", "args": _access_log_layer_args()},
                     ],
                 }
             ],
+            "plugins": _access_log_plugins(),
         }
 
         with proxy_with_config(config) as proxy:
@@ -452,11 +526,12 @@ class TestMultiThreadedAccessLog:
                 assert status == 200, f"Request {i} got status {status}"
 
             # Poll for log file with enough lines
-            log_path = os.path.join(proxy.working_dir, "logs", "access.log")
+            log_dir = os.path.join(proxy.working_dir, "logs")
             deadline = time.time() + 3.0
-            lines = []
+            lines: list[str] = []
             while time.time() < deadline:
-                if os.path.exists(log_path):
+                log_path = _find_access_log(log_dir)
+                if log_path is not None and os.path.exists(log_path):
                     with open(log_path) as f:
                         log_content = f.read()
                     lines = [line.strip() for line in log_content.strip().split('\n') if line.strip()]

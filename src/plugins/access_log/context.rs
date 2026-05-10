@@ -22,8 +22,10 @@ pub struct AccessLogEntry {
 }
 
 /// Log format type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum LogFormat {
   #[default]
   Text,
+  Json,
 }

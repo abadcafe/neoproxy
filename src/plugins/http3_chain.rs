@@ -23,7 +23,7 @@ use tokio::task;
 use tracing::{error, info, warn};
 
 use crate::config::{SerializedArgs, UserCredential};
-use crate::connect_utils::{self as utils, ConnectTargetError};
+use super::utils::{self as utils, ConnectTargetError};
 use crate::context::RequestContext;
 use crate::h3_stream::H3ClientBidiStream;
 use crate::http_utils::{
@@ -856,7 +856,7 @@ async fn complete_tunnel(
 ) -> Result<Response> {
   // Write metrics to RequestContext
   ctx.insert(
-    "http3_chain.http3_chain.connect_ms",
+    "http3_chain.connect_ms",
     connect_ms.to_string(),
   );
 
@@ -1021,7 +1021,7 @@ pub fn plugin_name() -> &'static str {
   "http3_chain"
 }
 
-pub fn create_plugin() -> Box<dyn Plugin> {
+pub fn create_plugin(_config: Option<&SerializedArgs>) -> Box<dyn Plugin> {
   Box::new(Http3ChainPlugin::new())
 }
 
@@ -1441,7 +1441,7 @@ server_ca_path: /path/to/ca.pem
 
   #[test]
   fn test_create_plugin() {
-    let plugin = create_plugin();
+    let plugin = create_plugin(None);
     assert!(plugin.service_builder("http3_chain").is_some());
   }
 
@@ -1743,7 +1743,7 @@ default_tls:
 
   #[test]
   fn test_non_connect_method_produces_405() {
-    use crate::connect_utils::{self as utils, ConnectTargetError};
+    use super::utils::{self as utils, ConnectTargetError};
 
     // Build a GET request's header parts
     let req = http::Request::builder()
@@ -1770,7 +1770,7 @@ default_tls:
 
   #[test]
   fn test_connect_missing_port_produces_400() {
-    use crate::connect_utils::{self as utils, ConnectTargetError};
+    use super::utils::{self as utils, ConnectTargetError};
 
     // Build a CONNECT request with no port
     let req = http::Request::builder()
@@ -1797,7 +1797,7 @@ default_tls:
 
   #[test]
   fn test_connect_port_zero_produces_400() {
-    use crate::connect_utils::{self as utils, ConnectTargetError};
+    use super::utils::{self as utils, ConnectTargetError};
 
     let req = http::Request::builder()
       .method(http::Method::CONNECT)
@@ -1830,10 +1830,10 @@ default_tls:
     use crate::context::RequestContext;
 
     let ctx = RequestContext::new();
-    ctx.insert("http3_chain.http3_chain.connect_ms", "42".to_string());
+    ctx.insert("http3_chain.connect_ms", "42".to_string());
 
     let connect_ms =
-      ctx.get("http3_chain.http3_chain.connect_ms").unwrap();
+      ctx.get("http3_chain.connect_ms").unwrap();
     assert_eq!(connect_ms, "42");
   }
 }

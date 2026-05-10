@@ -75,7 +75,7 @@ pub fn plugin_name() -> &'static str {
   "echo"
 }
 
-pub fn create_plugin() -> Box<dyn Plugin> {
+pub fn create_plugin(_config: Option<&SerializedArgs>) -> Box<dyn Plugin> {
   Box::new(EchoPlugin::new())
 }
 
@@ -167,7 +167,7 @@ mod tests {
 
   #[test]
   fn test_create_plugin() {
-    let plugin = create_plugin();
+    let plugin = create_plugin(None);
     assert!(plugin.service_builder("echo").is_some());
   }
 

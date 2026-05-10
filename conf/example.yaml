@@ -21,6 +21,24 @@
 server_threads: 2
 
 # -----------------------------------------------------------------------------
+# Plugin Configuration
+# -----------------------------------------------------------------------------
+# Plugin-specific configuration sections.
+# Each plugin parses its own section independently.
+
+plugins:
+  access_log:
+    writers:
+      # Default access log writer
+      - path_prefix: "logs/access.log"
+        # buffer_capacity: "32KiB"      # Flush-triggering buffer size (default: 32KiB)
+        # max_buffer_size: "128KiB"     # Max buffer; drops entries when full (default: 128KiB)
+        # flush_interval: "1s"         # Max time between flushes (default: 1s)
+        # max_file_size: "200MiB"       # Max file size before rotation (default: 200MiB)
+        # rotate_daily: true           # Rotate at date boundary (default: true)
+        # format: "text"               # Log format: text / json (default: text)
+
+# -----------------------------------------------------------------------------
 # Listeners
 # -----------------------------------------------------------------------------
 # Listeners define how neoproxy accepts connections.
@@ -138,6 +156,8 @@ services:
             server_ca_path: conf/certs/server-ca.crt
     layers:
       - kind: access_log.file
+        args:
+          writer: "logs/access.log"
 
   # Connect TCP service with basic auth layer
   - name: connect_tcp
@@ -152,13 +172,14 @@ services:
           users:
             - username: "admin"
               password: "secret"
-      # Access log layer (logs to file)
+      # Access log layer (logs to audit file with JSON format)
       - kind: access_log.file
         args:
+          writer: "logs/access.log"
           # Request context fields to include in log entries
           context_fields:
-            - "auth.basic_auth.user"
-            - "connect_tcp.connect_tcp.connect_ms"
+            - "basic_auth.user"
+            - "connect_tcp.connect_ms"
 
 # -----------------------------------------------------------------------------
 # Servers

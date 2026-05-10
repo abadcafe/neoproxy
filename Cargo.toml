@@ -44,3 +44,4 @@ byte-unit = { version = "5.1", features = ["serde"] }
 tempfile = "3"
 rcgen = "0.13"
 futures = "0.3"
+serial_test = "3"

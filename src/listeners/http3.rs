@@ -24,7 +24,7 @@ use crate::http_utils::{
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };
-use crate::listeners::common::{
+use crate::listeners::utils::{
   LISTENER_SHUTDOWN_TIMEOUT,
 };
 use crate::shutdown::ShutdownHandle;
@@ -237,7 +237,7 @@ async fn handle_h3_stream(
   if method != http::Method::CONNECT {
     if let Some(ref sni) = sni {
       if let Some(auth) = req.uri().authority() {
-        if super::common::check_sni_vs_authority(sni, auth.host()) {
+        if super::utils::check_sni_vs_authority(sni, auth.host()) {
           let resp = build_error_response(
             http::StatusCode::MISDIRECTED_REQUEST,
             "Misdirected Request: SNI does not match request authority",
@@ -257,7 +257,7 @@ async fn handle_h3_stream(
   if let Some(host_val) = req.headers().get(http::header::HOST) {
     if let Some(auth) = req.uri().authority() {
       if let Ok(host_str) = host_val.to_str() {
-        if super::common::check_authority_vs_host(
+        if super::utils::check_authority_vs_host(
           &auth.to_string(),
           host_str,
         ) {

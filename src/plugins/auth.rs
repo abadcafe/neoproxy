@@ -96,7 +96,7 @@ pub fn plugin_name() -> &'static str {
   "auth"
 }
 
-pub fn create_plugin() -> Box<dyn Plugin> {
+pub fn create_plugin(_config: Option<&SerializedArgs>) -> Box<dyn Plugin> {
   Box::new(AuthPlugin::new())
 }
 
@@ -145,9 +145,9 @@ impl tower::Service<Request> for AuthMiddleware {
         parse_basic_auth_header(auth_header)
       && self.auth.verify_credentials(&username, &password).is_ok()
     {
-      ctx.insert("auth.basic_auth.user", username);
+      ctx.insert("basic_auth.user", username);
       ctx.insert(
-        "auth.basic_auth.auth_type",
+        "basic_auth.auth_type",
         AuthType::Password.to_string(),
       );
 
@@ -291,7 +291,7 @@ mod plugin_tests {
 
   #[test]
   fn test_auth_plugin_create_plugin() {
-    let plugin = crate::plugins::auth::create_plugin();
+    let plugin = crate::plugins::auth::create_plugin(None);
     assert!(plugin.layer_builder("basic_auth").is_some());
   }
 }
@@ -478,11 +478,11 @@ mod middleware_tests {
 
       // Check that auth info was written to the context
       assert_eq!(
-        ctx.get("auth.basic_auth.user"),
+        ctx.get("basic_auth.user"),
         Some("admin".to_string())
       );
       assert_eq!(
-        ctx.get("auth.basic_auth.auth_type"),
+        ctx.get("basic_auth.auth_type"),
         Some("password".to_string())
       );
     });

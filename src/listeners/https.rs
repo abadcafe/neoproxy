@@ -31,7 +31,7 @@ use crate::http_utils::{
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };
-use crate::listeners::common::{
+use crate::listeners::utils::{
   LISTENER_SHUTDOWN_TIMEOUT,
   TokioLocalExecutor,
 };
@@ -134,10 +134,10 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
     // Step 1: Check HTTP version FIRST
     // HTTP/1.0 is not supported - return 505 HTTP Version Not Supported
     if let Err(_status) =
-      super::common::check_http_version(req.version())
+      super::utils::check_http_version(req.version())
     {
       return Box::pin(async {
-        Ok(super::common::build_505_response())
+        Ok(super::utils::build_505_response())
       });
     }
 
@@ -148,9 +148,9 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       if let Some(ref sni) = self.sni {
         if let Some(host_header) = req.headers().get(http::header::HOST) {
           if let Ok(host_str) = host_header.to_str() {
-            if super::common::check_sni_vs_host(sni, host_str) {
+            if super::utils::check_sni_vs_host(sni, host_str) {
               return Box::pin(async {
-                Ok(super::common::build_421_misdirected_response())
+                Ok(super::utils::build_421_misdirected_response())
               });
             }
           }
@@ -170,7 +170,7 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       None => {
         // No matching server found - return 404
         return Box::pin(async {
-          Ok(super::common::build_404_response())
+          Ok(super::utils::build_404_response())
         });
       }
     };
@@ -180,7 +180,7 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
     // client did not present a certificate, reject with 403.
     if routing_entry.requires_client_cert() && !self.client_cert_presented {
       return Box::pin(async {
-        Ok(super::common::build_403_forbidden(
+        Ok(super::utils::build_403_forbidden(
           "Forbidden: client certificate required",
         ))
       });

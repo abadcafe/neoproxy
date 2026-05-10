@@ -17,7 +17,6 @@ use crate::config::{
 
 mod auth;
 mod config;
-mod connect_utils;
 mod context;
 mod h3_stream;
 mod http_utils;
@@ -412,6 +411,14 @@ fn main() -> Result<()> {
     shutdown_notify,
     shutdown_triggered,
   )));
+
+  // CR-014: Flush writer threads before exiting. After all server
+  // threads have exited (main_loop returns), all mpsc::Sender clones
+  // from middleware instances are dropped. Writer threads can now exit
+  // (blocking_recv returns None) and flush their buffers. Without this
+  // call, std::process::exit() would kill detached writer threads
+  // before they could flush, potentially losing log entries.
+  plugins::flush_writer_threads();
 
   std::process::exit(exit_code);
 }

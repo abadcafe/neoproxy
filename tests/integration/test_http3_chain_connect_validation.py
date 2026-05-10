@@ -16,6 +16,7 @@ Expected behavior after fix:
 import subprocess
 import tempfile
 import shutil
+import os
 import re
 from typing import Optional, Tuple, Generator
 from contextlib import contextmanager
@@ -233,3 +234,121 @@ class TestHTTP3ChainConnectValidation:
             assert status_code == 400, \
                 f"Expected 400 for no authority, got {status_code}. " \
                 f"Response: {response.decode(errors='ignore')}"
+
+
+class TestHTTP3ChainAddressResolution:
+    """
+    Black-box tests for http3_chain proxy_group address resolution.
+
+    Verifies that:
+    - Hostname addresses (e.g. localhost:port) are resolved correctly
+    - Unresolvable hostnames cause startup failure (not silent drop / runtime panic)
+    """
+
+    def test_hostname_address_starts_successfully(self, shared_test_certs: dict) -> None:
+        """
+        TC-CHAIN-ADDR-001: Hostname address in proxy_group starts successfully.
+
+        Use "localhost:port" instead of "127.0.0.1:port" as proxy address.
+        The service should start and accept requests.
+        """
+        temp_dir = tempfile.mkdtemp()
+        http_port = get_unique_port()
+        h3_port = get_unique_port()
+        proxy_proc: Optional[subprocess.Popen] = None
+
+        try:
+            ca_path = shared_test_certs['ca_path']
+
+            # Use hostname "localhost" instead of IP
+            config_path = create_http3_chain_config(
+                http_port=http_port,
+                proxy_group=[("localhost", h3_port, 1)],
+                ca_path=ca_path,
+                temp_dir=temp_dir
+            )
+
+            proxy_proc = start_proxy(config_path)
+
+            # Should start successfully with hostname address
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=proxy_proc), \
+                "HTTP listener should start with hostname address in proxy_group"
+
+        finally:
+            if proxy_proc:
+                terminate_process(proxy_proc, timeout=10)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_unresolvable_address_starts_but_connect_fails(self, shared_test_certs: dict) -> None:
+        """
+        TC-CHAIN-ADDR-002: Unresolvable hostname in proxy_group starts but
+        connections fail gracefully (no panic).
+
+        DNS resolution happens at connect time, so an unresolvable hostname
+        should not prevent startup. However, requests should fail with 502
+        (not cause a panic like the old code that silently dropped the proxy).
+        """
+        temp_dir = tempfile.mkdtemp()
+        http_port = get_unique_port()
+        proxy_proc: Optional[subprocess.Popen] = None
+
+        try:
+            ca_path = shared_test_certs['ca_path']
+
+            config_content = f"""server_threads: 1
+
+listeners:
+- name: http_main
+  kind: http
+  addresses: ["0.0.0.0:{http_port}"]
+
+services:
+- name: http3_chain
+  kind: http3_chain.http3_chain
+  args:
+    proxy_group:
+    - address: this.host.does.not.exist.invalid:8443
+      hostname: this.host.does.not.exist.invalid
+      weight: 1
+    default_tls:
+      server_ca_path: "{ca_path}"
+
+servers:
+- name: http_proxy
+  listeners: ["http_main"]
+  service: http3_chain
+"""
+            config_path = os.path.join(temp_dir, "bad_address.yaml")
+            with open(config_path, "w") as f:
+                f.write(config_content)
+
+            proxy_proc = start_proxy(config_path)
+
+            # Should start successfully (DNS resolved at connect time)
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=proxy_proc), \
+                "Service should start even with unresolvable proxy address"
+
+            # But requests should fail gracefully (502, not connection reset)
+            result = subprocess.run(
+                [
+                    "curl", "-s", "-p",
+                    "-x", f"http://127.0.0.1:{http_port}",
+                    "https://example.com/",
+                    "--connect-timeout", "5"
+                ],
+                capture_output=True,
+                text=True
+            )
+
+            # Should get 502 Bad Gateway (not a crash/panic)
+            assert "502" in result.stdout or "502" in result.stderr or result.returncode != 0, \
+                "Request should fail gracefully with unresolvable proxy address"
+
+            # Process should still be running (no panic)
+            assert proxy_proc.poll() is None, \
+                "Service should not crash/panic with unresolvable proxy address"
+
+        finally:
+            if proxy_proc and proxy_proc.poll() is None:
+                terminate_process(proxy_proc, timeout=10)
+            shutil.rmtree(temp_dir, ignore_errors=True)

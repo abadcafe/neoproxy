@@ -276,7 +276,7 @@ impl ClientCertCredential {
 }
 
 struct Proxy {
-  address: SocketAddr,
+  address: String,
   /// Hostname for SNI (used for TLS certificate validation)
   hostname: Option<String>,
   conn_handle: Option<task::JoinHandle<Result<()>>>,
@@ -314,7 +314,7 @@ struct ProxyGroup {
 impl ProxyGroup {
   fn new(
     addresses: Vec<(
-      SocketAddr,
+      String,
       Option<String>, // hostname for SNI
       usize,
       UserPasswordCredential,
@@ -339,7 +339,10 @@ impl ProxyGroup {
     Self { proxies }
   }
 
-  fn schedule_wrr(&mut self) -> usize {
+  fn schedule_wrr(&mut self) -> Option<usize> {
+    if self.proxies.is_empty() {
+      return None;
+    }
     let total =
       self.proxies.iter().fold(0, |t, p| t + p.weight) as isize;
     let mut selected_idx = 0usize;
@@ -353,7 +356,7 @@ impl ProxyGroup {
     }
 
     self.proxies[selected_idx].current_weight -= total;
-    selected_idx
+    Some(selected_idx)
   }
 
   /// Establish a new QUIC connection with specific credentials
@@ -416,7 +419,7 @@ impl ProxyGroup {
     ));
     cli_endpoint.set_default_client_config(cli_config);
 
-    let addr = self.proxies[proxy_idx].address;
+    let addr = resolve_address(&self.proxies[proxy_idx].address)?;
     // Use configured hostname for SNI, or fall back to IP address
     let host: &str = match &self.proxies[proxy_idx].hostname {
       Some(h) => h.as_str(),
@@ -442,7 +445,7 @@ impl ProxyGroup {
     UserPasswordCredential,
     ClientCertCredential,
   )> {
-    let idx = self.schedule_wrr();
+    let idx = self.schedule_wrr().ok_or_else(|| anyhow!("no proxies available"))?;
     let proxy = &mut self.proxies[idx];
 
     // Get credentials for this proxy
@@ -555,6 +558,20 @@ fn default_idle_timeout() -> Duration {
   Duration::from_secs(crate::stream::DEFAULT_IDLE_TIMEOUT_SECS)
 }
 
+/// Resolve an address string to a SocketAddr.
+/// Supports both "IP:port" and "hostname:port" formats.
+fn resolve_address(s: &str) -> Result<SocketAddr> {
+  s.parse()
+    .or_else(|_| {
+      std::net::ToSocketAddrs::to_socket_addrs(s)
+        .map_err(|e| anyhow!("address '{s}' is neither IP:port nor resolvable hostname: {e}"))
+        .and_then(|mut addrs| {
+          addrs.next().ok_or_else(|| anyhow!("address '{s}' resolved to no addresses"))
+        })
+    })
+    .with_context(|| format!("proxy_group address '{s}'"))
+}
+
 impl Http3ChainServiceArgs {
   fn validate(&self) -> Result<()> {
     if self.proxy_group.is_empty() {
@@ -641,9 +658,9 @@ impl Http3ChainService {
     let args: Http3ChainServiceArgs = serde_yaml::from_value(sargs)?;
     args.validate()?;
 
-    // Resolve credentials for each proxy
+    // Resolve credentials for each proxy (DNS resolved at connect time)
     let proxy_addresses: Vec<(
-      SocketAddr,
+      String,
       Option<String>, // hostname for SNI
       usize,
       UserPasswordCredential,
@@ -652,7 +669,7 @@ impl Http3ChainService {
     )> = args
       .proxy_group
       .iter()
-      .filter_map(|e| {
+      .map(|e| {
         let Http3ChainServiceArgsProxyGroup {
           address: s,
           hostname,
@@ -664,12 +681,12 @@ impl Http3ChainService {
         let (upc, ccc, server_ca) =
           args.resolve_credential(&user, &tls);
 
-        s.parse()
-          .inspect_err(|e| error!("address '{s}' invalid: {e}"))
-          .ok()
-          .map(|a| (a, hostname.clone(), *w, upc, ccc, server_ca))
+        // Validate address format (IP:port or hostname:port)
+        resolve_address(s)?;
+
+        Ok((s.clone(), hostname.clone(), *w, upc, ccc, server_ca))
       })
-      .collect();
+      .collect::<Result<Vec<_>>>()?;
 
     let proxy_group = ProxyGroup::new(proxy_addresses);
 
@@ -1569,7 +1586,7 @@ server_ca_path: /path/to/ca.pem
   fn test_proxy_group_new() {
     let addresses = vec![
       (
-        "127.0.0.1:8080".parse().unwrap(),
+        "127.0.0.1:8080".to_string(),
         Some("proxy1.example.com".to_string()),
         1,
         UserPasswordCredential::none(),
@@ -1577,7 +1594,7 @@ server_ca_path: /path/to/ca.pem
         None,
       ),
       (
-        "127.0.0.1:8081".parse().unwrap(),
+        "127.0.0.1:8081".to_string(),
         Some("proxy2.example.com".to_string()),
         2,
         UserPasswordCredential::none(),
@@ -1595,7 +1612,7 @@ server_ca_path: /path/to/ca.pem
   #[test]
   fn test_proxy_group_schedule_wrr_single() {
     let addresses = vec![(
-      "127.0.0.1:8080".parse().unwrap(),
+      "127.0.0.1:8080".to_string(),
       Some("proxy.example.com".to_string()),
       1,
       UserPasswordCredential::none(),
@@ -1605,7 +1622,7 @@ server_ca_path: /path/to/ca.pem
     let mut group = ProxyGroup::new(addresses);
 
     // With single proxy, should always select index 0
-    assert_eq!(group.schedule_wrr(), 0);
+    assert_eq!(group.schedule_wrr(), Some(0));
   }
 
   #[test]
@@ -1615,7 +1632,7 @@ server_ca_path: /path/to/ca.pem
     // 2:1)
     let addresses = vec![
       (
-        "127.0.0.1:8080".parse().unwrap(),
+        "127.0.0.1:8080".to_string(),
         Some("proxy1.example.com".to_string()),
         2,
         UserPasswordCredential::none(),
@@ -1623,7 +1640,7 @@ server_ca_path: /path/to/ca.pem
         None,
       ), // weight 2
       (
-        "127.0.0.1:8081".parse().unwrap(),
+        "127.0.0.1:8081".to_string(),
         Some("proxy2.example.com".to_string()),
         1,
         UserPasswordCredential::none(),
@@ -1635,7 +1652,7 @@ server_ca_path: /path/to/ca.pem
 
     // Run 6 iterations (total weight = 3, so 6 = 2 full cycles)
     let selections: Vec<usize> =
-      (0..6).map(|_| group.schedule_wrr()).collect();
+      (0..6).map(|_| group.schedule_wrr().unwrap()).collect();
 
     // Count selections per proxy
     let count_0 = selections.iter().filter(|&&x| x == 0).count();
@@ -1650,6 +1667,49 @@ server_ca_path: /path/to/ca.pem
       count_1, 2,
       "Proxy 1 (weight 1) should be selected 2 times"
     );
+  }
+
+  #[test]
+  fn test_proxy_group_schedule_wrr_empty_returns_none() {
+    let addresses = vec![];
+    let mut group = ProxyGroup::new(addresses);
+    assert_eq!(group.schedule_wrr(), None);
+  }
+
+  #[test]
+  fn test_resolve_address_ip_port() {
+    let addr = resolve_address("127.0.0.1:8080").unwrap();
+    assert_eq!(addr, "127.0.0.1:8080".parse().unwrap());
+  }
+
+  #[test]
+  fn test_resolve_address_localhost() {
+    let addr = resolve_address("localhost:8080").unwrap();
+    assert!(addr.is_ipv4() || addr.is_ipv6());
+    assert_eq!(addr.port(), 8080);
+  }
+
+  #[test]
+  fn test_resolve_address_unresolvable_fails() {
+    let result = resolve_address("this.host.does.not.exist.invalid:8080");
+    assert!(result.is_err());
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+      msg.contains("this.host.does.not.exist.invalid"),
+      "error should mention the bad address: {msg}"
+    );
+  }
+
+  #[test]
+  fn test_resolve_address_missing_port_fails() {
+    let result = resolve_address("127.0.0.1");
+    assert!(result.is_err());
+  }
+
+  #[test]
+  fn test_resolve_address_garbage_fails() {
+    let result = resolve_address("not-a-valid-address");
+    assert!(result.is_err());
   }
 
   // ============== Http3ChainServiceArgs Tests ==============

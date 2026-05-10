@@ -846,6 +846,7 @@ async fn send_connect_and_tunnel_with_credential(
   // Success - complete the tunnel
   info!("Http3ChainService: CONNECT succeeded, setting up tunnel");
   let (sending_stream, receiving_stream) = proxy_stream.split();
+  info!("Http3ChainService: about to call complete_tunnel, requester will be dropped after this returns");
   complete_tunnel(
     sending_stream,
     receiving_stream,
@@ -882,6 +883,7 @@ async fn complete_tunnel(
   let addr = "http3_chain".to_string();
 
   st.register(async move {
+    info!("Http3ChainService: tunnel task started, awaiting upgrade");
     let mut client = match upgrade {
       Some(u) => match u.await {
         Ok(c) => c,

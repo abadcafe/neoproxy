@@ -46,11 +46,12 @@ impl StreamTracker {
   }
 
   /// Register a connection task (for protocols like QUIC).
+  /// Returns an AbortHandle for checking if the task is still running.
   pub fn register_connection(
     &self,
     conn_future: impl Future<Output = ()> + 'static,
-  ) {
-    self.connections.borrow_mut().spawn_local(conn_future);
+  ) -> tokio::task::AbortHandle {
+    self.connections.borrow_mut().spawn_local(conn_future)
   }
 
   /// Trigger shutdown notification.
@@ -199,6 +200,49 @@ mod tests {
     let tracker = StreamTracker::new();
     tracker.abort_all();
     assert_eq!(tracker.active_count(), 0);
+  }
+
+  #[tokio::test]
+  async fn test_register_connection_returns_abort_handle() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let tracker = StreamTracker::new();
+        let handle = tracker.register_connection(async {
+          // empty task completes immediately
+        });
+        // Yield to let the task run
+        tokio::task::yield_now().await;
+        assert!(
+          handle.is_finished(),
+          "AbortHandle should report is_finished after task completes"
+        );
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_register_connection_handle_not_finished_while_running() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let tracker = StreamTracker::new();
+        let handle = tracker.register_connection(async {
+          tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+        // Should NOT be finished yet
+        assert!(
+          !handle.is_finished(),
+          "AbortHandle should NOT report is_finished while task is running"
+        );
+        // Wait for completion
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+          handle.is_finished(),
+          "AbortHandle should report is_finished after task completes"
+        );
+      })
+      .await;
   }
 
 }

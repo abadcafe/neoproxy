@@ -19,6 +19,7 @@ import tempfile
 import shutil
 import time
 import os
+import datetime
 import signal
 import pytest
 from typing import Optional, Tuple, List
@@ -31,6 +32,7 @@ from .utils.helpers import (
     terminate_process,
     wait_for_udp_port_bound,
     wait_for_process_running,
+    wait_for_log_contains,
 )
 
 from .utils.http_echo import http_echo_handler
@@ -773,3 +775,107 @@ class TestWRRLoadBalancing:
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
             shutil.rmtree(temp_dir3, ignore_errors=True)
+
+
+class TestConnectionReuse:
+    """Test connection reuse in HTTP/3 chain."""
+
+    def test_connection_reuse_across_requests(self, shared_test_certs) -> None:
+        """
+        TC-REUSE-001: QUIC connection is reused across multiple requests.
+
+        Target: Verify that once a QUIC connection is established, subsequent
+        requests reuse it instead of creating new connections. This prevents
+        fd leaks and ensures optimal resource usage.
+        """
+        temp_dir1 = tempfile.mkdtemp()
+        temp_dir2 = tempfile.mkdtemp()
+
+        http_port = get_unique_port()
+        h3_port = get_unique_port()
+        target_port = get_unique_port()
+
+        chain_proc: Optional[subprocess.Popen] = None
+        h3_proc: Optional[subprocess.Popen] = None
+        target_socket: Optional[socket.socket] = None
+
+        try:
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+            ca_path = shared_test_certs['ca_path']
+
+            # Start target echo server
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, http_echo_handler
+            )
+
+            # Start HTTP/3 listener
+            h3_config = create_http3_listener_config(
+                proxy_port=h3_port,
+                cert_path=cert_path,
+                key_path=key_path,
+                temp_dir=temp_dir1
+            )
+            h3_proc = start_proxy(h3_config)
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0, proc=h3_proc), \
+                "HTTP/3 listener failed to start"
+
+            # Start chain service
+            chain_config = create_http3_chain_config(
+                http_port=http_port,
+                proxy_group=[("127.0.0.1", h3_port, 1)],
+                ca_path=ca_path,
+                temp_dir=temp_dir2
+            )
+            chain_proc = start_proxy(chain_config)
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=chain_proc), \
+                "HTTP listener failed to start"
+
+            # Send 5 requests through the chain
+            for i in range(5):
+                result = subprocess.run(
+                    [
+                        "curl", "-s", "-p",
+                        "-x", f"http://127.0.0.1:{http_port}",
+                        f"http://127.0.0.1:{target_port}/",
+                        "-d", f"request_{i}",
+                        "--connect-timeout", "10"
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "no_proxy": ""}
+                )
+                assert f"request_{i}" in result.stdout, \
+                    f"Request {i} failed: stdout={result.stdout}, stderr={result.stderr}"
+
+            # Gracefully shutdown chain service so WorkerGuard flushes logs
+            chain_proc.send_signal(signal.SIGTERM)
+            return_code = chain_proc.wait(timeout=10)
+            assert return_code == 0, f"Chain exit code: {return_code}"
+
+            # Read log file and count QUIC connection establishments
+            log_path = os.path.join(
+                temp_dir2, "logs",
+                f"neoproxy.log.{datetime.date.today().isoformat()}"
+            )
+            assert os.path.exists(log_path), \
+                f"Log file not found at {log_path}, dir contents: {os.listdir(os.path.join(temp_dir2, 'logs')) if os.path.exists(os.path.join(temp_dir2, 'logs')) else 'logs dir missing'}"
+
+            with open(log_path, 'r') as f:
+                log_content = f.read()
+
+            quic_count = log_content.count("QUIC connection established")
+            assert quic_count == 1, \
+                f"Expected exactly 1 'QUIC connection established', got {quic_count}.\nLog tail:\n{log_content[-2000:]}"
+
+        finally:
+            if chain_proc and chain_proc.poll() is None:
+                chain_proc.kill()
+                chain_proc.wait(timeout=5)
+            if h3_proc:
+                h3_proc.kill()
+                h3_proc.wait(timeout=5)
+            if target_socket:
+                target_socket.close()
+            shutil.rmtree(temp_dir1, ignore_errors=True)
+            shutil.rmtree(temp_dir2, ignore_errors=True)

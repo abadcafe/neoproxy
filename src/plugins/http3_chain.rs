@@ -103,7 +103,7 @@ impl UpstreamConnection {
 /// potentially causing resource leaks.
 #[derive(Clone, Default)]
 struct UpstreamConnectionTracker {
-  connections: Rc<RefCell<Vec<UpstreamConnection>>>,
+  connections: Rc<RefCell<HashMap<usize, UpstreamConnection>>>,
 }
 
 impl UpstreamConnectionTracker {
@@ -111,11 +111,19 @@ impl UpstreamConnectionTracker {
     Self::default()
   }
 
-  /// Register a new active connection.
+  /// Register a new active connection for a specific proxy.
   ///
-  /// Call this when a new QUIC connection is successfully established.
-  fn register(&self, conn: quinn::Connection) {
-    self.connections.borrow_mut().push(UpstreamConnection::new(conn));
+  /// If a connection already exists for this `proxy_idx`, it is closed
+  /// gracefully (H3_NO_ERROR) before being replaced. This ensures old
+  /// connections are properly cleaned up and their `quinn::Endpoint`
+  /// sockets (fds) can be released.
+  fn register(&self, proxy_idx: usize, conn: quinn::Connection) {
+    let mut map = self.connections.borrow_mut();
+    // Close existing connection for this proxy, if any
+    if let Some(existing) = map.get(&proxy_idx) {
+      existing.close();
+    }
+    map.insert(proxy_idx, UpstreamConnection::new(conn));
   }
 
   /// Close all registered connections with H3_NO_ERROR.
@@ -128,7 +136,7 @@ impl UpstreamConnectionTracker {
   /// shutdown.
   fn close_all(&self) {
     let connections = self.connections.borrow();
-    for conn in connections.iter() {
+    for conn in connections.values() {
       conn.close();
     }
     info!(
@@ -279,7 +287,7 @@ struct Proxy {
   address: String,
   /// Hostname for SNI (used for TLS certificate validation)
   hostname: Option<String>,
-  conn_handle: Option<task::JoinHandle<Result<()>>>,
+  conn_handle: Option<task::AbortHandle>,
   requester: Option<h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>>,
   weight: usize,
   current_weight: isize,
@@ -454,21 +462,7 @@ impl ProxyGroup {
     let client_cert_credential = proxy.client_cert_credential.clone();
 
     if let Some(h) = proxy.conn_handle.as_mut() {
-      if h.is_finished() {
-        match h.await {
-          Err(e) => {
-            info!(
-              "join connection handle of {} failed: {e}",
-              proxy.address
-            );
-          }
-          Ok(res) => {
-            if let Err(e) = res {
-              info!("connection of {} finished: {e}", proxy.address);
-            }
-          }
-        }
-      } else {
+      if !h.is_finished() {
         return Ok((
           proxy.requester.as_ref().unwrap().clone(),
           idx,
@@ -482,15 +476,15 @@ impl ProxyGroup {
     let conn = self
       .new_proxy_conn_with_credentials(idx, &client_cert_credential)
       .await?;
-    conn_tracker.register(conn.clone());
+    conn_tracker.register(idx, conn.clone());
     let (h3_conn, requester) =
       h3::client::new(h3_quinn::Connection::new(conn)).await?;
     let conn_task = connection_maintaining(h3_conn);
-    stream_tracker.register_connection(async move {
+    let handle = stream_tracker.register_connection(async move {
       let _ = conn_task.await;
     });
     let proxy = &mut self.proxies[idx];
-    let _ = proxy.conn_handle.take();
+    let _ = proxy.conn_handle.insert(handle);
     let _ = proxy.requester.insert(requester.clone());
     Ok((
       requester,
@@ -1902,5 +1896,34 @@ default_tls:
     let connect_ms =
       ctx.get("http3_chain.connect_ms").unwrap();
     assert_eq!(connect_ms, "42");
+  }
+
+  // ============== UpstreamConnectionTracker Tests ==============
+
+  #[test]
+  fn test_conn_tracker_new_is_empty() {
+    let tracker = UpstreamConnectionTracker::new();
+    assert_eq!(tracker.count(), 0);
+  }
+
+  #[test]
+  fn test_conn_tracker_clear_empty_no_panic() {
+    let tracker = UpstreamConnectionTracker::new();
+    tracker.clear();
+    assert_eq!(tracker.count(), 0);
+  }
+
+  #[test]
+  fn test_conn_tracker_close_all_empty_no_panic() {
+    let tracker = UpstreamConnectionTracker::new();
+    tracker.close_all();
+  }
+
+  #[test]
+  fn test_conn_tracker_count_after_close_all_stays_same() {
+    // close_all should not remove entries (clear does that)
+    let tracker = UpstreamConnectionTracker::new();
+    tracker.close_all();
+    assert_eq!(tracker.count(), 0);
   }
 }

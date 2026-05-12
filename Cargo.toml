@@ -39,6 +39,8 @@ x509-parser = "0.16"
 humantime = "2.1"
 humantime-serde = "1"
 byte-unit = { version = "5.1", features = ["serde"] }
+tokio-io-timeout = "1.2.1"
+pin-project-lite = "0.2.17"
 
 [dev-dependencies]
 tempfile = "3"

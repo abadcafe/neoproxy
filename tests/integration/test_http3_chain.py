@@ -19,7 +19,6 @@ import tempfile
 import shutil
 import time
 import os
-import datetime
 import signal
 import pytest
 from typing import Optional, Tuple, List
@@ -843,7 +842,7 @@ class TestConnectionReuse:
                     ],
                     capture_output=True,
                     text=True,
-                    env={**os.environ, "no_proxy": ""}
+                    env={**os.environ, "no_proxy": "", "NO_PROXY": ""}
                 )
                 assert f"request_{i}" in result.stdout, \
                     f"Request {i} failed: stdout={result.stdout}, stderr={result.stderr}"
@@ -854,15 +853,17 @@ class TestConnectionReuse:
             assert return_code == 0, f"Chain exit code: {return_code}"
 
             # Read log file and count QUIC connection establishments
-            log_path = os.path.join(
-                temp_dir2, "logs",
-                f"neoproxy.log.{datetime.date.today().isoformat()}"
+            # Note: log file name uses UTC date, not local date, so we find
+            # it by listing the directory rather than hardcoding today's date.
+            log_dir = os.path.join(temp_dir2, "logs")
+            log_files = sorted(
+                f for f in os.listdir(log_dir) if f.startswith("neoproxy.log.")
             )
-            assert os.path.exists(log_path), \
-                f"Log file not found at {log_path}, dir contents: {os.listdir(os.path.join(temp_dir2, 'logs')) if os.path.exists(os.path.join(temp_dir2, 'logs')) else 'logs dir missing'}"
-
-            with open(log_path, 'r') as f:
-                log_content = f.read()
+            assert log_files, f"No log files found in {log_dir}"
+            log_content = ""
+            for lf in log_files:
+                with open(os.path.join(log_dir, lf), 'r') as f:
+                    log_content += f.read()
 
             quic_count = log_content.count("QUIC connection established")
             assert quic_count == 1, \

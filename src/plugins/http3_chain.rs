@@ -552,6 +552,25 @@ fn default_idle_timeout() -> Duration {
   Duration::from_secs(crate::stream::DEFAULT_IDLE_TIMEOUT_SECS)
 }
 
+/// Validate that an address string has host:port format without DNS resolution.
+/// This allows unresolvable hostnames to pass startup validation — DNS is
+/// resolved at connect time instead.
+fn validate_address_format(s: &str) -> Result<()> {
+  // Must contain a colon separating host and port
+  let colon_pos = s
+    .rfind(':')
+    .ok_or_else(|| anyhow!("proxy_group address '{s}' missing port"))?;
+  let port_str = &s[colon_pos + 1..];
+  port_str
+    .parse::<u16>()
+    .with_context(|| format!("proxy_group address '{s}' has invalid port"))?;
+  let host = &s[..colon_pos];
+  if host.is_empty() {
+    anyhow::bail!("proxy_group address '{s}' missing host");
+  }
+  Ok(())
+}
+
 /// Resolve an address string to a SocketAddr.
 /// Supports both "IP:port" and "hostname:port" formats.
 fn resolve_address(s: &str) -> Result<SocketAddr> {
@@ -675,8 +694,8 @@ impl Http3ChainService {
         let (upc, ccc, server_ca) =
           args.resolve_credential(&user, &tls);
 
-        // Validate address format (IP:port or hostname:port)
-        resolve_address(s)?;
+        // Validate address format (must contain host:port)
+        validate_address_format(s)?;
 
         Ok((s.clone(), hostname.clone(), *w, upc, ccc, server_ca))
       })
@@ -883,7 +902,7 @@ async fn complete_tunnel(
     // reaches 0, killing all streams on this H3 connection.
     let _requester = requester;
 
-    let mut client = match upgrade {
+    let client = match upgrade {
       Some(u) => match u.await {
         Ok(c) => c,
         Err(e) => {
@@ -897,12 +916,12 @@ async fn complete_tunnel(
       }
     };
 
-    let mut h3_stream =
+    let h3_stream =
       H3ClientBidiStream::new(sending_stream, receiving_stream);
 
     crate::stream::run_tunnel(
-      &mut client,
-      &mut h3_stream,
+      client,
+      h3_stream,
       shutdown_handle,
       idle_timeout,
       &addr,

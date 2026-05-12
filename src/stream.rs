@@ -7,6 +7,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -340,12 +341,172 @@ pub fn extract_upgrade(
   }
 }
 
+// ============================================================================
+// Shared idle timeout wrapper
+// ============================================================================
+
+/// Shared activity tracker for idle timeout across a bidirectional tunnel.
+///
+/// Both sides share one tracker. Any successful read or write on either
+/// side resets the idle deadline.
+#[derive(Clone)]
+struct IdleTracker {
+  last_active_ms: Arc<AtomicU64>,
+  idle_timeout: Duration,
+  epoch: tokio::time::Instant,
+}
+
+impl IdleTracker {
+  fn new(idle_timeout: Duration) -> Self {
+    Self {
+      last_active_ms: Arc::new(AtomicU64::new(0)),
+      idle_timeout,
+      epoch: tokio::time::Instant::now(),
+    }
+  }
+
+  /// Record activity (called on successful read/write).
+  fn touch(&self) {
+    let ms = self.epoch.elapsed().as_millis() as u64;
+    self.last_active_ms.store(ms, Ordering::Relaxed);
+  }
+
+  /// Return the instant at which the idle deadline expires based on
+  /// the last recorded activity.
+  fn deadline(&self) -> tokio::time::Instant {
+    let last_ms = self.last_active_ms.load(Ordering::Relaxed);
+    let last_instant = self.epoch + Duration::from_millis(last_ms);
+    last_instant + self.idle_timeout
+  }
+
+  /// Check whether the connection is genuinely idle right now.
+  fn is_idle(&self) -> bool {
+    let now_ms = self.epoch.elapsed().as_millis() as u64;
+    let last = self.last_active_ms.load(Ordering::Relaxed);
+    now_ms.saturating_sub(last) > self.idle_timeout.as_millis() as u64
+  }
+}
+
+pin_project_lite::pin_project! {
+  /// AsyncRead + AsyncWrite wrapper with shared idle timeout.
+  ///
+  /// On each successful read/write, the shared `IdleTracker` is updated.
+  /// An internal `Sleep` fires at the current idle deadline; when it
+  /// expires (no activity for `idle_timeout`), the next I/O poll
+  /// returns `TimedOut`.
+  struct IdleTimeoutStream<S> {
+    #[pin]
+    stream: S,
+    tracker: IdleTracker,
+    #[pin]
+    idle_check: tokio::time::Sleep,
+  }
+}
+
+impl<S> IdleTimeoutStream<S> {
+  fn new(stream: S, tracker: IdleTracker) -> Self {
+    let idle_check = tokio::time::sleep_until(tracker.deadline());
+    Self {
+      stream,
+      tracker,
+      idle_check,
+    }
+  }
+}
+
+impl<S: AsyncRead> AsyncRead for IdleTimeoutStream<S> {
+  fn poll_read(
+    self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &mut tokio::io::ReadBuf<'_>,
+  ) -> Poll<std::io::Result<()>> {
+    let mut this = self.project();
+
+    // If our local Sleep has fired, check the shared tracker to see if
+    // it's a real idle timeout or a stale alarm (the other side may have
+    // called touch() which updated last_active_ms but didn't reset our
+    // Sleep).  If stale, reset our Sleep to the new deadline.
+    if this.idle_check.as_mut().poll(cx).is_ready() {
+      if this.tracker.is_idle() {
+        return Poll::Ready(Err(std::io::Error::new(
+          std::io::ErrorKind::TimedOut,
+          "idle timeout",
+        )));
+      }
+      // Stale alarm — the other side was active. Reset our Sleep.
+      this.idle_check.as_mut().reset(this.tracker.deadline());
+    }
+
+    match this.stream.poll_read(cx, buf) {
+      Poll::Ready(Ok(())) => {
+        if buf.filled().len() > 0 {
+          this.tracker.touch();
+          this.idle_check.as_mut().reset(this.tracker.deadline());
+        }
+        Poll::Ready(Ok(()))
+      }
+      other => other,
+    }
+  }
+}
+
+impl<S: AsyncWrite> AsyncWrite for IdleTimeoutStream<S> {
+  fn poll_write(
+    self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &[u8],
+  ) -> Poll<std::io::Result<usize>> {
+    let mut this = self.project();
+
+    if this.idle_check.as_mut().poll(cx).is_ready() {
+      if this.tracker.is_idle() {
+        return Poll::Ready(Err(std::io::Error::new(
+          std::io::ErrorKind::TimedOut,
+          "idle timeout",
+        )));
+      }
+      this.idle_check.as_mut().reset(this.tracker.deadline());
+    }
+
+    match this.stream.poll_write(cx, buf) {
+      Poll::Ready(Ok(n)) => {
+        if n > 0 {
+          this.tracker.touch();
+          this.idle_check.as_mut().reset(this.tracker.deadline());
+        }
+        Poll::Ready(Ok(n))
+      }
+      other => other,
+    }
+  }
+
+  fn poll_flush(
+    self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<std::io::Result<()>> {
+    self.project().stream.poll_flush(cx)
+  }
+
+  fn poll_shutdown(
+    self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<std::io::Result<()>> {
+    self.project().stream.poll_shutdown(cx)
+  }
+}
+
+// ============================================================================
+// Tunnel functions
+// ============================================================================
+
 /// Run bidirectional copy between client and target streams.
 ///
 /// Handles shutdown notification and idle timeout. Logs the outcome.
+/// Idle timeout is shared across both directions: if data flows in
+/// EITHER direction, the connection is considered active.
 pub async fn run_tunnel<C, T>(
-  client: &mut C,
-  target: &mut T,
+  client: C,
+  target: T,
   shutdown_handle: ShutdownHandle,
   idle_timeout: Duration,
   addr: &str,
@@ -360,10 +521,19 @@ pub async fn run_tunnel<C, T>(
 
   info!("tunnel to {addr}: starting bidirectional transfer");
 
+  let tracker = IdleTracker::new(idle_timeout);
+  let client_wrapped = IdleTimeoutStream::new(client, tracker.clone());
+  let target_wrapped = IdleTimeoutStream::new(target, tracker);
+
+  // IdleTimeoutStream is !Unpin (contains Sleep), Box::pin to satisfy
+  // copy_bidirectional's Unpin requirement.
+  let mut client_pinned = Box::pin(client_wrapped);
+  let mut target_pinned = Box::pin(target_wrapped);
+
   let result = tokio::select! {
-    res = tokio::time::timeout(
-      idle_timeout,
-      tokio::io::copy_bidirectional(client, target),
+    res = tokio::io::copy_bidirectional(
+      &mut client_pinned,
+      &mut target_pinned,
     ) => res,
     _ = shutdown_handle.notified() => {
       warn!("tunnel to {addr}: shutdown by notification");
@@ -372,17 +542,17 @@ pub async fn run_tunnel<C, T>(
   };
 
   match result {
-    Ok(Ok((_sent, _received))) => {
+    Ok((_sent, _received)) => {
       info!("tunnel to {addr}: transfer completed");
     }
-    Ok(Err(e)) => {
-      error!("tunnel to {addr}: transfer error: {e}");
-    }
-    Err(_) => {
+    Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
       warn!(
         "tunnel to {addr}: idle timeout after {idle_timeout:?}, \
          closing"
       );
+    }
+    Err(e) => {
+      error!("tunnel to {addr}: transfer error: {e}");
     }
   }
 }
@@ -484,4 +654,217 @@ mod tests {
     let result = upgrade.await;
     assert!(result.is_err(), "Upgrade should resolve with Err");
   }
+
+  // ============== IdleTracker Tests ==============
+
+  #[test]
+  fn test_idle_tracker_new_not_idle() {
+    let tracker = IdleTracker::new(Duration::from_secs(30));
+    assert!(
+      !tracker.is_idle(),
+      "Newly created tracker should not be idle"
+    );
+  }
+
+  #[test]
+  fn test_idle_tracker_touch_updates_deadline() {
+    let tracker = IdleTracker::new(Duration::from_secs(30));
+    let d1 = tracker.deadline();
+    // Simulate passage of time by touching after a short sleep
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    tracker.touch();
+    let d2 = tracker.deadline();
+    assert!(
+      d2 > d1,
+      "After touch, deadline should advance: {d2:?} <= {d1:?}"
+    );
+  }
+
+  #[test]
+  fn test_idle_tracker_stale_alarm_not_idle() {
+    // Simulate the stale alarm scenario:
+    // 1. Tracker created at T+0 with 200ms idle timeout
+    // 2. Other side touches at T+150ms (updates last_active_ms)
+    // 3. At T+200ms, our local Sleep fires but tracker.is_idle() should
+    //    return false because last activity was only 50ms ago.
+    let tracker = IdleTracker::new(Duration::from_millis(200));
+
+    // Not idle initially
+    assert!(!tracker.is_idle());
+
+    // Simulate other side having activity at T+150ms
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    tracker.touch();
+
+    // At this point, only ~0ms since last activity → not idle
+    assert!(
+      !tracker.is_idle(),
+      "Should not be idle right after touch"
+    );
+
+    // After 250ms total (50ms after touch), still within 200ms timeout
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(
+      !tracker.is_idle(),
+      "50ms after touch should not be idle with 200ms timeout"
+    );
+
+    // After 200ms+ since touch → idle
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(
+      tracker.is_idle(),
+      "200ms after touch should be idle with 200ms timeout"
+    );
+  }
+
+  // ============== run_tunnel Tests ==============
+
+  #[tokio::test]
+  async fn test_run_tunnel_idle_timeout_on_no_data() {
+    // Two connected TCP streams with no data flowing should time out
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (server, _) = listener.accept().await.unwrap();
+
+    let shutdown = ShutdownHandle::new();
+    let idle_timeout = Duration::from_millis(200);
+
+    let start = std::time::Instant::now();
+    run_tunnel(client, server, shutdown, idle_timeout, "test").await;
+    let elapsed = start.elapsed();
+
+    assert!(
+      elapsed >= Duration::from_millis(150),
+      "Should wait for idle timeout, only waited {elapsed:?}"
+    );
+    assert!(
+      elapsed < Duration::from_secs(2),
+      "Should not wait much longer than idle timeout, waited {elapsed:?}"
+    );
+  }
+
+  #[tokio::test]
+  async fn test_run_tunnel_no_timeout_with_active_data() {
+    // Stream with continuous data should survive past idle_timeout.
+    // Use a target that keeps sending data, and a client that drains it.
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // server side: continuously writes data
+    let server_handle = tokio::spawn(async move {
+      let (mut server, _) = listener.accept().await.unwrap();
+      let data = vec![0xABu8; 4096];
+      // Send data for longer than idle_timeout (200ms * 10 = 2s)
+      for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if server.write_all(&data).await.is_err() {
+          break;
+        }
+      }
+      let _ = server.shutdown().await;
+    });
+
+    // client side: the tunnel side
+    let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+
+    // target: duplex stream to satisfy AsyncRead + AsyncWrite
+    let (target, _drain) = tokio::io::duplex(65536);
+
+    // Drain the target's output so writes don't block
+    let drainer = tokio::spawn(async move {
+      let mut drain = _drain;
+      let mut buf = [0u8; 4096];
+      loop {
+        match drain.read(&mut buf).await {
+          Ok(0) => break,
+          Ok(_) => continue,
+          Err(_) => break,
+        }
+      }
+    });
+
+    let shutdown = ShutdownHandle::new();
+    let idle_timeout = Duration::from_millis(200);
+
+    let start = std::time::Instant::now();
+    run_tunnel(client, target, shutdown, idle_timeout, "test").await;
+    let elapsed = start.elapsed();
+
+    // Tunnel should have survived well past 200ms because data was flowing,
+    // and only ended when the server stopped sending and closed.
+    assert!(
+      elapsed >= Duration::from_millis(500),
+      "Tunnel should survive past idle_timeout while data flows, \
+       only lasted {elapsed:?}"
+    );
+
+    let _ = server_handle.await;
+    let _ = drainer.await;
+  }
+
+  #[tokio::test]
+  async fn test_run_tunnel_completes_on_eof() {
+    // When one side closes immediately, tunnel should complete quickly
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (server, _) = listener.accept().await.unwrap();
+
+    // Server immediately closes
+    drop(server);
+
+    let shutdown = ShutdownHandle::new();
+    let idle_timeout = Duration::from_secs(60);
+
+    // Use duplex as target (sink doesn't impl AsyncRead)
+    let (target, _drain) = tokio::io::duplex(64);
+    drop(_drain);
+
+    let start = std::time::Instant::now();
+    run_tunnel(client, target, shutdown, idle_timeout, "test").await;
+    let elapsed = start.elapsed();
+
+    assert!(
+      elapsed < Duration::from_secs(5),
+      "Tunnel should complete on EOF, not wait for idle timeout. \
+       Elapsed: {elapsed:?}"
+    );
+  }
+
+  #[tokio::test]
+  async fn test_run_tunnel_shutdown_notification() {
+    // Tunnel should exit immediately on shutdown notification
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (server, _) = listener.accept().await.unwrap();
+
+    let shutdown = ShutdownHandle::new();
+    let shutdown_clone = shutdown.clone();
+    let idle_timeout = Duration::from_secs(60);
+
+    let tunnel_task = tokio::spawn(async move {
+      run_tunnel(client, server, shutdown_clone, idle_timeout, "test").await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    shutdown.shutdown();
+
+    let start = std::time::Instant::now();
+    let result = tunnel_task.await;
+    let elapsed = start.elapsed();
+
+    assert!(result.is_ok(), "Tunnel task should complete");
+    assert!(
+      elapsed < Duration::from_secs(2),
+      "Tunnel should exit quickly on shutdown, took {elapsed:?}"
+    );
+  }
+
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
 }

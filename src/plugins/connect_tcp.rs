@@ -189,7 +189,7 @@ impl tower::Service<Request> for ConnectTcpService {
 
       // Background task: wait for upgrade, then bidirectional transfer
       stream_tracker.register(async move {
-        let mut client = match upgrade {
+        let client = match upgrade {
           Some(u) => match u.await {
             Ok(c) => c,
             Err(e) => {
@@ -203,11 +203,9 @@ impl tower::Service<Request> for ConnectTcpService {
           }
         };
 
-        let mut target_stream = target_stream;
-
         stream::run_tunnel(
-          &mut client,
-          &mut target_stream,
+          client,
+          target_stream,
           shutdown_handle,
           idle_timeout,
           &addr,

@@ -13,8 +13,6 @@ import os
 import socket
 import subprocess
 import tempfile
-import time
-import pytest
 from typing import Optional
 
 from .conftest import get_unique_port
@@ -774,14 +772,12 @@ servers:
             [NEOPROXY_BINARY, "--config", config_path],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
         )
-        time.sleep(3)
-
-        returncode = proc.poll()
-        if returncode is None:
-            terminate_process(proc, timeout=5, force=True)
-            # Empty upstream name validated at service-build time
-        else:
+        try:
+            returncode = proc.wait(timeout=5)
             assert returncode != 0, f"Expected non-zero exit, got {returncode}"
+        except subprocess.TimeoutExpired:
+            # Process stayed alive — empty upstream name may not crash
+            terminate_process(proc, timeout=5, force=True)
 
 
 # ==============================================================================
@@ -871,12 +867,8 @@ servers:
             [NEOPROXY_BINARY, "--config", path],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
         )
-        time.sleep(3)
-        rc = proc.poll()
-        if rc is None:
-            terminate_process(proc, timeout=5, force=True)
-            pytest.fail("Should reject unknown field in service args")
-        assert rc != 0
+        rc, _ = wait_for_process_exit(proc, timeout=5)
+        assert rc != 0, "Should reject unknown field in service args"
 
     def test_connect_tcp_max_idle_timeout_starts(self):
         """connect_tcp with max_idle_timeout starts successfully."""
@@ -936,12 +928,8 @@ servers:
             [NEOPROXY_BINARY, "--config", path],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
         )
-        time.sleep(3)
-        rc = proc.poll()
-        if rc is None:
-            terminate_process(proc, timeout=5, force=True)
-            pytest.fail("Should reject unknown field in connect_tcp")
-        assert rc != 0
+        rc, _ = wait_for_process_exit(proc, timeout=5)
+        assert rc != 0, "Should reject unknown field in connect_tcp"
 
     def test_plugin_config_rejects_unknown_field(self):
         """Plugin config with unknown field rejected."""
@@ -978,9 +966,5 @@ servers:
             [NEOPROXY_BINARY, "--config", path],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
         )
-        time.sleep(3)
-        rc = proc.poll()
-        if rc is None:
-            terminate_process(proc, timeout=5, force=True)
-            pytest.fail("Should reject unknown field in plugin config")
-        assert rc != 0
+        rc, _ = wait_for_process_exit(proc, timeout=5)
+        assert rc != 0, "Should reject unknown field in plugin config"

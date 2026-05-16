@@ -200,6 +200,10 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       ctx.insert("server.ip", local_addr.ip().to_string());
       ctx.insert("server.port", local_addr.port().to_string());
       ctx.insert("service.name", &routing_entry.service_name);
+      // Store listener hostname from SNI for Proxy-Status
+      if let Some(ref sni) = self.sni {
+        ctx.insert("listener.hostname", sni);
+      }
       req.extensions_mut().insert(ctx);
     }
 

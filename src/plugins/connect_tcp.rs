@@ -17,6 +17,7 @@ use super::utils::{self as utils, ConnectTargetError};
 use crate::context::RequestContext;
 use crate::http_utils::{
   Request, Response, build_empty_response, build_error_response,
+  build_proxy_status, build_proxy_status_error,
 };
 use crate::plugin::Plugin;
 use crate::service::{BuildService, Service};
@@ -151,26 +152,48 @@ impl tower::Service<Request> for ConnectTcpService {
       let target_stream = match connect_result {
         Ok(Ok(stream)) => stream,
         Ok(Err(e)) => {
-          // Map IO error to HTTP status for the Listener to translate
-          let status = match e.kind() {
+          // Map IO error to HTTP status and Proxy-Status error
+          let (status, error) = match e.kind() {
             std::io::ErrorKind::ConnectionRefused => {
-              http::StatusCode::BAD_GATEWAY
+              (http::StatusCode::BAD_GATEWAY, "connection_refused")
             }
             std::io::ErrorKind::TimedOut => {
-              http::StatusCode::GATEWAY_TIMEOUT
+              (http::StatusCode::GATEWAY_TIMEOUT, "connection_timeout")
             }
-            _ => http::StatusCode::BAD_GATEWAY,
+            std::io::ErrorKind::HostUnreachable
+            | std::io::ErrorKind::NetworkUnreachable
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::AddrNotAvailable => {
+              (http::StatusCode::BAD_GATEWAY, "destination_unavailable")
+            }
+            _ => {
+              (http::StatusCode::BAD_GATEWAY, "proxy_internal_response")
+            }
           };
-          return Ok(build_empty_response(status));
+          let mut resp = build_empty_response(status);
+          if let Some(ref id) = ctx.get("listener.hostname") {
+            resp.headers_mut().insert(
+              http::header::HeaderName::from_static("proxy-status"),
+              build_proxy_status_error(id, error),
+            );
+          }
+          return Ok(resp);
         }
         Err(_) => {
           // Timeout expired
           warn!(
             "TCP connect to {addr} timed out after {connect_timeout:?}"
           );
-          return Ok(build_empty_response(
+          let mut resp = build_empty_response(
             http::StatusCode::GATEWAY_TIMEOUT,
-          ));
+          );
+          if let Some(ref id) = ctx.get("listener.hostname") {
+            resp.headers_mut().insert(
+              http::header::HeaderName::from_static("proxy-status"),
+              build_proxy_status_error(id, "connection_timeout"),
+            );
+          }
+          return Ok(resp);
         }
       };
       let connect_ms = connect_start.elapsed().as_millis() as u64;
@@ -181,8 +204,14 @@ impl tower::Service<Request> for ConnectTcpService {
         connect_ms.to_string(),
       );
 
-      // Build 200 response
-      let resp = build_empty_response(http::StatusCode::OK);
+      // Build 200 response with Proxy-Status
+      let mut resp = build_empty_response(http::StatusCode::OK);
+      if let Some(ref id) = ctx.get("listener.hostname") {
+        resp.headers_mut().insert(
+          http::header::HeaderName::from_static("proxy-status"),
+          build_proxy_status(id),
+        );
+      }
 
       // Get shutdown handle
       let shutdown_handle = stream_tracker.shutdown_handle();

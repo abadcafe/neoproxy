@@ -159,15 +159,25 @@ impl H3UpgradeTrigger {
   }
 
   /// Send H3 success (200 OK) and deliver the stream to the Service.
-  pub async fn send_success(mut self) -> Result<()> {
+  pub async fn send_success(
+    mut self,
+    resp_headers: Option<&http::HeaderMap>,
+  ) -> Result<()> {
     let mut stream =
       self.stream.take().expect("stream already consumed");
 
-    // Send 200 OK response on the H3 stream
-    let resp = http::Response::builder()
-      .status(http::StatusCode::OK)
-      .body(())
-      .unwrap();
+    // Send 200 OK response on the H3 stream, preserving upstream headers
+    // (e.g. Proxy-Status per RFC 9209).
+    let mut builder =
+      http::Response::builder().status(http::StatusCode::OK);
+    if let Some(headers) = resp_headers {
+      if let Some(ref mut hdrs) = builder.headers_mut() {
+        hdrs.extend(
+          headers.iter().map(|(k, v)| (k.clone(), v.clone())),
+        );
+      }
+    }
+    let resp = builder.body(()).unwrap();
     stream.send_response(resp).await?;
 
     // Split into send/recv halves and wrap
@@ -203,13 +213,23 @@ impl H3UpgradeTrigger {
     mut self,
     status: http::StatusCode,
     body: Bytes,
+    resp_headers: Option<&http::HeaderMap>,
   ) -> Result<()> {
     let mut stream =
       self.stream.take().expect("stream already consumed");
 
-    // Send error response on the H3 stream
-    let resp =
-      http::Response::builder().status(status).body(()).unwrap();
+    // Send error response on the H3 stream, preserving upstream
+    // headers (e.g. Proxy-Status per RFC 9209).
+    let mut builder =
+      http::Response::builder().status(status);
+    if let Some(headers) = resp_headers {
+      if let Some(ref mut hdrs) = builder.headers_mut() {
+        hdrs.extend(
+          headers.iter().map(|(k, v)| (k.clone(), v.clone())),
+        );
+      }
+    }
+    let resp = builder.body(()).unwrap();
     stream.send_response(resp).await?;
 
     // Send body if not empty

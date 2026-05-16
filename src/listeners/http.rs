@@ -142,6 +142,16 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
         &local_addr,
         &routing_entry.service_name(),
       );
+      // Store the listener hostname from Host header for Proxy-Status
+      if let Some(host) = req
+        .headers()
+        .get(http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(|h| h.split(':').next().unwrap_or(h).to_string())
+      {
+        ctx.insert("listener.hostname", host);
+      }
+
       req.extensions_mut().insert(ctx);
     }
 

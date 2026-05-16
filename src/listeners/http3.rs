@@ -320,6 +320,10 @@ async fn handle_h3_stream(
   ctx.insert("server.ip", local_addr.ip().to_string());
   ctx.insert("server.port", local_addr.port().to_string());
   ctx.insert("service.name", &routing_entry.service_name);
+  // Store listener hostname from SNI for Proxy-Status
+  if let Some(ref sni) = sni {
+    ctx.insert("listener.hostname", sni);
+  }
 
   // Phase 4: Create upgrade pair ONLY for CONNECT method
   let is_connect = method == http::Method::CONNECT;
@@ -357,12 +361,14 @@ async fn handle_h3_stream(
     Ok(resp) => {
       if is_connect {
         if resp.status() == http::StatusCode::OK {
+          let resp_headers = resp.headers().clone();
           if let Some(t) = trigger {
-            if let Err(e) = t.send_success().await {
+            if let Err(e) = t.send_success(Some(&resp_headers)).await {
               warn!("H3 failed to send success: {e}");
             }
           }
         } else {
+          let resp_headers = resp.headers().clone();
           let status = resp.status();
           let body_bytes =
             match http_body_util::BodyExt::collect(resp.into_body())
@@ -376,7 +382,7 @@ async fn handle_h3_stream(
             };
           if let Some(t) = trigger {
             if let Err(e) =
-              t.send_error_with_body(status, body_bytes).await
+              t.send_error_with_body(status, body_bytes, Some(&resp_headers)).await
             {
               warn!("H3 failed to send error: {e}");
             }

@@ -73,12 +73,12 @@ plugins:
 
 listeners:
   # HTTP listener - no extra args
-  - name: http_main
+  - name: http_chain
     kind: http
     addresses: ["127.0.0.1:8080"]
 
   # HTTPS listener - supports TLS handshake timeout
-  - name: https_main
+  - name: https_chain
     kind: https
     addresses: ["127.0.0.1:8443"]
     args:
@@ -86,7 +86,7 @@ listeners:
       tls_handshake_timeout: "5s"
 
   # HTTP/3 listener - supports QUIC protocol tuning
-  - name: http3_main
+  - name: http3_chain
     kind: http3
     addresses: ["127.0.0.1:8443"]
     args:
@@ -103,7 +103,7 @@ listeners:
         receive_window: "10MiB"
 
   # SOCKS5 listener - supports handshake timeout and user authentication
-  - name: socks5_main
+  - name: socks5_chain
     kind: socks5
     addresses: ["127.0.0.1:9080"]
     args:
@@ -115,22 +115,22 @@ listeners:
           password: "secret"
 
   # HTTP listener on alternate port (for connect_proxy)
-  - name: http_alt
+  - name: http_connect
     kind: http
     addresses: ["127.0.0.1:10080"]
 
   # HTTPS listener on alternate port
-  - name: https_alt
+  - name: https_connect
     kind: https
     addresses: ["127.0.0.1:10443"]
 
   # HTTP/3 listener on alternate port (for connect_proxy)
-  - name: http3_alt
+  - name: http3_connect
     kind: http3
     addresses: ["127.0.0.1:10443"]
 
   # SOCKS5 listener on alternate port (no auth)
-  - name: socks5_alt
+  - name: socks5_connect
     kind: socks5
     addresses: ["127.0.0.1:11080"]
 
@@ -231,10 +231,10 @@ servers:
       client_ca_certs:
         - conf/certs/client-ca.crt
     listeners:
-      - http_alt
-      - https_alt
-      - http3_alt
-      - socks5_alt
+      - http_connect
+      - https_connect
+      - http3_connect
+      - socks5_connect
     service: connect_tcp
 
   # ---------------------------------------------------------------------------
@@ -264,10 +264,10 @@ servers:
         - cert_path: conf/certs/server.crt
           key_path: conf/certs/server.key
     listeners:
-      - http_main
-      - https_main
-      - http3_main
-      - socks5_main
+      - http_chain
+      - https_chain
+      - http3_chain
+      - socks5_chain
     service: http3_chain
 
 # =============================================================================

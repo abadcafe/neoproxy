@@ -40,6 +40,11 @@ from .utils.certs import (
     generate_client_cert,
 )
 
+from .utils.config_builders import (
+    create_http3_listener_config,
+    create_http3_chain_config,
+)
+
 from .conftest import get_unique_port
 
 # Alias for backward compatibility in this file
@@ -48,121 +53,6 @@ from .conftest import get_unique_port
 # ==============================================================================
 # Test helper functions (unique to this module)
 # ==============================================================================
-
-
-def create_http3_listener_config(
-    proxy_port: int,
-    cert_path: str,
-    key_path: str,
-    temp_dir: str,
-    auth_config: Optional[str] = None,
-    quic_config: Optional[str] = None,
-    server_threads: int = 1
-) -> str:
-    """
-    Create HTTP/3 Listener configuration file.
-
-    Args:
-        proxy_port: Port for the HTTP/3 listener
-        cert_path: TLS certificate path
-        key_path: TLS private key path
-        temp_dir: Temporary directory for logs
-        auth_config: Optional authentication config YAML string
-        quic_config: Optional QUIC config YAML string
-        server_threads: Number of worker threads
-
-    Returns:
-        str: Path to the configuration file
-    """
-    # QUIC config goes in listener args
-    quic_section = ""
-    if quic_config:
-        # Indent each line of quic_config so it nests under 'quic:'
-        indented = "\n".join(
-            "      " + line.strip() for line in quic_config.strip().splitlines()
-        )
-        quic_section = f"""
-  args:
-    quic:
-{indented}"""
-
-    config_content = f"""server_threads: {server_threads}
-
-listeners:
-- name: h3_main
-  kind: http3
-  addresses: ["0.0.0.0:{proxy_port}"]{quic_section}
-
-services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
-
-servers:
-- name: http3_server
-  tls:
-    certificates:
-    - cert_path: "{cert_path}"
-      key_path: "{key_path}"
-  listeners: ["h3_main"]
-  service: connect_tcp
-"""
-    config_path = os.path.join(temp_dir, "http3_config.yaml")
-    with open(config_path, "w") as f:
-        f.write(config_content)
-    return config_path
-
-
-def create_http3_chain_config(
-    http_port: int,
-    proxy_group: List[Tuple[str, int, int]],
-    ca_path: str,
-    temp_dir: str,
-    server_threads: int = 1
-) -> str:
-    """
-    Create HTTP/3 Chain service configuration file.
-
-    Args:
-        http_port: Port for the HTTP listener
-        proxy_group: List of (address, port, weight) tuples
-        ca_path: CA certificate path
-        temp_dir: Temporary directory for logs
-        server_threads: Number of worker threads
-
-    Returns:
-        str: Path to the configuration file
-    """
-    proxy_list = []
-    for addr, port, weight in proxy_group:
-        proxy_list.append(f"    - address: {addr}:{port}\n      hostname: localhost\n      weight: {weight}")
-
-    proxy_section = "\n".join(proxy_list)
-
-    config_content = f"""server_threads: {server_threads}
-
-listeners:
-- name: http_main
-  kind: http
-  addresses: ["0.0.0.0:{http_port}"]
-
-services:
-- name: http3_chain
-  kind: http3_chain.http3_chain
-  args:
-    proxy_group:
-{proxy_section}
-    default_tls:
-      server_ca_path: "{ca_path}"
-
-servers:
-- name: http_proxy
-  listeners: ["http_main"]
-  service: http3_chain
-"""
-    config_path = os.path.join(temp_dir, "http3_chain_config.yaml")
-    with open(config_path, "w") as f:
-        f.write(config_content)
-    return config_path
 
 
 def run_curl_http3_connect(

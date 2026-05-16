@@ -17,7 +17,7 @@ use hyper_util::rt::TokioIo;
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::oneshot;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::h3_stream::H3ServerBidiStream;
 use crate::http_utils::RequestBody;
@@ -552,7 +552,7 @@ pub async fn run_tunnel<C, T>(
       );
     }
     Err(e) => {
-      error!("tunnel to {addr}: transfer error: {e}");
+      warn!("tunnel to {addr}: transfer error: {e}");
     }
   }
 }

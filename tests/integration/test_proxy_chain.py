@@ -122,19 +122,25 @@ def create_entry_http_password_config(
     """Create entry HTTP config with password auth, connecting to password upstream."""
     config_content = f"""server_threads: 1
 
+plugins:
+  http3_chain:
+    upstreams:
+      - name: test_upstream
+        addresses:
+          - address: "127.0.0.1:{h3_port}"
+            hostname: localhost
+            weight: 1
+            user:
+              username: user1
+              password: pass1
+            tls:
+              server_ca_path: "{ca_path}"
+
 services:
   - name: proxy_chain
     kind: http3_chain.http3_chain
     args:
-      proxy_group:
-        - address: "127.0.0.1:{h3_port}"
-          hostname: localhost
-          weight: 1
-          user:
-            username: user1
-            password: pass1
-          tls:
-            server_ca_path: "{ca_path}"
+      upstream: test_upstream
     layers:
       - kind: auth.basic_auth
         args:
@@ -169,18 +175,24 @@ def create_entry_http_tls_cert_config(
     """Create entry HTTP config with password auth, connecting to TLS cert upstream."""
     config_content = f"""server_threads: 1
 
+plugins:
+  http3_chain:
+    upstreams:
+      - name: test_upstream
+        addresses:
+          - address: "127.0.0.1:{h3_port}"
+            hostname: localhost
+            weight: 1
+            tls:
+              client_cert_path: "{client_cert_path}"
+              client_key_path: "{client_key_path}"
+              server_ca_path: "{ca_path}"
+
 services:
   - name: proxy_chain
     kind: http3_chain.http3_chain
     args:
-      proxy_group:
-        - address: "127.0.0.1:{h3_port}"
-          hostname: localhost
-          weight: 1
-          tls:
-            client_cert_path: "{client_cert_path}"
-            client_key_path: "{client_key_path}"
-            server_ca_path: "{ca_path}"
+      upstream: test_upstream
     layers:
       - kind: auth.basic_auth
         args:
@@ -213,19 +225,25 @@ def create_entry_socks5_password_config(
     """Create entry SOCKS5 config with password auth, connecting to password upstream."""
     config_content = f"""server_threads: 1
 
+plugins:
+  http3_chain:
+    upstreams:
+      - name: test_upstream
+        addresses:
+          - address: "127.0.0.1:{h3_port}"
+            hostname: localhost
+            weight: 1
+            user:
+              username: user1
+              password: pass1
+            tls:
+              server_ca_path: "{ca_path}"
+
 services:
   - name: proxy_chain
     kind: http3_chain.http3_chain
     args:
-      proxy_group:
-        - address: "127.0.0.1:{h3_port}"
-          hostname: localhost
-          weight: 1
-          user:
-            username: user1
-            password: pass1
-          tls:
-            server_ca_path: "{ca_path}"
+      upstream: test_upstream
 
 listeners:
   - name: socks5_main
@@ -258,18 +276,24 @@ def create_entry_socks5_tls_cert_config(
     """Create entry SOCKS5 config with password auth, connecting to TLS cert upstream."""
     config_content = f"""server_threads: 1
 
+plugins:
+  http3_chain:
+    upstreams:
+      - name: test_upstream
+        addresses:
+          - address: "127.0.0.1:{h3_port}"
+            hostname: localhost
+            weight: 1
+            tls:
+              client_cert_path: "{client_cert_path}"
+              client_key_path: "{client_key_path}"
+              server_ca_path: "{ca_path}"
+
 services:
   - name: proxy_chain
     kind: http3_chain.http3_chain
     args:
-      proxy_group:
-        - address: "127.0.0.1:{h3_port}"
-          hostname: localhost
-          weight: 1
-          tls:
-            client_cert_path: "{client_cert_path}"
-            client_key_path: "{client_key_path}"
-            server_ca_path: "{ca_path}"
+      upstream: test_upstream
 
 listeners:
   - name: socks5_main
@@ -639,16 +663,22 @@ def create_entry_http_no_upstream_auth_config(
     """Create entry HTTP config with password auth, no upstream auth."""
     config_content = f"""server_threads: 1
 
+plugins:
+  http3_chain:
+    tls:
+      server_ca_path: "{ca_path}"
+    upstreams:
+      - name: test_upstream
+        addresses:
+          - address: "127.0.0.1:{h3_port}"
+            hostname: localhost
+            weight: 1
+
 services:
   - name: proxy_chain
     kind: http3_chain.http3_chain
     args:
-      proxy_group:
-        - address: "127.0.0.1:{h3_port}"
-          hostname: localhost
-          weight: 1
-      default_tls:
-        server_ca_path: "{ca_path}"
+      upstream: test_upstream
     layers:
       - kind: auth.basic_auth
         args:
@@ -681,16 +711,22 @@ def create_entry_socks5_no_upstream_auth_config(
     """Create entry SOCKS5 config with password auth, no upstream auth."""
     config_content = f"""server_threads: 1
 
+plugins:
+  http3_chain:
+    tls:
+      server_ca_path: "{ca_path}"
+    upstreams:
+      - name: test_upstream
+        addresses:
+          - address: "127.0.0.1:{h3_port}"
+            hostname: localhost
+            weight: 1
+
 services:
   - name: proxy_chain
     kind: http3_chain.http3_chain
     args:
-      proxy_group:
-        - address: "127.0.0.1:{h3_port}"
-          hostname: localhost
-          weight: 1
-      default_tls:
-        server_ca_path: "{ca_path}"
+      upstream: test_upstream
 
 listeners:
   - name: socks5_main
@@ -722,19 +758,25 @@ def create_entry_http_wrong_upstream_auth_config(
     """Create entry HTTP config with password auth, wrong upstream credentials."""
     config_content = f"""server_threads: 1
 
+plugins:
+  http3_chain:
+    upstreams:
+      - name: test_upstream
+        addresses:
+          - address: "127.0.0.1:{h3_port}"
+            hostname: localhost
+            weight: 1
+            user:
+              username: wrong_user
+              password: wrong_pass
+            tls:
+              server_ca_path: "{ca_path}"
+
 services:
   - name: proxy_chain
     kind: http3_chain.http3_chain
     args:
-      proxy_group:
-        - address: "127.0.0.1:{h3_port}"
-          hostname: localhost
-          weight: 1
-          user:
-            username: wrong_user
-            password: wrong_pass
-          tls:
-            server_ca_path: "{ca_path}"
+      upstream: test_upstream
     layers:
       - kind: auth.basic_auth
         args:

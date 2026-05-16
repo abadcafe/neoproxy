@@ -36,7 +36,7 @@ from .utils.helpers import (
 
 from .utils.http_echo import http_echo_handler
 
-from .test_http3_listener import (
+from .utils.config_builders import (
     create_http3_listener_config,
     create_http3_chain_config,
 )
@@ -204,16 +204,16 @@ class TestHTTP3ChainProxy:
         try:
             config_content = f"""server_threads: 1
 
-services:
-- name: http3_chain
-  kind: http3_chain.http3_chain
-  args:
-    proxy_group:
-    - address: 127.0.0.1:{h3_port}
-      hostname: localhost
-      weight: 1
-    default_tls:
+plugins:
+  http3_chain:
+    tls:
       server_ca_path: "/nonexistent/ca.pem"
+    upstreams:
+      - name: test_upstream
+        addresses:
+          - address: 127.0.0.1:{h3_port}
+            hostname: localhost
+            weight: 1
 
 listeners:
 - name: http_main
@@ -223,6 +223,12 @@ listeners:
     protocols: [ http ]
     hostnames: []
     certificates: []
+
+services:
+- name: http3_chain
+  kind: http3_chain.http3_chain
+  args:
+    upstream: test_upstream
 
 servers:
 - name: http_proxy

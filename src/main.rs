@@ -360,11 +360,13 @@ fn check_server_threads(
 
 fn main() -> Result<()> {
   // Install rustls crypto provider before any TLS operations
-  rustls::crypto::ring::default_provider()
+    rustls::crypto::ring::default_provider()
     .install_default()
     .expect("Failed to install rustls crypto provider");
 
   // Load config
+  
+
   let config = Config::load(&CmdOpt::global().config_file)?;
 
   // Validate config
@@ -412,13 +414,8 @@ fn main() -> Result<()> {
     shutdown_triggered,
   )));
 
-  // CR-014: Flush writer threads before exiting. After all server
-  // threads have exited (main_loop returns), all mpsc::Sender clones
-  // from middleware instances are dropped. Writer threads can now exit
-  // (blocking_recv returns None) and flush their buffers. Without this
-  // call, std::process::exit() would kill detached writer threads
-  // before they could flush, potentially losing log entries.
-  plugins::flush_writer_threads();
+  // Writer threads are now joined directly in uninstall(), no need
+  // for separate flush.
 
   std::process::exit(exit_code);
 }

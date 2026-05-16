@@ -5,9 +5,9 @@
 #
 # Prerequisites:
 #   1. Run ./generate_certs.sh to generate certificates
-#   2. Add to /etc/hosts: 127.0.0.1 proxy.example.com http3.example.com
-#   3. server.crt now contains full chain (server cert + CA cert)
-#   4. Restart neoproxy after regenerating certificates
+#   2. server.crt must contain full chain (server cert + CA cert)
+#   3. Restart neoproxy after regenerating certificates
+#   4. TLS examples use --resolve to avoid editing /etc/hosts
 #
 # Quick test (HTTP proxy, no auth):
 #   curl --proxy http://127.0.0.1:8080 https://httpbin.org/ip
@@ -37,6 +37,29 @@ plugins:
         # max_file_size: "200MiB"       # Max file size before rotation (default: 200MiB)
         # rotate_daily: true           # Rotate at date boundary (default: true)
         # format: "text"               # Log format: text / json (default: text)
+
+  # HTTP/3 Chain Plugin - upstream pool configuration
+  # Defines upstream servers with three-level inheritance:
+  #   Plugin → Upstream → Address
+  http3_chain:
+    max_idle_timeout: "5m"
+    quic:
+      keep_alive_interval: "3s"
+    user:
+      username: "admin"
+      password: "secret"
+    tls:
+      client_cert_path: conf/certs/client.crt
+      client_key_path: conf/certs/client.key
+      server_ca_path: conf/certs/server-ca.crt
+    upstreams:
+      - name: local_relay
+        # max_idle_timeout, quic, user, tls: override plugin-level
+        addresses:
+          - address: "127.0.0.1:10443"
+            hostname: "http3.example.com"
+            weight: 1
+            # user, tls: override upstream/plugin-level
 
 # -----------------------------------------------------------------------------
 # Listeners
@@ -127,33 +150,11 @@ services:
     args: {}
 
   # HTTP/3 chain proxy service
-  # Forwards requests to upstream proxy servers via HTTP/3
+  # References an upstream defined in the plugin config
   - name: http3_chain
     kind: http3_chain.http3_chain
     args:
-      # Default credentials inherited by proxies without user/tls specified
-      default_user:
-        username: "default_user"
-        password: "default_pass"
-      default_tls:
-        server_ca_path: conf/certs/server-ca.crt
-      proxy_group:
-        # Each proxy requires:
-        #   - address: IP:port of upstream proxy
-        #   - hostname: SNI hostname (optional, must match server cert SAN)
-        #   - weight: Load balancing weight (must be > 0)
-        #   - user: (optional) Authentication credentials (overrides default_user)
-        #   - tls: (optional) TLS client certificate and CA (deep-merges with default_tls)
-        - address: 127.0.0.1:10443
-          hostname: "http3.example.com"
-          weight: 1
-          user:
-            username: "admin"
-            password: "secret"
-          tls:
-            client_cert_path: conf/certs/client.crt
-            client_key_path: conf/certs/client.key
-            server_ca_path: conf/certs/server-ca.crt
+      upstream: local_relay
     layers:
       - kind: access_log.file
         args:
@@ -164,7 +165,7 @@ services:
     kind: connect_tcp.connect_tcp
     args:
       connect_timeout: "10s"
-      idle_timeout: "60s"
+      max_idle_timeout: "60s"
     layers:
       # Basic proxy authentication layer
       - kind: auth.basic_auth
@@ -202,16 +203,18 @@ servers:
   #   # HTTP proxy (with basic auth)
   #   curl --proxy http://127.0.0.1:10080 -U "admin:secret" https://httpbin.org/ip
   #
-  #   # HTTPS proxy (with basic auth and client certificate)
-  #   curl --proxy https://proxy.example.com:10443 \
+  #   # HTTPS proxy (with basic auth + mTLS client cert)
+  #   curl --resolve proxy.example.com:10443:127.0.0.1 \
+  #        --proxy https://proxy.example.com:10443 \
   #        --proxy-cacert conf/certs/server-ca.crt \
   #        --proxy-cert conf/certs/client.crt \
   #        --proxy-key conf/certs/client.key \
   #        -U "admin:secret" \
   #        https://httpbin.org/ip
   #
-  #   # HTTP/3 proxy (with basic auth and client certificate)
-  #   curl --proxy https://proxy.example.com:10443 --http3 \
+  #   # HTTP/3 proxy (with basic auth + mTLS client cert)
+  #   curl --resolve proxy.example.com:10443:127.0.0.1 \
+  #        --proxy https://proxy.example.com:10443 --http3 \
   #        --proxy-cacert conf/certs/server-ca.crt \
   #        --proxy-cert conf/certs/client.crt \
   #        --proxy-key conf/certs/client.key \
@@ -238,20 +241,22 @@ servers:
   # Chain Proxy Server (no auth required on this node)
   # ---------------------------------------------------------------------------
   # curl examples:
-  #   # HTTP proxy
+  #   # HTTP proxy (no auth required at entry node)
   #   curl --proxy http://127.0.0.1:8080 https://httpbin.org/ip
   #
-  #   # HTTPS proxy (encrypted connection to proxy)
-  #   curl --proxy https://proxy.example.com:8443 \
+  #   # HTTPS proxy (encrypted connection to proxy, no auth at entry)
+  #   curl --resolve proxy.example.com:8443:127.0.0.1 \
+  #        --proxy https://proxy.example.com:8443 \
   #        --proxy-cacert conf/certs/server-ca.crt \
   #        https://httpbin.org/ip
   #
-  #   # HTTP/3 proxy (encrypted connection to proxy)
-  #   curl --proxy https://proxy.example.com:8443 --http3 \
+  #   # HTTP/3 proxy (encrypted QUIC connection to proxy)
+  #   curl --resolve proxy.example.com:8443:127.0.0.1 \
+  #        --proxy https://proxy.example.com:8443 --http3 \
   #        --proxy-cacert conf/certs/server-ca.crt \
   #        https://httpbin.org/ip
   #
-  #   # SOCKS5 proxy (with auth, configured in socks5_main listener)
+  #   # SOCKS5 proxy (with auth)
   #   curl --socks5 127.0.0.1:9080 --proxy-user admin:secret https://httpbin.org/ip
   - name: chain_proxy
     tls:

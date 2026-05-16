@@ -28,7 +28,7 @@ from .utils.helpers import (
     terminate_process,
 )
 
-from .test_http3_listener import (
+from .utils.config_builders import (
     create_http3_chain_config,
 )
 from .utils.certs import generate_test_certificates
@@ -297,6 +297,17 @@ class TestHTTP3ChainAddressResolution:
 
             config_content = f"""server_threads: 1
 
+plugins:
+  http3_chain:
+    tls:
+      server_ca_path: "{ca_path}"
+    upstreams:
+      - name: test_upstream
+        addresses:
+          - address: this.host.does.not.exist.invalid:8443
+            hostname: this.host.does.not.exist.invalid
+            weight: 1
+
 listeners:
 - name: http_main
   kind: http
@@ -306,12 +317,7 @@ services:
 - name: http3_chain
   kind: http3_chain.http3_chain
   args:
-    proxy_group:
-    - address: this.host.does.not.exist.invalid:8443
-      hostname: this.host.does.not.exist.invalid
-      weight: 1
-    default_tls:
-      server_ca_path: "{ca_path}"
+    upstream: test_upstream
 
 servers:
 - name: http_proxy

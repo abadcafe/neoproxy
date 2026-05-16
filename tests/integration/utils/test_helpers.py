@@ -139,6 +139,7 @@ class TestWaitForLogContains:
             time.sleep(0.2)
             with open(log_path, 'a') as f:
                 f.write("READY: Server is ready\n")
+                f.flush()
             written_event.set()
 
         thread = threading.Thread(target=write_later, daemon=True)

@@ -6,9 +6,9 @@ connections are only closed when no data flows in EITHER direction
 for the configured timeout period.
 
 This module covers:
-- Tunnel survives sustained data transfer longer than idle_timeout
+- Tunnel survives sustained data transfer longer than max_idle_timeout
 - Tunnel times out when no data flows
-- Tunnel idle_timeout is configurable
+- Tunnel max_idle_timeout is configurable
 """
 
 import subprocess
@@ -26,7 +26,7 @@ from .utils.helpers import (
     wait_for_udp_port_bound,
 )
 
-from .test_http3_listener import (
+from .utils.config_builders import (
     create_http3_listener_config,
 )
 
@@ -38,18 +38,18 @@ class TestTunnelIdleTimeout:
 
     def test_tunnel_survives_sustained_transfer(self, shared_test_certs) -> None:
         """
-        TC-IDLE-001: Tunnel survives data transfer longer than idle_timeout.
+        TC-IDLE-001: Tunnel survives data transfer longer than max_idle_timeout.
 
-        Target: Verify that a tunnel is NOT killed by idle_timeout while
+        Target: Verify that a tunnel is NOT killed by max_idle_timeout while
         data is actively flowing, even if the transfer takes longer than
-        the configured idle_timeout (default 60s).
+        the configured max_idle_timeout (default 60s).
 
         The old implementation used `tokio::time::timeout(60s)` which
         killed the tunnel after 60s total, regardless of data flow.
         The new implementation uses true idle timeout — only closing
         when no data flows for the timeout period.
 
-        We use a short idle_timeout (2s) and transfer data for >2s
+        We use a short max_idle_timeout (2s) and transfer data for >2s
         to verify the tunnel stays alive.
         """
         temp_dir1 = tempfile.mkdtemp()
@@ -68,7 +68,7 @@ class TestTunnelIdleTimeout:
             key_path = shared_test_certs['key_path']
             ca_path = shared_test_certs['ca_path']
 
-            # Create a target server that sends data slowly (longer than idle_timeout)
+            # Create a target server that sends data slowly (longer than max_idle_timeout)
             # It sends 5 chunks of 1KB every 500ms, taking ~2.5s total
             def slow_handler(conn: socket.socket) -> None:
                 try:
@@ -117,10 +117,21 @@ class TestTunnelIdleTimeout:
             assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0, proc=h3_proc), \
                 "HTTP/3 listener failed to start"
 
-            # Start chain service with short idle_timeout
-            # This config includes idle_timeout: 2s
-            proxy_list = f"    - address: 127.0.0.1:{h3_port}\n      hostname: localhost\n      weight: 1"
+            # Start chain service with short max_idle_timeout
+            # This config includes max_idle_timeout: 2s
             config_content = f"""server_threads: 1
+
+plugins:
+  http3_chain:
+    tls:
+      server_ca_path: "{ca_path}"
+    upstreams:
+      - name: test_upstream
+        addresses:
+          - address: 127.0.0.1:{h3_port}
+            hostname: localhost
+            weight: 1
+            max_idle_timeout: "2s"
 
 listeners:
 - name: http_main
@@ -131,11 +142,7 @@ services:
 - name: http3_chain
   kind: http3_chain.http3_chain
   args:
-    idle_timeout: "2s"
-    proxy_group:
-{proxy_list}
-    default_tls:
-      server_ca_path: "{ca_path}"
+    upstream: test_upstream
 
 servers:
 - name: http_proxy
@@ -151,7 +158,7 @@ servers:
                 "HTTP listener failed to start"
 
             # Download through the proxy — should succeed even though
-            # transfer takes ~2.5s and idle_timeout is 2s
+            # transfer takes ~2.5s and max_idle_timeout is 2s
             start = time.time()
             result = subprocess.run(
                 [
@@ -174,9 +181,9 @@ servers:
             assert len(result.stdout) == 5120, \
                 f"Expected 5120 bytes, got {len(result.stdout)}"
 
-            # Verify the transfer actually took longer than idle_timeout
+            # Verify the transfer actually took longer than max_idle_timeout
             assert elapsed >= 2.0, \
-                f"Transfer should take longer than idle_timeout (2s), took {elapsed:.1f}s"
+                f"Transfer should take longer than max_idle_timeout (2s), took {elapsed:.1f}s"
 
         finally:
             if chain_proc:
@@ -194,11 +201,11 @@ servers:
         """
         TC-IDLE-002: Tunnel times out when no data flows.
 
-        Target: Verify that a tunnel IS killed by idle_timeout when
+        Target: Verify that a tunnel IS killed by max_idle_timeout when
         no data flows for the configured period.
 
         We establish a CONNECT tunnel and then don't send any data.
-        The tunnel should close after idle_timeout.
+        The tunnel should close after max_idle_timeout.
         """
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
@@ -240,9 +247,20 @@ servers:
             assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0, proc=h3_proc), \
                 "HTTP/3 listener failed to start"
 
-            # Start chain service with short idle_timeout
-            proxy_list = f"    - address: 127.0.0.1:{h3_port}\n      hostname: localhost\n      weight: 1"
+            # Start chain service with short max_idle_timeout
             config_content = f"""server_threads: 1
+
+plugins:
+  http3_chain:
+    tls:
+      server_ca_path: "{ca_path}"
+    upstreams:
+      - name: test_upstream
+        addresses:
+          - address: 127.0.0.1:{h3_port}
+            hostname: localhost
+            weight: 1
+            max_idle_timeout: "2s"
 
 listeners:
 - name: http_main
@@ -253,11 +271,7 @@ services:
 - name: http3_chain
   kind: http3_chain.http3_chain
   args:
-    idle_timeout: "2s"
-    proxy_group:
-{proxy_list}
-    default_tls:
-      server_ca_path: "{ca_path}"
+    upstream: test_upstream
 
 servers:
 - name: http_proxy
@@ -296,7 +310,7 @@ servers:
                 f"Expected 200 OK from CONNECT, got: {response!r}"
 
             # Now idle — don't send any data
-            # The tunnel should close after idle_timeout (2s)
+            # The tunnel should close after max_idle_timeout (2s)
             start = time.time()
             sock.settimeout(10)
             try:
@@ -309,7 +323,7 @@ servers:
             sock.close()
 
             # Connection should have been closed within a reasonable time
-            # after idle_timeout (2s), not stay open forever
+            # after max_idle_timeout (2s), not stay open forever
             assert elapsed < 8.0, \
                 f"Idle tunnel should be closed after ~2s, but stayed open for {elapsed:.1f}s"
 
@@ -334,7 +348,7 @@ servers:
         idle Sleep may fire but should be caught by the is_idle()
         secondary check against the shared tracker.
 
-        We use a short idle_timeout (2s) and have the server send data
+        We use a short max_idle_timeout (2s) and have the server send data
         continuously for 5s. The client never sends data back. Without
         the stale alarm fix, the client's read Sleep might fire after
         2s (since client never writes), but the shared tracker shows
@@ -403,9 +417,20 @@ servers:
             assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0, proc=h3_proc), \
                 "HTTP/3 listener failed to start"
 
-            # Start chain service with 2s idle_timeout
-            proxy_list = f"    - address: 127.0.0.1:{h3_port}\n      hostname: localhost\n      weight: 1"
+            # Start chain service with 2s max_idle_timeout
             config_content = f"""server_threads: 1
+
+plugins:
+  http3_chain:
+    tls:
+      server_ca_path: "{ca_path}"
+    upstreams:
+      - name: test_upstream
+        addresses:
+          - address: 127.0.0.1:{h3_port}
+            hostname: localhost
+            weight: 1
+            max_idle_timeout: "2s"
 
 listeners:
 - name: http_main
@@ -416,11 +441,7 @@ services:
 - name: http3_chain
   kind: http3_chain.http3_chain
   args:
-    idle_timeout: "2s"
-    proxy_group:
-{proxy_list}
-    default_tls:
-      server_ca_path: "{ca_path}"
+    upstream: test_upstream
 
 servers:
 - name: http_proxy
@@ -436,7 +457,7 @@ servers:
                 "HTTP listener failed to start"
 
             # Download through the proxy — one-way transfer lasting 5s
-            # with 2s idle_timeout. Without stale alarm fix, this would fail.
+            # with 2s max_idle_timeout. Without stale alarm fix, this would fail.
             start = time.time()
             result = subprocess.run(
                 [
@@ -458,7 +479,7 @@ servers:
             assert len(result.stdout) == 256000, \
                 f"Expected 256000 bytes, got {len(result.stdout)}"
 
-            # Transfer took >2s (the idle_timeout), proving no false timeout
+            # Transfer took >2s (the max_idle_timeout), proving no false timeout
             assert elapsed >= 4.0, \
                 f"Transfer should take ~5s, only took {elapsed:.1f}s"
 

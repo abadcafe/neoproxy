@@ -32,98 +32,12 @@ from .utils.helpers import (
 
 from .conftest import get_unique_port
 
-from .test_http3_listener import (
+from .utils.config_builders import (
     create_http3_listener_config,
-)
-
-from .test_http3_auth import (
     create_http3_listener_config_with_password_auth,
     create_http3_listener_config_with_tls_client_cert,
+    create_http3_chain_config_with_per_proxy_auth,
 )
-
-
-def create_http3_chain_config_with_per_proxy_auth(
-    http_port: int,
-    proxy_group: List[Tuple[str, int, int, Optional[str], Optional[str]]],
-    ca_path: str,
-    temp_dir: str,
-    default_user: Optional[Tuple[str, str]] = None,
-    default_tls: Optional[str] = None,
-    server_threads: int = 1
-) -> str:
-    """
-    Create HTTP/3 Chain service configuration file with per-proxy auth.
-
-    Args:
-        http_port: Port for the HTTP listener
-        proxy_group: List of (address, port, weight, user_yaml, tls_yaml) tuples.
-                     user_yaml: YAML string for user credentials, can be None.
-                     tls_yaml: YAML string for TLS config, can be None.
-        ca_path: CA certificate path
-        temp_dir: Temporary directory for logs
-        default_user: Optional tuple of (username, password) for default_user.
-        default_tls: Optional YAML string for default_tls extra fields.
-        server_threads: Number of worker threads
-
-    Returns:
-        str: Path to the configuration file
-    """
-    proxy_list = []
-    for addr, port, weight, user_yaml, tls_yaml in proxy_group:
-        proxy_entry = f"    - address: {addr}:{port}\n      hostname: localhost\n      weight: {weight}"
-        if user_yaml:
-            proxy_entry += f"\n      user:\n{user_yaml}"
-        if tls_yaml:
-            proxy_entry += f"\n      tls:\n{tls_yaml}"
-        proxy_list.append(proxy_entry)
-
-    proxy_section = "\n".join(proxy_list)
-
-    # Build default_user section
-    default_user_section = ""
-    if default_user:
-        default_user_section = f"""
-    default_user:
-      username: "{default_user[0]}"
-      password: "{default_user[1]}"
-"""
-
-    # Build default_tls section
-    default_tls_section = ""
-    if default_tls:
-        default_tls_section = f"""
-    default_tls:
-      server_ca_path: "{ca_path}"
-{default_tls}"""
-    else:
-        default_tls_section = f"""
-    default_tls:
-      server_ca_path: "{ca_path}"
-"""
-
-    config_content = f"""server_threads: {server_threads}
-
-services:
-- name: http3_chain
-  kind: http3_chain.http3_chain
-  args:
-    proxy_group:
-{proxy_section}{default_user_section}{default_tls_section}
-
-listeners:
-- name: http_main
-  kind: http
-  addresses: [ "0.0.0.0:{http_port}" ]
-
-servers:
-- name: http_proxy
-  listeners: ["http_main"]
-  service: http3_chain
-"""
-    config_path = os.path.join(temp_dir, "http3_chain_auth_config.yaml")
-    with open(config_path, "w") as f:
-        f.write(config_content)
-    return config_path
 
 
 # ==============================================================================
@@ -521,26 +435,32 @@ class TestTlsDeepMerge:
             h3_proc = start_proxy(h3_config)
             assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0)
 
-            # Chain: default_tls has WRONG ca, per-proxy tls has CORRECT ca
+            # Chain: plugin-level tls has WRONG ca, per-address tls has CORRECT ca
             config_content = f"""server_threads: 1
 
-services:
-- name: http3_chain
-  kind: http3_chain.http3_chain
-  args:
-    proxy_group:
-    - address: 127.0.0.1:{h3_port}
-      hostname: localhost
-      weight: 1
-      tls:
-        server_ca_path: "{ca_path}"
-    default_tls:
+plugins:
+  http3_chain:
+    tls:
       server_ca_path: "/nonexistent/wrong_ca.pem"
+    upstreams:
+      - name: test_upstream
+        addresses:
+          - address: 127.0.0.1:{h3_port}
+            hostname: localhost
+            weight: 1
+            tls:
+              server_ca_path: "{ca_path}"
 
 listeners:
 - name: http_main
   kind: http
   addresses: ["0.0.0.0:{http_port}"]
+
+services:
+- name: http3_chain
+  kind: http3_chain.http3_chain
+  args:
+    upstream: test_upstream
 
 servers:
 - name: http_proxy

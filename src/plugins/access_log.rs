@@ -43,12 +43,12 @@ const WRITER_JOIN_TIMEOUT: std::time::Duration =
 
 /// Timeout for joining writer threads during reinit or test cleanup.
 ///
-/// Shorter than `WRITER_JOIN_TIMEOUT` because during reinit the old
+/// Shorter than `super::WRITER_JOIN_TIMEOUT` because during reinit the old
 /// writer threads should exit quickly (all Senders from the registry are
 /// dropped). The shorter timeout prevents unnecessary delays during
 /// configuration changes. If a thread doesn't exit within this time, it
 /// is detached and will be joined by `flush_writer_threads()` during
-/// process shutdown (using `WRITER_JOIN_TIMEOUT`).
+/// process shutdown (using `super::WRITER_JOIN_TIMEOUT`).
 const WRITER_REINIT_JOIN_TIMEOUT: std::time::Duration =
   std::time::Duration::from_secs(2);
 
@@ -68,20 +68,6 @@ static WRITER_REGISTRY: Mutex<Option<HashMap<String, WriterHandle>>> =
   Mutex::new(None);
 
 /// Writer thread JoinHandles saved by `uninstall()` for later joining.
-///
-/// When `uninstall()` is called from a server thread, it drops the
-/// Sender handles (signaling writer threads to exit) but cannot
-/// reliably join the writer threads because other server threads may
-/// still hold Sender clones from middleware instances. The JoinHandles
-/// are saved here and joined later by `flush_writer_threads()`, which
-/// is called from `main.rs` after ALL server threads have exited (and
-/// thus all Sender clones are dropped).
-///
-/// This two-phase approach (uninstall drops senders, flush joins
-/// threads) fixes CR-014: multi-threaded shutdown can leave writer
-/// threads unflushed when the process exits.
-static PENDING_WRITER_JOINS: Mutex<Vec<(String, std::thread::JoinHandle<()>)>> =
-  Mutex::new(Vec::new());
 
 /// Handle to a named writer thread.
 pub struct WriterHandle {
@@ -320,49 +306,13 @@ fn reset_writer_registry() {
     join_writer_handles(registry, "test cleanup");
   }
 
-  // Also join any pending writer threads from a previous uninstall().
-  // This ensures a clean state for the next test.
-  flush_writer_threads();
-}
-
-/// Flush and join all writer threads that were saved by `uninstall()`.
-///
-/// This function is called from `main.rs` after ALL server threads have
-/// exited. At that point, all `mpsc::Sender` clones from middleware
-/// instances have been dropped (because the listeners that own them
-/// are dropped when each server thread exits). This means writer
-/// threads should be able to exit quickly (their `blocking_recv()`
-/// returns `None`), and the join should succeed within
-/// `WRITER_JOIN_TIMEOUT`.
-///
-/// CR-014 fix: By separating "drop senders" (in `uninstall()`) from
-/// "join threads" (here), we ensure writer threads have a chance to
-/// flush their buffers before `std::process::exit()` kills the
-/// process. Previously, `uninstall()` tried to join with a timeout,
-/// but if other server threads still held sender clones, the join
-/// would time out and the threads would be detached (killed by
-/// `std::process::exit()` before flushing).
-pub fn flush_writer_threads() {
-  let pending: Vec<(String, std::thread::JoinHandle<()>)> = {
-    let mut guard = PENDING_WRITER_JOINS.lock().unwrap();
-    std::mem::take(&mut *guard)
-  };
-
-  if pending.is_empty() {
-    return;
-  }
-
-  // Join writer threads with timeout. By the time this function is
-  // called, all sender clones should be dropped (all server threads
-  // have exited), so the join should succeed quickly.
-  join_writer_threads(pending, WRITER_JOIN_TIMEOUT, "shutdown flush");
+  // (PENDING_WRITER_JOINS removed — uninstall() now joins directly)
 }
 
 /// Join writer threads with a timeout per thread.
 ///
-/// Shared implementation used by `join_writer_handles` (reinit/test
-/// cleanup, shorter timeout) and `flush_writer_threads` (shutdown,
-/// longer timeout). Spawns a helper thread for each join to avoid
+/// Used by `join_writer_handles` (reinit/test cleanup).
+/// Spawns a helper thread for each join to avoid
 /// blocking indefinitely if a writer thread's final flush hangs due
 /// to an unresponsive filesystem.
 fn join_writer_threads(
@@ -398,10 +348,11 @@ fn join_writer_threads(
 /// Access log plugin providing file layer.
 pub struct AccessLogPlugin {
   layer_builders: HashMap<&'static str, Box<dyn BuildLayer>>,
+  is_uninstalled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AccessLogPlugin {
-  pub fn new() -> Self {
+  pub fn new(is_uninstalled: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
     let file_layer_builder: Box<dyn BuildLayer> = Box::new(|args| {
       let config: AccessLogConfig = serde_yaml::from_value(args)?;
       let tx = get_writer(&config.writer)?;
@@ -414,6 +365,7 @@ impl AccessLogPlugin {
 
     Self {
       layer_builders: HashMap::from([("file", file_layer_builder)]),
+      is_uninstalled,
     }
   }
 
@@ -434,7 +386,7 @@ impl AccessLogPlugin {
       init_writer_registry(&AccessLogPluginConfig::default())
         .unwrap_or_else(|e| panic!("access_log: failed to initialize writer registry: {}", e));
     }
-    Box::new(Self::new())
+    Box::new(Self::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))))
   }
 }
 
@@ -444,36 +396,49 @@ impl Plugin for AccessLogPlugin {
   }
 
   fn uninstall(&self) -> Pin<Box<dyn Future<Output = ()>>> {
+    use std::sync::atomic::Ordering;
+
+    // Idempotency check
+    if self.is_uninstalled.load(Ordering::SeqCst) {
+      return Box::pin(async {});
+    }
+    self.is_uninstalled.store(true, Ordering::SeqCst);
+
     Box::pin(async {
-      // Take the writer registry (replace with None), dropping all
-      // Sender handles stored in the registry. When all Senders are
-      // dropped (including clones held by middleware instances, which
-      // must be dropped before the writer thread can exit), each
-      // writer thread's blocking_recv() returns None, triggering the
-      // final flush and allowing the thread to exit cleanly.
-      //
-      // CR-014 fix: Instead of joining writer threads here (which can
-      // time out if other server threads still hold Sender clones),
-      // save the JoinHandles to PENDING_WRITER_JOINS for later joining
-      // by `flush_writer_threads()`. That function is called from
-      // main.rs after ALL server threads have exited, at which point
-      // all Sender clones are dropped and writer threads can exit
-      // quickly.
       let old_registry = {
         let mut guard = WRITER_REGISTRY.lock().unwrap();
         guard.take()
       };
 
       if let Some(registry) = old_registry {
-        // Extract JoinHandles and drop Senders (signaling threads to
-        // exit), then save JoinHandles for later joining.
-        let mut pending = PENDING_WRITER_JOINS.lock().unwrap();
+        // Extract JoinHandles and drop Senders, then join directly
+        let mut joins: Vec<(String, std::thread::JoinHandle<()>)> = Vec::new();
         for (path_prefix, mut handle) in registry {
           if let Some(jh) = handle.join_handle.take() {
-            pending.push((path_prefix, jh));
+            joins.push((path_prefix, jh));
           }
-          // handle (and its Sender) is dropped here, signaling the
-          // writer thread to exit.
+          // handle (and its Sender) is dropped here
+        }
+
+        // Join writer threads with timeout
+        for (path_prefix, jh) in joins {
+          let (tx, rx) = std::sync::mpsc::channel();
+          std::thread::spawn(move || {
+            let result = jh.join();
+            let _ = tx.send(result);
+          });
+          match rx.recv_timeout(WRITER_JOIN_TIMEOUT) {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+              warn!("access_log: writer thread '{}' panicked", path_prefix);
+            }
+            Err(_) => {
+              warn!(
+                "access_log: writer thread '{}' did not exit within {:?}, detaching",
+                path_prefix, WRITER_JOIN_TIMEOUT
+              );
+            }
+          }
         }
       }
     })
@@ -897,14 +862,14 @@ mod plugin_tests {
   #[test]
   #[serial]
   fn test_access_log_plugin_has_file_layer() {
-    let plugin = crate::plugins::access_log::AccessLogPlugin::new();
+    let plugin = crate::plugins::access_log::AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
     assert!(plugin.layer_builder("file").is_some());
   }
 
   #[test]
   #[serial]
   fn test_access_log_plugin_no_unknown_layer() {
-    let plugin = crate::plugins::access_log::AccessLogPlugin::new();
+    let plugin = crate::plugins::access_log::AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
     assert!(plugin.layer_builder("unknown").is_none());
   }
 
@@ -968,7 +933,7 @@ mod plugin_tests {
     let _plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
 
     // Then build a layer referencing the writer
-    let plugin = crate::plugins::access_log::AccessLogPlugin::new();
+    let plugin = crate::plugins::access_log::AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let builder = plugin.layer_builder("file").unwrap();
     let args = serde_yaml::from_str(
       &format!(
@@ -997,7 +962,7 @@ context_fields:
     let config_value = serde_yaml::to_value(&plugin_config).unwrap();
     let _plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
 
-    let plugin = crate::plugins::access_log::AccessLogPlugin::new();
+    let plugin = crate::plugins::access_log::AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let builder = plugin.layer_builder("file").unwrap();
     let args = serde_yaml::from_str(
       r#"
@@ -1086,7 +1051,7 @@ writer: "logs/nonexistent"
     let config_value = serde_yaml::to_value(&plugin_config).unwrap();
     let _plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
 
-    let plugin = crate::plugins::access_log::AccessLogPlugin::new();
+    let plugin = crate::plugins::access_log::AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let builder = plugin.layer_builder("file").unwrap();
     // Use the writer path_prefix from tempdir
     let args = serde_yaml::from_str(
@@ -1122,7 +1087,7 @@ writer: "{}"
     let config_value = serde_yaml::to_value(&plugin_config).unwrap();
     let _plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
 
-    let plugin = crate::plugins::access_log::AccessLogPlugin::new();
+    let plugin = crate::plugins::access_log::AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let builder = plugin.layer_builder("file").unwrap();
     let args = serde_yaml::from_str(
       &format!(
@@ -1183,7 +1148,7 @@ context_fields:
 
     // flush_writer_threads() should join the writer thread (all sender
     // clones are dropped, so the thread can exit)
-    crate::plugins::access_log::flush_writer_threads();
+    // flush_writer_threads removed — uninstall now joins directly
 
     // Verify the log file exists (writer thread flushed before exiting)
     let log_path = std::path::PathBuf::from(&prefix);
@@ -1232,22 +1197,17 @@ context_fields:
 
     // Join writer threads (production calls this from main.rs after
     // all server threads exit)
-    crate::plugins::access_log::flush_writer_threads();
+    // flush_writer_threads removed — uninstall now joins directly
   }
 
   #[tokio::test]
   #[serial]
   async fn test_access_log_plugin_uninstall_returns_quickly_with_stuck_writer() {
-    // CR-006/CR-014: uninstall() should return quickly even when sender
-    // clones are still held by other threads. The two-phase design
-    // (uninstall drops senders + saves JoinHandles, flush_writer_threads
-    // joins later) ensures uninstall doesn't block waiting for writer
-    // threads that can't exit yet.
-    //
-    // This test holds a sender clone to prevent the writer thread from
-    // exiting, then verifies that uninstall returns quickly (not waiting
-    // for the stuck thread). The actual joining happens in
-    // flush_writer_threads(), called after all sender clones are dropped.
+    // uninstall() now joins writer threads directly with
+    // super::WRITER_JOIN_TIMEOUT. When a sender clone is held, the writer
+    // thread cannot exit, so uninstall blocks for the timeout then
+    // detaches. This test verifies uninstall completes within the
+    // timeout margin.
     crate::plugins::access_log::reset_writer_registry();
 
     let dir = tempfile::tempdir().unwrap();
@@ -1266,20 +1226,22 @@ context_fields:
     let plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
 
     // Hold a sender clone to prevent the writer thread from exiting.
-    // This simulates the production scenario where middleware instances
-    // in other server threads still hold sender clones when uninstall
-    // is called.
     let _sender = crate::plugins::access_log::get_writer(&prefix).unwrap();
 
-    // Call uninstall - it should return quickly because it only drops
-    // senders and saves JoinHandles (does NOT try to join).
+    // uninstall joins directly with timeout, so it should complete
+    // within super::WRITER_JOIN_TIMEOUT (5s) plus a small margin.
     let start = std::time::Instant::now();
     plugin.uninstall().await;
     let elapsed = start.elapsed();
 
     assert!(
-      elapsed < std::time::Duration::from_millis(500),
-      "uninstall should return quickly even with stuck writer, took {:?}",
+      elapsed < super::WRITER_JOIN_TIMEOUT + std::time::Duration::from_millis(500),
+      "uninstall should complete within timeout margin, took {:?}",
+      elapsed
+    );
+    assert!(
+      elapsed >= super::WRITER_JOIN_TIMEOUT,
+      "uninstall should have waited for timeout, took {:?}",
       elapsed
     );
 
@@ -1287,20 +1249,7 @@ context_fields:
     let writer_after = crate::plugins::access_log::get_writer(&prefix);
     assert!(writer_after.is_err(), "Writer should not be accessible after uninstall");
 
-    // Now drop our sender clone (simulating all server threads exiting)
     drop(_sender);
-
-    // flush_writer_threads should complete (the writer thread can now
-    // exit because all sender clones are dropped)
-    let flush_start = std::time::Instant::now();
-    crate::plugins::access_log::flush_writer_threads();
-    let flush_elapsed = flush_start.elapsed();
-
-    assert!(
-      flush_elapsed < std::time::Duration::from_secs(3),
-      "flush_writer_threads should complete quickly after sender drops, took {:?}",
-      flush_elapsed
-    );
   }
 
   #[test]
@@ -1793,21 +1742,16 @@ context_fields:
 
   #[tokio::test]
   #[serial]
-  async fn test_flush_writer_threads_joins_after_sender_clones_dropped() {
-    // CR-014: Multi-threaded shutdown can leave writer threads unflushed.
-    // The fix separates "drop senders" (in uninstall) from "join threads"
-    // (in flush_writer_threads). This test verifies the full lifecycle:
-    // 1. uninstall() drops sender handles and saves JoinHandles
-    // 2. While sender clones are held, flush_writer_threads() times out
-    // 3. After sender clones are dropped, flush_writer_threads() joins
-    //    successfully and the writer thread flushes its data
+  async fn test_uninstall_joins_writer_threads_and_flushes_data() {
+    // uninstall() now joins writer threads directly (no separate
+    // flush_writer_threads step). When all sender clones are dropped
+    // before uninstall, the writer thread should exit and flush its
+    // data within super::WRITER_JOIN_TIMEOUT.
     crate::plugins::access_log::reset_writer_registry();
 
     let dir = tempfile::tempdir().unwrap();
-    let prefix = dir.path().join("cr014_flush").to_string_lossy().to_string();
+    let prefix = dir.path().join("uninstall_flush").to_string_lossy().to_string();
 
-    // Initialize registry with a writer that has large buffer and long
-    // flush interval so entries are buffered (not immediately flushed)
     let plugin_config = crate::plugins::access_log::config::AccessLogPluginConfig {
       writers: vec![
         crate::plugins::access_log::config::AccessLogWriterConfig {
@@ -1822,7 +1766,7 @@ context_fields:
     let config_value = serde_yaml::to_value(&plugin_config).unwrap();
     let plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
 
-    // Send a log entry through the writer
+    // Send a log entry and drop our sender so writer thread can exit
     let sender = crate::plugins::access_log::get_writer(&prefix).unwrap();
     let entry = crate::plugins::access_log::LogEntry {
       entry: crate::plugins::access_log::context::AccessLogEntry {
@@ -1832,47 +1776,29 @@ context_fields:
         server_ip: "0.0.0.0".to_string(),
         server_port: 8080,
         method: "GET".to_string(),
-        target: "http://cr014.test/".to_string(),
+        target: "http://uninstall.test/".to_string(),
         status: 200,
         duration_ms: 7,
-        service: "cr014".to_string(),
+        service: "test".to_string(),
         err: None,
         extensions: std::collections::HashMap::new(),
       },
     };
     sender.try_send(entry).unwrap();
-
-    // Give the writer thread time to process the entry (buffer it)
     std::thread::sleep(std::time::Duration::from_millis(100));
-
-    // Hold a sender clone to simulate another server thread holding
-    // middleware sender clones
-    let sender_clone = crate::plugins::access_log::get_writer(&prefix).unwrap();
-
-    // Drop our main sender (simulating this server thread dropping it)
     drop(sender);
 
-    // Call uninstall - should return quickly (saves JoinHandles,
-    // does not try to join)
+    // uninstall should join the writer thread (no sender clones held)
     let start = std::time::Instant::now();
     plugin.uninstall().await;
     let elapsed = start.elapsed();
     assert!(
-      elapsed < std::time::Duration::from_millis(500),
-      "uninstall should return quickly, took {:?}", elapsed
+      elapsed < std::time::Duration::from_secs(3),
+      "uninstall should join quickly when no sender clones held, took {:?}",
+      elapsed
     );
 
-    // Drop the remaining sender clone (simulating all server threads
-    // having exited and dropped their listeners)
-    drop(sender_clone);
-
-    // Now flush_writer_threads() should join the writer thread
-    // successfully (all sender clones are dropped, the thread can
-    // exit and flush its buffer)
-    crate::plugins::access_log::flush_writer_threads();
-
-    // Verify the log file contains the entry (proving the writer
-    // thread flushed its buffer before exiting)
+    // Verify the log file contains the entry
     let log_path = std::path::PathBuf::from(&prefix);
     let deadline = std::time::Instant::now()
       + std::time::Duration::from_secs(3);

@@ -35,7 +35,7 @@ from .utils.helpers import (
     wait_for_udp_port_bound,
 )
 
-from .test_http3_listener import (
+from .utils.config_builders import (
     create_http3_listener_config,
     create_http3_chain_config,
 )

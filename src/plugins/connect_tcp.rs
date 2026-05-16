@@ -37,16 +37,16 @@ struct ConnectTcpServiceArgs {
   /// Idle timeout for tunnel data transfer.
   #[serde(
     with = "humantime_serde",
-    default = "default_idle_timeout"
+    default = "default_max_idle_timeout"
   )]
-  idle_timeout: Duration,
+  max_idle_timeout: Duration,
 }
 
 fn default_connect_timeout() -> Duration {
   DEFAULT_CONNECT_TIMEOUT
 }
 
-fn default_idle_timeout() -> Duration {
+fn default_max_idle_timeout() -> Duration {
   Duration::from_secs(stream::DEFAULT_IDLE_TIMEOUT_SECS)
 }
 
@@ -57,7 +57,7 @@ struct ConnectTcpService {
   /// Timeout for TCP connect to target server
   connect_timeout: Duration,
   /// Idle timeout for tunnel data transfer
-  idle_timeout: Duration,
+  max_idle_timeout: Duration,
 }
 
 impl ConnectTcpService {
@@ -74,7 +74,7 @@ impl ConnectTcpService {
     Ok(Service::new(Self {
       stream_tracker,
       connect_timeout: args.connect_timeout,
-      idle_timeout: args.idle_timeout,
+      max_idle_timeout: args.max_idle_timeout,
     }))
   }
 
@@ -84,7 +84,7 @@ impl ConnectTcpService {
     Self {
       stream_tracker: Rc::new(StreamTracker::new()),
       connect_timeout: DEFAULT_CONNECT_TIMEOUT,
-      idle_timeout: Duration::from_secs(stream::DEFAULT_IDLE_TIMEOUT_SECS),
+      max_idle_timeout: Duration::from_secs(stream::DEFAULT_IDLE_TIMEOUT_SECS),
     }
   }
 }
@@ -101,7 +101,7 @@ impl tower::Service<Request> for ConnectTcpService {
   fn call(&mut self, mut req: Request) -> Self::Future {
     let stream_tracker = self.stream_tracker.clone();
     let connect_timeout = self.connect_timeout;
-    let idle_timeout = self.idle_timeout;
+    let max_idle_timeout = self.max_idle_timeout;
 
     // Extract RequestContext from request extensions
     let ctx = req
@@ -207,7 +207,7 @@ impl tower::Service<Request> for ConnectTcpService {
           client,
           target_stream,
           shutdown_handle,
-          idle_timeout,
+          max_idle_timeout,
           &addr,
         )
         .await;

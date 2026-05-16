@@ -14,15 +14,6 @@ pub mod echo;
 pub mod http3_chain;
 pub mod utils;
 
-/// Flush and join all writer threads that were saved by `uninstall()`.
-///
-/// Must be called after ALL server threads have exited (i.e., after
-/// `main_loop` returns) to ensure writer threads can flush their
-/// buffers before the process exits. See `access_log::flush_writer_threads()`
-/// for details.
-pub fn flush_writer_threads() {
-  access_log::flush_writer_threads();
-}
 
 /// Manages plugin lifecycle: registers all plugins at construction,
 /// builds services/layers on demand.

@@ -184,7 +184,8 @@ pub(crate) async fn create_quic_connection(
 
   let addr = resolve_address(address)?;
   let host: &str = hostname.unwrap_or_else(|| {
-    panic!("hostname is required for SNI");
+    // Use the host part of address as SNI when hostname is not configured
+    address.split_at(address.rfind(':').unwrap_or(address.len())).0
   });
   let conn = cli_endpoint.connect(addr, host)?.await?;
 

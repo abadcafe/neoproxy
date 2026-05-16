@@ -142,9 +142,11 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
     }
 
     // Step 2: Check SNI vs Host header mismatch
-    // For CONNECT requests, the target is the destination server,
-    // not the proxy server, so mismatch is expected.
-    if req.method() != http::Method::CONNECT {
+    // For CONNECT requests and absolute-form URIs, the target is the
+    // destination server, not the proxy server, so mismatch is expected.
+    if req.method() != http::Method::CONNECT
+      && req.uri().scheme().is_none()
+    {
       if let Some(ref sni) = self.sni {
         if let Some(host_header) = req.headers().get(http::header::HOST) {
           if let Ok(host_str) = host_header.to_str() {

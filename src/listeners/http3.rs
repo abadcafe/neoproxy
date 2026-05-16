@@ -707,6 +707,11 @@ impl Listening for Http3Listener {
             tracker_for_register.register_connection(async move {
               match conn.await {
                 Ok(quinn_conn) => {
+                  let local_addr = quinn_conn
+                    .local_ip()
+                    .map_or(local_addr, |ip| {
+                      SocketAddr::new(ip, local_addr.port())
+                    });
                   handle_h3_connection(
                     quinn_conn,
                     server_routing_table,

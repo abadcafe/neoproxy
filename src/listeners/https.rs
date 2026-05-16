@@ -26,7 +26,8 @@ use tracing::{error, info, warn};
 use crate::config::SerializedArgs;
 use crate::context::RequestContext;
 use crate::http_utils::{
-  BytesBufBodyWrapper, Request, RequestBody, Response,
+  build_error_response, BytesBufBodyWrapper, Request, RequestBody,
+  Response,
 };
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
@@ -86,8 +87,6 @@ struct HttpsServiceAdaptor {
   client_addr: Option<SocketAddr>,
   /// Local address from accept
   local_addr: Option<SocketAddr>,
-  /// SNI from TLS handshake
-  sni: Option<String>,
   /// Whether client presented a certificate during TLS handshake
   client_cert_presented: bool,
 }
@@ -97,11 +96,10 @@ impl HttpsServiceAdaptor {
     server_routing_table: Vec<Server>,
     client_addr: Option<SocketAddr>,
     local_addr: Option<SocketAddr>,
-    sni: Option<String>,
     client_cert_presented: bool,
   ) -> Self {
     let server_router = ServerRouter::build(server_routing_table);
-    Self { server_router, client_addr, local_addr, sni, client_cert_presented }
+    Self { server_router, client_addr, local_addr, client_cert_presented }
   }
 
   /// Route a request to the correct service based on Host header.
@@ -141,26 +139,39 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       });
     }
 
-    // Step 2: Check SNI vs Host header mismatch
-    // For CONNECT requests and absolute-form URIs, the target is the
-    // destination server, not the proxy server, so mismatch is expected.
-    if req.method() != http::Method::CONNECT
-      && req.uri().scheme().is_none()
+    // Step 2: Check Host header MUST exist
+    let host_header = match req
+      .headers()
+      .get(http::header::HOST)
+      .and_then(|h| h.to_str().ok())
+      .map(|s| s.to_string())
     {
-      if let Some(ref sni) = self.sni {
-        if let Some(host_header) = req.headers().get(http::header::HOST) {
-          if let Ok(host_str) = host_header.to_str() {
-            if super::utils::check_sni_vs_host(sni, host_str) {
-              return Box::pin(async {
-                Ok(super::utils::build_421_misdirected_response())
-              });
-            }
-          }
-        }
+      Some(h) => h,
+      None => {
+        return Box::pin(async {
+          Ok(build_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "Bad Request: Host header is required",
+          ))
+        });
+      }
+    };
+
+    // Step 3: If :authority exists, it must equal Host header
+    if let Some(authority) = req.uri().authority() {
+      if super::utils::check_authority_vs_host(
+        &authority.to_string(),
+        &host_header,
+      ) {
+        return Box::pin(async {
+          Ok(build_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "Bad Request: :authority and Host headers differ",
+          ))
+        });
       }
     }
 
-    // Step 3: Route FIRST
     let (parts, body) = req.into_parts();
     let mut req = Request::from_parts(
       parts,
@@ -200,29 +211,15 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       ctx.insert("server.ip", local_addr.ip().to_string());
       ctx.insert("server.port", local_addr.port().to_string());
       ctx.insert("service.name", &routing_entry.service_name);
-      // Store listener hostname from SNI for Proxy-Status
-      if let Some(ref sni) = self.sni {
-        ctx.insert("listener.hostname", sni);
-      }
+      // Store server address for Proxy-Status
+      ctx.insert("listener.hostname", local_addr.to_string());
       req.extensions_mut().insert(ctx);
     }
 
-    // Step 5: Call service (auth/access_log handled by layers)
+    // Step 6: Call service (auth/access_log handled by layers)
     let s = routing_entry.service.clone();
     Box::pin(async move { tower_util::Oneshot::new(s, req).await })
   }
-}
-
-/// Extract SNI from TLS connection.
-///
-/// Returns None if SNI is not available (should not happen for valid
-/// HTTPS connections). The SNI (Server Name Indication) is extracted
-/// from the TLS handshake.
-fn get_sni_from_tls_connection(
-  conn: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
-) -> Option<String> {
-  let (_, session) = conn.get_ref();
-  session.server_name().map(|s| s.to_string())
 }
 
 /// Check whether the client presented a certificate during TLS handshake.
@@ -342,8 +339,7 @@ impl HttpsListener {
             .await
             {
               Ok(Ok(tls_stream)) => {
-                // Extract SNI and client cert info from TLS connection
-                let sni = get_sni_from_tls_connection(&tls_stream);
+                // Extract client cert info from TLS connection
                 let client_cert_presented =
                   get_client_cert_presented(&tls_stream);
 
@@ -352,7 +348,6 @@ impl HttpsListener {
                   server_routing_table.clone(),
                   Some(raddr),
                   Some(local_addr),
-                  sni,
                   client_cert_presented,
                 );
                 let builder =
@@ -697,7 +692,7 @@ mod tests {
       },
     ];
 
-    let adaptor = HttpsServiceAdaptor::new(servers, None, None, None, false);
+    let adaptor = HttpsServiceAdaptor::new(servers, None, None, false);
 
     // Request with Host header matching api.example.com
     let req_api = http::Request::builder()

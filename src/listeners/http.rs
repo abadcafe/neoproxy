@@ -19,7 +19,8 @@ use tracing::{error, info, warn};
 use crate::config::SerializedArgs;
 use crate::context::RequestContext;
 use crate::http_utils::{
-  BytesBufBodyWrapper, Request, RequestBody, Response,
+  build_error_response, BytesBufBodyWrapper, Request, RequestBody,
+  Response,
 };
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
@@ -115,7 +116,40 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       });
     }
 
-    // Step 2: Route FIRST - get the correct server entry
+    // Step 2: Check Host header MUST exist
+    let host_header = match req
+      .headers()
+      .get(http::header::HOST)
+      .and_then(|h| h.to_str().ok())
+      .map(|s| s.to_string())
+    {
+      Some(h) => h,
+      None => {
+        return Box::pin(async {
+          Ok(build_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "Bad Request: Host header is required",
+          ))
+        });
+      }
+    };
+
+    // Step 3: If :authority exists, it must equal Host header
+    if let Some(authority) = req.uri().authority() {
+      if super::utils::check_authority_vs_host(
+        &authority.to_string(),
+        &host_header,
+      ) {
+        return Box::pin(async {
+          Ok(build_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "Bad Request: :authority and Host headers differ",
+          ))
+        });
+      }
+    }
+
+    // Step 4: Route FIRST - get the correct server entry
     let (parts, body) = req.into_parts();
     let mut req = Request::from_parts(
       parts,
@@ -131,7 +165,7 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       }
     };
 
-    // Step 3: Build RequestContext with connection-level keys and
+    // Step 5: Build RequestContext with connection-level keys and
     // insert into request extensions. Auth and access logging are
     // now handled by the plugin layer in the service pipeline.
     if let (Some(peer_addr), Some(local_addr)) =
@@ -142,20 +176,13 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
         &local_addr,
         &routing_entry.service_name(),
       );
-      // Store the listener hostname from Host header for Proxy-Status
-      if let Some(host) = req
-        .headers()
-        .get(http::header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .map(|h| h.split(':').next().unwrap_or(h).to_string())
-      {
-        ctx.insert("listener.hostname", host);
-      }
+      // Store server address for Proxy-Status
+      ctx.insert("listener.hostname", local_addr.to_string());
 
       req.extensions_mut().insert(ctx);
     }
 
-    // Step 4: Call service (auth/access_log handled by layers)
+    // Step 6: Call service (auth/access_log handled by layers)
     let s = routing_entry.service.clone();
     Box::pin(async move { tower_util::Oneshot::new(s, req).await })
   }

@@ -57,7 +57,7 @@ plugins:
         # max_idle_timeout, quic, user, tls: override plugin-level
         addresses:
           - address: "127.0.0.1:10443"
-            hostname: "http3.example.com"
+            hostname: "proxy.example.com"
             weight: 1
             # user, tls: override upstream/plugin-level
 
@@ -245,14 +245,14 @@ servers:
   #   curl --proxy http://127.0.0.1:8080 https://httpbin.org/ip
   #
   #   # HTTPS proxy (encrypted connection to proxy, no auth at entry)
-  #   curl --resolve proxy.example.com:8443:127.0.0.1 \
-  #        --proxy https://proxy.example.com:8443 \
+  #   curl --resolve chain.example.com:8443:127.0.0.1 \
+  #        --proxy https://chain.example.com:8443 \
   #        --proxy-cacert conf/certs/server-ca.crt \
   #        https://httpbin.org/ip
   #
   #   # HTTP/3 proxy (encrypted QUIC connection to proxy)
-  #   curl --resolve proxy.example.com:8443:127.0.0.1 \
-  #        --proxy https://proxy.example.com:8443 --http3 \
+  #   curl --resolve chain.example.com:8443:127.0.0.1 \
+  #        --proxy https://chain.example.com:8443 --http3 \
   #        --proxy-cacert conf/certs/server-ca.crt \
   #        https://httpbin.org/ip
   #

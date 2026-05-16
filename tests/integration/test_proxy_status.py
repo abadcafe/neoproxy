@@ -4,7 +4,7 @@ Proxy-Status header integration tests (RFC 9209).
 Tests:
 - CONNECT 200 response includes Proxy-Status header
 - Connection refused response includes Proxy-Status error
-- Proxy-Status identifier comes from listener hostname
+- Proxy-Status identifier comes from server address
 """
 
 import subprocess

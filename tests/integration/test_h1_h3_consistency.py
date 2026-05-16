@@ -674,147 +674,19 @@ class TestHTTPVersionCheck:
                 terminate_process(proc)
 
 
-class TestSNIHostMismatch:
-    """Test that SNI vs request authority mismatch returns 421 Misdirected Request."""
 
-    def test_sni_host_mismatch_https_returns_421(
-        self, h1_h3_test_env: Tuple[str, int, int, int, int]
-    ) -> None:
-        """
-        Test that SNI vs authority mismatch on HTTPS returns 421 Misdirected Request.
+class TestHTTP3AuthorityHostMismatch:
+    """Test HTTP/3 authority vs Host mismatch checks.
 
-        When SNI differs from the request authority (derived from Host header
-        in HTTP/1.1), the server returns 421 Misdirected Request.
-
-        Expected: PASS - SNI/authority mismatch should receive 421 response.
-        """
-        import ssl
-        import socket
-
-        config_path, http_port, https_port, http3_port, default_port = h1_h3_test_env
-
-        proc: Optional[subprocess.Popen] = None
-
-        try:
-            proc = subprocess.Popen(
-                [NEOPROXY_BINARY, "--config", config_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-
-            # Wait for server to start using polling
-            if not wait_for_proxy("127.0.0.1", https_port, timeout=5.0, proc=proc):
-                if proc.poll() is not None:
-                    _, stderr_data = proc.communicate(timeout=5)
-                    stderr_text = stderr_data.decode("utf-8", errors="replace")
-                    pytest.fail(
-                        f"Process failed to start.\n"
-                        f"stderr: {stderr_text}"
-                    )
-                pytest.fail("Proxy server failed to start within timeout")
-
-            # Create SSL context that sends different SNI than Host
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-
-            # Connect with SNI = https.example.com (matches cert SAN *.example.com)
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5.0)
-            ssl_sock = context.wrap_socket(sock, server_hostname="https.example.com")
-            ssl_sock.connect(("127.0.0.1", https_port))
-
-            # Send request with different Host header
-            ssl_sock.sendall(
-                b"GET /test HTTP/1.1\r\n"
-                b"Host: other.example.com\r\n"
-                b"\r\n"
-            )
-            response = ssl_sock.recv(4096).decode()
-            ssl_sock.close()
-
-            # We expect 421 Misdirected Request
-            assert "421" in response, f"Expected 421 Misdirected Request, got: {response}"
-
-        finally:
-            if proc is not None:
-                terminate_process(proc)
-
-    def test_sni_host_match_https_returns_200(
-        self, h1_h3_test_env: Tuple[str, int, int, int, int]
-    ) -> None:
-        """
-        Test that matching SNI and authority returns 200 OK.
-
-        When SNI and request authority (derived from Host header in HTTP/1.1)
-        match, the request should succeed.
-        """
-        import ssl
-        import socket
-
-        config_path, http_port, https_port, http3_port, default_port = h1_h3_test_env
-
-        proc: Optional[subprocess.Popen] = None
-
-        try:
-            proc = subprocess.Popen(
-                [NEOPROXY_BINARY, "--config", config_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-
-            # Wait for server to start using polling
-            if not wait_for_proxy("127.0.0.1", https_port, timeout=5.0, proc=proc):
-                if proc.poll() is not None:
-                    _, stderr_data = proc.communicate(timeout=5)
-                    stderr_text = stderr_data.decode("utf-8", errors="replace")
-                    pytest.fail(
-                        f"Process failed to start.\n"
-                        f"stderr: {stderr_text}"
-                    )
-                pytest.fail("Proxy server failed to start within timeout")
-
-            # Create SSL context
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-
-            # Connect with SNI matching Host header (matches cert SAN)
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5.0)
-            ssl_sock = context.wrap_socket(sock, server_hostname="https.example.com")
-            ssl_sock.connect(("127.0.0.1", https_port))
-
-            # Send request with matching Host header
-            ssl_sock.sendall(
-                b"GET /test HTTP/1.1\r\n"
-                b"Host: https.example.com\r\n"
-                b"\r\n"
-            )
-            response = ssl_sock.recv(4096).decode()
-            ssl_sock.close()
-
-            # We expect 200 OK or authentication required (407)
-            assert "200" in response or "407" in response, f"Expected 200 or 407, got: {response}"
-
-        finally:
-            if proc is not None:
-                terminate_process(proc)
-
-
-class TestHTTP3SNIHostMismatch:
-    """Test HTTP/3 authority/Host mismatch checks.
-
-    HTTP/3 performs two checks:
-    1. SNI vs authority: mismatch returns 421 Misdirected Request
-    2. authority vs Host: mismatch returns 400 Bad Request
+    Per RFC 9114 §4.3.1, if both :authority and Host are present,
+    they MUST contain the same value.
     """
 
     def test_h3_authority_host_match_returns_200(self, shared_test_certs: dict) -> None:
         """
-        Test that matching SNI, :authority, and Host in HTTP/3 returns 200 OK.
+        Test that matching :authority and Host in HTTP/3 returns 200 OK.
 
-        When SNI, :authority, and Host header all match, the request should
+        When :authority and Host header match, the request should
         succeed. This test verifies the basic HTTP/3 flow with correct headers.
         """
         import asyncio
@@ -883,17 +755,15 @@ class TestHTTP3SNIHostMismatch:
                     pytest.fail(f"Process failed to start.\nstderr: {stderr_text}")
                 pytest.fail("HTTP/3 listener failed to start within timeout")
 
-            # Send request with matching :authority, SNI, and Host
-            # SNI is set to "localhost" by default when connecting to IP
-            # :authority and Host should also be "localhost" (no port) to match SNI
+            # Send request with matching :authority and Host
             response = asyncio.run(
                 perform_h3_request_with_custom_authority(
                     host="127.0.0.1",
                     port=http3_port,
-                    custom_authority="localhost",  # Match SNI
+                    custom_authority="localhost",  # Match Host header
                     path="/test",
                     ca_path=ca_path,
-                    additional_headers=[("host", "localhost")],  # Match SNI and authority
+                    additional_headers=[("host", "localhost")],  # Match authority
                     timeout=10.0,
                 )
             )
@@ -1321,3 +1191,186 @@ class TestHTTP3ClientCert:
             if proc and proc.poll() is None:
                 terminate_process(proc)
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+class TestHostHeaderRequired:
+    """Test that Host header is required for HTTP/HTTPS listeners."""
+
+    def test_http_missing_host_returns_400(self, shared_test_certs: dict) -> None:
+        """
+        Test that HTTP request without Host header returns 400.
+
+        Per the listener consistency checks, the Host header MUST
+        exist for all requests on HTTP listeners.
+        """
+        http_port = get_unique_port()
+
+        temp_dir = tempfile.mkdtemp(prefix="neoproxy_host_req_")
+        proc: Optional[subprocess.Popen] = None
+
+        try:
+            config = {
+                "server_threads": 1,
+                "services": [
+                    {
+                        "name": "echo",
+                        "kind": "echo.echo",
+                        "args": {},
+                    }
+                ],
+                "listeners": [
+                    {
+                        "name": "http_main",
+                        "kind": "http",
+                        "addresses": [f"127.0.0.1:{http_port}"],
+                    }
+                ],
+                "servers": [
+                    {
+                        "name": "default_server",
+                        "listeners": ["http_main"],
+                        "service": "echo",
+                    }
+                ],
+            }
+
+            config_path = os.path.join(temp_dir, "config.yaml")
+            with open(config_path, "w") as f:
+                yaml.dump(config, f)
+
+            proc = subprocess.Popen(
+                [NEOPROXY_BINARY, "--config", config_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            if not wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=proc):
+                if proc.poll() is not None:
+                    _, stderr_data = proc.communicate(timeout=5)
+                    stderr_text = stderr_data.decode("utf-8", errors="replace")
+                    pytest.fail(f"Process failed to start.\nstderr: {stderr_text}")
+                pytest.fail("HTTP listener failed to start within timeout")
+
+            # Send GET request WITHOUT Host header
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5.0)
+            sock.connect(("127.0.0.1", http_port))
+            sock.sendall(
+                b"GET /test HTTP/1.1\r\n"
+                b"\r\n"
+            )
+            response = b""
+            while b"\r\n\r\n" not in response:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+            sock.close()
+
+            assert b"400" in response, \
+                f"Expected 400 Bad Request for missing Host header, got: {response.decode(errors='replace')[:200]}"
+
+        finally:
+            if proc and proc.poll() is None:
+                terminate_process(proc)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_https_missing_host_returns_400(self, shared_test_certs: dict) -> None:
+        """
+        Test that HTTPS request without Host header returns 400.
+
+        Per the listener consistency checks, the Host header MUST
+        exist for all requests on HTTPS listeners.
+        """
+        import ssl
+        import socket
+
+        https_port = get_unique_port()
+
+        temp_dir = tempfile.mkdtemp(prefix="neoproxy_https_host_req_")
+        proc: Optional[subprocess.Popen] = None
+
+        try:
+            cert_path = shared_test_certs['cert_path']
+            key_path = shared_test_certs['key_path']
+
+            config = {
+                "server_threads": 1,
+                "services": [
+                    {
+                        "name": "echo",
+                        "kind": "echo.echo",
+                        "args": {},
+                    }
+                ],
+                "listeners": [
+                    {
+                        "name": "https_main",
+                        "kind": "https",
+                        "addresses": [f"127.0.0.1:{https_port}"],
+                    }
+                ],
+                "servers": [
+                    {
+                        "name": "default_server",
+                        "tls": {
+                            "certificates": [
+                                {
+                                    "cert_path": cert_path,
+                                    "key_path": key_path,
+                                }
+                            ]
+                        },
+                        "listeners": ["https_main"],
+                        "service": "echo",
+                    }
+                ],
+            }
+
+            config_path = os.path.join(temp_dir, "config.yaml")
+            with open(config_path, "w") as f:
+                yaml.dump(config, f)
+
+            proc = subprocess.Popen(
+                [NEOPROXY_BINARY, "--config", config_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            if not wait_for_proxy("127.0.0.1", https_port, timeout=5.0):
+                if proc.poll() is not None:
+                    _, stderr_data = proc.communicate(timeout=5)
+                    stderr_text = stderr_data.decode("utf-8", errors="replace")
+                    pytest.fail(f"Process failed to start.\nstderr: {stderr_text}")
+                pytest.fail("HTTPS listener failed to start within timeout")
+
+            # Send GET request WITHOUT Host header over TLS
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5.0)
+            ssl_sock = context.wrap_socket(sock, server_hostname="localhost")
+            ssl_sock.connect(("127.0.0.1", https_port))
+            ssl_sock.sendall(
+                b"GET /test HTTP/1.1\r\n"
+                b"\r\n"
+            )
+            response = b""
+            while b"\r\n\r\n" not in response:
+                chunk = ssl_sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+            ssl_sock.close()
+
+            assert b"400" in response, \
+                f"Expected 400 Bad Request for missing Host header, got: {response.decode(errors='replace')[:200]}"
+
+        finally:
+            if proc and proc.poll() is None:
+                terminate_process(proc)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+

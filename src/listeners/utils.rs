@@ -59,45 +59,6 @@ pub fn build_505_response() -> Response {
   resp
 }
 
-/// Check if SNI matches the request authority host.
-///
-/// Both inputs are pure hostnames (no port), so comparison is
-/// straightforward case-insensitive string equality.
-///
-/// # Arguments
-/// * `sni` - The SNI hostname from TLS handshake
-/// * `authority_host` - The host part of the request URI authority
-///
-/// # Returns
-/// `true` if SNI does NOT match authority (mismatch), `false` otherwise
-pub fn check_sni_vs_authority(sni: &str, authority_host: &str) -> bool {
-  if sni.is_empty() || authority_host.is_empty() {
-    return false;
-  }
-  sni.to_lowercase() != authority_host.to_lowercase()
-}
-
-/// Check if SNI matches the Host header for HTTPS requests.
-///
-/// For HTTP/1.1 requests with relative URIs, the authority comes from
-/// the Host header rather than the URI. This function extracts the
-/// hostname from the Host header (stripping port if present) and
-/// compares it with the SNI.
-///
-/// # Arguments
-/// * `sni` - The SNI hostname from TLS handshake
-/// * `host_header` - The raw Host header value (e.g., "example.com" or "example.com:443")
-///
-/// # Returns
-/// `true` if SNI does NOT match Host (mismatch), `false` otherwise
-pub fn check_sni_vs_host(sni: &str, host_header: &str) -> bool {
-  if sni.is_empty() || host_header.is_empty() {
-    return false;
-  }
-  // Strip port from Host header if present
-  let host = host_header.split(':').next().unwrap_or(host_header);
-  sni.to_lowercase() != host.to_lowercase()
-}
 
 /// Check if authority and Host header values differ.
 ///
@@ -120,24 +81,6 @@ pub fn check_authority_vs_host(
   authority_str.to_lowercase() != host_header.to_lowercase()
 }
 
-/// Build a 421 Misdirected Request response.
-///
-/// This response is sent when the SNI from TLS handshake does not match
-/// the request authority, indicating a misdirected connection.
-pub fn build_421_misdirected_response() -> Response {
-  let body = http_body_util::Full::new(bytes::Bytes::from(
-    "Misdirected Request: SNI does not match request authority",
-  ));
-  let bytes_buf = BytesBufBodyWrapper::new(body);
-  let body = ResponseBody::new(bytes_buf);
-  let mut resp = Response::new(body);
-  *resp.status_mut() = http::StatusCode::MISDIRECTED_REQUEST;
-  resp.headers_mut().insert(
-    http::header::CONTENT_TYPE,
-    http::HeaderValue::from_static("text/plain"),
-  );
-  resp
-}
 
 /// Build a 403 Forbidden response.
 ///
@@ -169,43 +112,6 @@ pub fn build_404_response() -> Response {
 #[cfg(test)]
 mod tests {
   use super::*;
-
-  // ============== SNI vs Authority Check Tests ==============
-
-  #[test]
-  fn test_check_sni_vs_authority_match() {
-    assert!(!check_sni_vs_authority("api.example.com", "api.example.com"));
-  }
-
-  #[test]
-  fn test_check_sni_vs_authority_mismatch() {
-    assert!(check_sni_vs_authority("api.example.com", "other.example.com"));
-  }
-
-  #[test]
-  fn test_check_sni_vs_authority_case_insensitive() {
-    assert!(!check_sni_vs_authority("API.EXAMPLE.COM", "api.example.com"));
-  }
-
-  #[test]
-  fn test_check_sni_vs_authority_empty_sni() {
-    assert!(!check_sni_vs_authority("", "api.example.com"));
-  }
-
-  #[test]
-  fn test_check_sni_vs_authority_empty_authority() {
-    assert!(!check_sni_vs_authority("api.example.com", ""));
-  }
-
-  #[test]
-  fn test_check_sni_vs_authority_both_empty() {
-    assert!(!check_sni_vs_authority("", ""));
-  }
-
-  #[test]
-  fn test_check_sni_vs_authority_ipv4() {
-    assert!(!check_sni_vs_authority("192.168.1.1", "192.168.1.1"));
-  }
 
   // ============== Authority vs Host Check Tests ==============
 
@@ -257,32 +163,6 @@ mod tests {
     assert!(!check_authority_vs_host("api.example.com", ""));
   }
 
-  // ============== 421 Response Tests ==============
-
-  #[test]
-  fn test_build_421_response() {
-    let resp = build_421_misdirected_response();
-    assert_eq!(resp.status(), http::StatusCode::MISDIRECTED_REQUEST);
-  }
-
-  #[test]
-  fn test_build_421_response_content_type() {
-    let resp = build_421_misdirected_response();
-    let content_type = resp.headers().get(http::header::CONTENT_TYPE);
-    assert!(content_type.is_some());
-    assert_eq!(content_type.unwrap(), "text/plain");
-  }
-
-  #[test]
-  fn test_build_421_response_body() {
-    let resp = build_421_misdirected_response();
-    let body = resp.into_body();
-    // We can't easily inspect the body without async, but we can check
-    // it exists
-    let _ = body;
-  }
-
-  // ============== Original Tests ==============
 
   #[test]
   fn test_check_http_version_http10_returns_505() {

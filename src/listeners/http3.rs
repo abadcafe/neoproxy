@@ -187,15 +187,6 @@ impl Default for QuicConfig {
 // Error Response Helpers
 // ============================================================================
 
-/// Extract SNI from a quinn connection's handshake data.
-fn extract_sni_from_connection(conn: &quinn::Connection) -> Option<String> {
-  let handshake_data = conn.handshake_data()?;
-  let hd = handshake_data
-    .downcast::<quinn::crypto::rustls::HandshakeData>()
-    .ok()?;
-  hd.server_name
-}
-
 // ============================================================================
 // HTTP/3 Stream Handler
 // ============================================================================
@@ -203,17 +194,14 @@ fn extract_sni_from_connection(conn: &quinn::Connection) -> Option<String> {
 /// Handle a single HTTP/3 stream by delegating to the Service.
 ///
 /// Flow:
-/// Handle a single HTTP/3 stream by delegating to the Service.
-///
-/// Flow:
-/// 1. SNI vs authority mismatch check (fail -> send 421 directly)
-/// 2. authority vs Host mismatch check (fail -> send 400 directly)
-/// 3. Authentication check (fail -> send 407 directly)
-/// 4. Route request to correct service based on :authority
-/// 5. Create (trigger, on_upgrade) pair
-/// 6. Build Request with on_upgrade in extensions
-/// 7. Call service.call(request)
-/// 8. Based on response status, trigger.send_success() or
+/// 1. authority check (:authority MUST exist, if Host present must equal
+///    :authority)
+/// 2. Authentication check (fail -> send 407 directly)
+/// 3. Route request to correct service based on :authority
+/// 4. Create (trigger, on_upgrade) pair
+/// 5. Build Request with on_upgrade in extensions
+/// 6. Call service.call(request)
+/// 7. Based on response status, trigger.send_success() or
 ///    trigger.send_error()
 ///
 /// Returns unit `()` because all errors are handled internally via
@@ -226,51 +214,42 @@ async fn handle_h3_stream(
   _shutdown_handle: ShutdownHandle,
   client_addr: SocketAddr,
   local_addr: SocketAddr,
-  sni: Option<String>,
   client_cert_presented: bool,
 ) -> () {
   let method = req.method().clone();
 
-  // Phase 1a: Check SNI vs authority mismatch
-  // For CONNECT requests, authority contains the target server,
-  // not the proxy server, so mismatch is expected.
-  if method != http::Method::CONNECT {
-    if let Some(ref sni) = sni {
-      if let Some(auth) = req.uri().authority() {
-        if super::utils::check_sni_vs_authority(sni, auth.host()) {
-          let resp = build_error_response(
-            http::StatusCode::MISDIRECTED_REQUEST,
-            "Misdirected Request: SNI does not match request authority",
-          );
-          let mut stream = stream;
-          if let Err(e) = send_h3_response(&mut stream, resp, true).await {
-            warn!("Failed to send 421 response: {e}");
-          }
-          return;
-        }
+  // Phase 1a: Check :authority MUST exist
+  let authority = match req.uri().authority() {
+    Some(a) => a,
+    None => {
+      let resp = build_error_response(
+        http::StatusCode::BAD_REQUEST,
+        "Bad Request: :authority is required",
+      );
+      let mut stream = stream;
+      if let Err(e) = send_h3_response(&mut stream, resp, true).await {
+        warn!("Failed to send 400 response: {e}");
       }
+      return;
     }
-  }
+  };
 
-  // Phase 1b: Check authority vs Host header mismatch
-  // Per RFC 9114 §4.3.1, :authority and Host must contain the same value.
+  // Phase 1b: If Host header exists, it must equal :authority
   if let Some(host_val) = req.headers().get(http::header::HOST) {
-    if let Some(auth) = req.uri().authority() {
-      if let Ok(host_str) = host_val.to_str() {
-        if super::utils::check_authority_vs_host(
-          &auth.to_string(),
-          host_str,
-        ) {
-          let resp = build_error_response(
-            http::StatusCode::BAD_REQUEST,
-            "Bad Request: :authority and Host headers differ",
-          );
-          let mut stream = stream;
-          if let Err(e) = send_h3_response(&mut stream, resp, true).await {
-            warn!("Failed to send 400 response: {e}");
-          }
-          return;
+    if let Ok(host_str) = host_val.to_str() {
+      if super::utils::check_authority_vs_host(
+        &authority.to_string(),
+        host_str,
+      ) {
+        let resp = build_error_response(
+          http::StatusCode::BAD_REQUEST,
+          "Bad Request: :authority and Host headers differ",
+        );
+        let mut stream = stream;
+        if let Err(e) = send_h3_response(&mut stream, resp, true).await {
+          warn!("Failed to send 400 response: {e}");
         }
+        return;
       }
     }
   }
@@ -320,10 +299,8 @@ async fn handle_h3_stream(
   ctx.insert("server.ip", local_addr.ip().to_string());
   ctx.insert("server.port", local_addr.port().to_string());
   ctx.insert("service.name", &routing_entry.service_name);
-  // Store listener hostname from SNI for Proxy-Status
-  if let Some(ref sni) = sni {
-    ctx.insert("listener.hostname", sni);
-  }
+  // Store server address for Proxy-Status
+  ctx.insert("listener.hostname", local_addr.to_string());
 
   // Phase 4: Create upgrade pair ONLY for CONNECT method
   let is_connect = method == http::Method::CONNECT;
@@ -473,9 +450,6 @@ async fn handle_h3_connection(
 ) {
   let client_addr = conn.remote_address();
 
-  // Extract SNI before conn is moved into h3_quinn
-  let sni = extract_sni_from_connection(&conn);
-
   // Check whether client presented a certificate during TLS handshake
   let client_cert_presented = conn.peer_identity().is_some();
 
@@ -508,7 +482,6 @@ async fn handle_h3_connection(
     match accept_result {
       Ok(Some(resolver)) => {
         let server_router = server_router.clone();
-        let sni = sni.clone();
         let stream_shutdown = stream_tracker.shutdown_handle();
         stream_tracker.register(async move {
           match resolver.resolve_request().await {
@@ -520,7 +493,6 @@ async fn handle_h3_connection(
                 stream_shutdown,
                 client_addr,
                 local_addr,
-                sni,
                 client_cert_presented,
               )
               .await;
@@ -1034,7 +1006,7 @@ mod tests {
   fn test_build_error_response_421_misdirected() {
     let resp = build_error_response(
       http::StatusCode::MISDIRECTED_REQUEST,
-      "Misdirected Request: SNI does not match request authority",
+      "Misdirected Request",
     );
     assert_eq!(resp.status(), http::StatusCode::MISDIRECTED_REQUEST);
   }

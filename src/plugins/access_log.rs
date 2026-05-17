@@ -368,26 +368,26 @@ impl AccessLogPlugin {
       is_uninstalled,
     }
   }
+}
 
-  pub fn plugin_name() -> &'static str {
-    "access_log"
-  }
+pub fn plugin_name() -> &'static str {
+  "access_log"
+}
 
-  pub fn create_plugin(config: Option<&SerializedArgs>) -> Box<dyn Plugin> {
-    // Initialize writer registry from config
-    if let Some(config_value) = config {
-      let plugin_config: AccessLogPluginConfig =
-        serde_yaml::from_value(config_value.clone())
-          .unwrap_or_else(|e| panic!("access_log: failed to parse plugin config: {}", e));
-      init_writer_registry(&plugin_config)
-        .unwrap_or_else(|e| panic!("access_log: failed to initialize writer registry: {}", e));
-    } else {
-      // No config provided - initialize with empty registry
-      init_writer_registry(&AccessLogPluginConfig::default())
-        .unwrap_or_else(|e| panic!("access_log: failed to initialize writer registry: {}", e));
-    }
-    Box::new(Self::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))))
+pub fn create_plugin(config: Option<&SerializedArgs>) -> Box<dyn Plugin> {
+  // Initialize writer registry from config
+  if let Some(config_value) = config {
+    let plugin_config: AccessLogPluginConfig =
+      serde_yaml::from_value(config_value.clone())
+        .unwrap_or_else(|e| panic!("access_log: failed to parse plugin config: {}", e));
+    init_writer_registry(&plugin_config)
+      .unwrap_or_else(|e| panic!("access_log: failed to initialize writer registry: {}", e));
+  } else {
+    // No config provided - initialize with empty registry
+    init_writer_registry(&AccessLogPluginConfig::default())
+      .unwrap_or_else(|e| panic!("access_log: failed to initialize writer registry: {}", e));
   }
+  Box::new(AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))))
 }
 
 impl Plugin for AccessLogPlugin {
@@ -902,7 +902,7 @@ mod plugin_tests {
     };
     let config_value = serde_yaml::to_value(&plugin_config).unwrap();
     // create_plugin should accept config and initialize writers
-    let _plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
+    let _plugin = crate::plugins::access_log::create_plugin(Some(&config_value));
 
     // Verify writers are accessible
     let writer1 = crate::plugins::access_log::get_writer(&prefix1);
@@ -930,7 +930,7 @@ mod plugin_tests {
       ],
     };
     let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-    let _plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
+    let _plugin = crate::plugins::access_log::create_plugin(Some(&config_value));
 
     // Then build a layer referencing the writer
     let plugin = crate::plugins::access_log::AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
@@ -960,7 +960,7 @@ context_fields:
       writers: vec![],
     };
     let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-    let _plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
+    let _plugin = crate::plugins::access_log::create_plugin(Some(&config_value));
 
     let plugin = crate::plugins::access_log::AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let builder = plugin.layer_builder("file").unwrap();
@@ -1049,7 +1049,7 @@ writer: "logs/nonexistent"
       ],
     };
     let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-    let _plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
+    let _plugin = crate::plugins::access_log::create_plugin(Some(&config_value));
 
     let plugin = crate::plugins::access_log::AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let builder = plugin.layer_builder("file").unwrap();
@@ -1085,7 +1085,7 @@ writer: "{}"
       ],
     };
     let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-    let _plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
+    let _plugin = crate::plugins::access_log::create_plugin(Some(&config_value));
 
     let plugin = crate::plugins::access_log::AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let builder = plugin.layer_builder("file").unwrap();
@@ -1123,7 +1123,7 @@ context_fields:
       ],
     };
     let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-    let plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
+    let plugin = crate::plugins::access_log::create_plugin(Some(&config_value));
 
     // Verify writer is accessible before uninstall
     let writer = crate::plugins::access_log::get_writer(&prefix);
@@ -1176,7 +1176,7 @@ context_fields:
       ],
     };
     let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-    let plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
+    let plugin = crate::plugins::access_log::create_plugin(Some(&config_value));
 
     // Verify writer is accessible before uninstall
     let writer = crate::plugins::access_log::get_writer(&prefix);
@@ -1223,7 +1223,7 @@ context_fields:
       ],
     };
     let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-    let plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
+    let plugin = crate::plugins::access_log::create_plugin(Some(&config_value));
 
     // Hold a sender clone to prevent the writer thread from exiting.
     let _sender = crate::plugins::access_log::get_writer(&prefix).unwrap();
@@ -1274,7 +1274,7 @@ context_fields:
       ],
     };
     let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-    let _plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
+    let _plugin = crate::plugins::access_log::create_plugin(Some(&config_value));
 
     // Send a log entry through the writer
     let sender = crate::plugins::access_log::get_writer(&prefix).unwrap();
@@ -1362,7 +1362,7 @@ context_fields:
       ],
     };
     let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-    let _plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
+    let _plugin = crate::plugins::access_log::create_plugin(Some(&config_value));
 
     // Send a log entry
     let sender = crate::plugins::access_log::get_writer(&prefix).unwrap();
@@ -1466,7 +1466,7 @@ context_fields:
       ],
     };
     let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-    let _plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
+    let _plugin = crate::plugins::access_log::create_plugin(Some(&config_value));
 
     // Hold a sender clone so the old writer thread CANNOT exit. This
     // forces the reinit's join to block (waiting for the thread that
@@ -1530,7 +1530,7 @@ context_fields:
     let result = std::panic::catch_unwind(|| {
       // Pass invalid config that will fail to parse as AccessLogPluginConfig
       let bad_config = serde_yaml::Value::String("not_a_valid_config".to_string());
-      let _ = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&bad_config));
+      let _ = crate::plugins::access_log::create_plugin(Some(&bad_config));
     });
 
     assert!(result.is_err(), "create_plugin should panic on invalid config");
@@ -1764,7 +1764,7 @@ context_fields:
       ],
     };
     let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-    let plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
+    let plugin = crate::plugins::access_log::create_plugin(Some(&config_value));
 
     // Send a log entry and drop our sender so writer thread can exit
     let sender = crate::plugins::access_log::get_writer(&prefix).unwrap();
@@ -1965,7 +1965,7 @@ context_fields:
       ],
     };
     let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-    let _plugin = crate::plugins::access_log::AccessLogPlugin::create_plugin(Some(&config_value));
+    let _plugin = crate::plugins::access_log::create_plugin(Some(&config_value));
 
     // Hold a sender clone so the writer thread cannot exit (its
     // blocking_recv() won't return None until all senders are dropped).

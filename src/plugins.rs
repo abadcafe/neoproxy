@@ -43,8 +43,8 @@ impl PluginManager {
       auth::create_plugin(plugins_config.get("auth")),
     );
     plugins.insert(
-      access_log::AccessLogPlugin::plugin_name(),
-      access_log::AccessLogPlugin::create_plugin(plugins_config.get("access_log")),
+      access_log::plugin_name(),
+      access_log::create_plugin(plugins_config.get("access_log")),
     );
     Self { plugins }
   }

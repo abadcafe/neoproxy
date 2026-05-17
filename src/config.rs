@@ -108,6 +108,8 @@ pub struct ConfigRaw {
   pub servers: Vec<Server>,
   #[serde(default)]
   pub plugins: HashMap<String, SerializedArgs>,
+  #[serde(default)]
+  pub tls_provider: Option<String>,
 }
 
 fn default_server_threads() -> usize {
@@ -122,6 +124,7 @@ pub struct Config {
   pub services: Vec<Service>,
   pub servers: Vec<Server>,
   pub plugins: HashMap<String, SerializedArgs>,
+  pub tls_provider: Option<String>,
 }
 
 impl Default for Config {
@@ -132,6 +135,7 @@ impl Default for Config {
       services: vec![],
       servers: vec![],
       plugins: HashMap::new(),
+      tls_provider: None,
     }
   }
 }
@@ -145,6 +149,7 @@ impl Config {
     self.listeners = raw.listeners;
     self.servers = raw.servers;
     self.plugins = raw.plugins;
+    self.tls_provider = raw.tls_provider;
 
     // Convert ServiceRaw -> Service using parse methods
     self.services = raw
@@ -415,6 +420,7 @@ servers:
       services: vec![],
       servers: vec![],
       plugins: HashMap::new(),
+      tls_provider: None,
     };
     let cloned = config.clone();
     assert_eq!(cloned.server_threads, 2);

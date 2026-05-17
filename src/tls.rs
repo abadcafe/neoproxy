@@ -15,7 +15,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{
   ClientHello, ResolvesServerCert, WebPkiClientVerifier,
 };
-use rustls::sign::CertifiedKey;
+use rustls::sign::{CertifiedKey, SigningKey};
+use rustls::InconsistentKeys;
 use tracing::{info, warn};
 
 use crate::config::CertificateConfig;
@@ -164,7 +165,7 @@ pub fn load_cert_and_key(
 
   // Create signing key to verify it's valid
   let signing_key =
-    rustls::crypto::ring::sign::any_supported_type(&key)
+    load_signing_key(key.clone_key())
       .map_err(|e| anyhow!("Unsupported private key type: {:?}", e))?;
 
   // Create a CertifiedKey and verify the keys match
@@ -175,7 +176,7 @@ pub fn load_cert_and_key(
     Ok(()) => {
       // Keys match, all good
     }
-    Err(rustls::Error::InconsistentKeys(_)) => {
+    Err(rustls::Error::InconsistentKeys(InconsistentKeys::KeyMismatch)) => {
       bail!(
         "Certificate and private key do not match: {} and {}",
         config.cert_path,
@@ -193,6 +194,14 @@ pub fn load_cert_and_key(
   }
 
   Ok((certs, key))
+}
+
+/// Load a signing key using the default crypto provider.
+/// Provider-agnostic: works with both ring and rustls-openssl.
+pub fn load_signing_key(key: PrivateKeyDer<'static>) -> Result<Arc<dyn SigningKey>> {
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .expect("CryptoProvider must be installed before loading keys");
+    Ok(provider.key_provider.load_private_key(key)?)
 }
 
 /// Extract Subject Alternative Names (SAN) from a certificate.
@@ -262,7 +271,7 @@ pub fn build_sni_resolver(
       // Build certified key
       let certified_key = CertifiedKey::new(
         certs.clone(),
-        rustls::crypto::ring::sign::any_supported_type(&key).map_err(
+        load_signing_key(key.clone_key()).map_err(
           |e| anyhow!("Unsupported private key type: {:?}", e),
         )?,
       );
@@ -376,6 +385,8 @@ mod tests {
   /// Ensure the rustls crypto provider is installed for tests.
   fn ensure_crypto_provider() {
     CRYPTO_PROVIDER_INSTALLED.get_or_init(|| {
+      // Install ring provider for tests (always available).
+      // Production uses the configured provider (see main.rs).
       let _ =
         rustls::crypto::ring::default_provider().install_default();
       true
@@ -512,7 +523,7 @@ mod tests {
     let (certs, key) = load_cert_and_key(&config).unwrap();
     let certified_key = Arc::new(CertifiedKey::new(
       certs,
-      rustls::crypto::ring::sign::any_supported_type(&key).unwrap(),
+      load_signing_key(key.clone_key()).unwrap(),
     ));
 
     let mut resolver = SniResolver::new();
@@ -534,7 +545,7 @@ mod tests {
     let (certs, key) = load_cert_and_key(&config).unwrap();
     let certified_key = Arc::new(CertifiedKey::new(
       certs,
-      rustls::crypto::ring::sign::any_supported_type(&key).unwrap(),
+      load_signing_key(key.clone_key()).unwrap(),
     ));
 
     let mut resolver = SniResolver::new();
@@ -555,7 +566,7 @@ mod tests {
     let (certs, key) = load_cert_and_key(&config).unwrap();
     let certified_key = Arc::new(CertifiedKey::new(
       certs,
-      rustls::crypto::ring::sign::any_supported_type(&key).unwrap(),
+      load_signing_key(key.clone_key()).unwrap(),
     ));
 
     let mut resolver = SniResolver::new();

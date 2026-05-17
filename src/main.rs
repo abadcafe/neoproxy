@@ -11,6 +11,9 @@ use tokio::signal::unix as signal;
 use tokio::{runtime, sync, task};
 use tracing::{debug, error, info, warn};
 
+#[cfg(feature = "tls-openssl")]
+use rustls_openssl;
+
 use crate::config::{
   CmdOpt, Config, ConfigErrorCollector, validate_config,
 };
@@ -358,16 +361,42 @@ fn check_server_threads(
   joined_indices.len() == handles.len()
 }
 
+/// Install the rustls crypto provider based on configuration.
+fn install_tls_provider(config: &Config) {
+  let provider_name = config.tls_provider.as_deref().unwrap_or("ring");
+  match provider_name {
+    "openssl" => {
+      #[cfg(feature = "tls-openssl")]
+      {
+        rustls_openssl::default_provider()
+          .install_default()
+          .expect("Failed to install rustls-openssl rustls crypto provider");
+        return;
+      }
+      #[cfg(not(feature = "tls-openssl"))]
+      panic!(
+        "tls_provider 'openssl' requires the 'tls-openssl' cargo feature"
+      );
+    }
+    "ring" => {
+      rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+    }
+    other => {
+      panic!(
+        "Unknown tls_provider '{other}'. Supported: 'ring', 'openssl'"
+      );
+    }
+  }
+}
+
 fn main() -> Result<()> {
-  // Install rustls crypto provider before any TLS operations
-    rustls::crypto::ring::default_provider()
-    .install_default()
-    .expect("Failed to install rustls crypto provider");
-
   // Load config
-  
-
   let config = Config::load(&CmdOpt::global().config_file)?;
+
+  // Install rustls crypto provider based on config
+  install_tls_provider(&config);
 
   // Validate config
   let mut collector = ConfigErrorCollector::new();

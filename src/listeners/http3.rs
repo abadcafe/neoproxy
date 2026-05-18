@@ -4,12 +4,14 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context as AnyhowContext, Result, anyhow, bail};
 use byte_unit::Byte;
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use h3::server;
+use http_body::{Body, Frame};
 use http_body_util::BodyExt;
 use quinn::crypto::rustls::QuicServerConfig;
 use serde::Deserialize;
@@ -31,6 +33,46 @@ use crate::shutdown::ShutdownHandle;
 use crate::stream::H3UpgradeTrigger;
 use crate::tls::build_tls_server_config;
 use crate::tracker::StreamTracker;
+
+// ============================================================================
+// H3 Request Body Adapter
+// ============================================================================
+
+/// HTTP/3 request body adapter for receiving data from H3 streams.
+pub(crate) struct H3RecvBody {
+  stream: h3::server::RequestStream<h3_quinn::RecvStream, Bytes>,
+}
+
+impl H3RecvBody {
+  pub(crate) fn new(
+    stream: h3::server::RequestStream<h3_quinn::RecvStream, Bytes>,
+  ) -> Self {
+    Self { stream }
+  }
+}
+
+// SAFETY: H3RecvBody owns its stream and contains no self-referential data.
+impl Unpin for H3RecvBody {}
+
+impl Body for H3RecvBody {
+  type Data = Bytes;
+  type Error = h3::error::StreamError;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    match Pin::new(&mut self.stream).poll_recv_data(cx) {
+      Poll::Ready(Ok(Some(mut data))) => {
+        let bytes = data.copy_to_bytes(data.remaining());
+        Poll::Ready(Some(Ok(Frame::data(bytes))))
+      }
+      Poll::Ready(Ok(None)) => Poll::Ready(None),
+      Poll::Ready(Err(e)) => Poll::Ready(Some(Err(e))),
+      Poll::Pending => Poll::Pending,
+    }
+  }
+}
 
 // ============================================================================
 // Constants
@@ -305,14 +347,29 @@ async fn handle_h3_stream(
   // Phase 4: Create upgrade pair ONLY for CONNECT method
   let is_connect = method == http::Method::CONNECT;
 
-  // Phase 5: Build Request
+  // Phase 5: Build Request with appropriate body and stream handling.
+  // stream is consumed here — either by H3UpgradeTrigger::pair (CONNECT)
+  // or by stream.split() (non-CONNECT). Both branches are mutually exclusive.
+  let (request_body, mut stream_holder, trigger_and_upgrade) = if is_connect {
+    let (trigger, on_upgrade) = H3UpgradeTrigger::pair(stream);
+    let body = RequestBody::new(BytesBufBodyWrapper::new(
+      http_body_util::Empty::<Bytes>::new(),
+    ));
+    (body, None, Some((trigger, on_upgrade)))
+  } else {
+    // Non-CONNECT: split stream, use recv half for body, keep send half for response
+    let (send_stream, recv_stream) = stream.split();
+    let body = RequestBody::new(BytesBufBodyWrapper::new(
+      H3RecvBody::new(recv_stream),
+    ));
+    (body, Some(send_stream), None)
+  };
+
   let mut request = http::Request::builder()
     .method(req.method().clone())
     .uri(req.uri().clone())
     .version(req.version())
-    .body(RequestBody::new(BytesBufBodyWrapper::new(
-      http_body_util::Empty::<Bytes>::new(),
-    )))
+    .body(request_body)
     .expect("failed to build request");
 
   for (name, value) in req.headers() {
@@ -322,12 +379,11 @@ async fn handle_h3_stream(
   // Insert RequestContext into request extensions
   request.extensions_mut().insert(ctx);
 
-  let (trigger, mut stream_holder) = if is_connect {
-    let (trigger, on_upgrade) = H3UpgradeTrigger::pair(stream);
+  let trigger = if let Some((trigger, on_upgrade)) = trigger_and_upgrade {
     request.extensions_mut().insert(on_upgrade);
-    (Some(trigger), None)
+    Some(trigger)
   } else {
-    (None, Some(stream))
+    None
   };
 
   // Phase 6: Call Service
@@ -401,19 +457,19 @@ async fn handle_h3_stream(
 /// Send an HTTP/3 response with optional stream finish
 ///
 /// # Arguments
-/// * `stream` - The HTTP/3 request stream
+/// * `stream` - The HTTP/3 send stream (send half or full bidi stream)
 /// * `resp` - The HTTP response to send
 /// * `finish_stream` - If true, close the stream after sending
 ///   response. Should be false for CONNECT success response to allow
 ///   bidirectional data transfer.
-async fn send_h3_response(
-  stream: &mut server::RequestStream<
-    h3_quinn::BidiStream<Bytes>,
-    Bytes,
-  >,
+async fn send_h3_response<S>(
+  stream: &mut server::RequestStream<S, Bytes>,
   resp: Response,
   finish_stream: bool,
-) -> Result<()> {
+) -> Result<()>
+where
+  S: h3::quic::SendStream<Bytes>,
+{
   let (parts, body) = resp.into_parts();
   let resp = http::Response::from_parts(parts, ());
 

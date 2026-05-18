@@ -44,7 +44,36 @@ pub(crate) fn classify_quic_error(e: anyhow::Error) -> UpstreamHandleError {
     return UpstreamHandleError::DnsError(e.to_string());
   }
 
-  // Check for io::Error (DNS resolution, connect failures)
+  // QUIC handshake errors come back as `quinn::ConnectionError`
+  // (from awaiting `Connecting`) or `quinn::ConnectError` (from
+  // `endpoint.connect()`). These are NOT `std::io::Error`, so they
+  // must be checked separately before the io::Error downcast.
+  if let Some(conn_err) = e.downcast_ref::<quinn::ConnectionError>() {
+    return match conn_err {
+      quinn::ConnectionError::TimedOut => {
+        UpstreamHandleError::ConnectionTimeout(e.to_string())
+      }
+      quinn::ConnectionError::ConnectionClosed(_)
+      | quinn::ConnectionError::ApplicationClosed(_)
+      | quinn::ConnectionError::Reset
+      | quinn::ConnectionError::LocallyClosed => {
+        UpstreamHandleError::ConnectionRefused(e.to_string())
+      }
+      _ => UpstreamHandleError::DestinationUnavailable(e.to_string()),
+    };
+  }
+
+  if let Some(connect_err) = e.downcast_ref::<quinn::ConnectError>() {
+    return match connect_err {
+      quinn::ConnectError::InvalidServerName(_)
+      | quinn::ConnectError::InvalidRemoteAddress(_) => {
+        UpstreamHandleError::DnsError(e.to_string())
+      }
+      _ => UpstreamHandleError::DestinationUnavailable(e.to_string()),
+    };
+  }
+
+  // Check for io::Error (DNS resolution, socket-level connect failures)
   if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
     return match io_err.kind() {
       std::io::ErrorKind::ConnectionRefused => {
@@ -84,5 +113,96 @@ impl fmt::Display for DnsResolveError {
 impl std::error::Error for DnsResolveError {
   fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
     Some(&self.0)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_classify_quic_connection_error_timed_out() {
+    let err: anyhow::Error = quinn::ConnectionError::TimedOut.into();
+    assert!(matches!(
+      classify_quic_error(err),
+      UpstreamHandleError::ConnectionTimeout(_)
+    ));
+  }
+
+  #[test]
+  fn test_classify_quic_connection_error_reset() {
+    let err: anyhow::Error = quinn::ConnectionError::Reset.into();
+    assert!(matches!(
+      classify_quic_error(err),
+      UpstreamHandleError::ConnectionRefused(_)
+    ));
+  }
+
+  #[test]
+  fn test_classify_quic_connection_error_locally_closed() {
+    let err: anyhow::Error = quinn::ConnectionError::LocallyClosed.into();
+    assert!(matches!(
+      classify_quic_error(err),
+      UpstreamHandleError::ConnectionRefused(_)
+    ));
+  }
+
+  #[test]
+  fn test_classify_quic_connection_error_version_mismatch() {
+    let err: anyhow::Error = quinn::ConnectionError::VersionMismatch.into();
+    assert!(matches!(
+      classify_quic_error(err),
+      UpstreamHandleError::DestinationUnavailable(_)
+    ));
+  }
+
+  #[test]
+  fn test_classify_quic_connect_error_invalid_server_name() {
+    let err: anyhow::Error =
+      quinn::ConnectError::InvalidServerName("bad name".to_string()).into();
+    assert!(matches!(
+      classify_quic_error(err),
+      UpstreamHandleError::DnsError(_)
+    ));
+  }
+
+  #[test]
+  fn test_classify_quic_connect_error_endpoint_stopping() {
+    let err: anyhow::Error = quinn::ConnectError::EndpointStopping.into();
+    assert!(matches!(
+      classify_quic_error(err),
+      UpstreamHandleError::DestinationUnavailable(_)
+    ));
+  }
+
+  #[test]
+  fn test_classify_dns_resolve_error_takes_precedence() {
+    let io_err =
+      std::io::Error::new(std::io::ErrorKind::Other, "name lookup failed");
+    let err: anyhow::Error = DnsResolveError(io_err).into();
+    assert!(matches!(
+      classify_quic_error(err),
+      UpstreamHandleError::DnsError(_)
+    ));
+  }
+
+  #[test]
+  fn test_classify_io_connection_refused() {
+    let io_err = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+    let err: anyhow::Error = io_err.into();
+    assert!(matches!(
+      classify_quic_error(err),
+      UpstreamHandleError::ConnectionRefused(_)
+    ));
+  }
+
+  #[test]
+  fn test_classify_io_timed_out() {
+    let io_err = std::io::Error::from(std::io::ErrorKind::TimedOut);
+    let err: anyhow::Error = io_err.into();
+    assert!(matches!(
+      classify_quic_error(err),
+      UpstreamHandleError::ConnectionTimeout(_)
+    ));
   }
 }

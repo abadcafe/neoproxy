@@ -155,11 +155,13 @@ class TestHTTPConnect:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_tc002_non_connect_method_returns_405(self) -> None:
+    def test_tc002_origin_form_request_returns_400(self) -> None:
         """
-        TC-002: 非 CONNECT 方法返回 405
+        TC-002: 非代理请求（origin-form URI）返回 400
 
-        测试目标: 验证代理服务器对非 CONNECT 方法返回 405 Method Not Allowed
+        测试目标: 验证代理服务器对 origin-form URI 的 GET 请求返回 400 Bad Request。
+        使用绝对 URI（http://...）的 GET 请求会被当作 forward proxy 请求处理；
+        只有 origin-form（GET / HTTP/1.1）才会被拒绝并返回 400。
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
@@ -176,22 +178,13 @@ class TestHTTPConnect:
             assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
                 "Proxy server failed to start"
 
-            # 4. 发送 GET 请求（非 CONNECT 方法）
-            cmd: List[str] = [
-                "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                "-x", f"http://127.0.0.1:{proxy_port}",
-                "http://example.com/"
-            ]
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
+            # 4. 发送 origin-form GET 请求（非代理请求格式）
+            request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            response = send_raw_request("127.0.0.1", proxy_port, request)
 
-            # 5. 验证响应状态码
-            assert result.stdout.strip() == "405", \
-                f"Expected 405, got {result.stdout.strip()}"
+            # 5. 验证响应状态码为 400
+            assert b"400" in response or b"Bad Request" in response, \
+                f"Expected 400 Bad Request for origin-form GET, got: {response.decode(errors='ignore')}"
 
         finally:
             # 6. 清理资源

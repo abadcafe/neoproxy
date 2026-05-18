@@ -519,12 +519,13 @@ class TestFullHTTP3ProxyChain:
 class TestHTTP3ErrorHandling:
     """Test 7.5: HTTP/3 error handling scenarios with real client."""
 
-    def test_non_connect_request_returns_405(self, shared_test_certs) -> None:
+    def test_non_connect_request_returns_400(self, shared_test_certs) -> None:
         """
-        TC-H3-ERR-004: Non-CONNECT request returns 405.
+        TC-H3-ERR-004: Non-CONNECT origin-form request returns 400.
 
-        Target: Verify HTTP/3 listener returns 405 for non-CONNECT requests
-        using real HTTP/3 client.
+        Target: Verify HTTP/3 listener returns 400 for origin-form GET requests.
+        The connect_tcp forward proxy requires absolute-form http:// URIs;
+        origin-form (GET /) is rejected with 400 Bad Request.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
@@ -566,8 +567,8 @@ class TestHTTP3ErrorHandling:
                 loop.close()
 
             assert success, "HTTP/3 connection failed"
-            assert status_code == 405, \
-                f"Expected 405 Method Not Allowed, got {status_code}"
+            assert status_code == 400, \
+                f"Expected 400 Bad Request for origin-form GET, got {status_code}"
 
         finally:
             if proxy_proc:

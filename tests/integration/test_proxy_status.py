@@ -266,10 +266,13 @@ servers:
 
     def test_non_connect_no_proxy_status(self) -> None:
         """
-        PS-004: Non-CONNECT method does NOT include Proxy-Status.
+        PS-004: Origin-form request returns 400 without Proxy-Status.
 
-        Target: Verify that locally-generated 405 response does NOT
-        include Proxy-Status header per RFC 9209 Section 2.
+        Target: Verify that locally-generated 400 response (origin-form URI
+        rejected by forward proxy validation) does NOT include Proxy-Status
+        per RFC 9209 Section 2. Absolute-form http:// requests are now
+        forwarded as forward proxy requests, so we use origin-form (GET /)
+        to trigger the locally-generated error path.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
@@ -282,13 +285,13 @@ servers:
             assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
                 "Proxy failed to start"
 
-            # Send GET (non-CONNECT) request
+            # Send origin-form GET request (locally rejected → 400, no Proxy-Status)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10)
             sock.connect(("127.0.0.1", proxy_port))
             sock.sendall(
-                b"GET http://example.com/ HTTP/1.1\r\n"
-                b"Host: example.com\r\n"
+                b"GET / HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
                 b"\r\n"
             )
 
@@ -302,13 +305,13 @@ servers:
             sock.close()
 
             status = _parse_status_code(response)
-            assert status == 405, \
-                f"Expected 405, got {status}"
+            assert status == 400, \
+                f"Expected 400, got {status}"
 
             # Should NOT have Proxy-Status (locally generated error per RFC)
             ps = _get_header(response, "proxy-status")
             assert ps is None, \
-                f"Proxy-Status should NOT be present on locally-generated 405: {ps}"
+                f"Proxy-Status should NOT be present on locally-generated 400: {ps}"
 
         finally:
             if proxy_proc:

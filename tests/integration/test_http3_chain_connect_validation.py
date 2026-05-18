@@ -130,18 +130,19 @@ class TestHTTP3ChainConnectValidation:
     HTTP listener port and verify the error responses.
     """
 
-    def test_non_connect_method_returns_405(self, shared_test_certs: dict) -> None:
+    def test_non_connect_origin_form_returns_400(self, shared_test_certs: dict) -> None:
         """
-        TC-CHAIN-VALIDATE-001: Non-CONNECT method returns 405.
+        TC-CHAIN-VALIDATE-001: Origin-form GET request returns 400.
 
-        Send a GET request to the http3_chain service.
-        Expected: 405 Method Not Allowed with text/plain body.
+        Send a GET request with origin-form URI (GET / HTTP/1.1) to the
+        http3_chain service. The forward proxy path requires absolute-form
+        URIs (http://...), so origin-form is rejected with 400 Bad Request.
         """
         http_port = get_unique_port()
         h3_port = get_unique_port()
 
         with chain_service_context(http_port, h3_port, shared_test_certs) as (temp_dir, proxy_proc):
-            # Send GET request (non-CONNECT)
+            # Send GET request with origin-form URI (not absolute-form)
             request = (
                 b"GET / HTTP/1.1\r\n"
                 b"Host: localhost\r\n"
@@ -151,8 +152,8 @@ class TestHTTP3ChainConnectValidation:
 
             status_code, status_text, headers, body = parse_http_response(response)
 
-            assert status_code == 405, \
-                f"Expected 405 for non-CONNECT, got {status_code}. " \
+            assert status_code == 400, \
+                f"Expected 400 for origin-form GET, got {status_code}. " \
                 f"Response: {response.decode(errors='ignore')}"
 
             assert "content-type" in headers, \

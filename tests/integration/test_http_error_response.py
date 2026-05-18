@@ -144,17 +144,17 @@ class TestHTTPErrorResponse:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_405_on_non_connect(self) -> None:
+    def test_400_on_origin_form_request(self) -> None:
         """
-        TC-HTTP-002: HTTP 405 response on non-CONNECT request to connect_tcp.
+        TC-HTTP-002: HTTP 400 response on origin-form GET request to connect_tcp.
 
-        Target: Verify connect_tcp service returns 405 for non-CONNECT methods
-        with proper error response format.
+        Target: Verify connect_tcp service returns 400 for origin-form URIs.
+        The forward proxy requires absolute-form http:// URIs; origin-form
+        (GET /) is rejected with 400 Bad Request.
 
         Validates:
-        1. Status code is 405
-        2. Response contains "Method Not Allowed" text
-        3. Content-Type header is present
+        1. Status code is 400
+        2. Content-Type header is present
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
@@ -167,7 +167,7 @@ class TestHTTPErrorResponse:
             assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
                 "Proxy server failed to start"
 
-            # Send a GET request to connect_tcp service (should return 405)
+            # Send an origin-form GET request (should return 400)
             request = (
                 b"GET / HTTP/1.1\r\n"
                 b"Host: localhost\r\n"
@@ -178,18 +178,13 @@ class TestHTTPErrorResponse:
             # Parse response
             status_code, status_text, headers, body = parse_http_response(response)
 
-            # Verify status code is 405
-            assert status_code == 405, \
-                f"Expected status 405, got {status_code}. Response: {response.decode(errors='ignore')}"
+            # Verify status code is 400
+            assert status_code == 400, \
+                f"Expected status 400, got {status_code}. Response: {response.decode(errors='ignore')}"
 
-            # Verify status text contains "Method Not Allowed"
-            assert "Method Not Allowed" in status_text or "method" in status_text.lower(), \
-                f"Status text should contain 'Method Not Allowed', got: {status_text}"
-
-            # Verify response body or status text mentions CONNECT
-            response_str = response.decode('utf-8', errors='ignore')
-            assert "405" in response_str or "method" in response_str.lower(), \
-                f"Response should indicate method not allowed"
+            # Verify Content-Type header is present
+            assert "content-type" in headers, \
+                "Expected Content-Type header in error response"
 
         finally:
             if proxy_proc:

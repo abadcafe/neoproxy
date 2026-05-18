@@ -5,6 +5,8 @@ mod tests {
   use std::rc::Rc;
   use std::time::Duration;
 
+  use tower::Service as TowerService;
+
   use crate::config::UserCredential;
   use crate::http_utils::{build_empty_response, build_error_response};
   use crate::plugin::Plugin;
@@ -12,7 +14,8 @@ mod tests {
   use crate::plugins::http3_chain::upstream::*;
   use crate::plugins::http3_chain::service::*;
   use crate::plugins::http3_chain::{Http3ChainPlugin, SHUTDOWN_TIMEOUT, default_idle_timeout, create_plugin};
-  use crate::plugins::utils::{self as utils, ConnectTargetError};
+  use crate::plugins::utils::{self as utils, ConnectTargetError, ForwardTargetError};
+  use crate::service::Service as RuntimeService;
 
   // ============== ClientTlsConfig Tests ==============
 
@@ -503,7 +506,7 @@ upstream: hk_relay
   // ============== CONNECT Validation Tests ==============
 
   #[test]
-  fn test_non_connect_method_produces_405() {
+  fn test_parse_connect_target_rejects_non_connect_method() {
     let req = http::Request::builder()
       .method(http::Method::GET)
       .uri("http://example.com/")
@@ -543,6 +546,155 @@ upstream: hk_relay
     let (parts, _) = req.into_parts();
     let result = utils::parse_connect_target(&parts);
     assert!(matches!(result, Err(ConnectTargetError::PortZero)));
+  }
+
+  // ============== Forward Proxy Validation Tests ==============
+
+  #[test]
+  fn test_parse_forward_target_https_returns_unsupported_scheme() {
+    let (parts, _) = http::Request::builder()
+      .method(http::Method::GET)
+      .uri("https://example.com/path")
+      .body(())
+      .unwrap()
+      .into_parts();
+    let result = utils::parse_forward_target(&parts);
+    assert!(matches!(
+      result,
+      Err(ForwardTargetError::UnsupportedScheme)
+    ));
+  }
+
+  #[test]
+  fn test_parse_forward_target_origin_form_returns_not_absolute() {
+    let (parts, _) = http::Request::builder()
+      .method(http::Method::GET)
+      .uri("/path")
+      .body(())
+      .unwrap()
+      .into_parts();
+    let result = utils::parse_forward_target(&parts);
+    assert!(matches!(
+      result,
+      Err(ForwardTargetError::NotAbsoluteForm)
+    ));
+  }
+
+  #[test]
+  fn test_parse_forward_target_valid_http() {
+    let (parts, _) = http::Request::builder()
+      .method(http::Method::GET)
+      .uri("http://example.com:8080/path?q=1")
+      .body(())
+      .unwrap()
+      .into_parts();
+    let result = utils::parse_forward_target(&parts);
+    assert!(result.is_ok());
+    let (host, port, _) = result.unwrap();
+    assert_eq!(host, "example.com");
+    assert_eq!(port, 8080);
+  }
+
+  // ============== Http3ChainService Dispatch Tests ==============
+
+  fn make_h3_service_request(
+    method: http::Method,
+    uri: &str,
+  ) -> crate::http_utils::Request {
+    use crate::context::RequestContext;
+    use crate::http_utils::{BytesBufBodyWrapper, RequestBody};
+
+    let mut req = http::Request::builder()
+      .method(method)
+      .uri(uri)
+      .body(RequestBody::new(BytesBufBodyWrapper::new(
+        http_body_util::Empty::new(),
+      )))
+      .unwrap();
+    req.extensions_mut().insert(RequestContext::new());
+    req
+  }
+
+  #[tokio::test]
+  async fn test_service_non_connect_origin_form_returns_400() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let svc = Http3ChainService::new_for_test("test_upstream");
+        let mut svc = RuntimeService::new(svc);
+        let req =
+          make_h3_service_request(http::Method::GET, "/path");
+        let resp = TowerService::call(&mut svc, req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_service_non_connect_https_scheme_returns_400() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let svc = Http3ChainService::new_for_test("test_upstream");
+        let mut svc = RuntimeService::new(svc);
+        let req = make_h3_service_request(
+          http::Method::GET,
+          "https://example.com/",
+        );
+        let resp = TowerService::call(&mut svc, req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_service_non_connect_valid_http_no_upstream_returns_error() {
+    // No upstream registered → get_upstream_handle fails → 502/503/504
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let svc =
+          Http3ChainService::new_for_test("nonexistent_upstream");
+        let mut svc = RuntimeService::new(svc);
+        let req = make_h3_service_request(
+          http::Method::GET,
+          "http://example.com/path",
+        );
+        let resp = TowerService::call(&mut svc, req).await.unwrap();
+        assert!(
+          resp.status() == http::StatusCode::BAD_GATEWAY
+            || resp.status() == http::StatusCode::SERVICE_UNAVAILABLE
+            || resp.status() == http::StatusCode::GATEWAY_TIMEOUT,
+          "expected 502/503/504, got {}",
+          resp.status()
+        );
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_service_connect_no_upstream_returns_error() {
+    // CONNECT path: no upstream → get_upstream_handle fails → 502/503/504
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let svc =
+          Http3ChainService::new_for_test("nonexistent_upstream");
+        let mut svc = RuntimeService::new(svc);
+        let req = make_h3_service_request(
+          http::Method::CONNECT,
+          "example.com:443",
+        );
+        let resp = TowerService::call(&mut svc, req).await.unwrap();
+        assert!(
+          resp.status() == http::StatusCode::BAD_GATEWAY
+            || resp.status() == http::StatusCode::SERVICE_UNAVAILABLE
+            || resp.status() == http::StatusCode::GATEWAY_TIMEOUT,
+          "expected 502/503/504, got {}",
+          resp.status()
+        );
+      })
+      .await;
   }
 
   // ============== RequestContext Integration Tests ==============

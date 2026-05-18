@@ -13,18 +13,56 @@ use tracing::warn;
 
 use crate::stream;
 use crate::config::SerializedArgs;
-use super::utils::{self as utils, ConnectTargetError};
+use super::utils::{self as utils, ConnectTargetError, ForwardTargetError};
 use crate::context::RequestContext;
 use crate::http_utils::{
-  Request, Response, build_empty_response, build_error_response,
-  build_proxy_status, build_proxy_status_error,
+  Request, Response, append_proxy_status, build_empty_response,
+  build_error_response, build_proxy_status, build_proxy_status_error,
+  build_proxy_status_with_status,
 };
+use http_body_util::BodyExt;
 use crate::plugin::Plugin;
 use crate::service::{BuildService, Service};
 use crate::tracker::StreamTracker;
 
+mod pool;
+
 /// Default TCP connect timeout.
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Default pool size (max idle connections per host)
+const DEFAULT_POOL_SIZE: usize = 32;
+
+/// Default pool idle timeout
+const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
+
+#[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+struct ConnectTcpPluginConfig {
+  #[serde(default = "default_pool_size")]
+  pool_size: usize,
+  #[serde(
+    with = "humantime_serde",
+    default = "default_pool_idle_timeout"
+  )]
+  pool_idle_timeout: Duration,
+  /// TCP connect timeout for new pool connections.
+  /// Same semantic as the service-level connect_timeout but applies
+  /// when the pool establishes a new connection on the forward path.
+  #[serde(
+    with = "humantime_serde",
+    default = "default_connect_timeout"
+  )]
+  connect_timeout: Duration,
+}
+
+fn default_pool_size() -> usize {
+  DEFAULT_POOL_SIZE
+}
+
+fn default_pool_idle_timeout() -> Duration {
+  DEFAULT_POOL_IDLE_TIMEOUT
+}
 
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
@@ -114,137 +152,316 @@ impl tower::Service<Request> for ConnectTcpService {
     // Extract upgrade future: prefer our custom upgrade, fallback to hyper
     let upgrade = stream::extract_upgrade(&mut req);
 
-    // Parse target address
-    let (parts, _body) = req.into_parts();
-    let (host, port) = match utils::parse_connect_target(&parts) {
-      Ok(result) => result,
-      Err(ConnectTargetError::NotConnectMethod) => {
-        return Box::pin(async {
-          Ok(build_error_response(
-            http::StatusCode::METHOD_NOT_ALLOWED,
-            "Only CONNECT method is supported",
-          ))
+    // Parse request parts
+    let (parts, body) = req.into_parts();
+
+    // Dispatch based on method
+    if parts.method == http::Method::CONNECT {
+      // CONNECT tunnel path
+      let (host, port) = match utils::parse_connect_target(&parts) {
+        Ok(result) => result,
+        Err(ConnectTargetError::NotConnectMethod) => {
+          return Box::pin(async {
+            Ok(build_error_response(
+              http::StatusCode::METHOD_NOT_ALLOWED,
+              "Only CONNECT method is supported",
+            ))
+          });
+        }
+        Err(
+          ConnectTargetError::NoAuthority
+          | ConnectTargetError::NoPort
+          | ConnectTargetError::PortZero,
+        ) => {
+          return Box::pin(async {
+            Ok(build_error_response(
+              http::StatusCode::BAD_REQUEST,
+              "Invalid target address",
+            ))
+          });
+        }
+      };
+
+      Box::pin(async move {
+        // Connect to target server with timing and timeout
+        let addr = format!("{host}:{port}");
+        let connect_start = std::time::Instant::now();
+        let connect_result = tokio::time::timeout(
+          connect_timeout,
+          net::TcpStream::connect(&addr),
+        )
+        .await;
+        let target_stream = match connect_result {
+          Ok(Ok(stream)) => stream,
+          Ok(Err(e)) => {
+            // Map IO error to HTTP status and Proxy-Status error
+            let (status, error) = match e.kind() {
+              std::io::ErrorKind::ConnectionRefused => {
+                (http::StatusCode::BAD_GATEWAY, "connection_refused")
+              }
+              std::io::ErrorKind::TimedOut => {
+                (http::StatusCode::GATEWAY_TIMEOUT, "connection_timeout")
+              }
+              std::io::ErrorKind::HostUnreachable
+              | std::io::ErrorKind::NetworkUnreachable
+              | std::io::ErrorKind::ConnectionReset
+              | std::io::ErrorKind::AddrNotAvailable => {
+                (http::StatusCode::BAD_GATEWAY, "destination_unavailable")
+              }
+              _ => {
+                (http::StatusCode::BAD_GATEWAY, "proxy_internal_response")
+              }
+            };
+            let mut resp = build_empty_response(status);
+            if let Some(ref id) = ctx.get("listener.hostname") {
+              resp.headers_mut().insert(
+                http::header::HeaderName::from_static("proxy-status"),
+                build_proxy_status_error(id, error),
+              );
+            }
+            return Ok(resp);
+          }
+          Err(_) => {
+            // Timeout expired
+            warn!(
+              "TCP connect to {addr} timed out after {connect_timeout:?}"
+            );
+            let mut resp = build_empty_response(
+              http::StatusCode::GATEWAY_TIMEOUT,
+            );
+            if let Some(ref id) = ctx.get("listener.hostname") {
+              resp.headers_mut().insert(
+                http::header::HeaderName::from_static("proxy-status"),
+                build_proxy_status_error(id, "connection_timeout"),
+              );
+            }
+            return Ok(resp);
+          }
+        };
+        let connect_ms = connect_start.elapsed().as_millis() as u64;
+
+        // Write metrics to RequestContext
+        ctx.insert(
+          "connect_tcp.connect_ms",
+          connect_ms.to_string(),
+        );
+
+        // Build 200 response with Proxy-Status
+        let mut resp = build_empty_response(http::StatusCode::OK);
+        if let Some(ref id) = ctx.get("listener.hostname") {
+          resp.headers_mut().insert(
+            http::header::HeaderName::from_static("proxy-status"),
+            build_proxy_status(id),
+          );
+        }
+
+        // Get shutdown handle
+        let shutdown_handle = stream_tracker.shutdown_handle();
+
+        // Background task: wait for upgrade, then bidirectional transfer
+        stream_tracker.register(async move {
+          let client = match upgrade {
+            Some(u) => match u.await {
+              Ok(c) => c,
+              Err(e) => {
+                warn!("tunnel to {addr} upgrade failed: {e}");
+                return;
+              }
+            },
+            None => {
+              warn!("tunnel to {addr}: no upgrade available");
+              return;
+            }
+          };
+
+          stream::run_tunnel(
+            client,
+            target_stream,
+            shutdown_handle,
+            max_idle_timeout,
+            &addr,
+          )
+          .await;
         });
+
+        Ok(resp)
+      })
+    } else {
+      // Forward HTTP path
+      forward_http(parts, body, ctx)
+    }
+  }
+}
+
+/// Forward an HTTP request to the target server via the connection pool.
+///
+/// Handles GET/POST/PUT/DELETE and other non-CONNECT methods.
+fn forward_http(
+  parts: http::request::Parts,
+  body: crate::http_utils::RequestBody,
+  ctx: RequestContext,
+) -> Pin<Box<dyn Future<Output = Result<Response>>>> {
+  Box::pin(async move {
+    // Parse forward target
+    let (host, port, _origin_uri) = match utils::parse_forward_target(&parts) {
+      Ok(result) => result,
+      Err(ForwardTargetError::ConnectMethod) => {
+        return Ok(build_error_response(
+          http::StatusCode::METHOD_NOT_ALLOWED,
+          "CONNECT method not allowed for forward proxy",
+        ));
+      }
+      Err(ForwardTargetError::UnsupportedScheme) => {
+        return Ok(build_error_response(
+          http::StatusCode::BAD_REQUEST,
+          "Only http:// scheme supported for forward proxy",
+        ));
       }
       Err(
-        ConnectTargetError::NoAuthority
-        | ConnectTargetError::NoPort
-        | ConnectTargetError::PortZero,
+        ForwardTargetError::NotAbsoluteForm
+        | ForwardTargetError::NoAuthority
+        | ForwardTargetError::PortZero,
       ) => {
-        return Box::pin(async {
-          Ok(build_error_response(
-            http::StatusCode::BAD_REQUEST,
-            "Invalid target address",
-          ))
-        });
+        return Ok(build_error_response(
+          http::StatusCode::BAD_REQUEST,
+          "Invalid target address",
+        ));
       }
     };
 
-    Box::pin(async move {
-      // Connect to target server with timing and timeout
-      let addr = format!("{host}:{port}");
-      let connect_start = std::time::Instant::now();
-      let connect_result = tokio::time::timeout(
-        connect_timeout,
-        net::TcpStream::connect(&addr),
-      )
-      .await;
-      let target_stream = match connect_result {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(e)) => {
-          // Map IO error to HTTP status and Proxy-Status error
-          let (status, error) = match e.kind() {
-            std::io::ErrorKind::ConnectionRefused => {
-              (http::StatusCode::BAD_GATEWAY, "connection_refused")
-            }
-            std::io::ErrorKind::TimedOut => {
-              (http::StatusCode::GATEWAY_TIMEOUT, "connection_timeout")
-            }
-            std::io::ErrorKind::HostUnreachable
-            | std::io::ErrorKind::NetworkUnreachable
-            | std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::AddrNotAvailable => {
-              (http::StatusCode::BAD_GATEWAY, "destination_unavailable")
-            }
-            _ => {
-              (http::StatusCode::BAD_GATEWAY, "proxy_internal_response")
-            }
-          };
-          let mut resp = build_empty_response(status);
-          if let Some(ref id) = ctx.get("listener.hostname") {
-            resp.headers_mut().insert(
-              http::header::HeaderName::from_static("proxy-status"),
-              build_proxy_status_error(id, error),
-            );
-          }
-          return Ok(resp);
-        }
-        Err(_) => {
-          // Timeout expired
-          warn!(
-            "TCP connect to {addr} timed out after {connect_timeout:?}"
-          );
-          let mut resp = build_empty_response(
-            http::StatusCode::GATEWAY_TIMEOUT,
-          );
-          if let Some(ref id) = ctx.get("listener.hostname") {
-            resp.headers_mut().insert(
-              http::header::HeaderName::from_static("proxy-status"),
-              build_proxy_status_error(id, "connection_timeout"),
-            );
-          }
-          return Ok(resp);
-        }
-      };
-      let connect_ms = connect_start.elapsed().as_millis() as u64;
-
-      // Write metrics to RequestContext
-      ctx.insert(
-        "connect_tcp.connect_ms",
-        connect_ms.to_string(),
-      );
-
-      // Build 200 response with Proxy-Status
-      let mut resp = build_empty_response(http::StatusCode::OK);
-      if let Some(ref id) = ctx.get("listener.hostname") {
-        resp.headers_mut().insert(
-          http::header::HeaderName::from_static("proxy-status"),
-          build_proxy_status(id),
-        );
+    // Collect request body (buffer it for the pool)
+    let body_bytes = match body.collect().await {
+      Ok(collected) => collected.to_bytes(),
+      Err(e) => {
+        warn!("Failed to collect request body: {e}");
+        return Ok(build_error_response(
+          http::StatusCode::BAD_REQUEST,
+          "Failed to read request body",
+        ));
       }
+    };
 
-      // Get shutdown handle
-      let shutdown_handle = stream_tracker.shutdown_handle();
+    // Build forwarded request with the original absolute URI.
+    // hyper_util::client::legacy::Client uses the URI to determine
+    // which host to connect to, and rewrites to origin-form internally.
+    let mut fwd_req = http::Request::builder()
+      .method(parts.method.clone())
+      .uri(parts.uri.clone())
+      .version(http::Version::HTTP_11);
 
-      // Background task: wait for upgrade, then bidirectional transfer
-      stream_tracker.register(async move {
-        let client = match upgrade {
-          Some(u) => match u.await {
-            Ok(c) => c,
-            Err(e) => {
-              warn!("tunnel to {addr} upgrade failed: {e}");
-              return;
-            }
-          },
-          None => {
-            warn!("tunnel to {addr}: no upgrade available");
-            return;
-          }
-        };
+    // Copy headers and strip hop-by-hop
+    let mut headers = parts.headers.clone();
+    utils::strip_hop_by_hop_headers(&mut headers);
 
-        stream::run_tunnel(
-          client,
-          target_stream,
-          shutdown_handle,
-          max_idle_timeout,
-          &addr,
-        )
-        .await;
-      });
+    // Set Host header per RFC 7230 § 5.4: a proxy receiving an
+    // absolute-form request-target MUST ignore any received Host
+    // header and replace it with the URI authority.
+    let host_val = if port == 80 {
+      host.clone()
+    } else {
+      format!("{host}:{port}")
+    };
+    if let Ok(v) = host_val.parse() {
+      headers.insert(http::header::HOST, v);
+    }
 
-      Ok(resp)
-    })
-  }
+    for (name, value) in headers.iter() {
+      fwd_req = fwd_req.header(name, value);
+    }
+
+    // Build body
+    let fwd_body = http_body_util::Full::new(body_bytes);
+    let fwd_body_wrapped = crate::http_utils::BytesBufBodyWrapper::new(fwd_body);
+    let fwd_body_request = crate::http_utils::RequestBody::new(fwd_body_wrapped);
+
+    let fwd_req = match fwd_req.body(fwd_body_request) {
+      Ok(req) => req,
+      Err(e) => {
+        warn!("Failed to build forwarded request: {e}");
+        return Ok(build_error_response(
+          http::StatusCode::BAD_REQUEST,
+          "Failed to build request",
+        ));
+      }
+    };
+
+    // Send through pool
+    let forward_start = std::time::Instant::now();
+    let upstream_resp = match pool::pool_send_request(fwd_req).await {
+      Ok(resp) => resp,
+      Err(e) => {
+        warn!("Forward request failed: {e}");
+        let mut resp = build_empty_response(http::StatusCode::BAD_GATEWAY);
+        if let Some(ref id) = ctx.get("listener.hostname") {
+          resp.headers_mut().insert(
+            http::header::HeaderName::from_static("proxy-status"),
+            build_proxy_status_error(id, "proxy_internal_response"),
+          );
+        }
+        return Ok(resp);
+      }
+    };
+    let forward_ms = forward_start.elapsed().as_millis() as u64;
+
+    // Record metrics
+    ctx.insert("connect_tcp.forward_ms", forward_ms.to_string());
+    ctx.insert(
+      "connect_tcp.forward_status",
+      upstream_resp.status().as_str().to_string(),
+    );
+
+    // Build response
+    let (resp_parts, resp_body) = upstream_resp.into_parts();
+    let mut resp_headers = resp_parts.headers.clone();
+    utils::strip_hop_by_hop_headers(&mut resp_headers);
+
+    // Append our Proxy-Status entry to whatever the upstream sent
+    // (RFC 9209 Section 2).
+    let upstream_ps = resp_headers
+      .get(http::header::HeaderName::from_static("proxy-status"))
+      .cloned();
+    resp_headers.remove(http::header::HeaderName::from_static("proxy-status"));
+
+    let mut resp = http::Response::builder()
+      .status(resp_parts.status)
+      .version(resp_parts.version);
+
+    for (name, value) in resp_headers.iter() {
+      resp = resp.header(name, value);
+    }
+
+    if let Some(ref id) = ctx.get("listener.hostname") {
+      let our_entry =
+        build_proxy_status_with_status(id, resp_parts.status.as_u16());
+      resp = resp.header(
+        http::header::HeaderName::from_static("proxy-status"),
+        append_proxy_status(upstream_ps.as_ref(), &our_entry),
+      );
+    } else if let Some(ps) = upstream_ps {
+      // No listener identifier to add our own entry, but still
+      // preserve upstream's Proxy-Status so it isn't dropped.
+      resp = resp.header(
+        http::header::HeaderName::from_static("proxy-status"),
+        ps,
+      );
+    }
+
+    let resp_body_wrapped =
+      crate::http_utils::BytesBufBodyWrapper::new(resp_body);
+    let resp_body_request =
+      crate::http_utils::ResponseBody::new(resp_body_wrapped);
+
+    match resp.body(resp_body_request) {
+      Ok(r) => Ok(r),
+      Err(e) => {
+        warn!("Failed to build response: {e}");
+        Ok(build_error_response(
+          http::StatusCode::BAD_GATEWAY,
+          "Failed to build response",
+        ))
+      }
+    }
+  })
 }
 
 /// Plugin-level timeout for tunnel shutdown.
@@ -285,6 +502,7 @@ impl Plugin for ConnectTcpPlugin {
   /// 1. Triggers shutdown notification to all tunnels
   /// 2. Waits for tunnels to complete (up to TUNNEL_SHUTDOWN_TIMEOUT)
   /// 3. If timeout, forcefully aborts remaining tunnels
+  /// 4. Shuts down the TCP connection pool
   fn uninstall(&self) -> Pin<Box<dyn Future<Output = ()>>> {
     let stream_tracker = self.stream_tracker.clone();
 
@@ -311,6 +529,9 @@ impl Plugin for ConnectTcpPlugin {
         // Drain so aborted tasks are removed from JoinSet
         stream_tracker.drain().await;
       }
+
+      // Shutdown TCP pool
+      pool::shutdown_tcp_pool();
     })
   }
 }
@@ -319,7 +540,33 @@ pub fn plugin_name() -> &'static str {
   "connect_tcp"
 }
 
-pub fn create_plugin(_config: Option<&SerializedArgs>) -> Box<dyn Plugin> {
+pub fn create_plugin(config: Option<&SerializedArgs>) -> Box<dyn Plugin> {
+  // Parse plugin config and initialize TCP pool
+  if let Some(config_value) = config {
+    let plugin_config: ConnectTcpPluginConfig =
+      serde_yaml::from_value(config_value.clone())
+        .unwrap_or_else(|e| {
+          panic!("connect_tcp: failed to parse plugin config: {}", e)
+        });
+
+    if let Err(e) = pool::init_tcp_pool(
+      plugin_config.pool_size,
+      plugin_config.pool_idle_timeout,
+      plugin_config.connect_timeout,
+    ) {
+      panic!("connect_tcp: failed to initialize TCP pool: {}", e);
+    }
+  } else {
+    // Initialize with defaults
+    if let Err(e) = pool::init_tcp_pool(
+      DEFAULT_POOL_SIZE,
+      DEFAULT_POOL_IDLE_TIMEOUT,
+      DEFAULT_CONNECT_TIMEOUT,
+    ) {
+      panic!("connect_tcp: failed to initialize TCP pool: {}", e);
+    }
+  }
+
   Box::new(ConnectTcpPlugin::new())
 }
 
@@ -330,6 +577,7 @@ mod tests {
   use bytes::Bytes;
   use futures::task::noop_waker;
   use http_body_util::BodyExt;
+  use serial_test::serial;
   use tower::Service as TowerService;
 
   use super::*;
@@ -410,9 +658,28 @@ mod tests {
   }
 
   #[test]
+  #[serial]
   fn test_create_plugin() {
     let plugin = create_plugin(None);
     assert!(plugin.service_builder("connect_tcp").is_some());
+  }
+
+  #[test]
+  fn test_plugin_config_deserialize_with_connect_timeout() {
+    let yaml = "pool_size: 16\npool_idle_timeout: 60s\nconnect_timeout: 5s\n";
+    let cfg: ConnectTcpPluginConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(cfg.pool_size, 16);
+    assert_eq!(cfg.pool_idle_timeout, Duration::from_secs(60));
+    assert_eq!(cfg.connect_timeout, Duration::from_secs(5));
+  }
+
+  #[test]
+  fn test_plugin_config_connect_timeout_default() {
+    let yaml = "{}";
+    let cfg: ConnectTcpPluginConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(cfg.connect_timeout, DEFAULT_CONNECT_TIMEOUT);
+    assert_eq!(cfg.pool_size, DEFAULT_POOL_SIZE);
+    assert_eq!(cfg.pool_idle_timeout, DEFAULT_POOL_IDLE_TIMEOUT);
   }
 
   #[test]
@@ -457,18 +724,10 @@ mod tests {
         let req = make_connect_request(http::Method::GET, "/");
         let fut = service.call(req);
         let resp = fut.await.unwrap();
-        assert_eq!(resp.status(), http::StatusCode::METHOD_NOT_ALLOWED);
-        let content_type =
-          resp.headers().get(http::header::CONTENT_TYPE);
-        assert_eq!(
-          content_type.unwrap().to_str().unwrap(),
-          "text/plain"
-        );
+        // GET / is origin-form (not absolute-form), so forward proxy returns 400
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
         let body = collect_body(resp.into_body()).await;
-        assert_eq!(
-          body,
-          Bytes::from("Only CONNECT method is supported")
-        );
+        assert_eq!(body, Bytes::from("Invalid target address"));
       })
       .await;
   }
@@ -804,6 +1063,7 @@ mod tests {
   /// Test that uninstall() completes immediately when no streams are
   /// active.
   #[tokio::test]
+  #[serial]
   async fn test_uninstall_no_active_streams() {
     let local_set = tokio::task::LocalSet::new();
     local_set
@@ -829,6 +1089,7 @@ mod tests {
   /// Test uninstall() with streams that respond to shutdown
   /// notification.
   #[tokio::test]
+  #[serial]
   async fn test_uninstall_with_responsive_streams() {
     let local_set = tokio::task::LocalSet::new();
     local_set
@@ -869,6 +1130,7 @@ mod tests {
   /// This test uses tokio's time mocking to simulate the timeout
   /// without actually waiting for 5 seconds.
   #[tokio::test]
+  #[serial]
   async fn test_uninstall_timeout_aborts_streams() {
     let local_set = tokio::task::LocalSet::new();
     local_set
@@ -910,6 +1172,7 @@ mod tests {
 
   /// Test that uninstall can be called multiple times without panic.
   #[tokio::test]
+  #[serial]
   async fn test_uninstall_can_be_called_multiple_times() {
     let local_set = tokio::task::LocalSet::new();
     local_set
@@ -1107,6 +1370,210 @@ mod tests {
         // connect_ms should be a valid number
         let ms: u64 = connect_ms.unwrap().parse().unwrap();
         assert!(ms < u64::MAX, "connect_ms should be a valid u64");
+      })
+      .await;
+  }
+
+  // ============== Forward Proxy Tests ==============
+
+  #[tokio::test]
+  async fn test_forward_http_origin_form_returns_400() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let service = ConnectTcpService::new_for_test();
+        let mut service = RuntimeService::new(service);
+        let req = make_connect_request(http::Method::GET, "/path");
+        let resp = service.call(req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+        let body = collect_body(resp.into_body()).await;
+        assert_eq!(body, Bytes::from("Invalid target address"));
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  async fn test_forward_http_https_scheme_returns_400() {
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        let service = ConnectTcpService::new_for_test();
+        let mut service = RuntimeService::new(service);
+        let req =
+          make_connect_request(http::Method::GET, "https://example.com/");
+        let resp = service.call(req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+        let body = collect_body(resp.into_body()).await;
+        assert_eq!(
+          body,
+          Bytes::from("Only http:// scheme supported for forward proxy")
+        );
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_forward_http_success_writes_context_fields() {
+    use http_body_util::Empty;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+
+    // Pool must be initialized before forward_http can send requests
+    pool::init_tcp_pool(DEFAULT_POOL_SIZE, DEFAULT_POOL_IDLE_TIMEOUT, DEFAULT_CONNECT_TIMEOUT)
+      .expect("pool init");
+
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        // Spin up a minimal HTTP/1.1 server
+        let listener =
+          tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_handle = tokio::spawn(async move {
+          if let Ok((stream, _)) = listener.accept().await {
+            let io = TokioIo::new(stream);
+            let svc = service_fn(|_req| async {
+              Ok::<_, anyhow::Error>(
+                http::Response::builder()
+                  .status(200)
+                  .body(Empty::<Bytes>::new())
+                  .unwrap(),
+              )
+            });
+            let _ = http1::Builder::new()
+              .serve_connection(io, svc)
+              .await;
+          }
+        });
+
+        let service = ConnectTcpService::new_for_test();
+        let mut service = RuntimeService::new(service);
+
+        let ctx = crate::context::RequestContext::new();
+        let mut req = make_connect_request(
+          http::Method::GET,
+          &format!("http://127.0.0.1:{}/", addr.port()),
+        );
+        req.extensions_mut().insert(ctx.clone());
+
+        let resp = service.call(req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+
+        assert!(
+          ctx.get("connect_tcp.forward_ms").is_some(),
+          "forward_ms should be written to context"
+        );
+        assert_eq!(
+          ctx.get("connect_tcp.forward_status").as_deref(),
+          Some("200"),
+          "forward_status should be written to context"
+        );
+
+        server_handle.abort();
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_forward_http_appends_proxy_status() {
+    use http_body_util::Empty;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+
+    pool::init_tcp_pool(DEFAULT_POOL_SIZE, DEFAULT_POOL_IDLE_TIMEOUT, DEFAULT_CONNECT_TIMEOUT)
+      .expect("pool init");
+
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        // Origin server returns its own Proxy-Status entry
+        let listener =
+          tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_handle = tokio::spawn(async move {
+          if let Ok((stream, _)) = listener.accept().await {
+            let io = TokioIo::new(stream);
+            let svc = service_fn(|_req| async {
+              Ok::<_, anyhow::Error>(
+                http::Response::builder()
+                  .status(200)
+                  .header("proxy-status", "origin-server")
+                  .body(Empty::<Bytes>::new())
+                  .unwrap(),
+              )
+            });
+            let _ = http1::Builder::new()
+              .serve_connection(io, svc)
+              .await;
+          }
+        });
+
+        let service = ConnectTcpService::new_for_test();
+        let mut service = RuntimeService::new(service);
+
+        let ctx = crate::context::RequestContext::new();
+        ctx.insert("listener.hostname", "test-listener:8080");
+        let mut req = make_connect_request(
+          http::Method::GET,
+          &format!("http://127.0.0.1:{}/", addr.port()),
+        );
+        req.extensions_mut().insert(ctx.clone());
+
+        let resp = service.call(req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+
+        // Should have one Proxy-Status header containing both upstream's
+        // entry and ours, comma-separated per RFC 9209.
+        let ps = resp
+          .headers()
+          .get(http::header::HeaderName::from_static("proxy-status"))
+          .expect("proxy-status header should be set on success");
+        let ps_str = ps.to_str().unwrap();
+        assert!(
+          ps_str.contains("origin-server"),
+          "should preserve upstream's Proxy-Status: {ps_str}"
+        );
+        assert!(
+          ps_str.contains("test-listener"),
+          "should append our entry: {ps_str}"
+        );
+
+        server_handle.abort();
+      })
+      .await;
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_forward_http_unreachable_returns_502() {
+    // Pool must be initialized so the 502 comes from connection refused,
+    // not from "pool not initialized".
+    pool::init_tcp_pool(DEFAULT_POOL_SIZE, DEFAULT_POOL_IDLE_TIMEOUT, DEFAULT_CONNECT_TIMEOUT)
+      .expect("pool init");
+
+    let local_set = tokio::task::LocalSet::new();
+    local_set
+      .run_until(async {
+        // Bind and immediately drop to get a port that refuses connections
+        let listener =
+          tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let service = ConnectTcpService::new_for_test();
+        let mut service = RuntimeService::new(service);
+        let req = make_connect_request(
+          http::Method::GET,
+          &format!("http://127.0.0.1:{}/", addr.port()),
+        );
+        let resp = service.call(req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::BAD_GATEWAY);
       })
       .await;
   }

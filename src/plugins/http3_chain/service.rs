@@ -513,8 +513,7 @@ async fn forward_http_over_h3(
   let body_bytes = body_buf.freeze();
 
   let mut resp = http::Response::builder()
-    .status(resp_parts.status)
-    .version(resp_parts.version);
+    .status(resp_parts.status);
 
   for (name, value) in resp_headers.iter() {
     resp = resp.header(name, value);

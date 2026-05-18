@@ -423,8 +423,7 @@ fn forward_http(
     resp_headers.remove(http::header::HeaderName::from_static("proxy-status"));
 
     let mut resp = http::Response::builder()
-      .status(resp_parts.status)
-      .version(resp_parts.version);
+      .status(resp_parts.status);
 
     for (name, value) in resp_headers.iter() {
       resp = resp.header(name, value);

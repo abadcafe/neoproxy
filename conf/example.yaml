@@ -22,7 +22,7 @@ server_threads: 2
 
 # TLS crypto provider: "ring" (default) or "openssl" (requires tls-openssl feature)
 # Default: ring
-tls_provider: openssl
+#tls_provider: openssl
 
 # -----------------------------------------------------------------------------
 # Plugin Configuration

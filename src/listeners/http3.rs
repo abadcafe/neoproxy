@@ -19,7 +19,6 @@ use tower::Service;
 use tracing::{info, warn};
 
 use crate::config::SerializedArgs;
-use crate::context::RequestContext;
 use crate::http_utils::{
   BytesBufBodyWrapper, RequestBody, Response, build_error_response,
 };
@@ -335,14 +334,11 @@ async fn handle_h3_stream(
   // Phase 3: Build RequestContext with connection-level keys and insert
   // into request extensions. Auth and access logging are now handled
   // by the plugin layer in the service pipeline.
-  let ctx = RequestContext::new();
-  ctx.insert("client.ip", client_addr.ip().to_string());
-  ctx.insert("client.port", client_addr.port().to_string());
-  ctx.insert("server.ip", local_addr.ip().to_string());
-  ctx.insert("server.port", local_addr.port().to_string());
-  ctx.insert("service.name", &routing_entry.service_name);
-  // Store server address for Proxy-Status
-  ctx.insert("listener.hostname", local_addr.to_string());
+  let ctx = super::utils::build_request_context(
+    &client_addr,
+    &local_addr,
+    &routing_entry.service_name,
+  );
 
   // Phase 4: Create upgrade pair ONLY for CONNECT method
   let is_connect = method == http::Method::CONNECT;

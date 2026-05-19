@@ -621,19 +621,107 @@ class TestHTTP3ConnectOnlyUpgrade:
                 terminate_process(proc, force=True)
 
 
-class TestHTTPVersionCheck:
-    """Test that HTTP version check works correctly."""
+class TestHTTP10Support:
+    """Test that HTTP/1.0 requests are handled correctly.
 
-    def test_http10_returns_505(
+    HTTP/1.0 requests are no longer rejected with 505. Instead:
+    - HTTP/1.0 CONNECT (as used by Python 3.8 http.client._tunnel)
+      should succeed and establish a tunnel.
+    - HTTP/1.0 GET with Host header should route normally.
+    - HTTP/1.0 GET without Host header should return 400 Bad Request.
+    """
+
+    def test_http10_connect_succeeds(self) -> None:
+        """
+        HTTP/1.0 CONNECT should successfully establish a tunnel.
+
+        Python 3.8's http.client._tunnel() sends
+        'CONNECT host:port HTTP/1.0' (hardcoded HTTP/1.0).
+        This must work for Python 3.8 HTTPS clients using a proxy.
+        """
+        import socket
+        from .utils.helpers import (
+            create_test_config,
+            start_proxy,
+            create_target_server,
+        )
+
+        temp_dir = tempfile.mkdtemp()
+        proxy_port = get_unique_port()
+        target_port = get_unique_port()
+        proc: Optional[subprocess.Popen] = None
+        target_socket: Optional[socket.socket] = None
+
+        try:
+            config_path = create_test_config(proxy_port, temp_dir)
+
+            # Echo server as CONNECT target
+            def echo_handler(conn: socket.socket) -> None:
+                try:
+                    while True:
+                        data = conn.recv(1024)
+                        if not data:
+                            break
+                        conn.send(b"ECHO:" + data)
+                except Exception:
+                    pass
+                finally:
+                    conn.close()
+
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, echo_handler
+            )
+
+            proc = start_proxy(config_path)
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
+                "Proxy server failed to start"
+
+            # Send CONNECT with HTTP/1.0 (as Python 3.8 does)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(10.0)
+            try:
+                sock.connect(("127.0.0.1", proxy_port))
+                connect_request = (
+                    f"CONNECT 127.0.0.1:{target_port} HTTP/1.0\r\n"
+                    f"Host: 127.0.0.1:{target_port}\r\n\r\n"
+                ).encode()
+                sock.sendall(connect_request)
+
+                # Read 200 response
+                response = b""
+                while b"\r\n\r\n" not in response:
+                    chunk = sock.recv(1024)
+                    if not chunk:
+                        break
+                    response += chunk
+
+                assert b"200" in response, \
+                    f"Expected 200 for HTTP/1.0 CONNECT, got: {response.decode(errors='ignore')}"
+
+                # Verify bidirectional data transfer through tunnel
+                test_data = b"HELLO_HTTP10"
+                sock.sendall(test_data)
+                echo = sock.recv(1024)
+                assert echo == b"ECHO:" + test_data, \
+                    f"Tunnel data mismatch: expected 'ECHO:{test_data.decode()}', got {echo.decode(errors='ignore')}"
+            finally:
+                sock.close()
+
+        finally:
+            if proc is not None:
+                terminate_process(proc)
+            if target_socket is not None:
+                target_socket.close()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_http10_get_with_host_routed(
         self, h1_h3_test_env: Tuple[str, int, int, int, int]
     ) -> None:
         """
-        Test that HTTP/1.0 requests return 505.
+        HTTP/1.0 GET with Host header should route to the echo service.
 
-        According to spec: "http/https listener: force HTTP/1.1+,
-        otherwise return 505 HTTP Version Not Supported".
-
-        Expected: PASS - HTTP/1.0 should receive 505 response.
+        With the 505 rejection removed, HTTP/1.0 requests that include
+        a Host header should be routed normally by the listener.
         """
         import socket
 
@@ -648,26 +736,74 @@ class TestHTTPVersionCheck:
                 stderr=subprocess.PIPE,
             )
 
-            # Wait for server to start using polling
             if not wait_for_proxy("127.0.0.1", default_port, timeout=5.0, proc=proc):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
-                    pytest.fail(
-                        f"Process failed to start.\n"
-                        f"stderr: {stderr_text}"
-                    )
+                    pytest.fail(f"Process failed to start.\nstderr: {stderr_text}")
                 pytest.fail("Proxy server failed to start within timeout")
 
-            # Send HTTP/1.0 request using raw socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5.0)
             sock.connect(("127.0.0.1", default_port))
-            sock.sendall(b"GET /test HTTP/1.0\r\nHost: localhost\r\n\r\n")
-            response = sock.recv(1024).decode()
+            sock.sendall(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+            response = b""
+            try:
+                while True:
+                    chunk = sock.recv(1024)
+                    if not chunk:
+                        break
+                    response += chunk
+            except socket.timeout:
+                pass
             sock.close()
 
-            assert "505" in response, f"Expected 505 HTTP Version Not Supported, got: {response}"
+            # Should get 200 from echo service, not 505
+            assert b"200" in response, \
+                f"Expected 200 for HTTP/1.0 GET with Host, got: {response.decode(errors='ignore')}"
+
+        finally:
+            if proc is not None:
+                terminate_process(proc)
+
+    def test_http10_get_without_host_returns_400(
+        self, h1_h3_test_env: Tuple[str, int, int, int, int]
+    ) -> None:
+        """
+        HTTP/1.0 GET without Host header should return 400 Bad Request.
+
+        The Host header requirement still applies — HTTP/1.0 requests
+        without Host are rejected with 400, not 505.
+        """
+        import socket
+
+        config_path, http_port, https_port, http3_port, default_port = h1_h3_test_env
+
+        proc: Optional[subprocess.Popen] = None
+
+        try:
+            proc = subprocess.Popen(
+                [NEOPROXY_BINARY, "--config", config_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            if not wait_for_proxy("127.0.0.1", default_port, timeout=5.0, proc=proc):
+                if proc.poll() is not None:
+                    _, stderr_data = proc.communicate(timeout=5)
+                    stderr_text = stderr_data.decode("utf-8", errors="replace")
+                    pytest.fail(f"Process failed to start.\nstderr: {stderr_text}")
+                pytest.fail("Proxy server failed to start within timeout")
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5.0)
+            sock.connect(("127.0.0.1", default_port))
+            sock.sendall(b"GET / HTTP/1.0\r\n\r\n")
+            response = sock.recv(1024)
+            sock.close()
+
+            assert b"400" in response, \
+                f"Expected 400 Bad Request for HTTP/1.0 GET without Host, got: {response.decode(errors='ignore')}"
 
         finally:
             if proc is not None:

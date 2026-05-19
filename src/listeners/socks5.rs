@@ -28,7 +28,6 @@ use tracing::warn;
 
 use crate::auth::UserPasswordAuth;
 use crate::config::SerializedArgs;
-use crate::context::RequestContext;
 use crate::http_utils::{BytesBufBodyWrapper, RequestBody};
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
@@ -364,12 +363,11 @@ impl Socks5Listener {
               // insert into request extensions. Auth and
               // access logging are now handled by the
               // plugin layer in the service pipeline.
-              let ctx = RequestContext::new();
-              ctx.insert("client.ip", peer_addr.ip().to_string());
-              ctx.insert("client.port", peer_addr.port().to_string());
-              ctx.insert("server.ip", local_addr.ip().to_string());
-              ctx.insert("server.port", local_addr.port().to_string());
-              ctx.insert("service.name", &service_name);
+              let ctx = super::utils::build_request_context(
+                &peer_addr,
+                &local_addr,
+                &service_name,
+              );
               request.extensions_mut().insert(ctx);
 
               // Step 5: Call the associated Service

@@ -10,6 +10,7 @@ use http_body_util::BodyExt as _;
 use tracing::{info, warn};
 
 use crate::context::RequestContext;
+use crate::listeners::utils::get_server_id;
 use crate::h3_stream::H3ClientBidiStream;
 use crate::http_utils::{
   Request, Response, append_proxy_status, build_empty_response,
@@ -95,7 +96,7 @@ impl tower::Service<Request> for Http3ChainService {
         let mut resp = build_empty_response(
           http::StatusCode::SERVICE_UNAVAILABLE,
         );
-        if let Some(ref id) = ctx.get("listener.hostname") {
+        if let Some(ref id) = get_server_id(&ctx) {
           resp.headers_mut().insert(
             http::header::HeaderName::from_static("proxy-status"),
             build_proxy_status_error(id, "proxy_internal_response"),
@@ -160,7 +161,7 @@ impl tower::Service<Request> for Http3ChainService {
               }
             };
             let mut resp = build_empty_response(status);
-            if let Some(ref id) = ctx.get("listener.hostname") {
+            if let Some(ref id) = get_server_id(&ctx) {
               resp.headers_mut().insert(
                 http::header::HeaderName::from_static("proxy-status"),
                 build_proxy_status_error(id, error),
@@ -233,7 +234,7 @@ async fn send_connect_and_tunnel_with_credential(
       upstream_status
     };
     let mut resp = build_empty_response(status);
-    if let Some(ref id) = ctx.get("listener.hostname") {
+    if let Some(ref id) = get_server_id(&ctx) {
       let our_entry =
         build_proxy_status_with_status(id, upstream_status.as_u16());
       resp.headers_mut().insert(
@@ -281,7 +282,7 @@ async fn complete_tunnel(
   );
 
   let mut resp = build_tunnel_response();
-  if let Some(ref id) = ctx.get("listener.hostname") {
+  if let Some(ref id) = get_server_id(&ctx) {
     let our_entry =
       build_proxy_status_with_status(id, 200);
     resp.headers_mut().insert(
@@ -387,7 +388,7 @@ async fn forward_http_over_h3(
         }
       };
       let mut resp = build_empty_response(status);
-      if let Some(ref id) = ctx.get("listener.hostname") {
+      if let Some(ref id) = get_server_id(&ctx) {
         resp.headers_mut().insert(
           http::header::HeaderName::from_static("proxy-status"),
           build_proxy_status_error(id, error),
@@ -433,7 +434,7 @@ async fn forward_http_over_h3(
     Err(e) => {
       warn!("Http3ChainService: failed to send forward request: {e}");
       let mut resp = build_empty_response(http::StatusCode::BAD_GATEWAY);
-      if let Some(ref id) = ctx.get("listener.hostname") {
+      if let Some(ref id) = get_server_id(&ctx) {
         resp.headers_mut().insert(
           http::header::HeaderName::from_static("proxy-status"),
           build_proxy_status_error(id, "proxy_internal_response"),
@@ -519,7 +520,7 @@ async fn forward_http_over_h3(
     resp = resp.header(name, value);
   }
 
-  if let Some(ref id) = ctx.get("listener.hostname") {
+  if let Some(ref id) = get_server_id(&ctx) {
     let our_entry =
       build_proxy_status_with_status(id, resp_parts.status.as_u16());
     resp = resp.header(

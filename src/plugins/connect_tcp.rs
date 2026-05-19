@@ -15,6 +15,7 @@ use crate::stream;
 use crate::config::SerializedArgs;
 use super::utils::{self as utils, ConnectTargetError, ForwardTargetError};
 use crate::context::RequestContext;
+use crate::listeners::utils::get_server_id;
 use crate::http_utils::{
   Request, Response, append_proxy_status, build_empty_response,
   build_error_response, build_proxy_status, build_proxy_status_error,
@@ -213,7 +214,7 @@ impl tower::Service<Request> for ConnectTcpService {
               }
             };
             let mut resp = build_empty_response(status);
-            if let Some(ref id) = ctx.get("listener.hostname") {
+            if let Some(ref id) = get_server_id(&ctx) {
               resp.headers_mut().insert(
                 http::header::HeaderName::from_static("proxy-status"),
                 build_proxy_status_error(id, error),
@@ -229,7 +230,7 @@ impl tower::Service<Request> for ConnectTcpService {
             let mut resp = build_empty_response(
               http::StatusCode::GATEWAY_TIMEOUT,
             );
-            if let Some(ref id) = ctx.get("listener.hostname") {
+            if let Some(ref id) = get_server_id(&ctx) {
               resp.headers_mut().insert(
                 http::header::HeaderName::from_static("proxy-status"),
                 build_proxy_status_error(id, "connection_timeout"),
@@ -248,7 +249,7 @@ impl tower::Service<Request> for ConnectTcpService {
 
         // Build 200 response with Proxy-Status
         let mut resp = build_empty_response(http::StatusCode::OK);
-        if let Some(ref id) = ctx.get("listener.hostname") {
+        if let Some(ref id) = get_server_id(&ctx) {
           resp.headers_mut().insert(
             http::header::HeaderName::from_static("proxy-status"),
             build_proxy_status(id),
@@ -392,7 +393,7 @@ fn forward_http(
       Err(e) => {
         warn!("Forward request failed: {e}");
         let mut resp = build_empty_response(http::StatusCode::BAD_GATEWAY);
-        if let Some(ref id) = ctx.get("listener.hostname") {
+        if let Some(ref id) = get_server_id(&ctx) {
           resp.headers_mut().insert(
             http::header::HeaderName::from_static("proxy-status"),
             build_proxy_status_error(id, "proxy_internal_response"),
@@ -429,7 +430,7 @@ fn forward_http(
       resp = resp.header(name, value);
     }
 
-    if let Some(ref id) = ctx.get("listener.hostname") {
+    if let Some(ref id) = get_server_id(&ctx) {
       let our_entry =
         build_proxy_status_with_status(id, resp_parts.status.as_u16());
       resp = resp.header(
@@ -1517,7 +1518,8 @@ mod tests {
         let mut service = RuntimeService::new(service);
 
         let ctx = crate::context::RequestContext::new();
-        ctx.insert("listener.hostname", "test-listener:8080");
+        ctx.insert("server.ip", "test-listener");
+        ctx.insert("server.port", "8080");
         let mut req = make_connect_request(
           http::Method::GET,
           &format!("http://127.0.0.1:{}/", addr.port()),

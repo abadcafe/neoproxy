@@ -4,9 +4,13 @@
 //! to avoid code duplication.
 
 use std::future::Future;
+use std::net::SocketAddr;
+use std::rc::Rc;
 use std::time::Duration;
 
-use crate::http_utils::{BytesBufBodyWrapper, Response, ResponseBody};
+use crate::context::RequestContext;
+use crate::http_utils::{build_error_response, BytesBufBodyWrapper, Response, ResponseBody};
+use crate::server::{Server, ServerRouter};
 
 /// Listener shutdown timeout in seconds.
 /// This is the timeout for Phase 1 of graceful shutdown.
@@ -24,41 +28,6 @@ where
     tokio::task::spawn_local(fut);
   }
 }
-
-/// Check HTTP version and return error if version is not supported.
-///
-/// HTTP/1.0 is NOT supported - returns 505 HTTP Version Not Supported.
-/// HTTP/1.1 and higher are supported.
-pub fn check_http_version(
-  version: http::Version,
-) -> Result<(), http::StatusCode> {
-  match version {
-    http::Version::HTTP_10 => {
-      Err(http::StatusCode::HTTP_VERSION_NOT_SUPPORTED)
-    }
-    http::Version::HTTP_11
-    | http::Version::HTTP_2
-    | http::Version::HTTP_3 => Ok(()),
-    _ => Err(http::StatusCode::HTTP_VERSION_NOT_SUPPORTED),
-  }
-}
-
-/// Build a 505 HTTP Version Not Supported response.
-pub fn build_505_response() -> Response {
-  let body = http_body_util::Full::new(bytes::Bytes::from(
-    "HTTP Version Not Supported",
-  ));
-  let bytes_buf = BytesBufBodyWrapper::new(body);
-  let body = ResponseBody::new(bytes_buf);
-  let mut resp = Response::new(body);
-  *resp.status_mut() = http::StatusCode::HTTP_VERSION_NOT_SUPPORTED;
-  resp.headers_mut().insert(
-    http::header::CONTENT_TYPE,
-    http::HeaderValue::from_static("text/plain"),
-  );
-  resp
-}
-
 
 /// Check if authority and Host header values differ.
 ///
@@ -79,6 +48,81 @@ pub fn check_authority_vs_host(
     return false;
   }
   authority_str.to_lowercase() != host_header.to_lowercase()
+}
+
+/// Validate request headers and route to the correct server.
+///
+/// Checks that a Host header is present, that it is consistent with
+/// `:authority` (if present), and routes the request to a server via
+/// the `ServerRouter`.
+///
+/// Returns `Ok(routing_entry)` on success, or `Err(error_response)`
+/// if validation or routing fails.
+pub fn validate_and_route<B>(
+  req: &http::Request<B>,
+  router: &ServerRouter,
+) -> Result<Rc<Server>, Response> {
+  // Host header is required
+  let host_header = match req
+    .headers()
+    .get(http::header::HOST)
+    .and_then(|h| h.to_str().ok())
+    .map(|s| s.to_string())
+  {
+    Some(h) => h,
+    None => {
+      return Err(build_error_response(
+        http::StatusCode::BAD_REQUEST,
+        "Bad Request: Host header is required",
+      ));
+    }
+  };
+
+  // If :authority exists, it must equal Host header
+  if let Some(authority) = req.uri().authority()
+    && check_authority_vs_host(authority.as_ref(), &host_header)
+  {
+    return Err(build_error_response(
+      http::StatusCode::BAD_REQUEST,
+      "Bad Request: :authority and Host headers differ",
+    ));
+  }
+
+  // Route via Host header
+  let host = host_header.split(':').next().unwrap_or(&host_header);
+  match router.route(Some(host)) {
+    Some(entry) => Ok(entry),
+    None => Err(build_404_response()),
+  }
+}
+
+/// Build a RequestContext with connection-level keys.
+///
+/// Populates the context with client/server IP and port, plus the
+/// service name.
+pub fn build_request_context(
+  peer_addr: &SocketAddr,
+  local_addr: &SocketAddr,
+  service_name: &str,
+) -> RequestContext {
+  let ctx = RequestContext::new();
+  ctx.insert("client.ip", peer_addr.ip().to_string());
+  ctx.insert("client.port", peer_addr.port().to_string());
+  ctx.insert("server.ip", local_addr.ip().to_string());
+  ctx.insert("server.port", local_addr.port().to_string());
+  ctx.insert("service.name", service_name);
+  ctx
+}
+
+/// Get the server identifier (`ip:port`) from a RequestContext.
+///
+/// Returns `Some("ip:port")` if both `server.ip` and `server.port` are
+/// present in the context, `None` otherwise. Used for building
+/// Proxy-Status header identifiers (RFC 9209).
+pub fn get_server_id(ctx: &RequestContext) -> Option<String> {
+  let ip = ctx.get("server.ip")?;
+  let port = ctx.get("server.port")?;
+  Some(format!("{ip}:{port}"))
 }
 
 
@@ -164,70 +208,53 @@ mod tests {
   }
 
 
+  // ============== validate_and_route Tests ==============
+
   #[test]
-  fn test_check_http_version_http10_returns_505() {
-    // HTTP/1.0 should return 505
-    let version = http::Version::HTTP_10;
-    let result = check_http_version(version);
-    assert!(result.is_err());
-    assert_eq!(
-      result.unwrap_err(),
-      http::StatusCode::HTTP_VERSION_NOT_SUPPORTED
-    );
+  fn test_validate_and_route_no_host_returns_400() {
+    let router = ServerRouter::build(vec![]);
+    let req = http::Request::builder()
+      .method(http::Method::GET)
+      .uri("/")
+      .body(())
+      .unwrap();
+    let result = validate_and_route(&req, &router);
+    match result {
+      Err(resp) => assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST),
+      Ok(_) => panic!("expected error"),
+    }
   }
 
   #[test]
-  fn test_check_http_version_http11_ok() {
-    // HTTP/1.1 should pass
-    let version = http::Version::HTTP_11;
-    let result = check_http_version(version);
-    assert!(result.is_ok());
+  fn test_validate_and_route_authority_host_mismatch_returns_400() {
+    let router = ServerRouter::build(vec![]);
+    let req = http::Request::builder()
+      .method(http::Method::GET)
+      .uri("http://other.example.com/")
+      .header("host", "api.example.com")
+      .body(())
+      .unwrap();
+    let result = validate_and_route(&req, &router);
+    match result {
+      Err(resp) => assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST),
+      Ok(_) => panic!("expected error"),
+    }
   }
 
   #[test]
-  fn test_check_http_version_http2_ok() {
-    // HTTP/2 should pass (hyper handles this)
-    let version = http::Version::HTTP_2;
-    let result = check_http_version(version);
-    assert!(result.is_ok());
-  }
-
-  #[test]
-  fn test_check_http_version_http3_ok() {
-    // HTTP/3 should pass
-    let version = http::Version::HTTP_3;
-    let result = check_http_version(version);
-    assert!(result.is_ok());
-  }
-
-  #[test]
-  fn test_check_http_version_unknown_returns_505() {
-    // Unknown versions should return 505
-    let version = http::Version::HTTP_09;
-    let result = check_http_version(version);
-    assert!(result.is_err());
-    assert_eq!(
-      result.unwrap_err(),
-      http::StatusCode::HTTP_VERSION_NOT_SUPPORTED
-    );
-  }
-
-  #[test]
-  fn test_build_505_response() {
-    let resp = build_505_response();
-    assert_eq!(
-      resp.status(),
-      http::StatusCode::HTTP_VERSION_NOT_SUPPORTED
-    );
-    assert!(resp.headers().get(http::header::CONTENT_TYPE).is_some());
-  }
-
-  #[test]
-  fn test_build_505_response_content_type() {
-    let resp = build_505_response();
-    let content_type = resp.headers().get(http::header::CONTENT_TYPE);
-    assert!(content_type.is_some());
-    assert_eq!(content_type.unwrap(), "text/plain");
+  fn test_validate_and_route_no_matching_server_returns_404() {
+    let router = ServerRouter::build(vec![]);
+    let req = http::Request::builder()
+      .method(http::Method::GET)
+      .uri("/")
+      .header("host", "api.example.com")
+      .body(())
+      .unwrap();
+    let result = validate_and_route(&req, &router);
+    match result {
+      Err(resp) => assert_eq!(resp.status(), http::StatusCode::NOT_FOUND),
+      Ok(_) => panic!("expected error"),
+    }
   }
 
   // ============== 404 Response Tests ==============

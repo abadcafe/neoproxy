@@ -17,43 +17,19 @@ use tower::util as tower_util;
 use tracing::{error, info, warn};
 
 use crate::config::SerializedArgs;
-use crate::context::RequestContext;
-use crate::http_utils::{
-  build_error_response, BytesBufBodyWrapper, Request, RequestBody,
-  Response,
-};
+use crate::http_utils::{BytesBufBodyWrapper, Request, RequestBody, Response};
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };
 use crate::listeners::utils::{
-  LISTENER_SHUTDOWN_TIMEOUT,
-  TokioLocalExecutor,
+  LISTENER_SHUTDOWN_TIMEOUT, TokioLocalExecutor, build_request_context,
+  validate_and_route,
 };
 use crate::server::{Server, ServerRouter};
 #[cfg(test)]
 use crate::service::Service;
 use crate::tracker::StreamTracker;
 
-/// Build a RequestContext with connection-level keys from accept
-/// parameters.
-///
-/// Populates the context with client/server IP and port, plus the
-/// service name. The returned context should be inserted into
-/// `req.extensions()` before calling the service so that downstream
-/// layers can access connection metadata.
-fn build_request_context(
-  peer_addr: &SocketAddr,
-  local_addr: &SocketAddr,
-  service_name: &str,
-) -> RequestContext {
-  let ctx = RequestContext::new();
-  ctx.insert("client.ip", peer_addr.ip().to_string());
-  ctx.insert("client.port", peer_addr.port().to_string());
-  ctx.insert("server.ip", local_addr.ip().to_string());
-  ctx.insert("server.port", local_addr.port().to_string());
-  ctx.insert("service.name", service_name);
-  ctx
-}
 
 /// HTTP Listener with shared-address routing support.
 ///
@@ -79,20 +55,6 @@ impl HyperServiceAdaptor {
     Self { server_router, client_addr, local_addr }
   }
 
-  /// Route a request to the correct service based on Host header.
-  fn route_request(
-    &self,
-    req: &Request,
-  ) -> Option<std::rc::Rc<Server>> {
-    // Get Host header and strip port if present
-    let host = req
-      .headers()
-      .get(http::header::HOST)
-      .and_then(|h| h.to_str().ok())
-      .map(|h| h.split(':').next().unwrap_or(h));
-
-    self.server_router.route(host)
-  }
 }
 
 impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
@@ -106,63 +68,16 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
     &self,
     req: http::Request<hyper_body::Incoming>,
   ) -> Self::Future {
-    // Step 1: Check HTTP version FIRST
-    // HTTP/1.0 is not supported - return 505 HTTP Version Not Supported
-    if let Err(_status) =
-      super::utils::check_http_version(req.version())
-    {
-      return Box::pin(async {
-        Ok(super::utils::build_505_response())
-      });
-    }
-
-    // Step 2: Check Host header MUST exist
-    let host_header = match req
-      .headers()
-      .get(http::header::HOST)
-      .and_then(|h| h.to_str().ok())
-      .map(|s| s.to_string())
-    {
-      Some(h) => h,
-      None => {
-        return Box::pin(async {
-          Ok(build_error_response(
-            http::StatusCode::BAD_REQUEST,
-            "Bad Request: Host header is required",
-          ))
-        });
-      }
-    };
-
-    // Step 3: If :authority exists, it must equal Host header
-    if let Some(authority) = req.uri().authority() {
-      if super::utils::check_authority_vs_host(
-        &authority.to_string(),
-        &host_header,
-      ) {
-        return Box::pin(async {
-          Ok(build_error_response(
-            http::StatusCode::BAD_REQUEST,
-            "Bad Request: :authority and Host headers differ",
-          ))
-        });
-      }
-    }
-
-    // Step 4: Route FIRST - get the correct server entry
     let (parts, body) = req.into_parts();
     let mut req = Request::from_parts(
       parts,
       RequestBody::new(BytesBufBodyWrapper::new(body)),
     );
 
-    let routing_entry = match self.route_request(&req) {
-      Some(entry) => entry,
-      None => {
-        return Box::pin(async {
-          Ok(super::utils::build_404_response())
-        });
-      }
+    let routing_entry = match validate_and_route(&req, &self.server_router)
+    {
+      Ok(entry) => entry,
+      Err(resp) => return Box::pin(async { Ok(resp) }),
     };
 
     // Step 5: Build RequestContext with connection-level keys and
@@ -176,8 +91,6 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
         &local_addr,
         &routing_entry.service_name(),
       );
-      // Store server address for Proxy-Status
-      ctx.insert("listener.hostname", local_addr.to_string());
 
       req.extensions_mut().insert(ctx);
     }
@@ -400,9 +313,6 @@ pub fn create_listener_builder() -> Box<dyn BuildListener> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::listeners::utils::{
-    build_505_response, check_http_version,
-  };
   use crate::shutdown::ShutdownHandle;
 
   // ============== HttpListenerArgs Tests ==============
@@ -512,7 +422,7 @@ mod tests {
 
   #[test]
   fn test_build_404_response() {
-    let resp = super::super::utils::build_404_response();
+    let resp = crate::listeners::utils::build_404_response();
     assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
   }
 
@@ -549,8 +459,8 @@ mod tests {
 
   #[test]
   fn test_http_listener_routes_by_hostname_routing_behavior() {
-    // Verify that the listener correctly routes requests to the right
-    // server based on the Host header via ServerRouter.
+    // Verify that validate_and_route correctly routes requests based
+    // on the Host header via ServerRouter.
     let servers = vec![
       Server {
         hostnames: vec![],
@@ -566,20 +476,18 @@ mod tests {
       },
     ];
 
-    let adaptor = HyperServiceAdaptor::new(servers, None, None);
+    let router = ServerRouter::build(servers);
 
     // Request with Host header matching api.example.com
     let req_api = http::Request::builder()
       .method("GET")
       .uri("/test")
       .header(http::header::HOST, "api.example.com")
-      .body(RequestBody::new(BytesBufBodyWrapper::new(
-        http_body_util::Empty::new(),
-      )))
+      .body(())
       .unwrap();
 
-    let result = adaptor.route_request(&req_api);
-    assert!(result.is_some());
+    let result = validate_and_route(&req_api, &router);
+    assert!(result.is_ok());
     assert_eq!(
       result.unwrap().service_name,
       "api",
@@ -591,75 +499,29 @@ mod tests {
       .method("GET")
       .uri("/test")
       .header(http::header::HOST, "other.example.com")
-      .body(RequestBody::new(BytesBufBodyWrapper::new(
-        http_body_util::Empty::new(),
-      )))
+      .body(())
       .unwrap();
 
-    let result = adaptor.route_request(&req_other);
-    assert!(result.is_some());
+    let result = validate_and_route(&req_other, &router);
+    assert!(result.is_ok());
     assert_eq!(
       result.unwrap().service_name,
       "default",
       "Request with non-matching Host should route to default server"
     );
 
-    // Request without Host header
+    // Request without Host header returns 400
     let req_no_host = http::Request::builder()
       .method("GET")
       .uri("/test")
-      .body(RequestBody::new(BytesBufBodyWrapper::new(
-        http_body_util::Empty::new(),
-      )))
+      .body(())
       .unwrap();
 
-    let result = adaptor.route_request(&req_no_host);
-    assert!(result.is_some());
-    assert_eq!(
-      result.unwrap().service_name,
-      "default",
-      "Request without Host header should route to default server"
-    );
-  }
-
-  // ============== HTTP Version Check Tests ==============
-
-  #[test]
-  fn test_check_http_version_http10_returns_505() {
-    // HTTP/1.0 should return 505
-    let version = http::Version::HTTP_10;
-    let result = check_http_version(version);
-    assert!(result.is_err());
-    assert_eq!(
-      result.unwrap_err(),
-      http::StatusCode::HTTP_VERSION_NOT_SUPPORTED
-    );
-  }
-
-  #[test]
-  fn test_check_http_version_http11_ok() {
-    // HTTP/1.1 should pass
-    let version = http::Version::HTTP_11;
-    let result = check_http_version(version);
-    assert!(result.is_ok());
-  }
-
-  #[test]
-  fn test_check_http_version_http2_ok() {
-    // HTTP/2 should pass (hyper handles this)
-    let version = http::Version::HTTP_2;
-    let result = check_http_version(version);
-    assert!(result.is_ok());
-  }
-
-  #[test]
-  fn test_build_505_response() {
-    let resp = build_505_response();
-    assert_eq!(
-      resp.status(),
-      http::StatusCode::HTTP_VERSION_NOT_SUPPORTED
-    );
-    assert!(resp.headers().get(http::header::CONTENT_TYPE).is_some());
+    let result = validate_and_route(&req_no_host, &router);
+    match result {
+      Err(resp) => assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST),
+      Ok(_) => panic!("expected error for missing Host header"),
+    }
   }
 
   // ============== RequestContext Tests ==============
@@ -670,7 +532,7 @@ mod tests {
     let local_addr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
     let service_name = "web_service";
 
-    let ctx = super::build_request_context(
+    let ctx = build_request_context(
       &peer_addr,
       &local_addr,
       service_name,
@@ -692,7 +554,7 @@ mod tests {
     let local_addr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
     let service_name = "test_svc";
 
-    let ctx = super::build_request_context(
+    let ctx = build_request_context(
       &peer_addr,
       &local_addr,
       service_name,
@@ -740,21 +602,20 @@ mod tests {
       },
     ];
 
-    let adaptor =
-      HyperServiceAdaptor::new(server_routing_table, None, None);
+    let router = ServerRouter::build(server_routing_table);
 
-    // Request without Host header should route to default
+    // Request without Host header returns 400
     let req = http::Request::builder()
       .method("GET")
       .uri("/test")
-      .body(RequestBody::new(BytesBufBodyWrapper::new(
-        http_body_util::Empty::new(),
-      )))
+      .body(())
       .unwrap();
 
-    let result = adaptor.route_request(&req);
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().service_name, "default_service");
+    let result = validate_and_route(&req, &router);
+    match result {
+      Err(resp) => assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST),
+      Ok(_) => panic!("expected error for missing Host header"),
+    }
   }
 
   #[test]
@@ -774,21 +635,18 @@ mod tests {
       },
     ];
 
-    let adaptor =
-      HyperServiceAdaptor::new(server_routing_table, None, None);
+    let router = ServerRouter::build(server_routing_table);
 
     // Request with Host header should route to matching server
     let req = http::Request::builder()
       .method("GET")
       .uri("/test")
       .header(http::header::HOST, "api.example.com")
-      .body(RequestBody::new(BytesBufBodyWrapper::new(
-        http_body_util::Empty::new(),
-      )))
+      .body(())
       .unwrap();
 
-    let result = adaptor.route_request(&req);
-    assert!(result.is_some());
+    let result = validate_and_route(&req, &router);
+    assert!(result.is_ok());
     assert_eq!(result.unwrap().service_name, "api_service");
   }
 }

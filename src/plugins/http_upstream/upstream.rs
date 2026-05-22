@@ -358,6 +358,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Rewind<T> {
 
 pub(crate) struct ConnectResult {
   pub(crate) transport: TunnelTransport,
+  pub(crate) upstream_addr: Option<std::net::SocketAddr>,
   pub(crate) upstream_proxy_status: Option<http::HeaderValue>,
   pub(crate) tunnel_idle_timeout: Duration,
 }
@@ -635,8 +636,11 @@ impl UpstreamRegistry {
       ))?
       .map_err(|e| classify_connect_error(e.into()))?;
 
+      let upstream_addr = stream.peer_addr().ok();
+
       return Ok(ConnectResult {
         transport: TunnelTransport::Tcp(Box::new(stream)),
+        upstream_addr,
         upstream_proxy_status: None,
         tunnel_idle_timeout,
       });
@@ -666,6 +670,8 @@ impl UpstreamRegistry {
         ))?
         .map_err(|e| classify_connect_error(e.into()))?;
 
+        let upstream_addr = stream.peer_addr().ok();
+
         let io = TokioIo::new(stream);
         let (mut sr, conn) = http1::handshake(io).await
           .map_err(|e| UpstreamError::ProxyInternalError(
@@ -692,6 +698,7 @@ impl UpstreamRegistry {
 
         Ok(ConnectResult {
           transport: TunnelTransport::Tcp(Box::new(Rewind::new(parts.io.into_inner(), Some(parts.read_buf)))),
+          upstream_addr,
           upstream_proxy_status,
           tunnel_idle_timeout,
         })
@@ -712,6 +719,8 @@ impl UpstreamRegistry {
           format!("TCP connect to {address} timed out"),
         ))?
         .map_err(|e| classify_connect_error(e.into()))?;
+
+        let upstream_addr = stream.peer_addr().ok();
 
         let host: &str = hostname.as_deref().unwrap_or_else(|| {
           address.split_at(address.rfind(':').unwrap_or(address.len())).0
@@ -755,6 +764,7 @@ impl UpstreamRegistry {
 
         Ok(ConnectResult {
           transport: TunnelTransport::Tcp(Box::new(Rewind::new(parts.io.into_inner(), Some(parts.read_buf)))),
+          upstream_addr,
           upstream_proxy_status,
           tunnel_idle_timeout,
         })
@@ -813,6 +823,7 @@ impl UpstreamRegistry {
           transport: TunnelTransport::Http3(
             crate::h3_stream::H3ClientBidiStream::new(sending_stream, receiving_stream),
           ),
+          upstream_addr: None,
           upstream_proxy_status,
           tunnel_idle_timeout,
         })

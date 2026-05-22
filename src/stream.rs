@@ -513,6 +513,82 @@ impl<S: AsyncWrite> AsyncWrite for IdleTimeoutStream<S> {
 }
 
 // ============================================================================
+// TaggedIo - tags I/O errors with a side label
+// ============================================================================
+
+/// Wrapper that injects a side tag (e.g. "client", "upstream") into I/O
+/// errors, so that `copy_bidirectional` error messages indicate which side
+/// failed.
+struct TaggedIo<S> {
+  inner: S,
+  tag: &'static str,
+}
+
+impl<S> TaggedIo<S> {
+  fn new(inner: S, tag: &'static str) -> Self {
+    Self { inner, tag }
+  }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for TaggedIo<S> {
+  fn poll_read(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &mut tokio::io::ReadBuf<'_>,
+  ) -> Poll<std::io::Result<()>> {
+    match Pin::new(&mut self.inner).poll_read(cx, buf) {
+      Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::new(
+        e.kind(),
+        format!("[{}] {}", self.tag, e),
+      ))),
+      other => other,
+    }
+  }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for TaggedIo<S> {
+  fn poll_write(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &[u8],
+  ) -> Poll<std::io::Result<usize>> {
+    match Pin::new(&mut self.inner).poll_write(cx, buf) {
+      Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::new(
+        e.kind(),
+        format!("[{}] {}", self.tag, e),
+      ))),
+      other => other,
+    }
+  }
+
+  fn poll_flush(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<std::io::Result<()>> {
+    match Pin::new(&mut self.inner).poll_flush(cx) {
+      Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::new(
+        e.kind(),
+        format!("[{}] {}", self.tag, e),
+      ))),
+      other => other,
+    }
+  }
+
+  fn poll_shutdown(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<std::io::Result<()>> {
+    match Pin::new(&mut self.inner).poll_shutdown(cx) {
+      Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::new(
+        e.kind(),
+        format!("[{}] {}", self.tag, e),
+      ))),
+      other => other,
+    }
+  }
+}
+
+// ============================================================================
 // Tunnel functions
 // ============================================================================
 
@@ -526,26 +602,27 @@ pub async fn run_tunnel<C, T>(
   target: T,
   shutdown_handle: ShutdownHandle,
   idle_timeout: Duration,
-  addr: &str,
+  tunnel_desc: &str,
 ) where
   C: AsyncRead + AsyncWrite + Unpin,
   T: AsyncRead + AsyncWrite + Unpin,
 {
   if shutdown_handle.is_shutdown() {
-    warn!("tunnel to {addr}: shutdown already triggered, aborting");
+    warn!("tunnel {tunnel_desc}: shutdown already triggered, aborting");
     return;
   }
 
-  info!("tunnel to {addr}: starting bidirectional transfer");
+  info!("tunnel {tunnel_desc}: bidirectional transfer started");
 
   let tracker = IdleTracker::new(idle_timeout);
   let client_wrapped = IdleTimeoutStream::new(client, tracker.clone());
   let target_wrapped = IdleTimeoutStream::new(target, tracker);
 
-  // IdleTimeoutStream is !Unpin (contains Sleep), Box::pin to satisfy
-  // copy_bidirectional's Unpin requirement.
-  let mut client_pinned = Box::pin(client_wrapped);
-  let mut target_pinned = Box::pin(target_wrapped);
+  let client_tagged = TaggedIo::new(Box::pin(client_wrapped), "client");
+  let target_tagged = TaggedIo::new(Box::pin(target_wrapped), "upstream");
+
+  let mut client_pinned = client_tagged;
+  let mut target_pinned = target_tagged;
 
   let result = tokio::select! {
     res = tokio::io::copy_bidirectional(
@@ -553,23 +630,23 @@ pub async fn run_tunnel<C, T>(
       &mut target_pinned,
     ) => res,
     _ = shutdown_handle.notified() => {
-      warn!("tunnel to {addr}: shutdown by notification");
+      warn!("tunnel {tunnel_desc}: shutdown by notification");
       return;
     }
   };
 
   match result {
     Ok((_sent, _received)) => {
-      info!("tunnel to {addr}: transfer completed");
+      info!("tunnel {tunnel_desc}: transfer completed");
     }
     Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
       warn!(
-        "tunnel to {addr}: idle timeout after {idle_timeout:?}, \
+        "tunnel {tunnel_desc}: idle timeout after {idle_timeout:?}, \
          closing"
       );
     }
     Err(e) => {
-      warn!("tunnel to {addr}: transfer error: {e}");
+      warn!("tunnel {tunnel_desc}: transfer error: {e}");
     }
   }
 }

@@ -155,16 +155,27 @@ async fn chain_connect(
 
   let ConnectResult {
     transport,
+    upstream_addr,
     upstream_proxy_status,
     tunnel_idle_timeout,
   } = result;
 
-  let target: Box<dyn Io> = match transport {
+  let target_io: Box<dyn Io> = match transport {
     TunnelTransport::Tcp(stream) => stream,
     TunnelTransport::Http3(h3_stream) => Box::new(h3_stream),
   };
 
-  complete_tunnel(target, st, upgrade, ctx, upstream_proxy_status, tunnel_idle_timeout).await
+  let client_addr = format!(
+    "{}:{}",
+    ctx.get("client.ip").unwrap_or_default(),
+    ctx.get("client.port").unwrap_or_default(),
+  );
+  let upstream_ip = upstream_addr
+    .map(|a| format!(" ({a})"))
+    .unwrap_or_default();
+  let tunnel_desc = format!("{client_addr} -> {target}{upstream_ip}");
+
+  complete_tunnel(target_io, st, upgrade, ctx, upstream_proxy_status, tunnel_idle_timeout, &tunnel_desc).await
 }
 
 /// Complete a CONNECT tunnel by building the 200 response and registering
@@ -176,6 +187,7 @@ async fn complete_tunnel(
   ctx: &RequestContext,
   upstream_proxy_status: Option<http::HeaderValue>,
   tunnel_idle_timeout: Duration,
+  tunnel_desc: &str,
 ) -> Result<Response> {
   let mut resp = build_tunnel_response();
   if let Some(ref id) = get_server_id(ctx) {
@@ -187,24 +199,24 @@ async fn complete_tunnel(
   }
 
   let shutdown_handle = st.shutdown_handle();
-  let addr = "upstream".to_string();
+  let tunnel_desc = tunnel_desc.to_string();
 
   st.register(async move {
     let client = match upgrade {
       Some(u) => match u.await {
         Ok(c) => c,
         Err(e) => {
-          warn!("tunnel to {addr} upgrade failed: {e}");
+          warn!("tunnel {tunnel_desc} upgrade failed: {e}");
           return;
         }
       },
       None => {
-        warn!("tunnel to {addr}: no upgrade available");
+        warn!("tunnel {tunnel_desc}: no upgrade available");
         return;
       }
     };
 
-    stream::run_tunnel(client, target, shutdown_handle, tunnel_idle_timeout, &addr).await;
+    stream::run_tunnel(client, target, shutdown_handle, tunnel_idle_timeout, &tunnel_desc).await;
   });
 
   Ok(resp)

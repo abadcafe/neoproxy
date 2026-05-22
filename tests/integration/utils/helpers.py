@@ -75,7 +75,7 @@ def create_test_config(
     server_threads: int = 1
 ) -> str:
     """
-    Create test configuration file for CONNECT TCP service.
+    Create test configuration file for direct upstream service.
 
     Args:
         proxy_port: Port for the proxy server
@@ -87,20 +87,27 @@ def create_test_config(
     """
     config_content = f"""server_threads: {server_threads}
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 listeners:
 - name: http_main
   kind: http
   addresses: ["0.0.0.0:{proxy_port}"]
 
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 servers:
 - name: http_connect
   hostnames: []
   listeners: ["http_main"]
-  service: connect_tcp
+  service: direct
 """
     config_path = os.path.join(temp_dir, "test_config.yaml")
     with open(config_path, "w") as f:

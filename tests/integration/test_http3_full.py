@@ -654,16 +654,23 @@ class TestHTTP3ErrorHandling:
             # Create config with short connect_timeout to make test faster
             config_content = f"""server_threads: 1
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+        http:
+          connect_timeout: 1s
+
 listeners:
 - name: h3_main
   kind: http3
   addresses: ["0.0.0.0:{proxy_port}"]
 
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
   args:
-    connect_timeout: "1s"
+    upstream: direct
 
 servers:
 - name: http3_server
@@ -672,7 +679,7 @@ servers:
     - cert_path: "{cert_path}"
       key_path: "{key_path}"
   listeners: ["h3_main"]
-  service: connect_tcp
+  service: direct
 """
             config_path = os.path.join(temp_dir, "config.yaml")
             with open(config_path, "w") as f:
@@ -814,9 +821,16 @@ class TestHTTP3ConfigValidationFull:
 
             config_content = f"""server_threads: 1
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
   layers:
     - kind: auth.basic_auth
       args:
@@ -836,7 +850,7 @@ servers:
     - cert_path: "{cert_path}"
       key_path: "{key_path}"
   listeners: ["http3_main"]
-  service: connect_tcp
+  service: direct
 """
             config_path = os.path.join(temp_dir, "valid_password.yaml")
             with open(config_path, "w") as f:

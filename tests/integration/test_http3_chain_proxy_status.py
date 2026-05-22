@@ -184,8 +184,8 @@ class TestHttp3ChainProxyStatus:
             config_content = f"""server_threads: 1
 
 plugins:
-  http3_chain:
-    tls:
+  http_upstream:
+    certificates:
       server_ca_path: "{ca_path}"
     upstreams:
       - name: test_upstream
@@ -193,6 +193,7 @@ plugins:
           - address: this-host-does-not-exist.example.com:8443
             hostname: this-host-does-not-exist.example.com
             weight: 1
+            http3: {{}}
 
 listeners:
 - name: http_main
@@ -200,15 +201,15 @@ listeners:
   addresses: ["0.0.0.0:{http_port}"]
 
 services:
-- name: http3_chain
-  kind: http3_chain.http3_chain
+- name: upstream
+  kind: http_upstream.upstream
   args:
     upstream: test_upstream
 
 servers:
 - name: http_proxy
   listeners: ["http_main"]
-  service: http3_chain
+  service: upstream
 """
             config_path = f"{temp_dir}/dns_error_config.yaml"
             with open(config_path, "w") as f:

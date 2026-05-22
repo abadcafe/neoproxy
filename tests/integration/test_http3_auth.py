@@ -340,9 +340,16 @@ class TestHTTP3TLSClientCertAuth:
             # NEW config format: top-level listener with server-level TLS with non-existent client_ca_certs
             config_content = f"""server_threads: 1
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 listeners:
 - name: h3_main
@@ -358,7 +365,7 @@ servers:
     client_ca_certs:
     - "/nonexistent/ca.pem"
   listeners: ["h3_main"]
-  service: connect_tcp
+  service: direct
 """
             config_path = os.path.join(temp_dir, "missing_ca.yaml")
             with open(config_path, "w") as f:

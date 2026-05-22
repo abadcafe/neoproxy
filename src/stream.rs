@@ -336,9 +336,6 @@ pub fn http_status_to_socks5_error(
 // Tunnel functions
 // ============================================================================
 
-/// Default idle timeout for tunnel data transfer (60 seconds).
-pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 60;
-
 /// Extract an upgrade future from the request.
 ///
 /// Prefers our custom `OnUpgrade` (SOCKS5/H3), falls back to hyper's

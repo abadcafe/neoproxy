@@ -432,7 +432,12 @@ class TestServerLevelConfig:
         try:
             config = {
                 "server_threads": 1,
-                "services": [{"name": "connect_tcp", "kind": "connect_tcp.connect_tcp"}],
+                "plugins": {
+                    "http_upstream": {
+                        "upstreams": [{"name": "direct"}],
+                    }
+                },
+                "services": [{"name": "direct", "kind": "http_upstream.upstream", "args": {"upstream": "direct"}}],
                 "listeners": [{"name": "http_main", "kind": "http", "addresses": [f"127.0.0.1:{port}"]}],
                 "servers": [{
                     "name": "test",
@@ -441,7 +446,7 @@ class TestServerLevelConfig:
                         "client_ca_certs": [ca_path],
                     },
                     "listeners": ["http_main"],
-                    "service": "connect_tcp",
+                    "service": "direct",
                 }],
             }
             config_path = os.path.join(temp_dir, "config.yaml")

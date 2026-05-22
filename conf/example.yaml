@@ -42,28 +42,31 @@ plugins:
         # rotate_daily: true           # Rotate at date boundary (default: true)
         # format: "text"               # Log format: text / json (default: text)
 
-  # HTTP/3 Chain Plugin - upstream pool configuration
-  # Defines upstream servers with three-level inheritance:
+  # HTTP Upstream Plugin - unified proxy service configuration
+  # Defines upstream pools with three-level inheritance:
   #   Plugin → Upstream → Address
-  http3_chain:
-    max_idle_timeout: "5m"
-    quic:
-      keep_alive_interval: "3s"
-    user:
-      username: "admin"
-      password: "secret"
-    tls:
+  http_upstream:
+    certificates:
       client_cert_path: conf/certs/client.crt
       client_key_path: conf/certs/client.key
       server_ca_path: conf/certs/server-ca.crt
     upstreams:
+      # Direct mode (no addresses) - connects directly to target
+      - name: direct
+        tunnel_idle_timeout: "60s"
+        http:
+          connect_timeout: "10s"
+
+      # Chain mode (with addresses) - connects through upstream proxy
       - name: local_relay
-        # max_idle_timeout, quic, user, tls: override plugin-level
         addresses:
           - address: "127.0.0.1:10443"
             hostname: "proxy.example.com"
             weight: 1
-            # user, tls: override upstream/plugin-level
+            user:
+              username: "admin"
+              password: "secret"
+            http3: {}
 
 # -----------------------------------------------------------------------------
 # Listeners
@@ -153,10 +156,9 @@ services:
     kind: echo.echo
     args: {}
 
-  # HTTP/3 chain proxy service
-  # References an upstream defined in the plugin config
-  - name: http3_chain
-    kind: http3_chain.http3_chain
+  # Chain proxy service (through upstream H3 proxy)
+  - name: chain
+    kind: http_upstream.upstream
     args:
       upstream: local_relay
     layers:
@@ -164,12 +166,11 @@ services:
         args:
           writer: "logs/access.log"
 
-  # Connect TCP service with basic auth layer
-  - name: connect_tcp
-    kind: connect_tcp.connect_tcp
+  # Direct proxy service with basic auth layer
+  - name: direct_proxy
+    kind: http_upstream.upstream
     args:
-      connect_timeout: "10s"
-      max_idle_timeout: "60s"
+      upstream: direct
     layers:
       # Basic proxy authentication layer
       - kind: auth.basic_auth
@@ -184,7 +185,7 @@ services:
           # Request context fields to include in log entries
           context_fields:
             - "basic_auth.user"
-            - "connect_tcp.connect_ms"
+            - "upstream.connect_ms"
 
 # -----------------------------------------------------------------------------
 # Servers
@@ -239,7 +240,7 @@ servers:
       - https_connect
       - http3_connect
       - socks5_connect
-    service: connect_tcp
+    service: direct_proxy
 
   # ---------------------------------------------------------------------------
   # Chain Proxy Server (no auth required on this node)
@@ -272,7 +273,7 @@ servers:
       - https_chain
       - http3_chain
       - socks5_chain
-    service: http3_chain
+    service: chain
 
 # =============================================================================
 # Certificate Generation

@@ -189,12 +189,10 @@ class TestHTTP3ChainProxy:
 
     def test_http3_chain_missing_ca(self, shared_test_certs) -> None:
         """
-        TC-CHAIN-004: HTTP/3 Chain with missing CA certificate in default_tls.
+        TC-CHAIN-004: HTTP/3 Chain with missing CA certificate.
 
-        Target: Verify http3_chain service behavior when CA file is missing.
-        Note: With new config structure, server_ca_path in default_tls is NOT
-        validated at startup - validation happens at connection time.
-        The service should start successfully and fail only when attempting connections.
+        Target: Verify http_upstream plugin fails to start when CA file is missing.
+        The new http_upstream plugin validates the CA path eagerly at startup.
         """
         temp_dir = tempfile.mkdtemp()
         http_port = get_unique_port()
@@ -205,8 +203,8 @@ class TestHTTP3ChainProxy:
             config_content = f"""server_threads: 1
 
 plugins:
-  http3_chain:
-    tls:
+  http_upstream:
+    certificates:
       server_ca_path: "/nonexistent/ca.pem"
     upstreams:
       - name: test_upstream
@@ -214,6 +212,7 @@ plugins:
           - address: 127.0.0.1:{h3_port}
             hostname: localhost
             weight: 1
+            http3: {{}}
 
 listeners:
 - name: http_main
@@ -225,15 +224,15 @@ listeners:
     certificates: []
 
 services:
-- name: http3_chain
-  kind: http3_chain.http3_chain
+- name: upstream
+  kind: http_upstream.upstream
   args:
     upstream: test_upstream
 
 servers:
 - name: http_proxy
   listeners: ["http_main"]
-  service: http3_chain
+  service: upstream
 """
             config_path = os.path.join(temp_dir, "missing_ca.yaml")
             with open(config_path, "w") as f:
@@ -246,17 +245,15 @@ servers:
                 text=False
             )
 
-            # With new config structure, server_ca_path in tls is not
-            # validated at startup. The service starts but connections will fail.
-            # Verify the service starts (does not crash at config parse time).
-            running = wait_for_process_running(proc, timeout=0.5)
-            if not running:
-                # Process exited - this means config validation failed
-                assert False, \
-                    f"Service should start with missing CA in default_tls, got exit code {proc.returncode}"
-            # Process is still running - expected with new format
-            proc.kill()
-            proc.wait(timeout=2)
+            # http_upstream validates CA path eagerly at startup,
+            # so the process should exit with an error
+            try:
+                exit_code = proc.wait(timeout=5.0)
+                assert exit_code != 0, \
+                    "Expected non-zero exit code for missing CA file"
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
 
         finally:
             if proc and proc.poll() is None:

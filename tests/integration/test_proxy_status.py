@@ -198,22 +198,29 @@ class TestProxyStatus:
             # Use very short connect_timeout to trigger timeout quickly
             config_content = f"""server_threads: 1
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+        tunnel_idle_timeout: 60s
+        http:
+          connect_timeout: 1s
+
 listeners:
 - name: http_main
   kind: http
   addresses: ["0.0.0.0:{proxy_port}"]
 
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
   args:
-    connect_timeout: "1s"
-    max_idle_timeout: "60s"
+    upstream: direct
 
 servers:
 - name: http_connect
   listeners: ["http_main"]
-  service: connect_tcp
+  service: direct
 """
             config_path = os.path.join(temp_dir, "timeout_config.yaml")
             with open(config_path, "w") as f:

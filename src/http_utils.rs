@@ -56,6 +56,7 @@ pub type Request = http::Request<RequestBody>;
 pub type Response = http::Response<ResponseBody>;
 
 /// Build a Proxy-Status header value with just an identifier (success case).
+#[cfg(test)]
 pub fn build_proxy_status(identifier: &str) -> http::HeaderValue {
   http::HeaderValue::from_str(identifier)
     .unwrap_or_else(|_| http::HeaderValue::from_static("neoproxy"))

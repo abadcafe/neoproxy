@@ -435,21 +435,21 @@ class TestTlsDeepMerge:
             h3_proc = start_proxy(h3_config)
             assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0)
 
-            # Chain: plugin-level tls has WRONG ca, per-address tls has CORRECT ca
+            # Chain: plugin-level certificates with correct CA
+            # (New config format: certificates are global, not per-address)
             config_content = f"""server_threads: 1
 
 plugins:
-  http3_chain:
-    tls:
-      server_ca_path: "/nonexistent/wrong_ca.pem"
+  http_upstream:
+    certificates:
+      server_ca_path: "{ca_path}"
     upstreams:
       - name: test_upstream
         addresses:
           - address: 127.0.0.1:{h3_port}
             hostname: localhost
             weight: 1
-            tls:
-              server_ca_path: "{ca_path}"
+            http3: {{}}
 
 listeners:
 - name: http_main
@@ -457,15 +457,15 @@ listeners:
   addresses: ["0.0.0.0:{http_port}"]
 
 services:
-- name: http3_chain
-  kind: http3_chain.http3_chain
+- name: upstream
+  kind: http_upstream.upstream
   args:
     upstream: test_upstream
 
 servers:
 - name: http_proxy
   listeners: ["http_main"]
-  service: http3_chain
+  service: upstream
 """
             config_path = os.path.join(temp_dir2, "chain_config.yaml")
             with open(config_path, "w") as f:

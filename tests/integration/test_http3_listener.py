@@ -260,14 +260,21 @@ class TestHTTP3ErrorHandling:
             # NEW config format: server-level TLS with non-existent cert
             config_content = f"""server_threads: 1
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 listeners:
 - name: h3_main
   kind: http3
   addresses: ["0.0.0.0:{proxy_port}"]
 
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 servers:
 - name: http3_server
@@ -276,7 +283,7 @@ servers:
     - cert_path: "/nonexistent/path/to/cert.pem"
       key_path: "/nonexistent/path/to/key.pem"
   listeners: ["h3_main"]
-  service: connect_tcp
+  service: direct
 """
             config_path = os.path.join(temp_dir, "invalid_config.yaml")
             with open(config_path, "w") as f:
@@ -319,14 +326,21 @@ servers:
             # NEW config format: server-level TLS with non-existent key
             config_content = f"""server_threads: 1
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 listeners:
 - name: h3_main
   kind: http3
   addresses: ["0.0.0.0:{proxy_port}"]
 
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 servers:
 - name: http3_server
@@ -335,7 +349,7 @@ servers:
     - cert_path: "{cert_path}"
       key_path: "/nonexistent/path/to/key.pem"
   listeners: ["h3_main"]
-  service: connect_tcp
+  service: direct
 """
             config_path = os.path.join(temp_dir, "invalid_config.yaml")
             with open(config_path, "w") as f:
@@ -388,14 +402,21 @@ servers:
             # NEW config format: server-level TLS with mismatched cert/key
             config_content = f"""server_threads: 1
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 listeners:
 - name: h3_main
   kind: http3
   addresses: ["0.0.0.0:{proxy_port}"]
 
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 servers:
 - name: http3_server
@@ -404,7 +425,7 @@ servers:
     - cert_path: "{cert_path1}"
       key_path: "{key_path2}"
   listeners: ["h3_main"]
-  service: connect_tcp
+  service: direct
 """
             config_path = os.path.join(temp_dir, "mismatch_config.yaml")
             with open(config_path, "w") as f:
@@ -497,19 +518,26 @@ class TestHTTP3ConfigValidation:
             # NEW config format: Missing server-level tls (required for http3)
             config_content = f"""server_threads: 1
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 listeners:
 - name: h3_main
   kind: http3
   addresses: ["0.0.0.0:{proxy_port}"]
 
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 servers:
 - name: http3_server
   listeners: ["h3_main"]
-  service: connect_tcp
+  service: direct
 """
             config_path = os.path.join(temp_dir, "missing_fields.yaml")
             with open(config_path, "w") as f:
@@ -550,14 +578,21 @@ servers:
             # NEW config format: server-level TLS with invalid address format
             config_content = f"""server_threads: 1
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 listeners:
 - name: h3_main
   kind: http3
   addresses: ["invalid_address_format"]
 
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 servers:
 - name: http3_server
@@ -566,7 +601,7 @@ servers:
     - cert_path: "{cert_path}"
       key_path: "{key_path}"
   listeners: ["h3_main"]
-  service: connect_tcp
+  service: direct
 """
             config_path = os.path.join(temp_dir, "invalid_addr.yaml")
             with open(config_path, "w") as f:

@@ -10,8 +10,7 @@
 | Listener | `https` | HTTPS (HTTP/1.1 over TLS) 监听器，支持 SNI 证书选择和客户端证书认证 |
 | Listener | `http3` | HTTP/3 (QUIC) 监听器 |
 | Listener | `socks5` | SOCKS5 监听器，支持用户名/密码认证 |
-| Service | `connect_tcp` | TCP 隧道服务，连接目标服务器 |
-| Service | `http3_chain` | HTTP/3 代理链服务，通过 HTTP/3 连接上游代理 |
+| Service | `http_upstream.upstream` | 统一代理服务，支持直连模式（连接目标）和链式模式（通过上游代理） |
 | Service | `echo` | 回显服务（测试用） |
 | Layer | `auth.basic_auth` | HTTP Basic 代理认证层 |
 | Layer | `access_log.file` | 访问日志层，支持多 writer、缓冲写入、文件轮转 |
@@ -108,41 +107,53 @@ plugins:
         format: "text"                   # 日志格式: text / json（默认: text）
 ```
 
-### 2. http3_chain 插件
+### 2. http_upstream 插件
 
-HTTP/3 代理链插件，定义上游代理池。支持三級繼承配置：**Plugin → Upstream → Address**。
+统一代理插件，定义上游代理池和直连配置。支持三级继承配置：**Plugin → Upstream → Address**。
 低层级覆盖高层级同名参数。
+
+**直连模式**：upstream 不配置 `addresses`，代理直接连接目标服务器。
+**链式模式**：upstream 配置 `addresses`，代理通过上游代理服务器转发。
 
 ```yaml
 plugins:
-  http3_chain:
-    max_idle_timeout: "5m"               # 连接池空闲超时（默认: 5m）
-    quic:
-      keep_alive_interval: "3s"          # QUIC keep-alive 间隔
-    user:                                # 默认认证凭证（可被覆盖）
-      username: "admin"
-      password: "secret"
-    tls:                                 # 默认 TLS 配置（可被覆盖）
+  http_upstream:
+    certificates:                          # TLS 配置（链式模式需要）
+      server_ca_path: conf/certs/server-ca.crt
       client_cert_path: conf/certs/client.crt
       client_key_path: conf/certs/client.key
-      server_ca_path: conf/certs/server-ca.crt
-    upstreams:
-      - name: <上游名称>                  # 被 service.args.upstream 引用
-        max_idle_timeout: "60s"          # 覆盖插件级
+    upstream:                              # 插件级默认配置
+      http:
+        connect_timeout: 10s
+        tunnel_idle_timeout: 60s
+      https:
+        connect_timeout: 10s
+        tls_handshake_timeout: 5s
+      http3:
+        tunnel_idle_timeout: 60s
         quic:
-          keep_alive_interval: "5s"
-        user:
-          username: "admin"
-          password: "secret"
-        tls:
-          client_cert_path: ...
-          client_key_path: ...
-          server_ca_path: ...
+          keep_alive_interval: "3s"
+    upstreams:
+      # 直连模式（无 addresses）
+      - name: direct
+        http:
+          connect_timeout: 10s
+          tunnel_idle_timeout: 60s
+        pool:
+          max_idle_per_host: 32            # 连接池最大空闲连接数（默认: 32）
+          idle_timeout: 90s                # 连接池空闲超时（默认: 90s）
+
+      # 链式模式（有 addresses）
+      - name: remote_relay
+        http3:
+          tunnel_idle_timeout: 60s
+          quic:
+            keep_alive_interval: "5s"
         addresses:
-          - address: "host:port"          # 上游代理地址
-            hostname: "sni.example.com"   # 连接上游时使用的 SNI（需匹配上游证书 SAN）
+          - address: "host:port"           # 上游代理地址
+            hostname: "sni.example.com"    # 连接上游时使用的 SNI（需匹配上游证书 SAN）
             weight: 1                      # 负载均衡权重
-            # user, tls: 可在此处进一步覆盖
+            http: {}                       # 可在此处覆盖协议配置
 ```
 
 ---
@@ -350,26 +361,38 @@ curl --socks5 127.0.0.1:1080 --proxy-user user1:pass1 https://example.com
 
 ## Service 详解
 
-### 1. connect_tcp
+### 1. http_upstream.upstream
 
-TCP 隧道服务，连接目标服务器并转发数据。支持 HTTP CONNECT、SOCKS5 CONNECT 和 HTTP/3 CONNECT。
+统一代理服务，支持两种模式：
+- **直连模式**：upstream 无 addresses，代理直接连接目标服务器
+- **链式模式**：upstream 有 addresses，代理通过上游代理服务器转发
+
+支持 HTTP CONNECT、SOCKS5 CONNECT、HTTP/3 CONNECT 和 HTTP 正向代理。
 
 #### 配置参数
 
-| 参数 | 类型 | 必填 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| `connect_timeout` | `Duration` | 否 | `10s` | TCP 连接目标超时 |
-| `max_idle_timeout` | `Duration` | 否 | `60s` | 隧道数据传输空闲超时 |
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `upstream` | `String` | 是 | 上游名称，引用 `plugins.http_upstream.upstreams[].name` |
 
-#### 配置示例
+直连模式的超时和连接池配置在 upstream 定义中设置（`http.connect_timeout`、`http.tunnel_idle_timeout`、`pool`）。
+
+#### 直连模式示例
 
 ```yaml
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+        http:
+          connect_timeout: "10s"
+          tunnel_idle_timeout: "60s"
+
 services:
   - name: tunnel
-    kind: connect_tcp.connect_tcp
+    kind: http_upstream.upstream
     args:
-      connect_timeout: "10s"
-      max_idle_timeout: "60s"
+      upstream: direct
 
 servers:
   - name: proxy
@@ -378,43 +401,20 @@ servers:
     service: tunnel
 ```
 
-#### 支持的协议
+#### 链式模式示例
 
-- HTTP CONNECT（通过 `http` 或 `https` 监听器）
-- SOCKS5 CONNECT（通过 `socks5` 监听器）
-- HTTP/3 CONNECT（通过 `http3` 监听器）
-
----
-
-### 2. http3_chain
-
-HTTP/3 代理链服务，通过 HTTP/3 协议连接到上游代理服务器。
-
-**适用场景：** 利用 QUIC 的弱网能力，在不稳定网络环境下建立代理链。
-
-#### 配置参数
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `upstream` | `String` | 是 | 上游名称，引用 `plugins.http3_chain.upstreams[].name` |
-
-上游代理的定义和连接参数（地址、TLS、认证）统一在 `plugins.http3_chain` 中配置，支持三級繼承。
-
-#### 代理链架构
+代理链架构：
 
 ```
 客户端 --HTTP/1.1 CONNECT--> neoproxy(本地) --HTTP/3 QUIC--> neoproxy(上游) --> 目标服务器
 ```
 
-#### 配置示例
-
 **本地节点**（监听 HTTP 请求，转发到上游 H3 代理）：
 
 ```yaml
 plugins:
-  http3_chain:
-    max_idle_timeout: "5m"
-    tls:
+  http_upstream:
+    certificates:
       server_ca_path: conf/certs/server-ca.crt
     upstreams:
       - name: remote_relay
@@ -422,6 +422,7 @@ plugins:
           - address: upstream.example.com:443
             hostname: "proxy.example.com"
             weight: 1
+            http3: {}
 
 listeners:
   - name: http_main
@@ -430,7 +431,7 @@ listeners:
 
 services:
   - name: chain
-    kind: http3_chain.http3_chain
+    kind: http_upstream.upstream
     args:
       upstream: remote_relay
 
@@ -444,6 +445,11 @@ servers:
 **上游节点**（监听 H3 连接，转发 TCP）：
 
 ```yaml
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 listeners:
   - name: http3_main
     kind: http3
@@ -451,7 +457,9 @@ listeners:
 
 services:
   - name: tunnel
-    kind: connect_tcp.connect_tcp
+    kind: http_upstream.upstream
+    args:
+      upstream: direct
 
 servers:
   - name: remote_proxy
@@ -464,9 +472,16 @@ servers:
     service: tunnel
 ```
 
+#### 支持的协议
+
+- HTTP CONNECT（通过 `http` 或 `https` 监听器）
+- SOCKS5 CONNECT（通过 `socks5` 监听器）
+- HTTP/3 CONNECT（通过 `http3` 监听器）
+- HTTP 正向代理（absolute-form URI）
+
 ---
 
-### 3. echo
+### 2. echo
 
 回显服务，返回请求内容。用于测试和调试。
 
@@ -508,7 +523,9 @@ HTTP Basic 代理认证层，验证 `Proxy-Authorization` 请求头。
 ```yaml
 services:
   - name: tunnel
-    kind: connect_tcp.connect_tcp
+    kind: http_upstream.upstream
+    args:
+      upstream: direct
     layers:
       - kind: auth.basic_auth
         args:
@@ -529,14 +546,16 @@ services:
 ```yaml
 services:
   - name: tunnel
-    kind: connect_tcp.connect_tcp
+    kind: http_upstream.upstream
+    args:
+      upstream: direct
     layers:
       - kind: access_log.file
         args:
           writer: "logs/access.log"
           context_fields:
             - "basic_auth.user"
-            - "connect_tcp.connect_ms"
+            - "upstream.connect_ms"
 ```
 
 ---
@@ -593,6 +612,12 @@ plugins:
   access_log:
     writers:
       - path_prefix: "logs/access.log"
+  http_upstream:
+    upstreams:
+      - name: direct
+        http:
+          connect_timeout: "10s"
+          tunnel_idle_timeout: "60s"
 
 listeners:
   - name: http_main
@@ -601,10 +626,9 @@ listeners:
 
 services:
   - name: tunnel
-    kind: connect_tcp.connect_tcp
+    kind: http_upstream.upstream
     args:
-      connect_timeout: "10s"
-      max_idle_timeout: "60s"
+      upstream: direct
     layers:
       - kind: auth.basic_auth
         args:
@@ -629,6 +653,11 @@ servers:
 ```yaml
 server_threads: 4
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 listeners:
   - name: socks5_main
     kind: socks5
@@ -636,7 +665,9 @@ listeners:
 
 services:
   - name: tunnel
-    kind: connect_tcp.connect_tcp
+    kind: http_upstream.upstream
+    args:
+      upstream: direct
 
 servers:
   - name: socks5_proxy
@@ -650,6 +681,11 @@ servers:
 ```yaml
 server_threads: 4
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 listeners:
   - name: https_main
     kind: https
@@ -662,7 +698,9 @@ listeners:
 
 services:
   - name: tunnel
-    kind: connect_tcp.connect_tcp
+    kind: http_upstream.upstream
+    args:
+      upstream: direct
     layers:
       - kind: auth.basic_auth
         args:
@@ -692,8 +730,8 @@ servers:
 server_threads: 4
 
 plugins:
-  http3_chain:
-    tls:
+  http_upstream:
+    certificates:
       server_ca_path: /etc/neoproxy/ca.pem
     upstreams:
       - name: remote
@@ -701,6 +739,7 @@ plugins:
           - address: remote.example.com:443
             hostname: "proxy.example.com"
             weight: 1
+            http3: {}
 
 listeners:
   - name: http_main
@@ -709,7 +748,7 @@ listeners:
 
 services:
   - name: chain
-    kind: http3_chain.http3_chain
+    kind: http_upstream.upstream
     args:
       upstream: remote
 
@@ -725,6 +764,11 @@ servers:
 ```yaml
 server_threads: 4
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 listeners:
   - name: http3_main
     kind: http3
@@ -732,7 +776,9 @@ listeners:
 
 services:
   - name: tunnel
-    kind: connect_tcp.connect_tcp
+    kind: http_upstream.upstream
+    args:
+      upstream: direct
 
 servers:
   - name: remote_proxy

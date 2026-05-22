@@ -44,9 +44,16 @@ def create_socks5_connect_tcp_config(
     """Create a minimal SOCKS5 + connect_tcp config using the real schema."""
     config_content = f"""server_threads: 1
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 listeners:
 - name: socks5_main
@@ -57,7 +64,7 @@ listeners:
 servers:
 - name: socks5_server
   listeners: ["socks5_main"]
-  service: connect_tcp
+  service: direct
 """
     config_path = os.path.join(temp_dir, "config.yaml")
     with open(config_path, "w") as f:

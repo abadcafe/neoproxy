@@ -9,9 +9,8 @@ use crate::service::{Layer, Service};
 
 pub mod access_log;
 pub mod auth;
-pub mod connect_tcp;
 pub mod echo;
-pub mod http3_chain;
+pub mod http_upstream;
 pub mod utils;
 
 
@@ -27,16 +26,8 @@ impl PluginManager {
       HashMap::new();
 
     plugins.insert(
-      connect_tcp::plugin_name(),
-      connect_tcp::create_plugin(plugins_config.get("connect_tcp")),
-    );
-    plugins.insert(
       echo::plugin_name(),
       echo::create_plugin(plugins_config.get("echo")),
-    );
-    plugins.insert(
-      http3_chain::plugin_name(),
-      http3_chain::create_plugin(plugins_config.get("http3_chain")),
     );
     plugins.insert(
       auth::plugin_name(),
@@ -45,6 +36,10 @@ impl PluginManager {
     plugins.insert(
       access_log::plugin_name(),
       access_log::create_plugin(plugins_config.get("access_log")),
+    );
+    plugins.insert(
+      http_upstream::plugin_name(),
+      http_upstream::create_plugin(plugins_config.get("http_upstream")),
     );
     Self { plugins }
   }
@@ -123,8 +118,7 @@ mod tests {
     assert!(pm.plugins.contains_key("echo"));
     assert!(pm.plugins.contains_key("auth"));
     assert!(pm.plugins.contains_key("access_log"));
-    assert!(pm.plugins.contains_key("http3_chain"));
-    assert!(pm.plugins.contains_key("connect_tcp"));
+    assert!(pm.plugins.contains_key("http_upstream"));
   }
 
   #[test]

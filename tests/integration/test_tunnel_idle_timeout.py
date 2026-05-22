@@ -122,8 +122,8 @@ class TestTunnelIdleTimeout:
             config_content = f"""server_threads: 1
 
 plugins:
-  http3_chain:
-    tls:
+  http_upstream:
+    certificates:
       server_ca_path: "{ca_path}"
     upstreams:
       - name: test_upstream
@@ -131,7 +131,8 @@ plugins:
           - address: 127.0.0.1:{h3_port}
             hostname: localhost
             weight: 1
-            max_idle_timeout: "2s"
+            tunnel_idle_timeout: "2s"
+            http3: {{}}
 
 listeners:
 - name: http_main
@@ -139,15 +140,15 @@ listeners:
   addresses: ["0.0.0.0:{http_port}"]
 
 services:
-- name: http3_chain
-  kind: http3_chain.http3_chain
+- name: upstream
+  kind: http_upstream.upstream
   args:
     upstream: test_upstream
 
 servers:
 - name: http_proxy
   listeners: ["http_main"]
-  service: http3_chain
+  service: upstream
 """
             config_path = os.path.join(temp_dir2, "chain_config.yaml")
             with open(config_path, "w") as f:
@@ -251,8 +252,8 @@ servers:
             config_content = f"""server_threads: 1
 
 plugins:
-  http3_chain:
-    tls:
+  http_upstream:
+    certificates:
       server_ca_path: "{ca_path}"
     upstreams:
       - name: test_upstream
@@ -260,7 +261,8 @@ plugins:
           - address: 127.0.0.1:{h3_port}
             hostname: localhost
             weight: 1
-            max_idle_timeout: "2s"
+            tunnel_idle_timeout: "2s"
+            http3: {{}}
 
 listeners:
 - name: http_main
@@ -268,15 +270,15 @@ listeners:
   addresses: ["0.0.0.0:{http_port}"]
 
 services:
-- name: http3_chain
-  kind: http3_chain.http3_chain
+- name: upstream
+  kind: http_upstream.upstream
   args:
     upstream: test_upstream
 
 servers:
 - name: http_proxy
   listeners: ["http_main"]
-  service: http3_chain
+  service: upstream
 """
             config_path = os.path.join(temp_dir2, "chain_config.yaml")
             with open(config_path, "w") as f:
@@ -421,8 +423,8 @@ servers:
             config_content = f"""server_threads: 1
 
 plugins:
-  http3_chain:
-    tls:
+  http_upstream:
+    certificates:
       server_ca_path: "{ca_path}"
     upstreams:
       - name: test_upstream
@@ -430,7 +432,8 @@ plugins:
           - address: 127.0.0.1:{h3_port}
             hostname: localhost
             weight: 1
-            max_idle_timeout: "2s"
+            tunnel_idle_timeout: "2s"
+            http3: {{}}
 
 listeners:
 - name: http_main
@@ -438,15 +441,15 @@ listeners:
   addresses: ["0.0.0.0:{http_port}"]
 
 services:
-- name: http3_chain
-  kind: http3_chain.http3_chain
+- name: upstream
+  kind: http_upstream.upstream
   args:
     upstream: test_upstream
 
 servers:
 - name: http_proxy
   listeners: ["http_main"]
-  service: http3_chain
+  service: upstream
 """
             config_path = os.path.join(temp_dir2, "chain_config.yaml")
             with open(config_path, "w") as f:

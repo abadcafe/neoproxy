@@ -47,14 +47,21 @@ def create_http3_listener_config(
 
     config_content = f"""server_threads: {server_threads}
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 listeners:
 - name: h3_main
   kind: http3
   addresses: ["0.0.0.0:{proxy_port}"]{quic_section}
 
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 servers:
 - name: http3_server
@@ -63,7 +70,7 @@ servers:
     - cert_path: "{cert_path}"
       key_path: "{key_path}"
   listeners: ["h3_main"]
-  service: connect_tcp
+  service: direct
 """
     config_path = os.path.join(temp_dir, "http3_config.yaml")
     with open(config_path, "w") as f:
@@ -98,7 +105,8 @@ def create_http3_chain_config(
         address_list.append(
             f"          - address: {addr}:{port}\n"
             f"            hostname: localhost\n"
-            f"            weight: {weight}"
+            f"            weight: {weight}\n"
+            f"            http3: {{}}"
         )
 
     address_section = "\n".join(address_list)
@@ -106,8 +114,8 @@ def create_http3_chain_config(
     config_content = f"""server_threads: {server_threads}
 
 plugins:
-  http3_chain:
-    tls:
+  http_upstream:
+    certificates:
       server_ca_path: "{ca_path}"
     upstreams:
       - name: {upstream_name}
@@ -120,15 +128,15 @@ listeners:
   addresses: ["0.0.0.0:{http_port}"]
 
 services:
-- name: http3_chain
-  kind: http3_chain.http3_chain
+- name: upstream
+  kind: http_upstream.upstream
   args:
     upstream: {upstream_name}
 
 servers:
 - name: http_proxy
   listeners: ["http_main"]
-  service: http3_chain
+  service: upstream
 """
     config_path = os.path.join(temp_dir, "http3_chain_config.yaml")
     with open(config_path, "w") as f:
@@ -178,9 +186,16 @@ def create_http3_listener_config_with_password_auth(
 
     config_content = f"""server_threads: {server_threads}
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
   layers:
     - kind: auth.basic_auth
       args:
@@ -199,7 +214,7 @@ servers:
     - cert_path: "{cert_path}"
       key_path: "{key_path}"
   listeners: ["h3_main"]
-  service: connect_tcp
+  service: direct
 """
     config_path = os.path.join(temp_dir, "http3_auth_config.yaml")
     with open(config_path, "w") as f:
@@ -242,9 +257,16 @@ def create_http3_listener_config_with_tls_client_cert(
 
     config_content = f"""server_threads: {server_threads}
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 listeners:
 - name: h3_main
@@ -260,7 +282,7 @@ servers:
     client_ca_certs:
     - "{client_ca_path}"
   listeners: ["h3_main"]
-  service: connect_tcp
+  service: direct
 """
     config_path = os.path.join(temp_dir, "http3_tls_auth_config.yaml")
     with open(config_path, "w") as f:
@@ -316,9 +338,16 @@ def create_http3_listener_config_with_mtls_and_password(
 
     config_content = f"""server_threads: {server_threads}
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
   layers:
     - kind: auth.basic_auth
       args:
@@ -339,7 +368,7 @@ servers:
     client_ca_certs:
     - "{client_ca_path}"
   listeners: ["h3_main"]
-  service: connect_tcp
+  service: direct
 """
     config_path = os.path.join(temp_dir, "http3_mtls_password_auth_config.yaml")
     with open(config_path, "w") as f:
@@ -383,44 +412,54 @@ def create_http3_chain_config_with_per_proxy_auth(
         return "\n".join(prefix + line for line in dedented.strip().split("\n"))
 
     address_list = []
+    # Per-address TLS is now global; collect any tls_yaml to merge into
+    # plugin-level certificates
+    collected_tls_yaml = None
     for addr, port, weight, user_yaml, tls_yaml in proxy_group:
+        # Build address-level user section
+        user_section = ""
+        if user_yaml:
+            user_section = f"\n            user:\n{indent(user_yaml, 14)}"
+        if tls_yaml:
+            collected_tls_yaml = tls_yaml  # Use last non-None tls_yaml
+
         entry = (
             f"          - address: {addr}:{port}\n"
             f"            hostname: localhost\n"
-            f"            weight: {weight}"
+            f"            weight: {weight}{user_section}\n"
+            f"            http3: {{}}"
         )
-        if user_yaml:
-            entry += f"\n            user:\n{indent(user_yaml, 14)}"
-        if tls_yaml:
-            entry += f"\n            tls:\n{indent(tls_yaml, 14)}"
         address_list.append(entry)
 
     address_section = "\n".join(address_list)
 
-    # Plugin-level user
+    # Plugin-level user (goes inside upstream defaults)
     plugin_user_section = ""
     if default_user:
         plugin_user_section = (
-            f"    user:\n"
-            f'      username: "{default_user[0]}"\n'
-            f'      password: "{default_user[1]}"\n'
+            f"    upstream:\n"
+            f"      user:\n"
+            f'        username: "{default_user[0]}"\n'
+            f'        password: "{default_user[1]}"\n'
         )
 
-    # Plugin-level tls
+    # Plugin-level tls (global certificates: server_ca_path + optional client certs)
+    # Merge default_tls and any per-address tls_yaml into the global certificates
+    effective_tls = default_tls or collected_tls_yaml
     plugin_tls_section = ""
-    if default_tls:
+    if effective_tls:
         plugin_tls_section = (
-            f"    tls:\n"
+            f"    certificates:\n"
             f'      server_ca_path: "{ca_path}"\n'
-            f"{indent(default_tls, 6)}\n"
+            f"{indent(effective_tls, 6)}\n"
         )
     else:
-        plugin_tls_section = f'    tls:\n      server_ca_path: "{ca_path}"\n'
+        plugin_tls_section = f'    certificates:\n      server_ca_path: "{ca_path}"\n'
 
     config_content = f"""server_threads: {server_threads}
 
 plugins:
-  http3_chain:
+  http_upstream:
 {plugin_user_section}{plugin_tls_section}    upstreams:
       - name: {upstream_name}
         addresses:
@@ -432,15 +471,15 @@ listeners:
   addresses: [ "0.0.0.0:{http_port}" ]
 
 services:
-- name: http3_chain
-  kind: http3_chain.http3_chain
+- name: upstream
+  kind: http_upstream.upstream
   args:
     upstream: {upstream_name}
 
 servers:
 - name: http_proxy
   listeners: ["http_main"]
-  service: http3_chain
+  service: upstream
 """
     config_path = os.path.join(temp_dir, "http3_chain_auth_config.yaml")
     with open(config_path, "w") as f:

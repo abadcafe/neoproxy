@@ -330,9 +330,16 @@ class TestFieldValidation:
         """
         config = """server_threads: 1
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 listeners:
 - name: socks5_main
@@ -345,7 +352,7 @@ listeners:
 servers:
 - name: socks5_server
   listeners: ["socks5_main"]
-  service: connect_tcp
+  service: direct
 """
         proxy_proc = subprocess.Popen(
             [os.path.abspath(NEOPROXY_BINARY), "--config", "/dev/stdin"],
@@ -373,9 +380,16 @@ servers:
         """
         config = """server_threads: 1
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 listeners:
 - name: socks5_main
@@ -385,7 +399,7 @@ listeners:
 servers:
 - name: socks5_server
   listeners: ["socks5_main"]
-  service: connect_tcp
+  service: direct
 """
         proxy_proc = subprocess.Popen(
             [os.path.abspath(NEOPROXY_BINARY), "--config", "/dev/stdin"],
@@ -447,9 +461,16 @@ servers:
         proxy_port = get_unique_port()
         config = f"""server_threads: 1
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 listeners:
 - name: socks5_main
@@ -462,7 +483,7 @@ listeners:
 servers:
 - name: socks5_server
   listeners: ["socks5_main"]
-  service: connect_tcp
+  service: direct
 """
         proxy_proc = subprocess.Popen(
             [os.path.abspath(NEOPROXY_BINARY), "--config", "/dev/stdin"],
@@ -484,10 +505,10 @@ servers:
 
     def test_unknown_field_ca_path_in_service(self) -> None:
         """
-        TC-CERT-REFACTOR-007: Old ca_path at service level is rejected.
+        TC-CERT-REFACTOR-007: Unknown field at service level is rejected.
 
-        After refactoring, http3_chain rejects ca_path at service level
-        because the struct uses #[serde(deny_unknown_fields)].
+        After refactoring, http_upstream.upstream rejects ca_path at service
+        level because the struct uses #[serde(deny_unknown_fields)].
         """
         config = """server_threads: 1
 
@@ -497,19 +518,16 @@ listeners:
   addresses: ["0.0.0.0:30589"]
 
 services:
-- name: http3_chain
-  kind: http3_chain.http3_chain
+- name: upstream
+  kind: http_upstream.upstream
   args:
-    proxy_group:
-    - address: 127.0.0.1:30588
-      hostname: localhost
-      weight: 1
+    upstream: test
     ca_path: "/tmp/ca.pem"
 
 servers:
 - name: http_proxy
   listeners: ["http_main"]
-  service: http3_chain
+  service: upstream
 """
         proxy_proc = subprocess.Popen(
             [os.path.abspath(NEOPROXY_BINARY), "--config", "/dev/stdin"],
@@ -538,9 +556,16 @@ servers:
         proxy_port = get_unique_port()
         config = f"""server_threads: 1
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 listeners:
 - name: socks5_main
@@ -553,7 +578,7 @@ listeners:
 servers:
 - name: socks5_server
   listeners: ["socks5_main"]
-  service: connect_tcp
+  service: direct
 """
         proxy_proc = subprocess.Popen(
             [os.path.abspath(NEOPROXY_BINARY), "--config", "/dev/stdin"],
@@ -583,9 +608,16 @@ servers:
         proxy_port = get_unique_port()
         config = f"""server_threads: 1
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 listeners:
 - name: socks5_main
@@ -598,7 +630,7 @@ listeners:
 servers:
 - name: socks5_server
   listeners: ["socks5_main"]
-  service: connect_tcp
+  service: direct
 """
         proxy_proc = subprocess.Popen(
             [os.path.abspath(NEOPROXY_BINARY), "--config", "/dev/stdin"],
@@ -793,9 +825,16 @@ servers:
         socks_port = get_unique_port()
         config = f"""server_threads: 1
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 listeners:
 - name: socks_a_main
@@ -809,11 +848,11 @@ servers:
 - name: socks_a
   hostnames: []
   listeners: ["socks_a_main"]
-  service: connect_tcp
+  service: direct
 - name: socks_b
   hostnames: []
   listeners: ["socks_b_main"]
-  service: connect_tcp
+  service: direct
 """
         returncode, _, stderr = run_neoproxy_with_config(config)
 
@@ -832,9 +871,16 @@ servers:
         socks_port = get_unique_port()
         config = f"""server_threads: 1
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 listeners:
 - name: socks_main
@@ -845,7 +891,7 @@ servers:
 - name: socks_server
   hostnames: []
   listeners: ["socks_main"]
-  service: connect_tcp
+  service: direct
 """
         proc = subprocess.Popen(
             [NEOPROXY_BINARY, "--config", self._write_config(config)],

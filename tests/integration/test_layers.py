@@ -391,13 +391,19 @@ class TestAccessLogErrorHandling:
             "services": [
                 {
                     "name": "tcp_svc",
-                    "kind": "connect_tcp.connect_tcp",
+                    "kind": "http_upstream.upstream",
+                    "args": {"upstream": "direct"},
                     "layers": [
                         {"kind": "access_log.file", "args": _access_log_layer_args()},
                     ],
                 }
             ],
-            "plugins": _access_log_plugins(),
+            "plugins": {
+                **_access_log_plugins(),
+                "http_upstream": {
+                    "upstreams": [{"name": "direct"}],
+                },
+            },
         }
 
         with proxy_with_config(config) as proxy:

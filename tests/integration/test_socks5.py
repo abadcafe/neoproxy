@@ -114,9 +114,16 @@ def create_socks5_config(
 
     config_content = f"""server_threads: {server_threads}
 
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+
 services:
-- name: connect_tcp
-  kind: connect_tcp.connect_tcp
+- name: direct
+  kind: http_upstream.upstream
+  args:
+    upstream: direct
 
 listeners:
 - name: socks5_main
@@ -127,7 +134,7 @@ listeners:
 servers:
 - name: socks5_server
   listeners: ["socks5_main"]
-  service: connect_tcp
+  service: direct
 """
 
     config_path = os.path.join(temp_dir, "socks5_config.yaml")

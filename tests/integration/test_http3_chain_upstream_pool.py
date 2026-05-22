@@ -177,8 +177,8 @@ class TestMultipleServicesShareUpstream:
             config_content = f"""server_threads: 2
 
 plugins:
-  http3_chain:
-    tls:
+  http_upstream:
+    certificates:
       server_ca_path: "{ca_path}"
     upstreams:
       - name: shared_upstream
@@ -186,6 +186,7 @@ plugins:
           - address: 127.0.0.1:{h3_port}
             hostname: localhost
             weight: 1
+            http3: {{}}
 
 listeners:
   - name: http_1
@@ -197,11 +198,11 @@ listeners:
 
 services:
   - name: chain_1
-    kind: http3_chain.http3_chain
+    kind: http_upstream.upstream
     args:
       upstream: shared_upstream
   - name: chain_2
-    kind: http3_chain.http3_chain
+    kind: http_upstream.upstream
     args:
       upstream: shared_upstream
 
@@ -291,12 +292,14 @@ class TestThreeLevelConfigInheritance:
             config_content = f"""server_threads: 1
 
 plugins:
-  http3_chain:
-    user:
-      username: "wrong_user"
-      password: "wrong_pass"
-    tls:
+  http_upstream:
+    certificates:
       server_ca_path: "{ca_path}"
+    upstream:
+      user:
+        username: "wrong_user"
+        password: "wrong_pass"
+      http3: {{}}
     upstreams:
       - name: test_upstream
         addresses:
@@ -306,6 +309,7 @@ plugins:
             user:
               username: "addr_user"
               password: "addr_pass"
+            http3: {{}}
 
 listeners:
   - name: http_main
@@ -314,7 +318,7 @@ listeners:
 
 services:
   - name: chain
-    kind: http3_chain.http3_chain
+    kind: http_upstream.upstream
     args:
       upstream: test_upstream
 
@@ -386,18 +390,21 @@ servers:
             config_content = f"""server_threads: 1
 
 plugins:
-  http3_chain:
-    user:
-      username: "plugin_user"
-      password: "plugin_pass"
-    tls:
+  http_upstream:
+    certificates:
       server_ca_path: "{ca_path}"
+    upstream:
+      user:
+        username: "plugin_user"
+        password: "plugin_pass"
+      http3: {{}}
     upstreams:
       - name: test_upstream
         addresses:
           - address: 127.0.0.1:{h3_port}
             hostname: localhost
             weight: 1
+            http3: {{}}
 
 listeners:
   - name: http_main
@@ -406,7 +413,7 @@ listeners:
 
 services:
   - name: chain
-    kind: http3_chain.http3_chain
+    kind: http_upstream.upstream
     args:
       upstream: test_upstream
 
@@ -480,12 +487,14 @@ servers:
             config_content = f"""server_threads: 1
 
 plugins:
-  http3_chain:
-    user:
-      username: "wrong_plugin_user"
-      password: "wrong_plugin_pass"
-    tls:
+  http_upstream:
+    certificates:
       server_ca_path: "{ca_path}"
+    upstream:
+      user:
+        username: "wrong_plugin_user"
+        password: "wrong_plugin_pass"
+      http3: {{}}
     upstreams:
       - name: test_upstream
         user:
@@ -495,6 +504,7 @@ plugins:
           - address: 127.0.0.1:{h3_port}
             hostname: localhost
             weight: 1
+            http3: {{}}
 
 listeners:
   - name: http_main
@@ -503,7 +513,7 @@ listeners:
 
 services:
   - name: chain
-    kind: http3_chain.http3_chain
+    kind: http_upstream.upstream
     args:
       upstream: test_upstream
 
@@ -592,8 +602,8 @@ class TestWRRLoadBalancingWithPool:
             config_content = f"""server_threads: 2
 
 plugins:
-  http3_chain:
-    tls:
+  http_upstream:
+    certificates:
       server_ca_path: "{ca_path}"
     upstreams:
       - name: wrr_upstream
@@ -601,9 +611,11 @@ plugins:
           - address: 127.0.0.1:{h3_port_1}
             hostname: localhost
             weight: 2
+            http3: {{}}
           - address: 127.0.0.1:{h3_port_2}
             hostname: localhost
             weight: 1
+            http3: {{}}
 
 listeners:
   - name: http_main
@@ -612,7 +624,7 @@ listeners:
 
 services:
   - name: chain
-    kind: http3_chain.http3_chain
+    kind: http_upstream.upstream
     args:
       upstream: wrr_upstream
 
@@ -674,20 +686,18 @@ class TestUpstreamPoolConfigValidation:
     Verify config validation for the new upstream format.
     """
 
-    def test_missing_upstream_reference_fails_at_request_time(self):
+    def test_missing_upstream_reference_fails_at_startup(self):
         """
-        Service referencing a non-existent upstream should start but
-        return 502 when a request is made (validated at connection time).
+        Service referencing a non-existent upstream should fail at startup
+        (validated at service construction time).
         """
         temp_dir = tempfile.mkdtemp()
         port = get_unique_port()
-        target_port = get_unique_port()
-        target_socket: Optional[socket.socket] = None
 
         config_content = f"""server_threads: 1
 
 plugins:
-  http3_chain:
+  http_upstream:
     upstreams: []
 
 listeners:
@@ -697,7 +707,7 @@ listeners:
 
 services:
   - name: chain
-    kind: http3_chain.http3_chain
+    kind: http_upstream.upstream
     args:
       upstream: nonexistent_upstream
 
@@ -715,22 +725,10 @@ servers:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
         )
         try:
-            assert wait_for_proxy("127.0.0.1", port, timeout=5.0), \
-                "Proxy should start with missing upstream"
-
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, http_echo_handler
-            )
-
-            # Request should fail — the upstream doesn't exist
-            # _proxy_get returns 0 on failure (tunnel setup fails)
-            status = _proxy_get(port, "127.0.0.1", target_port)
-            assert status == 0, (
-                f"Expected tunnel failure (0), got {status}"
-            )
+            # Proxy should NOT start — upstream validation fails at startup
+            assert not wait_for_proxy("127.0.0.1", port, timeout=5.0), \
+                "Proxy should NOT start with missing upstream"
         finally:
-            if target_socket:
-                target_socket.close()
             terminate_process(proc, timeout=5, force=True)
 
     def test_empty_upstream_name_in_service_fails(self):
@@ -743,7 +741,7 @@ servers:
         config_content = f"""server_threads: 1
 
 plugins:
-  http3_chain:
+  http_upstream:
     upstreams:
       - name: valid_upstream
         addresses: []
@@ -755,7 +753,7 @@ listeners:
 
 services:
   - name: chain
-    kind: http3_chain.http3_chain
+    kind: http_upstream.upstream
     args:
       upstream: ""
 
@@ -794,24 +792,27 @@ class TestQuicAndMaxIdleTimeoutConfig:
 
         config = f"""server_threads: 1
 plugins:
-  http3_chain:
-    max_idle_timeout: "5m"
-    quic:
-      keep_alive_interval: "3s"
-      max_idle_timeout: "30s"
+  http_upstream:
+    upstream:
+      tunnel_idle_timeout: "5m"
+      http3:
+        quic:
+          keep_alive_interval: "3s"
+          max_idle_timeout: "30s"
     upstreams:
       - name: u
         addresses:
           - address: 127.0.0.1:1
             hostname: localhost
             weight: 1
+            http3: {{}}
 listeners:
   - name: http
     kind: http
     addresses: ["0.0.0.0:{port}"]
 services:
   - name: c
-    kind: http3_chain.http3_chain
+    kind: http_upstream.upstream
     args:
       upstream: u
 servers:
@@ -838,20 +839,21 @@ servers:
         port = get_unique_port()
         config = f"""server_threads: 1
 plugins:
-  http3_chain:
+  http_upstream:
     upstreams:
       - name: u
         addresses:
           - address: 127.0.0.1:1
             hostname: localhost
             weight: 1
+            http3: {{}}
 listeners:
   - name: http
     kind: http
     addresses: ["0.0.0.0:{port}"]
 services:
   - name: c
-    kind: http3_chain.http3_chain
+    kind: http_upstream.upstream
     args:
       upstream: u
       unknown_field: "x"
@@ -871,19 +873,24 @@ servers:
         assert rc != 0, "Should reject unknown field in service args"
 
     def test_connect_tcp_max_idle_timeout_starts(self):
-        """connect_tcp with max_idle_timeout starts successfully."""
+        """direct service with tunnel_idle_timeout starts successfully."""
         temp_dir = tempfile.mkdtemp()
         port = get_unique_port()
         config = f"""server_threads: 1
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
+        tunnel_idle_timeout: "30s"
 listeners:
   - name: http
     kind: http
     addresses: ["0.0.0.0:{port}"]
 services:
   - name: tcp
-    kind: connect_tcp.connect_tcp
+    kind: http_upstream.upstream
     args:
-      max_idle_timeout: "30s"
+      upstream: direct
 servers:
   - name: s
     listeners: ["http"]
@@ -903,18 +910,23 @@ servers:
             terminate_process(proc, timeout=5, force=True)
 
     def test_connect_tcp_rejects_unknown_field(self):
-        """connect_tcp args with unknown field rejected."""
+        """upstream service args with unknown field rejected."""
         temp_dir = tempfile.mkdtemp()
         port = get_unique_port()
         config = f"""server_threads: 1
+plugins:
+  http_upstream:
+    upstreams:
+      - name: direct
 listeners:
   - name: http
     kind: http
     addresses: ["0.0.0.0:{port}"]
 services:
   - name: tcp
-    kind: connect_tcp.connect_tcp
+    kind: http_upstream.upstream
     args:
+      upstream: direct
       unknown_field: "x"
 servers:
   - name: s
@@ -937,7 +949,7 @@ servers:
         port = get_unique_port()
         config = f"""server_threads: 1
 plugins:
-  http3_chain:
+  http_upstream:
     unknown_field: "x"
     upstreams:
       - name: u
@@ -945,13 +957,14 @@ plugins:
           - address: 127.0.0.1:1
             hostname: localhost
             weight: 1
+            http3: {{}}
 listeners:
   - name: http
     kind: http
     addresses: ["0.0.0.0:{port}"]
 services:
   - name: c
-    kind: http3_chain.http3_chain
+    kind: http_upstream.upstream
     args:
       upstream: u
 servers:

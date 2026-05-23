@@ -209,7 +209,7 @@ impl HttpListener {
               let conn =
                 builder.serve_connection_with_upgrades(io, svc);
               if let Err(e) = conn.await {
-                error!("connection error: {e}");
+                warn!("connection from {raddr} on {local_addr:?}: {e}");
               }
             });
           }

@@ -99,11 +99,6 @@ def create_socks5_config(
     args_entries = []
     if handshake_timeout:
         args_entries.append(f'    handshake_timeout: "{handshake_timeout}"')
-    if auth_type == "password" and users:
-        args_entries.append("    users:")
-        for u in users:
-            args_entries.append(f'      - username: "{u["username"]}"')
-            args_entries.append(f'        password: "{u["password"]}"')
 
     addresses_yaml = "\n".join([f'  - "{a}"' for a in addresses])
 
@@ -111,6 +106,22 @@ def create_socks5_config(
         args_yaml = "\n" + "  args:\n" + "\n".join(args_entries)
     else:
         args_yaml = ""
+
+    # Build auth layer for the service
+    if auth_type == "password" and users:
+        users_yaml_lines = []
+        for u in users:
+            users_yaml_lines.append(f'        - username: "{u["username"]}"')
+            users_yaml_lines.append(f'          password: "{u["password"]}"')
+        layers_yaml = (
+            "\n  layers:"
+            "\n    - kind: auth.basic_auth"
+            "\n      args:"
+            "\n        users:\n"
+            + "\n".join(users_yaml_lines)
+        )
+    else:
+        layers_yaml = ""
 
     config_content = f"""server_threads: {server_threads}
 
@@ -123,7 +134,7 @@ services:
 - name: direct
   kind: http_upstream.upstream
   args:
-    upstream: direct
+    upstream: direct{layers_yaml}
 
 listeners:
 - name: socks5_main
@@ -567,10 +578,12 @@ class TestSocks5BasicConnection:
         TC-S5-003: Password authentication failure
 
         Test that SOCKS5 connection fails with wrong credentials.
-        Note: RFC 1929 allows any non-zero status code for auth failure.
+        Auth is deferred to the middleware layer: the handshake always
+        succeeds, but CONNECT is rejected when credentials are invalid.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: Optional[subprocess.Popen] = None
 
         try:
@@ -591,14 +604,19 @@ class TestSocks5BasicConnection:
             try:
                 sock.connect(("127.0.0.1", proxy_port))
 
-                # Try with wrong password
+                # Handshake always succeeds (auth deferred to middleware)
                 success, status = socks5_handshake_password(
                     sock, "testuser", "wrongpass"
                 )
-                assert not success, "Authentication should have failed"
-                # RFC 1929: any non-zero status indicates failure
-                assert status != PASSWORD_AUTH_SUCCESS, \
-                    f"Expected auth failure (non-zero status), got {status}"
+                assert success, \
+                    f"Handshake should succeed (auth is deferred), got status {status}"
+
+                # CONNECT should be rejected by the auth middleware
+                success, reply = socks5_connect_ipv4(
+                    sock, "127.0.0.1", target_port
+                )
+                assert not success, \
+                    f"CONNECT should fail with wrong credentials, got reply {reply}"
 
             finally:
                 sock.close()

@@ -395,9 +395,10 @@ impl Socks5Listener {
                   }
                 }
                 Err(e) => {
-                  tracing::error!(
-                    "SOCKS5 service error from {}: {}",
+                  tracing::warn!(
+                    "connection from {} on {}: {}",
                     peer_addr,
+                    local_addr,
                     e
                   );
                   if let Err(send_err) = trigger

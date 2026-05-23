@@ -287,7 +287,7 @@ impl HttpsListener {
                   let conn =
                     builder.serve_connection_with_upgrades(io, svc);
                   if let Err(e) = conn.await {
-                    error!("HTTPS connection error: {}", e);
+                    warn!("connection from {raddr} on {local_addr}: {e}");
                   }
                 });
               }

@@ -561,7 +561,7 @@ async fn handle_h3_connection(
       }
       Err(e) => {
         if !e.is_h3_no_error() {
-          warn!("H3 connection error: {e}");
+          warn!("connection from {client_addr} on {local_addr}: {e}");
         }
         break;
       }

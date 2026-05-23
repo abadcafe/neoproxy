@@ -109,17 +109,14 @@ listeners:
         # QUIC receive window (default: 10MiB)
         receive_window: "10MiB"
 
-  # SOCKS5 listener - supports handshake timeout and user authentication
+  # SOCKS5 listener - supports handshake timeout
+  # Auth is configured in the service pipeline (auth.basic_auth layer)
   - name: socks5_chain
     kind: socks5
     addresses: ["127.0.0.1:9080"]
     args:
       # Handshake timeout (default: 3s)
       handshake_timeout: "3s"
-      # User/password authentication (omit for no auth)
-      users:
-        - username: "admin"
-          password: "secret"
 
   # HTTP listener on alternate port (for connect_proxy)
   - name: http_connect
@@ -162,6 +159,12 @@ services:
     args:
       upstream: local_relay
     layers:
+      # Basic proxy authentication (used by SOCKS5 listener)
+      - kind: auth.basic_auth
+        args:
+          users:
+            - username: "admin"
+              password: "secret"
       - kind: access_log.file
         args:
           writer: "logs/access.log"

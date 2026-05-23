@@ -22,11 +22,11 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use base64::Engine;
 use serde::Deserialize;
 use tower::Service;
 use tracing::warn;
 
-use crate::auth::UserPasswordAuth;
 use crate::config::SerializedArgs;
 use crate::http_utils::{BytesBufBodyWrapper, RequestBody};
 use crate::listener::{
@@ -61,8 +61,6 @@ pub struct Socks5Listener {
   graceful_shutdown_timeout: Duration,
   /// Handshake timeout duration.
   handshake_timeout: Duration,
-  /// User password authentication.
-  user_password_auth: UserPasswordAuth,
   /// Service name for identification in logs.
   service_name: String,
 }
@@ -120,7 +118,6 @@ impl Socks5Listener {
       service,
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
       handshake_timeout: args.handshake_timeout,
-      user_password_auth: args.user_password_auth,
       service_name,
     }))
   }
@@ -134,7 +131,6 @@ impl Socks5Listener {
   /// * `stream_tracker` - Tracker for active stream tasks
   /// * `shutdown_handle` - Shutdown notification handle
   /// * `handshake_timeout` - Timeout for SOCKS5 handshake
-  /// * `user_password_auth` - User password authentication
   /// * `service_name` - Service name for access log
   ///
   /// # Returns
@@ -147,7 +143,6 @@ impl Socks5Listener {
     stream_tracker: Rc<StreamTracker>,
     shutdown_handle: ShutdownHandle,
     handshake_timeout: Duration,
-    user_password_auth: UserPasswordAuth,
     service_name: String,
   ) -> Result<std::pin::Pin<Box<dyn Future<Output = Result<()>>>>> {
     // Create TCP socket based on address type
@@ -209,7 +204,6 @@ impl Socks5Listener {
 
             // Clone handles for use in connection handler
             let mut service = service.clone();
-            let user_password_auth = user_password_auth.clone();
             let service_name = service_name.clone();
 
             // Register connection handler
@@ -233,7 +227,6 @@ impl Socks5Listener {
               let handshake_result = match perform_handshake(
                 stream,
                 handshake_timeout,
-                &user_password_auth,
               )
               .await
               {
@@ -263,19 +256,6 @@ impl Socks5Listener {
                         "SOCKS5 method not acceptable from {}",
                         peer_addr
                       );
-                    }
-                    HandshakeError::AuthenticationFailed {
-                      username,
-                    } => {
-                      // Auth failure response was already sent
-                      if let Some(user) = username {
-                        tracing::warn!(
-                          "SOCKS5 authentication failed for user '{}' \
-                           from {}",
-                          user,
-                          peer_addr
-                        );
-                      }
                     }
                     HandshakeError::ClientDisconnected => {
                       tracing::info!(
@@ -356,6 +336,23 @@ impl Socks5Listener {
                   http_body_util::Empty::<bytes::Bytes>::new(),
                 )))
                 .expect("failed to build CONNECT request");
+
+              // Inject SOCKS5 credentials as Proxy-Authorization header
+              // so the auth middleware can verify them
+              if let (Some(username), Some(password)) =
+                (&handshake_result.username, &handshake_result.password)
+              {
+                let credentials =
+                  base64::engine::general_purpose::STANDARD
+                    .encode(format!("{username}:{password}"));
+                request.headers_mut().insert(
+                  "Proxy-Authorization",
+                  http::HeaderValue::from_str(&format!(
+                    "Basic {credentials}"
+                  ))
+                  .unwrap(),
+                );
+              }
 
               request.extensions_mut().insert(on_upgrade);
 
@@ -481,7 +478,6 @@ impl Listening for Socks5Listener {
       let stream_tracker = self.stream_tracker.clone();
       let shutdown_handle = shutdown_handle.clone();
       let handshake_timeout = self.handshake_timeout;
-      let user_password_auth = self.user_password_auth.clone();
       let service_name = self.service_name.clone();
 
       match self.serve_addr(
@@ -490,7 +486,6 @@ impl Listening for Socks5Listener {
         stream_tracker,
         shutdown_handle,
         handshake_timeout,
-        user_password_auth,
         service_name,
       ) {
         Ok(fut) => {
@@ -588,7 +583,6 @@ impl Clone for Socks5Listener {
       service: self.service.clone(),
       graceful_shutdown_timeout: self.graceful_shutdown_timeout,
       handshake_timeout: self.handshake_timeout,
-      user_password_auth: self.user_password_auth.clone(),
       service_name: self.service_name.clone(),
     }
   }
@@ -606,6 +600,8 @@ pub struct HandshakeResult {
   >,
   /// The username if password authentication was used.
   pub username: Option<String>,
+  /// The password if password authentication was used.
+  pub password: Option<String>,
 }
 
 impl std::fmt::Debug for HandshakeResult {
@@ -642,16 +638,6 @@ pub enum HandshakeError {
   /// METHOD=0xFF and close the connection.
   MethodNotAcceptable(Vec<u8>),
 
-  /// Authentication failed.
-  ///
-  /// The username/password combination was invalid.
-  /// According to RFC 1929, we should send auth failure response and
-  /// close connection.
-  AuthenticationFailed {
-    /// The username that failed authentication (for logging).
-    username: Option<String>,
-  },
-
   /// Client disconnected during handshake.
   ClientDisconnected,
 
@@ -668,13 +654,6 @@ impl std::fmt::Display for HandshakeError {
       }
       Self::MethodNotAcceptable(methods) => {
         write!(f, "authentication method not acceptable: {:?}", methods)
-      }
-      Self::AuthenticationFailed { username } => {
-        if let Some(u) = username {
-          write!(f, "authentication failed for user '{}'", u)
-        } else {
-          write!(f, "authentication failed")
-        }
       }
       Self::ClientDisconnected => {
         write!(f, "client disconnected during handshake")
@@ -778,12 +757,6 @@ impl From<HandshakeError> for CommandError {
       HandshakeError::MethodNotAcceptable(_) => Self::IoError(
         std::io::Error::other("authentication method not acceptable"),
       ),
-      HandshakeError::AuthenticationFailed { .. } => {
-        Self::IoError(std::io::Error::new(
-          std::io::ErrorKind::PermissionDenied,
-          "authentication failed",
-        ))
-      }
       HandshakeError::ClientDisconnected => Self::ClientDisconnected,
       HandshakeError::IoError(e) => Self::from(e),
     }
@@ -919,13 +892,6 @@ impl From<fast_socks5::server::SocksServerError> for HandshakeError {
       SocksServerError::AuthMethodUnacceptable(methods) => {
         Self::MethodNotAcceptable(methods)
       }
-      SocksServerError::AuthenticationRejected => {
-        Self::AuthenticationFailed { username: None }
-      }
-      SocksServerError::EmptyUsername
-      | SocksServerError::EmptyPassword => {
-        Self::AuthenticationFailed { username: None }
-      }
       SocksServerError::Io { source, .. } => Self::from(source),
       _ => Self::IoError(std::io::Error::other(e.to_string())),
     }
@@ -943,7 +909,6 @@ impl From<fast_socks5::server::SocksServerError> for HandshakeError {
 ///
 /// * `stream` - The TCP stream from the client
 /// * `timeout` - The maximum time allowed for handshake
-/// * `user_password_auth` - The user password authentication
 ///
 /// # Returns
 ///
@@ -955,7 +920,6 @@ impl From<fast_socks5::server::SocksServerError> for HandshakeError {
 /// - `Timeout`: Do not send response, close connection
 /// - `InvalidVersion`: Do not send response, close connection
 /// - `MethodNotAcceptable`: METHOD=0xFF was already sent
-/// - `AuthenticationFailed`: Auth failure response was already sent
 /// - `ClientDisconnected`: Connection already closed
 /// - `IoError`: Connection should be closed
 ///
@@ -980,7 +944,6 @@ impl From<fast_socks5::server::SocksServerError> for HandshakeError {
 pub async fn perform_handshake(
   stream: tokio::net::TcpStream,
   timeout_duration: Duration,
-  user_password_auth: &UserPasswordAuth,
 ) -> Result<HandshakeResult, HandshakeError> {
   // Wrap the entire handshake process with timeout
   let handshake_fut = async {
@@ -988,39 +951,36 @@ pub async fn perform_handshake(
     let proto =
       fast_socks5::server::Socks5ServerProtocol::start(stream);
 
-    // Determine if authentication is required
-    let requires_auth =
-      user_password_auth.verify_credentials("", "").is_err();
+    // Offer both No-Auth and Password methods, accept whichever
+    // the client chooses. Credential verification is deferred to
+    // the auth middleware in the service pipeline.
+    let auth_state = proto
+      .negotiate_auth(
+        fast_socks5::server::StandardAuthentication::allow_no_auth(true),
+      )
+      .await?;
 
-    if !requires_auth {
-      // No authentication required
-      let auth_state = proto
-        .negotiate_auth(&[fast_socks5::server::NoAuthentication])
-        .await?;
+    match auth_state {
+      fast_socks5::server::StandardAuthenticationStarted::NoAuthentication(
+        none_state,
+      ) => {
+        let authenticated =
+          fast_socks5::server::Socks5ServerProtocol::finish_auth(
+            none_state,
+          );
+        Ok(HandshakeResult {
+          proto: authenticated,
+          username: None,
+          password: None,
+        })
+      }
+      fast_socks5::server::StandardAuthenticationStarted::PasswordAuthentication(
+        auth_state,
+      ) => {
+        let (username, password, auth_impl) =
+          auth_state.read_username_password().await?;
 
-      // Finish authentication (no credentials for no-auth)
-      let authenticated =
-        fast_socks5::server::Socks5ServerProtocol::finish_auth(
-          auth_state,
-        );
-
-      Ok(HandshakeResult { proto: authenticated, username: None })
-    } else {
-      // Password authentication required
-      let auth_state = proto
-        .negotiate_auth(&[fast_socks5::server::PasswordAuthentication])
-        .await?;
-
-      // Read username and password
-      let (username, password, auth_impl) =
-        auth_state.read_username_password().await?;
-
-      // Verify credentials using UserPasswordAuth
-      if user_password_auth
-        .verify_credentials(&username, &password)
-        .is_ok()
-      {
-        // Accept authentication
+        // Always accept - verification is handled by auth middleware
         let finished = auth_impl.accept().await?;
         let authenticated =
           fast_socks5::server::Socks5ServerProtocol::finish_auth(
@@ -1028,25 +988,14 @@ pub async fn perform_handshake(
           );
 
         tracing::info!(
-          "SOCKS5 authentication succeeded for user '{}'",
+          "SOCKS5 password auth received for user '{}'",
           username
         );
 
         Ok(HandshakeResult {
           proto: authenticated,
           username: Some(username),
-        })
-      } else {
-        // Reject authentication - this sends the failure response
-        auth_impl.reject().await?;
-
-        tracing::warn!(
-          "SOCKS5 authentication failed for user '{}'",
-          username
-        );
-
-        Err(HandshakeError::AuthenticationFailed {
-          username: Some(username),
+          password: Some(password),
         })
       }
     }
@@ -1074,15 +1023,12 @@ const DEFAULT_HANDSHAKE_TIMEOUT: Duration =
 pub struct Socks5ListenerArgs {
   /// Handshake timeout duration.
   pub handshake_timeout: Duration,
-  /// User password authentication.
-  pub user_password_auth: UserPasswordAuth,
 }
 
 impl Default for Socks5ListenerArgs {
   fn default() -> Self {
     Self {
       handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
-      user_password_auth: UserPasswordAuth::none(),
     }
   }
 }
@@ -1092,9 +1038,7 @@ impl Default for Socks5ListenerArgs {
 /// # Errors
 ///
 /// Returns an error if:
-/// - `users` is empty (must have at least one user if specified)
 /// - `handshake_timeout` is not a valid humantime format (e.g., "10s")
-/// - Username length is not in range 1-255 bytes
 /// - Any other YAML parsing error occurs
 pub fn parse_config(
   args: SerializedArgs,
@@ -1107,8 +1051,6 @@ pub fn parse_config(
       default = "default_handshake_timeout"
     )]
     handshake_timeout: Duration,
-    #[serde(default)]
-    users: Option<Vec<crate::config::UserCredential>>,
   }
 
   fn default_handshake_timeout() -> Duration {
@@ -1118,32 +1060,8 @@ pub fn parse_config(
   let config: ConfigYaml = serde_yaml::from_value(args)
     .context("failed to parse SOCKS5 listener config")?;
 
-  let user_password_auth = match config.users {
-    None => UserPasswordAuth::none(),
-    Some(users) if users.is_empty() => UserPasswordAuth::none(),
-    Some(users) => {
-      for (idx, user) in users.iter().enumerate() {
-        if user.username.is_empty() {
-          bail!("users[{}].username cannot be empty", idx);
-        }
-        if user.username.len() > 255 {
-          bail!(
-            "users[{}].username exceeds 255 bytes (got {})",
-            idx,
-            user.username.len()
-          );
-        }
-        if user.password.is_empty() {
-          bail!("users[{}].password cannot be empty", idx);
-        }
-      }
-      UserPasswordAuth::from_users(&users)
-    }
-  };
-
   Ok(Socks5ListenerArgs {
     handshake_timeout: config.handshake_timeout,
-    user_password_auth,
   })
 }
 
@@ -1300,7 +1218,6 @@ mod tests {
       args.handshake_timeout,
       Duration::from_secs(DEFAULT_HANDSHAKE_TIMEOUT_SECS)
     );
-    assert!(args.user_password_auth.verify_credentials("", "").is_ok());
   }
 
   // ========== parse_config Tests ==========
@@ -1327,63 +1244,6 @@ handshake_timeout: "5s"
 
     let args = parse_config(yaml).unwrap();
     assert_eq!(args.handshake_timeout, Duration::from_secs(5));
-  }
-
-  #[test]
-  fn test_parse_config_with_password_auth() {
-    let yaml = serde_yaml::from_str(
-      r#"
-users:
-  - username: alice
-    password: secret123
-"#,
-    )
-    .unwrap();
-
-    let args = parse_config(yaml).unwrap();
-    // Verify auth was parsed
-    assert!(
-      args
-        .user_password_auth
-        .verify_credentials("alice", "secret123")
-        .is_ok()
-    );
-    assert!(
-      args
-        .user_password_auth
-        .verify_credentials("alice", "wrong")
-        .is_err()
-    );
-  }
-
-  #[test]
-  fn test_parse_config_rejects_empty_username() {
-    let yaml = serde_yaml::from_str(
-      r#"
-users:
-  - username: ""
-    password: secret
-"#,
-    )
-    .unwrap();
-
-    let result = parse_config(yaml);
-    assert!(result.is_err(), "Should reject empty username");
-  }
-
-  #[test]
-  fn test_parse_config_rejects_empty_password() {
-    let yaml = serde_yaml::from_str(
-      r#"
-users:
-  - username: alice
-    password: ""
-"#,
-    )
-    .unwrap();
-
-    let result = parse_config(yaml);
-    assert!(result.is_err(), "Should reject empty password");
   }
 
   // ========== Helper function tests ==========

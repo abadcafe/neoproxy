@@ -344,10 +344,6 @@ services:
 listeners:
 - name: socks5_main
   kind: socks5
-  args:
-    users:
-      - username: "test"
-        password: "test"
 
 servers:
 - name: socks5_server

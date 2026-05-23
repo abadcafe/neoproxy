@@ -261,15 +261,17 @@ services:
     kind: http_upstream.upstream
     args:
       upstream: test_upstream
+    layers:
+      - kind: auth.basic_auth
+        args:
+          users:
+            - username: user1
+              password: pass1
 
 listeners:
   - name: socks5_main
     kind: socks5
     addresses: ["127.0.0.1:{socks5_port}"]
-    args:
-      users:
-        - username: user1
-          password: pass1
 
 servers:
   - name: entry_socks5
@@ -312,16 +314,18 @@ services:
     kind: http_upstream.upstream
     args:
       upstream: test_upstream
+    layers:
+      - kind: auth.basic_auth
+        args:
+          users:
+            - username: user1
+              password: pass1
 
 listeners:
   - name: socks5_main
     kind: socks5
     addresses:
       - "127.0.0.1:{socks5_port}"
-    args:
-      users:
-        - username: user1
-          password: pass1
 
 servers:
   - name: entry_socks5
@@ -747,16 +751,18 @@ services:
     kind: http_upstream.upstream
     args:
       upstream: test_upstream
+    layers:
+      - kind: auth.basic_auth
+        args:
+          users:
+            - username: user1
+              password: pass1
 
 listeners:
   - name: socks5_main
     kind: socks5
     addresses:
       - "127.0.0.1:{socks5_port}"
-    args:
-      users:
-        - username: user1
-          password: pass1
 
 servers:
   - name: entry_socks5
@@ -1032,8 +1038,9 @@ class TestNegativeAuthSOCKS5Entry:
     def test_socks5_entry_wrong_credentials_fails(self, shared_test_certs: dict) -> None:
         """TC-NEG-AUTH-003: SOCKS5 entry with wrong credentials fails.
 
-        When a SOCKS5 proxy requires password authentication and the client
-        sends incorrect credentials, the connection must be rejected.
+        When a SOCKS5 proxy has auth middleware and the client
+        sends incorrect credentials, the auth middleware rejects
+        the request and the connection fails.
         """
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
@@ -1077,7 +1084,8 @@ class TestNegativeAuthSOCKS5Entry:
                 capture_output=True, text=True
             )
 
-            # SOCKS5 auth failure: curl returns non-zero exit code
+            # SOCKS5 auth failure: auth middleware rejects wrong credentials,
+            # SOCKS5 returns ConnectionNotAllowed, curl returns non-zero
             # or a non-200 HTTP code depending on curl version.
             # The important thing is it does NOT return 200.
             assert result.stdout != "200", \

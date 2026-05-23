@@ -1,11 +1,8 @@
 use std::collections::HashMap;
 use std::path;
 use std::time::Duration;
-use std::fs;
 
 use anyhow::{Context, Result, anyhow, bail};
-use base64::Engine;
-use rustls::pki_types::CertificateDer;
 use serde::Deserialize;
 
 use crate::config::UserCredential;
@@ -27,68 +24,11 @@ fn default_idle_timeout() -> Duration { Duration::from_secs(90) }
 // Credential Types
 // ============================================================================
 
-/// User password credential for proxy authentication.
-#[derive(Clone, Debug)]
-pub(crate) struct UserPasswordCredential {
-  pub(crate) user: Option<UserCredential>,
-}
-
-impl UserPasswordCredential {
-  pub(crate) fn none() -> Self { Self { user: None } }
-
-  pub(crate) fn apply(&self, req: &mut http::Request<()>) {
-    if let Some(ref user) = self.user {
-      let credentials = base64::engine::general_purpose::STANDARD
-        .encode(format!("{}:{}", user.username, user.password));
-      req.headers_mut().insert(
-        "Proxy-Authorization",
-        http::HeaderValue::from_str(&format!("Basic {}", credentials))
-          .unwrap(),
-      );
-    }
-  }
-}
-
 /// Client certificate credential for TLS authentication.
 #[derive(Clone, Debug)]
 pub(crate) struct ClientCertCredential {
   pub(crate) cert_path: Option<path::PathBuf>,
   pub(crate) key_path: Option<path::PathBuf>,
-}
-
-impl ClientCertCredential {
-  pub(crate) fn build_tls_config(
-    &self,
-    roots: rustls::RootCertStore,
-  ) -> Result<rustls::ClientConfig> {
-    match (&self.cert_path, &self.key_path) {
-      (Some(cert_path), Some(key_path)) => {
-        let cert_file = fs::File::open(cert_path)?;
-        let mut cert_reader = std::io::BufReader::new(cert_file);
-        let cert_chain: Vec<CertificateDer> =
-          rustls_pemfile::certs(&mut cert_reader)
-            .collect::<Result<Vec<_>, _>>()?;
-        let key_file = fs::File::open(key_path)?;
-        let mut key_reader = std::io::BufReader::new(key_file);
-        let key = rustls_pemfile::private_key(&mut key_reader)?
-          .ok_or_else(|| anyhow!("no private key found"))?;
-        Ok(
-          rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_client_auth_cert(cert_chain, key)?,
-        )
-      }
-      (None, None) => Ok(
-        rustls::ClientConfig::builder()
-          .with_root_certificates(roots)
-          .with_no_client_auth(),
-      ),
-      _ => bail!(
-        "client_cert_path and client_key_path must both be present or \
-         both absent"
-      ),
-    }
-  }
 }
 
 // ============================================================================
@@ -340,20 +280,19 @@ pub(crate) enum Protocol {
 
 /// Resolved address after three-level inheritance.
 #[derive(Clone, Debug)]
-pub(crate) struct ResolvedAddress {
+pub(crate) struct Address {
   pub(crate) address: String,
   pub(crate) hostname: Option<String>,
   pub(crate) weight: usize,
-  pub(crate) current_weight: std::cell::Cell<isize>,
   pub(crate) protocol: Protocol,
   pub(crate) tunnel_idle_timeout: Duration,
-  pub(crate) user: UserPasswordCredential,
+  pub(crate) user: Option<UserCredential>,
 }
 
 /// Resolved upstream after three-level inheritance.
 #[derive(Clone, Debug)]
-pub(crate) struct ResolvedUpstream {
-  pub(crate) addresses: Vec<ResolvedAddress>,
+pub(crate) struct Upstream {
+  pub(crate) addresses: Vec<Address>,
   pub(crate) pool_config: PoolConfig,
   /// Direct-mode fields (used when addresses is empty):
   pub(crate) connect_timeout: Duration,
@@ -406,10 +345,10 @@ fn merge_quic_field_level(
 }
 
 /// Resolve chain-mode configuration through three-level inheritance.
-pub(crate) fn resolve_chain_config(
+pub(crate) fn merge_chain_config(
   plugin: &HttpUpstreamPluginConfig,
-) -> Result<HashMap<String, ResolvedUpstream>> {
-  let mut upstreams: HashMap<String, ResolvedUpstream> = HashMap::new();
+) -> Result<HashMap<String, Upstream>> {
+  let mut upstreams: HashMap<String, Upstream> = HashMap::new();
 
   for upstream in &plugin.upstreams {
     let mut addresses = Vec::new();
@@ -486,11 +425,10 @@ pub(crate) fn resolve_chain_config(
 
       validate_address_format(&addr.address)?;
 
-      addresses.push(ResolvedAddress {
+      addresses.push(Address {
         address: addr.address.clone(),
         hostname: addr.hostname.clone(),
         weight: addr.weight,
-        current_weight: std::cell::Cell::new(0),
         protocol: resolved_protocol,
         tunnel_idle_timeout,
         user,
@@ -515,7 +453,7 @@ pub(crate) fn resolve_chain_config(
       default_tunnel_idle_timeout(),
     );
 
-    upstreams.insert(upstream.name.clone(), ResolvedUpstream {
+    upstreams.insert(upstream.name.clone(), Upstream {
       addresses,
       pool_config,
       connect_timeout,
@@ -531,11 +469,8 @@ fn resolve_user(
   addr: Option<&UserCredential>,
   upstream: Option<&UserCredential>,
   plugin: Option<&UserCredential>,
-) -> UserPasswordCredential {
-  match resolve_field(addr, upstream, plugin) {
-    Some(user) => UserPasswordCredential { user: Some(user.clone()) },
-    None => UserPasswordCredential::none(),
-  }
+) -> Option<UserCredential> {
+  resolve_field(addr, upstream, plugin)
 }
 
 // ============================================================================
@@ -556,34 +491,6 @@ pub(crate) fn validate_address_format(s: &str) -> Result<()> {
     bail!("address '{s}' missing host");
   }
   Ok(())
-}
-
-/// Build a root certificate store from native certs + optional server CA.
-pub(crate) fn build_root_cert_store(
-  server_ca_path: Option<&str>,
-) -> Result<rustls::RootCertStore> {
-  let mut roots = rustls::RootCertStore::empty();
-  let rustls_native_certs::CertificateResult { certs, errors, .. } =
-    rustls_native_certs::load_native_certs();
-  for cert in certs {
-    if let Err(e) = roots.add(cert) {
-      tracing::error!("failed to parse trust anchor: {e}");
-    }
-  }
-  for e in errors {
-    tracing::error!("couldn't load default trust roots: {e}");
-  }
-  if let Some(path) = server_ca_path {
-    let file = fs::File::open(path)
-      .with_context(|| format!("opening server CA file: {path}"))?;
-    let mut reader = std::io::BufReader::new(file);
-    let certs: Vec<CertificateDer> =
-      rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
-    for cert in certs {
-      roots.add(cert)?;
-    }
-  }
-  Ok(roots)
 }
 
 #[cfg(test)]
@@ -636,7 +543,7 @@ mod tests {
   }
 
   #[test]
-  fn test_resolve_chain_config_basic() {
+  fn test_merge_chain_config_basic() {
     let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
       r#"
       upstreams:
@@ -647,7 +554,7 @@ mod tests {
               http3: {}
       "#,
     ).unwrap();
-    let resolved = resolve_chain_config(&config).unwrap();
+    let resolved = merge_chain_config(&config).unwrap();
     let upstream = resolved.get("test").unwrap();
     assert_eq!(upstream.addresses.len(), 1);
     assert_eq!(upstream.addresses[0].address, "proxy.example.com:443");
@@ -656,7 +563,7 @@ mod tests {
   }
 
   #[test]
-  fn test_resolve_chain_config_pool_config() {
+  fn test_merge_chain_config_pool_config() {
     let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
       r#"
       upstreams:
@@ -669,13 +576,13 @@ mod tests {
               http: {}
       "#,
     ).unwrap();
-    let resolved = resolve_chain_config(&config).unwrap();
+    let resolved = merge_chain_config(&config).unwrap();
     let upstream = resolved.get("test").unwrap();
     assert_eq!(upstream.pool_config.max_idle_per_host, 16);
   }
 
   #[test]
-  fn test_resolve_chain_config_three_level_inheritance() {
+  fn test_merge_chain_config_three_level_inheritance() {
     let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
       r#"
       upstream:
@@ -694,7 +601,7 @@ mod tests {
               http: {}
       "#,
     ).unwrap();
-    let resolved = resolve_chain_config(&config).unwrap();
+    let resolved = merge_chain_config(&config).unwrap();
     let upstream = resolved.get("test").unwrap();
 
     // Address-level overrides upstream-level overrides plugin-level
@@ -749,7 +656,7 @@ mod tests {
           tunnel_idle_timeout: 45s
       "#,
     ).unwrap();
-    let resolved = resolve_chain_config(&config).unwrap();
+    let resolved = merge_chain_config(&config).unwrap();
     let upstream = resolved.get("direct").unwrap();
     assert!(upstream.addresses.is_empty());
     assert_eq!(upstream.connect_timeout, Duration::from_secs(3));
@@ -767,7 +674,7 @@ mod tests {
         - name: direct
       "#,
     ).unwrap();
-    let resolved = resolve_chain_config(&config).unwrap();
+    let resolved = merge_chain_config(&config).unwrap();
     let upstream = resolved.get("direct").unwrap();
     assert!(upstream.addresses.is_empty());
     assert_eq!(upstream.connect_timeout, Duration::from_secs(7));

@@ -113,13 +113,20 @@ pub fn create_plugin(config: Option<&SerializedArgs>) -> Box<dyn Plugin> {
     None => HttpUpstreamPluginConfig::default(),
   };
 
+  if let Some(ref certs) = plugin_config.certificates {
+    certs.validate().expect("invalid http_upstream certificate config");
+  }
+
+  let upstreams = config::merge_chain_config(&plugin_config)
+    .expect("invalid http_upstream config: failed to merge chain config");
+
   let tracker = Rc::new(StreamTracker::new());
-  let registry = UpstreamRegistry::new(&plugin_config, tracker)
+  let registry = UpstreamRegistry::new(upstreams, plugin_config.certificates.as_ref(), tracker)
     .expect("failed to initialize http_upstream registry");
 
   info!(
     "http_upstream: initialized with {} upstream(s)",
-    registry.resolved.len()
+    registry.entries.len()
   );
 
   Box::new(HttpUpstreamPlugin::new(registry))

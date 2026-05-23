@@ -5,15 +5,12 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use anyhow::Result;
-use bytes::{Buf, Bytes};
-use http_body_util::BodyExt;
-use hyper_util::client::legacy::Client;
 use tracing::warn;
 
 use crate::context::RequestContext;
 use crate::http_utils::{
-  Request, RequestBody, Response, ResponseBody, append_proxy_status,
-  build_empty_response, build_error_response,
+  Request, RequestBody, Response,
+  append_proxy_status, build_empty_response, build_error_response,
   build_proxy_status_with_status,
 };
 use crate::listeners::utils::get_server_id;
@@ -21,10 +18,9 @@ use crate::service::Service;
 use crate::stream::{self, Io};
 use crate::tracker::StreamTracker;
 
-use super::config::UserPasswordCredential;
 use super::error::UpstreamError;
 use super::upstream::{
-  ConnectResult, Transport, TunnelTransport, UpstreamRegistry,
+  ConnectResult, UpstreamRegistry,
 };
 use crate::plugins::utils::{self, ConnectTargetError, ForwardTargetError};
 
@@ -50,7 +46,7 @@ impl UpstreamService {
       serde_yaml::from_value(sargs)?;
 
     // Validate upstream exists in registry
-    if !registry.borrow().resolved.contains_key(&args.upstream) {
+    if !registry.borrow().entries.contains_key(&args.upstream) {
       anyhow::bail!("upstream '{}' not found in registry", args.upstream);
     }
 
@@ -138,12 +134,17 @@ async fn chain_connect(
   };
   let target = format!("{host}:{port}");
 
+  let (tls_config, tracker) = {
+    let reg = registry.borrow();
+    (reg.tls_config(), reg.tracker())
+  };
+
   let connect_start = std::time::Instant::now();
-  let result = match registry
-    .borrow()
-    .connect_for_tunnel(upstream_name, &target)
-    .await
-  {
+  let result = match registry.borrow().get_upstream(upstream_name) {
+    Ok(upstream) => upstream.connect_for_tunnel(&target, &tls_config, &tracker).await,
+    Err(e) => return Ok(e.to_response(ctx)),
+  };
+  let result = match result {
     Ok(r) => r,
     Err(e) => {
       warn!("UpstreamService: CONNECT to upstream failed: {e}");
@@ -160,10 +161,7 @@ async fn chain_connect(
     tunnel_idle_timeout,
   } = result;
 
-  let target_io: Box<dyn Io> = match transport {
-    TunnelTransport::Tcp(stream) => stream,
-    TunnelTransport::Http3(h3_stream) => Box::new(h3_stream),
-  };
+  let target_io: Box<dyn Io> = transport;
 
   let client_addr = format!(
     "{}:{}",
@@ -260,310 +258,24 @@ async fn chain_forward(
     }
   };
 
-  let transport = match registry.borrow().get_transport(upstream_name).await {
-    Ok(t) => t,
-    Err(e) => {
-      warn!("UpstreamService: failed to get transport for forward: {e}");
-      return Ok(e.to_response(ctx));
-    }
+  let (tls_config, tracker) = {
+    let reg = registry.borrow();
+    (reg.tls_config(), reg.tracker())
   };
 
-  match transport {
-    Transport::Direct {
-      client,
-    } => {
-      chain_forward_http(
-        client,
-        UserPasswordCredential::none(),
-        req_headers,
-        req_body,
-        ctx,
-      )
-      .await
-    }
-    Transport::Http {
-      client,
-      user,
-    } => {
-      chain_forward_http(
-        client,
-        user,
-        req_headers,
-        req_body,
-        ctx,
-      )
-      .await
-    }
-    Transport::Https {
-      client,
-      user,
-    } => {
-      chain_forward_http(
-        client,
-        user,
-        req_headers,
-        req_body,
-        ctx,
-      )
-      .await
-    }
-    Transport::Http3 {
-      send_request,
-      user,
-    } => {
-      chain_forward_h3(send_request, user, req_headers, req_body, ctx).await
-    }
-  }
-}
-
-/// Forward an HTTP request over HTTP/1.1 or HTTPS/1.1 to the upstream proxy.
-/// Uses hyper::Client which handles connection pooling internally.
-async fn chain_forward_http<C>(
-  client: Client<C, RequestBody>,
-  user: UserPasswordCredential,
-  req_headers: http::request::Parts,
-  req_body: RequestBody,
-  ctx: &RequestContext,
-) -> Result<Response>
-where
-  C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + Unpin + 'static,
-{
-  // Collect request body
-  let body_bytes = match req_body.collect().await {
-    Ok(collected) => collected.to_bytes(),
-    Err(e) => {
-      warn!("UpstreamService: failed to collect request body: {e}");
-      return Ok(build_error_response(
-        http::StatusCode::BAD_REQUEST,
-        "Failed to read request body",
-      ));
-    }
-  };
-
-  // Build forwarded request with absolute-form URI
-  let mut headers = req_headers.headers.clone();
-  utils::strip_hop_by_hop_headers(&mut headers);
-
-  // Apply proxy credentials to a temp request, then merge into headers
-  let mut temp_req = http::Request::builder()
-    .method(req_headers.method.clone())
-    .uri(req_headers.uri.clone())
-    .body(())
-    .unwrap();
-  user.apply(&mut temp_req);
-  for (name, value) in temp_req.headers().iter() {
-    headers.insert(name.clone(), value.clone());
-  }
-
-  // Build final request
-  let mut fwd_req_builder = http::Request::builder()
-    .method(req_headers.method)
-    .uri(req_headers.uri);
-  for (name, value) in headers.iter() {
-    fwd_req_builder = fwd_req_builder.header(name, value);
-  }
-
-  let body = http_body_util::Full::new(body_bytes);
-  let boxed_body = crate::http_utils::RequestBody::new(
-    crate::http_utils::BytesBufBodyWrapper::new(body),
-  );
-  let fwd_req = fwd_req_builder.body(boxed_body).unwrap();
-
-  let forward_start = std::time::Instant::now();
-  let upstream_resp = match client.request(fwd_req).await {
-    Ok(resp) => resp,
-    Err(e) => {
-      warn!("UpstreamService: forward request failed: {e}");
-      return Ok(UpstreamError::ConnectionTerminated(e.to_string())
-        .to_response(ctx));
-    }
-  };
-  let forward_ms = forward_start.elapsed().as_millis() as u64;
-
-  // Record metrics
-  ctx.insert("upstream.forward_ms", forward_ms.to_string());
-  ctx.insert(
-    "upstream.forward_status",
-    upstream_resp.status().as_str().to_string(),
-  );
-
-  // Build streaming response
-  let (resp_parts, resp_body) = upstream_resp.into_parts();
-  let mut resp_headers = resp_parts.headers;
-  utils::strip_hop_by_hop_headers(&mut resp_headers);
-
-  // Append Proxy-Status
-  let upstream_ps = resp_headers
-    .get(http::header::HeaderName::from_static("proxy-status"))
-    .cloned();
-  resp_headers.remove(http::header::HeaderName::from_static("proxy-status"));
-
-  let mut resp = http::Response::builder().status(resp_parts.status);
-  for (name, value) in resp_headers.iter() {
-    resp = resp.header(name, value);
-  }
-
-  if let Some(ref id) = get_server_id(ctx) {
-    let our_entry =
-      build_proxy_status_with_status(id, resp_parts.status.as_u16());
-    resp = resp.header(
-      http::header::HeaderName::from_static("proxy-status"),
-      append_proxy_status(upstream_ps.as_ref(), &our_entry),
-    );
-  } else if let Some(ps) = upstream_ps {
-    resp = resp.header(http::header::HeaderName::from_static("proxy-status"), ps);
-  }
-
-  // Stream response body (no buffering)
-  let wrapped_body = crate::http_utils::BytesBufBodyWrapper::new(resp_body);
-  let boxed_resp_body = ResponseBody::new(wrapped_body);
-
-  match resp.body(boxed_resp_body) {
-    Ok(r) => Ok(r),
-    Err(e) => {
-      warn!("UpstreamService: failed to build response: {e}");
-      Ok(build_error_response(
-        http::StatusCode::BAD_GATEWAY,
-        "Failed to build response",
-      ))
-    }
-  }
-}
-
-/// Forward an HTTP request over H3 to the upstream proxy.
-async fn chain_forward_h3(
-  mut send_request: h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
-  user: UserPasswordCredential,
-  req_headers: http::request::Parts,
-  req_body: RequestBody,
-  ctx: &RequestContext,
-) -> Result<Response> {
-  // Collect request body
-  let body_bytes = match req_body.collect().await {
-    Ok(collected) => collected.to_bytes(),
-    Err(e) => {
-      warn!("UpstreamService: failed to collect request body: {e}");
-      return Ok(build_error_response(
-        http::StatusCode::BAD_REQUEST,
-        "Failed to read request body",
-      ));
-    }
-  };
-
-  // Build H3 request with absolute-form URI
-  let mut fwd_req = http::Request::builder()
-    .method(req_headers.method.clone())
-    .uri(req_headers.uri.clone())
-    .body(())?;
-
-  let mut headers = req_headers.headers.clone();
-  utils::strip_hop_by_hop_headers(&mut headers);
-  user.apply(&mut fwd_req);
-
-  for (name, value) in headers.iter() {
-    fwd_req.headers_mut().insert(name.clone(), value.clone());
-  }
-
-  let forward_start = std::time::Instant::now();
-  let mut stream = match send_request.send_request(fwd_req).await {
-    Ok(s) => s,
-    Err(e) => {
-      warn!("UpstreamService: H3 forward request failed: {e}");
-      return Ok(UpstreamError::ConnectionTerminated(e.to_string())
-        .to_response(ctx));
-    }
-  };
-
-  // Send body
-  if !body_bytes.is_empty() {
-    if let Err(e) = stream.send_data(body_bytes).await {
-      warn!("UpstreamService: H3 failed to send body: {e}");
-      return Ok(UpstreamError::ProxyInternalError(
-        format!("Failed to send request body: {e}"),
-      ).to_response(ctx));
-    }
-  }
-
-  if let Err(e) = stream.finish().await {
-    warn!("UpstreamService: H3 failed to finish request: {e}");
-    return Ok(UpstreamError::ProxyInternalError(
-      format!("Failed to finish request: {e}"),
-    ).to_response(ctx));
-  }
-
-  // Receive response
-  let proxy_resp = match stream.recv_response().await {
-    Ok(resp) => resp,
-    Err(e) => {
-      warn!("UpstreamService: H3 failed to receive response: {e}");
-      return Ok(UpstreamError::ConnectionTerminated(e.to_string())
-        .to_response(ctx));
-    }
-  };
-  let forward_ms = forward_start.elapsed().as_millis() as u64;
-
-  ctx.insert("upstream.forward_ms", forward_ms.to_string());
-  ctx.insert(
-    "upstream.forward_status",
-    proxy_resp.status().as_str().to_string(),
-  );
-
-  // Build response - collect body from H3 stream
-  let (resp_parts, _) = proxy_resp.into_parts();
-  let mut resp_headers = resp_parts.headers;
-  utils::strip_hop_by_hop_headers(&mut resp_headers);
-
-  let upstream_ps = resp_headers
-    .get(http::header::HeaderName::from_static("proxy-status"))
-    .cloned();
-  resp_headers.remove(http::header::HeaderName::from_static("proxy-status"));
-
-  // Collect response body
-  let mut body_buf = bytes::BytesMut::new();
-  loop {
-    match stream.recv_data().await {
-      Ok(Some(mut chunk)) => {
-        let b = chunk.copy_to_bytes(chunk.remaining());
-        body_buf.extend_from_slice(&b);
-      }
-      Ok(None) => break,
-      Err(e) => {
-        warn!("UpstreamService: H3 failed to receive response body: {e}");
-        break;
+  match registry.borrow().get_upstream(upstream_name) {
+    Ok(upstream) => {
+      match upstream.forward(&tls_config, &tracker, req_headers, req_body, ctx).await {
+        Ok(resp) => Ok(resp),
+        Err(e) => {
+          warn!("UpstreamService: forward failed: {e}");
+          Ok(e.to_response(ctx))
+        }
       }
     }
-  }
-  let body_bytes = body_buf.freeze();
-
-  let mut resp = http::Response::builder().status(resp_parts.status);
-  for (name, value) in resp_headers.iter() {
-    resp = resp.header(name, value);
-  }
-
-  if let Some(ref id) = get_server_id(ctx) {
-    let our_entry =
-      build_proxy_status_with_status(id, resp_parts.status.as_u16());
-    resp = resp.header(
-      http::header::HeaderName::from_static("proxy-status"),
-      append_proxy_status(upstream_ps.as_ref(), &our_entry),
-    );
-  } else if let Some(ps) = upstream_ps {
-    resp = resp.header(http::header::HeaderName::from_static("proxy-status"), ps);
-  }
-
-  let resp_body_wrapped = crate::http_utils::BytesBufBodyWrapper::new(
-    http_body_util::Full::new(body_bytes),
-  );
-  let resp_body = ResponseBody::new(resp_body_wrapped);
-
-  match resp.body(resp_body) {
-    Ok(r) => Ok(r),
     Err(e) => {
-      warn!("UpstreamService: failed to build H3 response: {e}");
-      Ok(build_error_response(
-        http::StatusCode::BAD_GATEWAY,
-        "Failed to build response",
-      ))
+      warn!("UpstreamService: failed to get upstream for forward: {e}");
+      Ok(e.to_response(ctx))
     }
   }
 }
@@ -588,6 +300,12 @@ mod tests {
     req
   }
 
+  fn build_registry(plugin_config: super::super::config::HttpUpstreamPluginConfig) -> UpstreamRegistry {
+      let merged = super::super::config::merge_chain_config(&plugin_config).unwrap();
+      let st = Rc::new(StreamTracker::new());
+      UpstreamRegistry::new(merged, None, st.clone()).unwrap()
+  }
+
   fn make_direct_service() -> RuntimeService {
     let plugin_config: super::super::config::HttpUpstreamPluginConfig =
       serde_yaml::from_str("upstreams:\n  - name: direct\n").unwrap();
@@ -595,9 +313,7 @@ mod tests {
       (serde_yaml::Value::String("upstream".into()), serde_yaml::Value::String("direct".into())),
     ])).unwrap();
     let st = Rc::new(StreamTracker::new());
-    let registry = Rc::new(RefCell::new(
-      UpstreamRegistry::new(&plugin_config, st.clone()).unwrap(),
-    ));
+    let registry = Rc::new(RefCell::new(build_registry(plugin_config)));
     UpstreamService::new(sargs, st, registry).unwrap()
   }
 
@@ -620,9 +336,7 @@ mod tests {
       (serde_yaml::Value::String("upstream".into()), serde_yaml::Value::String("direct".into())),
     ])).unwrap();
     let st = Rc::new(StreamTracker::new());
-    let registry = Rc::new(RefCell::new(
-      UpstreamRegistry::new(&plugin_config, st.clone()).unwrap(),
-    ));
+    let registry = Rc::new(RefCell::new(build_registry(plugin_config)));
     let result = UpstreamService::new(sargs, st, registry);
     assert!(result.is_ok());
   }
@@ -724,9 +438,7 @@ mod tests {
       (serde_yaml::Value::String("upstream".into()), serde_yaml::Value::String("nonexistent".into())),
     ])).unwrap();
     let st = Rc::new(StreamTracker::new());
-    let registry = Rc::new(RefCell::new(
-      UpstreamRegistry::new(&plugin_config, st.clone()).unwrap(),
-    ));
+    let registry = Rc::new(RefCell::new(build_registry(plugin_config)));
     let result = UpstreamService::new(sargs, st, registry);
     assert!(result.is_err());
   }
@@ -743,7 +455,7 @@ upstreams:
       - address: "127.0.0.1:8080"
         http: {}
 "#).unwrap();
-    let registry = UpstreamRegistry::new(&plugin_config, st.clone()).unwrap();
+    let registry = build_registry(plugin_config);
     let registry = Rc::new(RefCell::new(registry));
 
     let sargs = serde_yaml::to_value(serde_yaml::Mapping::from_iter([

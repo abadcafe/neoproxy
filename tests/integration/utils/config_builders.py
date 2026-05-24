@@ -437,10 +437,9 @@ def create_http3_chain_config_with_per_proxy_auth(
     plugin_user_section = ""
     if default_user:
         plugin_user_section = (
-            f"    upstream:\n"
-            f"      user:\n"
-            f'        username: "{default_user[0]}"\n'
-            f'        password: "{default_user[1]}"\n'
+            f"    user:\n"
+            f'      username: "{default_user[0]}"\n'
+            f'      password: "{default_user[1]}"\n'
         )
 
     # Plugin-level tls (global certificates: server_ca_path + optional client certs)

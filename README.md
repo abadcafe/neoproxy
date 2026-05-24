@@ -122,31 +122,29 @@ plugins:
       server_ca_path: conf/certs/server-ca.crt
       client_cert_path: conf/certs/client.crt
       client_key_path: conf/certs/client.key
-    upstream:                              # 插件级默认配置
-      http:
-        connect_timeout: 10s
-        tunnel_idle_timeout: 60s
-      https:
-        connect_timeout: 10s
-        tls_handshake_timeout: 5s
-      http3:
-        tunnel_idle_timeout: 60s
-        quic:
-          keep_alive_interval: "3s"
+    tunnel_idle_timeout: 60s            # 插件级默认配置
+    http:
+      connect_timeout: 10s
+    https:
+      connect_timeout: 10s
+      tls_handshake_timeout: 5s
+    http3:
+      quic:
+        keep_alive_interval: "3s"
     upstreams:
       # 直连模式（无 addresses）
       - name: direct
+        tunnel_idle_timeout: 60s
         http:
           connect_timeout: 10s
-          tunnel_idle_timeout: 60s
         pool:
           max_idle_per_host: 32            # 连接池最大空闲连接数（默认: 32）
           idle_timeout: 90s                # 连接池空闲超时（默认: 90s）
 
       # 链式模式（有 addresses）
       - name: remote_relay
+        tunnel_idle_timeout: 60s
         http3:
-          tunnel_idle_timeout: 60s
           quic:
             keep_alive_interval: "5s"
         addresses:

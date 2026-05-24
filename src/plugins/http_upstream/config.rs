@@ -199,10 +199,12 @@ pub(crate) struct UpstreamConfig {
   pub(crate) http3: Option<Http3ProtocolConfig>,
 }
 
-/// Plugin-level upstream defaults (protocol-scoped).
+/// Top-level plugin configuration.
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct UpstreamDefaultsConfig {
+pub(crate) struct HttpUpstreamPluginConfig {
+  #[serde(default)]
+  pub(crate) certificates: Option<CertificateConfig>,
   #[serde(with = "humantime_serde", default)]
   pub(crate) tunnel_idle_timeout: Option<Duration>,
   #[serde(default)]
@@ -213,16 +215,6 @@ pub(crate) struct UpstreamDefaultsConfig {
   pub(crate) https: Option<HttpsProtocolConfig>,
   #[serde(default)]
   pub(crate) http3: Option<Http3ProtocolConfig>,
-}
-
-/// Top-level plugin configuration.
-#[derive(Deserialize, Clone, Debug, Default)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct HttpUpstreamPluginConfig {
-  #[serde(default)]
-  pub(crate) certificates: Option<CertificateConfig>,
-  #[serde(default)]
-  pub(crate) upstream: UpstreamDefaultsConfig,
   #[serde(default)]
   pub(crate) upstreams: Vec<UpstreamConfig>,
 }
@@ -360,13 +352,13 @@ pub(crate) fn merge_chain_config(
       let tunnel_idle_timeout = resolve_field_with_default(
         addr.tunnel_idle_timeout.as_ref(),
         upstream.tunnel_idle_timeout.as_ref(),
-        plugin.upstream.tunnel_idle_timeout.as_ref(),
+        plugin.tunnel_idle_timeout.as_ref(),
         default_tunnel_idle_timeout(),
       );
       let user = resolve_user(
         addr.user.as_ref(),
         upstream.user.as_ref(),
-        plugin.upstream.user.as_ref(),
+        plugin.user.as_ref(),
       );
 
       // Protocol-specific fields: protocol block three-level inheritance
@@ -374,7 +366,7 @@ pub(crate) fn merge_chain_config(
         ProtocolKind::Http => {
           let a = addr.http.as_ref();
           let u = upstream.http.as_ref();
-          let p = plugin.upstream.http.as_ref();
+          let p = plugin.http.as_ref();
           Protocol::Http {
             connect_timeout: resolve_field_with_default(
               a.and_then(|c| c.connect_timeout).as_ref(),
@@ -387,7 +379,7 @@ pub(crate) fn merge_chain_config(
         ProtocolKind::Https => {
           let a = addr.https.as_ref();
           let u = upstream.https.as_ref();
-          let p = plugin.upstream.https.as_ref();
+          let p = plugin.https.as_ref();
           Protocol::Https {
             connect_timeout: resolve_field_with_default(
               a.and_then(|c| c.connect_timeout).as_ref(),
@@ -406,7 +398,7 @@ pub(crate) fn merge_chain_config(
         ProtocolKind::Http3 => {
           let a = addr.http3.as_ref();
           let u = upstream.http3.as_ref();
-          let p = plugin.upstream.http3.as_ref();
+          let p = plugin.http3.as_ref();
           Protocol::Http3 {
             tls_handshake_timeout: resolve_field_with_default(
               a.and_then(|c| c.tls_handshake_timeout).as_ref(),
@@ -439,7 +431,7 @@ pub(crate) fn merge_chain_config(
 
     // Direct-mode fields: resolve from two-level inheritance
     let u_http = upstream.http.as_ref();
-    let p_http = plugin.upstream.http.as_ref();
+    let p_http = plugin.http.as_ref();
     let connect_timeout = resolve_field_with_default(
       u_http.and_then(|c| c.connect_timeout).as_ref(),
       p_http.and_then(|c| c.connect_timeout).as_ref(),
@@ -448,7 +440,7 @@ pub(crate) fn merge_chain_config(
     );
     let tunnel_idle_timeout = resolve_field_with_default(
       upstream.tunnel_idle_timeout.as_ref(),
-      plugin.upstream.tunnel_idle_timeout.as_ref(),
+      plugin.tunnel_idle_timeout.as_ref(),
       None,
       default_tunnel_idle_timeout(),
     );
@@ -585,10 +577,9 @@ mod tests {
   fn test_merge_chain_config_three_level_inheritance() {
     let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
       r#"
-      upstream:
-        tunnel_idle_timeout: 90s
-        http:
-          connect_timeout: 5s
+      tunnel_idle_timeout: 90s
+      http:
+        connect_timeout: 5s
       upstreams:
         - name: test
           http:
@@ -667,9 +658,8 @@ mod tests {
   fn test_resolve_direct_upstream_inherits_plugin_defaults() {
     let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
       r#"
-      upstream:
-        http:
-          connect_timeout: 7s
+      http:
+        connect_timeout: 7s
       upstreams:
         - name: direct
       "#,

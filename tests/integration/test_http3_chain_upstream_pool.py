@@ -295,11 +295,10 @@ plugins:
   http_upstream:
     certificates:
       server_ca_path: "{ca_path}"
-    upstream:
-      user:
-        username: "wrong_user"
-        password: "wrong_pass"
-      http3: {{}}
+    user:
+      username: "wrong_user"
+      password: "wrong_pass"
+    http3: {{}}
     upstreams:
       - name: test_upstream
         addresses:
@@ -393,11 +392,10 @@ plugins:
   http_upstream:
     certificates:
       server_ca_path: "{ca_path}"
-    upstream:
-      user:
-        username: "plugin_user"
-        password: "plugin_pass"
-      http3: {{}}
+    user:
+      username: "plugin_user"
+      password: "plugin_pass"
+    http3: {{}}
     upstreams:
       - name: test_upstream
         addresses:
@@ -490,11 +488,10 @@ plugins:
   http_upstream:
     certificates:
       server_ca_path: "{ca_path}"
-    upstream:
-      user:
-        username: "wrong_plugin_user"
-        password: "wrong_plugin_pass"
-      http3: {{}}
+    user:
+      username: "wrong_plugin_user"
+      password: "wrong_plugin_pass"
+    http3: {{}}
     upstreams:
       - name: test_upstream
         user:
@@ -793,9 +790,8 @@ class TestQuicAndMaxIdleTimeoutConfig:
         config = f"""server_threads: 1
 plugins:
   http_upstream:
-    upstream:
-      tunnel_idle_timeout: "5m"
-      http3:
+    tunnel_idle_timeout: "5m"
+    http3:
         quic:
           keep_alive_interval: "3s"
           max_idle_timeout: "30s"

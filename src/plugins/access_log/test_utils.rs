@@ -10,14 +10,16 @@ use std::sync::{Arc, Mutex};
 ///
 /// Encapsulates the RecordingLayer, StringVisitor, subscriber setup,
 /// and output() method into a reusable struct. This avoids duplicating
-/// ~20 lines of boilerplate per test that needs to verify tracing output.
+/// ~20 lines of boilerplate per test that needs to verify tracing
+/// output.
 pub struct TracingCapture {
   captured: Arc<Mutex<Vec<String>>>,
 }
 
 impl TracingCapture {
   pub fn new() -> (Self, tracing::subscriber::DefaultGuard) {
-    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured: Arc<Mutex<Vec<String>>> =
+      Arc::new(Mutex::new(Vec::new()));
     let captured_clone = captured.clone();
 
     use tracing_subscriber::layer::SubscriberExt;
@@ -59,9 +61,7 @@ impl TracingCapture {
 
     let layered = tracing_subscriber::registry()
       .with(tracing_subscriber::filter::LevelFilter::WARN)
-      .with(RecordingLayer {
-        captured: captured_clone,
-      });
+      .with(RecordingLayer { captured: captured_clone });
 
     let guard = tracing::subscriber::set_default(layered);
     (Self { captured }, guard)

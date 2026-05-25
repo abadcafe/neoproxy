@@ -1,10 +1,10 @@
 use std::fmt;
 
-use crate::http_utils::build_empty_response;
-use crate::http_utils::build_proxy_status_error;
-use crate::http_utils::build_proxy_status_with_status;
 use crate::context::RequestContext;
-use crate::http_utils::Response;
+use crate::http_utils::{
+  Response, build_empty_response, build_proxy_status_error,
+  build_proxy_status_with_status,
+};
 
 // ============================================================================
 // Upstream Error Type (RFC 9209 Proxy-Status error types)
@@ -21,7 +21,8 @@ pub(crate) enum UpstreamError {
   DestinationUnavailable(String),
   ProxyInternalError(String),
   /// Upstream proxy returned a non-2xx CONNECT response.
-  /// The status and proxy-status should be relayed to the downstream client.
+  /// The status and proxy-status should be relayed to the downstream
+  /// client.
   UpstreamConnectError {
     status: http::StatusCode,
     upstream_proxy_status: Option<http::HeaderValue>,
@@ -36,11 +37,16 @@ impl UpstreamError {
       | Self::ConnectionTerminated(_)
       | Self::TlsCertificateError(_)
       | Self::TlsProtocolError(_)
-      | Self::DestinationUnavailable(_) => http::StatusCode::BAD_GATEWAY,
+      | Self::DestinationUnavailable(_) => {
+        http::StatusCode::BAD_GATEWAY
+      }
       Self::ConnectionTimeout(_) => http::StatusCode::GATEWAY_TIMEOUT,
-      Self::ProxyInternalError(_) => http::StatusCode::SERVICE_UNAVAILABLE,
+      Self::ProxyInternalError(_) => {
+        http::StatusCode::SERVICE_UNAVAILABLE
+      }
       Self::UpstreamConnectError { status, .. } => {
-        // Relay upstream status; 407 becomes 502 per HTTP proxy conventions
+        // Relay upstream status; 407 becomes 502 per HTTP proxy
+        // conventions
         if *status == http::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
           http::StatusCode::BAD_GATEWAY
         } else {
@@ -67,11 +73,17 @@ impl UpstreamError {
   pub(crate) fn to_response(&self, ctx: &RequestContext) -> Response {
     let status = self.http_status();
     let mut resp = build_empty_response(status);
-    let id = ctx.get("proxy_id").unwrap_or_else(|| "neoproxy".to_string());
+    let id =
+      ctx.get("proxy_id").unwrap_or_else(|| "neoproxy".to_string());
 
-    if let Self::UpstreamConnectError { status, upstream_proxy_status } = self {
+    if let Self::UpstreamConnectError {
+      status,
+      upstream_proxy_status,
+    } = self
+    {
       // Append our proxy-status entry to the upstream's
-      let our_entry = build_proxy_status_with_status(&id, status.as_u16());
+      let our_entry =
+        build_proxy_status_with_status(&id, status.as_u16());
       resp.headers_mut().insert(
         http::header::HeaderName::from_static("proxy-status"),
         crate::http_utils::append_proxy_status(
@@ -80,7 +92,8 @@ impl UpstreamError {
         ),
       );
     } else {
-      let our_entry = build_proxy_status_error(&id, self.proxy_status_error());
+      let our_entry =
+        build_proxy_status_error(&id, self.proxy_status_error());
       resp.headers_mut().insert(
         http::header::HeaderName::from_static("proxy-status"),
         our_entry,
@@ -94,15 +107,21 @@ impl fmt::Display for UpstreamError {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Self::DnsError(msg) => write!(f, "DNS resolution failed: {msg}"),
-      Self::ConnectionRefused(msg) => write!(f, "Connection refused: {msg}"),
-      Self::ConnectionTimeout(msg) => write!(f, "Connection timed out: {msg}"),
+      Self::ConnectionRefused(msg) => {
+        write!(f, "Connection refused: {msg}")
+      }
+      Self::ConnectionTimeout(msg) => {
+        write!(f, "Connection timed out: {msg}")
+      }
       Self::ConnectionTerminated(msg) => {
         write!(f, "Connection terminated: {msg}")
       }
       Self::TlsCertificateError(msg) => {
         write!(f, "TLS certificate error: {msg}")
       }
-      Self::TlsProtocolError(msg) => write!(f, "TLS protocol error: {msg}"),
+      Self::TlsProtocolError(msg) => {
+        write!(f, "TLS protocol error: {msg}")
+      }
       Self::DestinationUnavailable(msg) => {
         write!(f, "Destination unavailable: {msg}")
       }
@@ -123,7 +142,8 @@ impl std::error::Error for UpstreamError {}
 // ============================================================================
 
 /// Marker wrapper for DNS resolution errors, so classifiers can detect
-/// DNS failures via `downcast_ref` instead of guessing from message patterns.
+/// DNS failures via `downcast_ref` instead of guessing from message
+/// patterns.
 #[derive(Debug)]
 pub(crate) struct DnsResolveError(pub(crate) std::io::Error);
 
@@ -144,7 +164,9 @@ impl std::error::Error for DnsResolveError {
 // ============================================================================
 
 /// Classify an anyhow error from TCP connect into an `UpstreamError`.
-pub(crate) fn classify_connect_error(e: anyhow::Error) -> UpstreamError {
+pub(crate) fn classify_connect_error(
+  e: anyhow::Error,
+) -> UpstreamError {
   if e.downcast_ref::<DnsResolveError>().is_some() {
     return UpstreamError::DnsError(e.to_string());
   }
@@ -174,8 +196,8 @@ pub(crate) fn classify_connect_error(e: anyhow::Error) -> UpstreamError {
 
 /// Classify an anyhow error from QUIC connection establishment into an
 /// `UpstreamError`. Adapted from `http3_chain/error.rs` with RFC 9209
-/// variants: ConnectionReset → ConnectionTerminated (not ConnectionRefused),
-/// plus TLS error classification.
+/// variants: ConnectionReset → ConnectionTerminated (not
+/// ConnectionRefused), plus TLS error classification.
 pub(crate) fn classify_quic_error(e: anyhow::Error) -> UpstreamError {
   if e.downcast_ref::<DnsResolveError>().is_some() {
     return UpstreamError::DnsError(e.to_string());
@@ -229,9 +251,11 @@ pub(crate) fn classify_quic_error(e: anyhow::Error) -> UpstreamError {
 }
 
 /// Classify an anyhow error from TLS handshake (tokio-rustls) into an
-/// `UpstreamError`. Distinguishes certificate errors from protocol errors
-/// by inspecting `rustls::Error` variants.
-pub(crate) fn classify_tls_handshake_error(e: anyhow::Error) -> UpstreamError {
+/// `UpstreamError`. Distinguishes certificate errors from protocol
+/// errors by inspecting `rustls::Error` variants.
+pub(crate) fn classify_tls_handshake_error(
+  e: anyhow::Error,
+) -> UpstreamError {
   if let Some(tls_err) = e.downcast_ref::<rustls::Error>() {
     return match tls_err {
       rustls::Error::InvalidCertificate(_)
@@ -273,11 +297,13 @@ mod tests {
       "dns_error"
     );
     assert_eq!(
-      UpstreamError::ConnectionTerminated("x".into()).proxy_status_error(),
+      UpstreamError::ConnectionTerminated("x".into())
+        .proxy_status_error(),
       "connection_terminated"
     );
     assert_eq!(
-      UpstreamError::TlsCertificateError("x".into()).proxy_status_error(),
+      UpstreamError::TlsCertificateError("x".into())
+        .proxy_status_error(),
       "tls_certificate_error"
     );
   }
@@ -301,7 +327,8 @@ mod tests {
 
   #[test]
   fn test_classify_connect_error_connection_refused() {
-    let io_err = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+    let io_err =
+      std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
     let err: anyhow::Error = io_err.into();
     assert!(matches!(
       classify_connect_error(err),
@@ -321,7 +348,8 @@ mod tests {
 
   #[test]
   fn test_classify_connect_error_connection_reset() {
-    let io_err = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
+    let io_err =
+      std::io::Error::from(std::io::ErrorKind::ConnectionReset);
     let err: anyhow::Error = io_err.into();
     assert!(matches!(
       classify_connect_error(err),
@@ -331,8 +359,10 @@ mod tests {
 
   #[test]
   fn test_classify_connect_error_dns_resolve() {
-    let io_err =
-      std::io::Error::new(std::io::ErrorKind::Other, "name lookup failed");
+    let io_err = std::io::Error::new(
+      std::io::ErrorKind::Other,
+      "name lookup failed",
+    );
     let err: anyhow::Error = DnsResolveError(io_err).into();
     assert!(matches!(
       classify_connect_error(err),
@@ -342,7 +372,8 @@ mod tests {
 
   #[test]
   fn test_classify_connect_error_host_unreachable() {
-    let io_err = std::io::Error::from(std::io::ErrorKind::HostUnreachable);
+    let io_err =
+      std::io::Error::from(std::io::ErrorKind::HostUnreachable);
     let err: anyhow::Error = io_err.into();
     assert!(matches!(
       classify_connect_error(err),
@@ -370,8 +401,10 @@ mod tests {
 
   #[test]
   fn test_classify_quic_dns_resolve_error() {
-    let io_err =
-      std::io::Error::new(std::io::ErrorKind::Other, "name lookup failed");
+    let io_err = std::io::Error::new(
+      std::io::ErrorKind::Other,
+      "name lookup failed",
+    );
     let err: anyhow::Error = DnsResolveError(io_err).into();
     assert!(matches!(
       classify_quic_error(err),

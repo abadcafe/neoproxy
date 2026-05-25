@@ -25,9 +25,7 @@ use crate::http_utils::{
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };
-use crate::listeners::utils::{
-  LISTENER_SHUTDOWN_TIMEOUT,
-};
+use crate::listeners::utils::LISTENER_SHUTDOWN_TIMEOUT;
 use crate::shutdown::ShutdownHandle;
 use crate::stream::H3UpgradeTrigger;
 use crate::tls::build_tls_server_config;
@@ -50,7 +48,8 @@ impl H3RecvBody {
   }
 }
 
-// SAFETY: H3RecvBody owns its stream and contains no self-referential data.
+// SAFETY: H3RecvBody owns its stream and contains no self-referential
+// data.
 impl Unpin for H3RecvBody {}
 
 impl Body for H3RecvBody {
@@ -87,12 +86,10 @@ const DEFAULT_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_INITIAL_MTU: u16 = 1200;
 
 /// Default send window size (10MiB)
-const DEFAULT_SEND_WINDOW: Byte =
-  Byte::from_u64(10485760);
+const DEFAULT_SEND_WINDOW: Byte = Byte::from_u64(10485760);
 
 /// Default receive window size (10MiB)
-const DEFAULT_RECEIVE_WINDOW: Byte =
-  Byte::from_u64(10485760);
+const DEFAULT_RECEIVE_WINDOW: Byte = Byte::from_u64(10485760);
 
 /// H3_NO_ERROR error code for CONNECTION_CLOSE frame
 /// See: https://www.rfc-editor.org/rfc/rfc9114.html#errors
@@ -165,7 +162,8 @@ impl QuicConfigArgs {
   pub fn validate_and_apply_defaults(&self) -> Result<QuicConfig> {
     if !(1..=10000).contains(&self.max_concurrent_bidi_streams) {
       bail!(
-        "Invalid max_concurrent_bidi_streams: {}, expected range 1-10000",
+        "Invalid max_concurrent_bidi_streams: {}, expected range \
+         1-10000",
         self.max_concurrent_bidi_streams
       );
     }
@@ -235,8 +233,8 @@ impl Default for QuicConfig {
 /// Handle a single HTTP/3 stream by delegating to the Service.
 ///
 /// Flow:
-/// 1. authority check (:authority MUST exist, if Host present must equal
-///    :authority)
+/// 1. authority check (:authority MUST exist, if Host present must
+///    equal :authority)
 /// 2. Authentication check (fail -> send 407 directly)
 /// 3. Route request to correct service based on :authority
 /// 4. Create (trigger, on_upgrade) pair
@@ -287,7 +285,8 @@ async fn handle_h3_stream(
           "Bad Request: :authority and Host headers differ",
         );
         let mut stream = stream;
-        if let Err(e) = send_h3_response(&mut stream, resp, true).await {
+        if let Err(e) = send_h3_response(&mut stream, resp, true).await
+        {
           warn!("Failed to send 400 response: {e}");
         }
         return;
@@ -344,22 +343,25 @@ async fn handle_h3_stream(
   let is_connect = method == http::Method::CONNECT;
 
   // Phase 5: Build Request with appropriate body and stream handling.
-  // stream is consumed here — either by H3UpgradeTrigger::pair (CONNECT)
-  // or by stream.split() (non-CONNECT). Both branches are mutually exclusive.
-  let (request_body, mut stream_holder, trigger_and_upgrade) = if is_connect {
-    let (trigger, on_upgrade) = H3UpgradeTrigger::pair(stream);
-    let body = RequestBody::new(BytesBufBodyWrapper::new(
-      http_body_util::Empty::<Bytes>::new(),
-    ));
-    (body, None, Some((trigger, on_upgrade)))
-  } else {
-    // Non-CONNECT: split stream, use recv half for body, keep send half for response
-    let (send_stream, recv_stream) = stream.split();
-    let body = RequestBody::new(BytesBufBodyWrapper::new(
-      H3RecvBody::new(recv_stream),
-    ));
-    (body, Some(send_stream), None)
-  };
+  // stream is consumed here — either by H3UpgradeTrigger::pair
+  // (CONNECT) or by stream.split() (non-CONNECT). Both branches are
+  // mutually exclusive.
+  let (request_body, mut stream_holder, trigger_and_upgrade) =
+    if is_connect {
+      let (trigger, on_upgrade) = H3UpgradeTrigger::pair(stream);
+      let body = RequestBody::new(BytesBufBodyWrapper::new(
+        http_body_util::Empty::<Bytes>::new(),
+      ));
+      (body, None, Some((trigger, on_upgrade)))
+    } else {
+      // Non-CONNECT: split stream, use recv half for body, keep send
+      // half for response
+      let (send_stream, recv_stream) = stream.split();
+      let body = RequestBody::new(BytesBufBodyWrapper::new(
+        H3RecvBody::new(recv_stream),
+      ));
+      (body, Some(send_stream), None)
+    };
 
   let mut request = http::Request::builder()
     .method(req.method().clone())
@@ -375,7 +377,8 @@ async fn handle_h3_stream(
   // Insert RequestContext into request extensions
   request.extensions_mut().insert(ctx);
 
-  let trigger = if let Some((trigger, on_upgrade)) = trigger_and_upgrade {
+  let trigger = if let Some((trigger, on_upgrade)) = trigger_and_upgrade
+  {
     request.extensions_mut().insert(on_upgrade);
     Some(trigger)
   } else {
@@ -410,8 +413,13 @@ async fn handle_h3_stream(
               }
             };
           if let Some(t) = trigger {
-            if let Err(e) =
-              t.send_error_with_body(status, body_bytes, Some(&resp_headers)).await
+            if let Err(e) = t
+              .send_error_with_body(
+                status,
+                body_bytes,
+                Some(&resp_headers),
+              )
+              .await
             {
               warn!("H3 failed to send error: {e}");
             }
@@ -759,9 +767,8 @@ impl Listening for Http3Listener {
             tracker_for_register.register_connection(async move {
               match conn.await {
                 Ok(quinn_conn) => {
-                  let local_addr = quinn_conn
-                    .local_ip()
-                    .map_or(local_addr, |ip| {
+                  let local_addr =
+                    quinn_conn.local_ip().map_or(local_addr, |ip| {
                       SocketAddr::new(ip, local_addr.port())
                     });
                   handle_h3_connection(
@@ -957,10 +964,8 @@ mod tests {
 
   #[test]
   fn test_quic_config_args_validate_invalid_initial_mtu_low() {
-    let args = QuicConfigArgs {
-      initial_mtu: 100,
-      ..default_quic_config_args()
-    };
+    let args =
+      QuicConfigArgs { initial_mtu: 100, ..default_quic_config_args() };
     let result = args.validate_and_apply_defaults();
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();

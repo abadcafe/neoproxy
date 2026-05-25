@@ -1,20 +1,27 @@
-use crate::plugin::Plugin;
 use serial_test::serial;
+
 use super::test_utils::TracingCapture;
-use super::{config, context, create_plugin, get_writer, layer,
-  reset_writer_registry, AccessLogPlugin, LogEntry, WRITER_JOIN_TIMEOUT};
+use super::{
+  AccessLogPlugin, LogEntry, WRITER_JOIN_TIMEOUT, config, context,
+  create_plugin, get_writer, layer, reset_writer_registry,
+};
+use crate::plugin::Plugin;
 
 #[test]
 #[serial]
 fn test_access_log_plugin_has_file_layer() {
-  let plugin = AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+  let plugin = AccessLogPlugin::new(std::sync::Arc::new(
+    std::sync::atomic::AtomicBool::new(false),
+  ));
   assert!(plugin.layer_builder("file").is_some());
 }
 
 #[test]
 #[serial]
 fn test_access_log_plugin_no_unknown_layer() {
-  let plugin = AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+  let plugin = AccessLogPlugin::new(std::sync::Arc::new(
+    std::sync::atomic::AtomicBool::new(false),
+  ));
   assert!(plugin.layer_builder("unknown").is_none());
 }
 
@@ -24,31 +31,30 @@ fn test_access_log_file_layer_builds_with_writer_config() {
   reset_writer_registry();
 
   let dir = tempfile::tempdir().unwrap();
-  let prefix = dir.path().join("test_layer").to_string_lossy().to_string();
+  let prefix =
+    dir.path().join("test_layer").to_string_lossy().to_string();
 
   let plugin_config = config::AccessLogPluginConfig {
-    writers: vec![
-      config::AccessLogWriterConfig {
-        path_prefix: prefix.clone(),
-        ..Default::default()
-      },
-    ],
+    writers: vec![config::AccessLogWriterConfig {
+      path_prefix: prefix.clone(),
+      ..Default::default()
+    }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
   let _plugin = create_plugin(Some(&config_value));
 
-  let plugin = AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+  let plugin = AccessLogPlugin::new(std::sync::Arc::new(
+    std::sync::atomic::AtomicBool::new(false),
+  ));
   let builder = plugin.layer_builder("file").unwrap();
-  let args = serde_yaml::from_str(
-    &format!(
-      r#"
+  let args = serde_yaml::from_str(&format!(
+    r#"
 writer: "{}"
 context_fields:
   - basic_auth.user
 "#,
-      prefix
-    ),
-  )
+    prefix
+  ))
   .unwrap();
   let layer = builder(args);
   assert!(layer.is_ok());
@@ -59,13 +65,13 @@ context_fields:
 fn test_access_log_file_layer_unknown_writer_fails() {
   reset_writer_registry();
 
-  let plugin_config = config::AccessLogPluginConfig {
-    writers: vec![],
-  };
+  let plugin_config = config::AccessLogPluginConfig { writers: vec![] };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
   let _plugin = create_plugin(Some(&config_value));
 
-  let plugin = AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+  let plugin = AccessLogPlugin::new(std::sync::Arc::new(
+    std::sync::atomic::AtomicBool::new(false),
+  ));
   let builder = plugin.layer_builder("file").unwrap();
   let args = serde_yaml::from_str(
     r#"
@@ -86,26 +92,24 @@ fn test_access_log_file_layer_builds_with_empty_config() {
   let prefix = dir.path().join("access").to_string_lossy().to_string();
 
   let plugin_config = config::AccessLogPluginConfig {
-    writers: vec![
-      config::AccessLogWriterConfig {
-        path_prefix: prefix.clone(),
-        ..Default::default()
-      },
-    ],
+    writers: vec![config::AccessLogWriterConfig {
+      path_prefix: prefix.clone(),
+      ..Default::default()
+    }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
   let _plugin = create_plugin(Some(&config_value));
 
-  let plugin = AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+  let plugin = AccessLogPlugin::new(std::sync::Arc::new(
+    std::sync::atomic::AtomicBool::new(false),
+  ));
   let builder = plugin.layer_builder("file").unwrap();
-  let args = serde_yaml::from_str(
-    &format!(
-      r#"
+  let args = serde_yaml::from_str(&format!(
+    r#"
 writer: "{}"
 "#,
-      prefix
-    ),
-  )
+    prefix
+  ))
   .unwrap();
   let layer = builder(args);
   assert!(layer.is_ok());
@@ -120,28 +124,26 @@ fn test_access_log_file_layer_builds_with_context_fields() {
   let prefix = dir.path().join("access").to_string_lossy().to_string();
 
   let plugin_config = config::AccessLogPluginConfig {
-    writers: vec![
-      config::AccessLogWriterConfig {
-        path_prefix: prefix.clone(),
-        ..Default::default()
-      },
-    ],
+    writers: vec![config::AccessLogWriterConfig {
+      path_prefix: prefix.clone(),
+      ..Default::default()
+    }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
   let _plugin = create_plugin(Some(&config_value));
 
-  let plugin = AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+  let plugin = AccessLogPlugin::new(std::sync::Arc::new(
+    std::sync::atomic::AtomicBool::new(false),
+  ));
   let builder = plugin.layer_builder("file").unwrap();
-  let args = serde_yaml::from_str(
-    &format!(
-      r#"
+  let args = serde_yaml::from_str(&format!(
+    r#"
 writer: "{}"
 context_fields:
   - basic_auth.user
 "#,
-      prefix
-    ),
-  )
+    prefix
+  ))
   .unwrap();
   let layer = builder(args);
   assert!(layer.is_ok());
@@ -153,31 +155,40 @@ async fn test_access_log_plugin_uninstall_joins_writer_threads() {
   reset_writer_registry();
 
   let dir = tempfile::tempdir().unwrap();
-  let prefix = dir.path().join("uninstall_join").to_string_lossy().to_string();
+  let prefix =
+    dir.path().join("uninstall_join").to_string_lossy().to_string();
 
   let plugin_config = config::AccessLogPluginConfig {
-    writers: vec![
-      config::AccessLogWriterConfig {
-        path_prefix: prefix.clone(),
-        ..Default::default()
-      },
-    ],
+    writers: vec![config::AccessLogWriterConfig {
+      path_prefix: prefix.clone(),
+      ..Default::default()
+    }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
   let plugin = create_plugin(Some(&config_value));
 
   let writer = get_writer(&prefix);
-  assert!(writer.is_ok(), "Writer should be accessible before uninstall");
+  assert!(
+    writer.is_ok(),
+    "Writer should be accessible before uninstall"
+  );
   drop(writer);
 
   let uninstall_result = tokio::time::timeout(
     std::time::Duration::from_secs(5),
     plugin.uninstall(),
-  ).await;
-  assert!(uninstall_result.is_ok(), "uninstall should complete within timeout");
+  )
+  .await;
+  assert!(
+    uninstall_result.is_ok(),
+    "uninstall should complete within timeout"
+  );
 
   let writer_after = get_writer(&prefix);
-  assert!(writer_after.is_err(), "Writer should not be accessible after uninstall");
+  assert!(
+    writer_after.is_err(),
+    "Writer should not be accessible after uninstall"
+  );
 
   let log_path = std::path::PathBuf::from(&prefix);
   let _ = log_path;
@@ -189,44 +200,49 @@ async fn test_access_log_plugin_uninstall_clears_registry() {
   reset_writer_registry();
 
   let dir = tempfile::tempdir().unwrap();
-  let prefix = dir.path().join("uninstall_test").to_string_lossy().to_string();
+  let prefix =
+    dir.path().join("uninstall_test").to_string_lossy().to_string();
 
   let plugin_config = config::AccessLogPluginConfig {
-    writers: vec![
-      config::AccessLogWriterConfig {
-        path_prefix: prefix.clone(),
-        ..Default::default()
-      },
-    ],
+    writers: vec![config::AccessLogWriterConfig {
+      path_prefix: prefix.clone(),
+      ..Default::default()
+    }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
   let plugin = create_plugin(Some(&config_value));
 
   let writer = get_writer(&prefix);
-  assert!(writer.is_ok(), "Writer should be accessible before uninstall");
+  assert!(
+    writer.is_ok(),
+    "Writer should be accessible before uninstall"
+  );
   drop(writer);
 
   plugin.uninstall().await;
 
   let writer_after = get_writer(&prefix);
-  assert!(writer_after.is_err(), "Writer should not be accessible after uninstall");
+  assert!(
+    writer_after.is_err(),
+    "Writer should not be accessible after uninstall"
+  );
 }
 
 #[tokio::test]
 #[serial]
-async fn test_access_log_plugin_uninstall_returns_quickly_with_stuck_writer() {
+async fn test_access_log_plugin_uninstall_returns_quickly_with_stuck_writer()
+ {
   reset_writer_registry();
 
   let dir = tempfile::tempdir().unwrap();
-  let prefix = dir.path().join("stuck_writer").to_string_lossy().to_string();
+  let prefix =
+    dir.path().join("stuck_writer").to_string_lossy().to_string();
 
   let plugin_config = config::AccessLogPluginConfig {
-    writers: vec![
-      config::AccessLogWriterConfig {
-        path_prefix: prefix.clone(),
-        ..Default::default()
-      },
-    ],
+    writers: vec![config::AccessLogWriterConfig {
+      path_prefix: prefix.clone(),
+      ..Default::default()
+    }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
   let plugin = create_plugin(Some(&config_value));
@@ -238,7 +254,8 @@ async fn test_access_log_plugin_uninstall_returns_quickly_with_stuck_writer() {
   let elapsed = start.elapsed();
 
   assert!(
-    elapsed < WRITER_JOIN_TIMEOUT + std::time::Duration::from_millis(500),
+    elapsed
+      < WRITER_JOIN_TIMEOUT + std::time::Duration::from_millis(500),
     "uninstall should complete within timeout margin, took {:?}",
     elapsed
   );
@@ -249,7 +266,10 @@ async fn test_access_log_plugin_uninstall_returns_quickly_with_stuck_writer() {
   );
 
   let writer_after = get_writer(&prefix);
-  assert!(writer_after.is_err(), "Writer should not be accessible after uninstall");
+  assert!(
+    writer_after.is_err(),
+    "Writer should not be accessible after uninstall"
+  );
 
   drop(_sender);
 }
@@ -264,18 +284,17 @@ async fn test_uninstall_joins_writer_threads_and_flushes_data() {
   reset_writer_registry();
 
   let dir = tempfile::tempdir().unwrap();
-  let prefix = dir.path().join("uninstall_flush").to_string_lossy().to_string();
+  let prefix =
+    dir.path().join("uninstall_flush").to_string_lossy().to_string();
 
   let plugin_config = config::AccessLogPluginConfig {
-    writers: vec![
-      config::AccessLogWriterConfig {
-        path_prefix: prefix.clone(),
-        buffer_capacity: byte_unit::Byte::from_u64(1024 * 1024),
-        flush_interval: std::time::Duration::from_secs(3600),
-        rotate_daily: false,
-        ..Default::default()
-      },
-    ],
+    writers: vec![config::AccessLogWriterConfig {
+      path_prefix: prefix.clone(),
+      buffer_capacity: byte_unit::Byte::from_u64(1024 * 1024),
+      flush_interval: std::time::Duration::from_secs(3600),
+      rotate_daily: false,
+      ..Default::default()
+    }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
   let plugin = create_plugin(Some(&config_value));
@@ -308,14 +327,15 @@ async fn test_uninstall_joins_writer_threads_and_flushes_data() {
   let elapsed = start.elapsed();
   assert!(
     elapsed < std::time::Duration::from_secs(3),
-    "uninstall should join quickly when no sender clones held, took {:?}",
+    "uninstall should join quickly when no sender clones held, took \
+     {:?}",
     elapsed
   );
 
   // Verify the log file contains the entry
   let log_path = std::path::PathBuf::from(&prefix);
-  let deadline = std::time::Instant::now()
-    + std::time::Duration::from_secs(3);
+  let deadline =
+    std::time::Instant::now() + std::time::Duration::from_secs(3);
   let mut content = String::new();
   loop {
     if log_path.exists() {
@@ -331,8 +351,14 @@ async fn test_uninstall_joins_writer_threads_and_flushes_data() {
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
   }
-  assert!(!content.is_empty(), "Log file should contain the written entry");
-  assert!(content.contains("10.0.0.1"), "Log file should contain entry data");
+  assert!(
+    !content.is_empty(),
+    "Log file should contain the written entry"
+  );
+  assert!(
+    content.contains("10.0.0.1"),
+    "Log file should contain entry data"
+  );
 }
 
 #[test]
@@ -341,11 +367,15 @@ fn test_create_plugin_invalid_config_panics_with_descriptive_message() {
   reset_writer_registry();
 
   let result = std::panic::catch_unwind(|| {
-    let bad_config = serde_yaml::Value::String("not_a_valid_config".to_string());
+    let bad_config =
+      serde_yaml::Value::String("not_a_valid_config".to_string());
     let _ = create_plugin(Some(&bad_config));
   });
 
-  assert!(result.is_err(), "create_plugin should panic on invalid config");
+  assert!(
+    result.is_err(),
+    "create_plugin should panic on invalid config"
+  );
 
   let panic_payload = result.unwrap_err();
   let message = if let Some(s) = panic_payload.downcast_ref::<&str>() {
@@ -366,9 +396,8 @@ fn test_create_plugin_invalid_config_panics_with_descriptive_message() {
 #[tokio::test]
 #[serial]
 async fn test_try_send_on_full_channel_logs_warning() {
-  use tower::Layer;
-  use tower::ServiceExt;
   use http_body_util::BodyExt;
+  use tower::{Layer, ServiceExt};
 
   // --- Test Full case ---
   {
@@ -393,10 +422,8 @@ async fn test_try_send_on_full_channel_logs_warning() {
     };
     tx.try_send(dummy_entry).unwrap();
 
-    let access_log_layer = layer::AccessLogLayer {
-      tx,
-      context_fields: vec![],
-    };
+    let access_log_layer =
+      layer::AccessLogLayer { tx, context_fields: vec![] };
     let inner = crate::server::placeholder_service();
     let mut service = Layer::layer(&access_log_layer, inner);
 
@@ -415,7 +442,8 @@ async fn test_try_send_on_full_channel_logs_warning() {
     let output = capture.output();
     assert!(
       output.contains("channel full"),
-      "tracing should capture 'channel full' warning from middleware, got: {:?}",
+      "tracing should capture 'channel full' warning from middleware, \
+       got: {:?}",
       &output[..output.len().min(500)]
     );
   }
@@ -427,10 +455,8 @@ async fn test_try_send_on_full_channel_logs_warning() {
     let (tx, rx) = std::sync::mpsc::sync_channel::<LogEntry>(1);
     drop(rx);
 
-    let access_log_layer = layer::AccessLogLayer {
-      tx,
-      context_fields: vec![],
-    };
+    let access_log_layer =
+      layer::AccessLogLayer { tx, context_fields: vec![] };
     let inner = crate::server::placeholder_service();
     let mut service = Layer::layer(&access_log_layer, inner);
 
@@ -449,7 +475,8 @@ async fn test_try_send_on_full_channel_logs_warning() {
     let output = capture.output();
     assert!(
       output.contains("channel closed"),
-      "tracing should capture 'channel closed' warning from middleware, got: {:?}",
+      "tracing should capture 'channel closed' warning from \
+       middleware, got: {:?}",
       &output[..output.len().min(500)]
     );
   }

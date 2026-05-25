@@ -11,12 +11,12 @@ use std::io::BufReader;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
+use rustls::InconsistentKeys;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{
   ClientHello, ResolvesServerCert, WebPkiClientVerifier,
 };
 use rustls::sign::{CertifiedKey, SigningKey};
-use rustls::InconsistentKeys;
 use tracing::{info, warn};
 
 use crate::config::CertificateConfig;
@@ -164,9 +164,8 @@ pub fn load_cert_and_key(
     })?;
 
   // Create signing key to verify it's valid
-  let signing_key =
-    load_signing_key(key.clone_key())
-      .map_err(|e| anyhow!("Unsupported private key type: {:?}", e))?;
+  let signing_key = load_signing_key(key.clone_key())
+    .map_err(|e| anyhow!("Unsupported private key type: {:?}", e))?;
 
   // Create a CertifiedKey and verify the keys match
   let certified_key = CertifiedKey::new(certs.clone(), signing_key);
@@ -176,7 +175,9 @@ pub fn load_cert_and_key(
     Ok(()) => {
       // Keys match, all good
     }
-    Err(rustls::Error::InconsistentKeys(InconsistentKeys::KeyMismatch)) => {
+    Err(rustls::Error::InconsistentKeys(
+      InconsistentKeys::KeyMismatch,
+    )) => {
       bail!(
         "Certificate and private key do not match: {} and {}",
         config.cert_path,
@@ -198,10 +199,12 @@ pub fn load_cert_and_key(
 
 /// Load a signing key using the default crypto provider.
 /// Provider-agnostic: works with both ring and rustls-openssl.
-pub fn load_signing_key(key: PrivateKeyDer<'static>) -> Result<Arc<dyn SigningKey>> {
-    let provider = rustls::crypto::CryptoProvider::get_default()
-        .expect("CryptoProvider must be installed before loading keys");
-    Ok(provider.key_provider.load_private_key(key)?)
+pub fn load_signing_key(
+  key: PrivateKeyDer<'static>,
+) -> Result<Arc<dyn SigningKey>> {
+  let provider = rustls::crypto::CryptoProvider::get_default()
+    .expect("CryptoProvider must be installed before loading keys");
+  Ok(provider.key_provider.load_private_key(key)?)
 }
 
 /// Extract Subject Alternative Names (SAN) from a certificate.
@@ -271,9 +274,9 @@ pub fn build_sni_resolver(
       // Build certified key
       let certified_key = CertifiedKey::new(
         certs.clone(),
-        load_signing_key(key.clone_key()).map_err(
-          |e| anyhow!("Unsupported private key type: {:?}", e),
-        )?,
+        load_signing_key(key.clone_key()).map_err(|e| {
+          anyhow!("Unsupported private key type: {:?}", e)
+        })?,
       );
       let certified_key = Arc::new(certified_key);
 
@@ -315,8 +318,8 @@ pub fn build_sni_resolver(
 /// Creates a rustls::ServerConfig that:
 /// - Uses SNI resolver for certificate selection
 /// - Requests client certificates but does not require them
-///   (allow_unauthenticated). The actual enforcement happens at
-///   the HTTP layer after routing to the correct server.
+///   (allow_unauthenticated). The actual enforcement happens at the
+///   HTTP layer after routing to the correct server.
 ///
 /// Note: This takes the full routing table to support multi-server
 /// certificate selection. Client CA certificates from all servers
@@ -355,8 +358,9 @@ pub fn build_tls_server_config(
   }
 
   let mut config = if has_client_ca {
-    // Request client certificates but allow unauthenticated connections.
-    // Per-server enforcement happens at the HTTP layer after routing.
+    // Request client certificates but allow unauthenticated
+    // connections. Per-server enforcement happens at the HTTP layer
+    // after routing.
     let verifier = WebPkiClientVerifier::builder(roots.into())
       .allow_unauthenticated()
       .build()?;

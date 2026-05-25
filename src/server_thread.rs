@@ -132,7 +132,8 @@ pub fn run_server_thread(
 
   rt.block_on(local_set.run_until(async {
     // Each thread builds its own PluginManager and listeners
-    let mut plugin_manager = PluginManager::new(Config::global().plugins.clone());
+    let mut plugin_manager =
+      PluginManager::new(Config::global().plugins.clone());
     let listener_manager = ListenerManager::new();
 
     let listeners = build_listeners(
@@ -159,14 +160,15 @@ pub fn run_server_thread(
 
     while join_set.join_next().await.is_some() {}
 
-    // Drop listeners first so middleware instances (which hold mpsc::Sender
-    // clones for access_log writer threads) are released before uninstall().
-    // This ensures the Sender clones are dropped early, allowing writer
-    // threads to see channel close and begin their final flush. uninstall()
-    // then drops the registry's Sender handles and saves JoinHandles to
+    // Drop listeners first so middleware instances (which hold
+    // mpsc::Sender clones for access_log writer threads) are
+    // released before uninstall(). This ensures the Sender clones
+    // are dropped early, allowing writer threads to see channel
+    // close and begin their final flush. uninstall() then drops the
+    // registry's Sender handles and saves JoinHandles to
     // PENDING_WRITER_JOINS. The actual thread join happens later in
-    // flush_writer_threads(), called from main.rs after all server threads
-    // have exited (see CR-014 two-phase shutdown design).
+    // flush_writer_threads(), called from main.rs after all server
+    // threads have exited (see CR-014 two-phase shutdown design).
     drop(listeners);
 
     // Uninstall plugins at shutdown

@@ -13,8 +13,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use anyhow::Result;
-use hyper_util::rt::TokioIo;
 use bytes::Bytes;
+use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::oneshot;
 use tracing::{info, warn};
@@ -87,14 +87,16 @@ impl OnUpgrade {
 impl Future for OnUpgrade {
   type Output = Result<Box<dyn Io>>;
 
-  fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+  fn poll(
+    self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Self::Output> {
     match &self.rx {
       Some(rx) => {
-        Pin::new(&mut *rx.lock().unwrap()).poll(cx).map(|res| {
-          match res {
-            Ok(inner) => inner,
-            Err(_) => Err(anyhow::anyhow!("upgrade canceled")),
-          }
+        Pin::new(&mut *rx.lock().unwrap()).poll(cx).map(|res| match res
+        {
+          Ok(inner) => inner,
+          Err(_) => Err(anyhow::anyhow!("upgrade canceled")),
         })
       }
       None => Poll::Ready(Err(anyhow::anyhow!("no upgrade available"))),
@@ -116,10 +118,9 @@ pub struct UpgradeTrigger {
 impl UpgradeTrigger {
   /// Send the upgraded stream to the service.
   pub fn send(self, result: Result<Box<dyn Io>>) -> Result<()> {
-    self
-      .sender
-      .send(result)
-      .map_err(|_| anyhow::anyhow!("service dropped the upgrade receiver"))
+    self.sender.send(result).map_err(|_| {
+      anyhow::anyhow!("service dropped the upgrade receiver")
+    })
   }
 }
 
@@ -149,13 +150,13 @@ impl std::fmt::Debug for H3UpgradeTrigger {
 impl H3UpgradeTrigger {
   /// Create a linked (trigger, on_upgrade) pair.
   pub fn pair(
-    stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    stream: h3::server::RequestStream<
+      h3_quinn::BidiStream<Bytes>,
+      Bytes,
+    >,
   ) -> (Self, OnUpgrade) {
     let (trigger, on_upgrade) = OnUpgrade::pair();
-    (
-      Self { trigger, stream: Some(stream) },
-      on_upgrade,
-    )
+    (Self { trigger, stream: Some(stream) }, on_upgrade)
   }
 
   /// Send H3 success (200 OK) and deliver the stream to the Service.
@@ -166,15 +167,14 @@ impl H3UpgradeTrigger {
     let mut stream =
       self.stream.take().expect("stream already consumed");
 
-    // Send 200 OK response on the H3 stream, preserving upstream headers
-    // (e.g. Proxy-Status per RFC 9209).
+    // Send 200 OK response on the H3 stream, preserving upstream
+    // headers (e.g. Proxy-Status per RFC 9209).
     let mut builder =
       http::Response::builder().status(http::StatusCode::OK);
     if let Some(headers) = resp_headers {
       if let Some(ref mut hdrs) = builder.headers_mut() {
-        hdrs.extend(
-          headers.iter().map(|(k, v)| (k.clone(), v.clone())),
-        );
+        hdrs
+          .extend(headers.iter().map(|(k, v)| (k.clone(), v.clone())));
       }
     }
     let resp = builder.body(()).unwrap();
@@ -220,13 +220,11 @@ impl H3UpgradeTrigger {
 
     // Send error response on the H3 stream, preserving upstream
     // headers (e.g. Proxy-Status per RFC 9209).
-    let mut builder =
-      http::Response::builder().status(status);
+    let mut builder = http::Response::builder().status(status);
     if let Some(headers) = resp_headers {
       if let Some(ref mut hdrs) = builder.headers_mut() {
-        hdrs.extend(
-          headers.iter().map(|(k, v)| (k.clone(), v.clone())),
-        );
+        hdrs
+          .extend(headers.iter().map(|(k, v)| (k.clone(), v.clone())));
       }
     }
     let resp = builder.body(()).unwrap();
@@ -365,7 +363,8 @@ pub fn extract_upgrade(
 // Shared idle timeout wrapper
 // ============================================================================
 
-/// Shared activity tracker for idle timeout across a bidirectional tunnel.
+/// Shared activity tracker for idle timeout across a bidirectional
+/// tunnel.
 ///
 /// Both sides share one tracker. Any successful read or write on either
 /// side resets the idle deadline.
@@ -426,11 +425,7 @@ pin_project_lite::pin_project! {
 impl<S> IdleTimeoutStream<S> {
   fn new(stream: S, tracker: IdleTracker) -> Self {
     let idle_check = tokio::time::sleep_until(tracker.deadline());
-    Self {
-      stream,
-      tracker,
-      idle_check,
-    }
+    Self { stream, tracker, idle_check }
   }
 }
 
@@ -443,9 +438,10 @@ impl<S: AsyncRead> AsyncRead for IdleTimeoutStream<S> {
     let mut this = self.project();
 
     // If our local Sleep has fired, check the shared tracker to see if
-    // it's a real idle timeout or a stale alarm (the other side may have
-    // called touch() which updated last_active_ms but didn't reset our
-    // Sleep).  If stale, reset our Sleep to the new deadline.
+    // it's a real idle timeout or a stale alarm (the other side may
+    // have called touch() which updated last_active_ms but didn't
+    // reset our Sleep).  If stale, reset our Sleep to the new
+    // deadline.
     if this.idle_check.as_mut().poll(cx).is_ready() {
       if this.tracker.is_idle() {
         return Poll::Ready(Err(std::io::Error::new(
@@ -520,8 +516,8 @@ impl<S: AsyncWrite> AsyncWrite for IdleTimeoutStream<S> {
 // ============================================================================
 
 /// Wrapper that injects a side tag (e.g. "client", "upstream") into I/O
-/// errors, so that `copy_bidirectional` error messages indicate which side
-/// failed.
+/// errors, so that `copy_bidirectional` error messages indicate which
+/// side failed.
 struct TaggedIo<S> {
   inner: S,
   tag: &'static str,
@@ -622,7 +618,8 @@ pub async fn run_tunnel<C, T>(
   let target_wrapped = IdleTimeoutStream::new(target, tracker);
 
   let client_tagged = TaggedIo::new(Box::pin(client_wrapped), "client");
-  let target_tagged = TaggedIo::new(Box::pin(target_wrapped), "upstream");
+  let target_tagged =
+    TaggedIo::new(Box::pin(target_wrapped), "upstream");
 
   let mut client_pinned = client_tagged;
   let mut target_pinned = target_tagged;
@@ -660,9 +657,10 @@ pub async fn run_tunnel<C, T>(
 
 #[cfg(test)]
 mod tests {
+  use http_body_util::Empty;
+
   use super::*;
   use crate::http_utils::{BytesBufBodyWrapper, RequestBody};
-  use http_body_util::Empty;
 
   #[tokio::test]
   async fn test_on_upgrade_extracts_from_extensions() {
@@ -725,10 +723,12 @@ mod tests {
 
   #[tokio::test]
   async fn test_upgrade_trigger_send_success() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener =
+      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let client_fut = tokio::net::TcpStream::connect(addr);
-    let (client, server_res) = tokio::join!(client_fut, listener.accept());
+    let (client, server_res) =
+      tokio::join!(client_fut, listener.accept());
     let client = client.unwrap();
     let (server, _) = server_res.unwrap();
 
@@ -744,9 +744,7 @@ mod tests {
   #[tokio::test]
   async fn test_upgrade_trigger_send_error() {
     let (trigger, upgrade) = OnUpgrade::pair();
-    trigger
-      .send(Err(anyhow::anyhow!("test error")))
-      .unwrap();
+    trigger.send(Err(anyhow::anyhow!("test error"))).unwrap();
 
     let result = upgrade.await;
     assert!(result.is_err(), "Upgrade should resolve with Err");
@@ -794,10 +792,7 @@ mod tests {
     tracker.touch();
 
     // At this point, only ~0ms since last activity → not idle
-    assert!(
-      !tracker.is_idle(),
-      "Should not be idle right after touch"
-    );
+    assert!(!tracker.is_idle(), "Should not be idle right after touch");
 
     // After 250ms total (50ms after touch), still within 200ms timeout
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -838,14 +833,16 @@ mod tests {
     );
     assert!(
       elapsed < Duration::from_secs(2),
-      "Should not wait much longer than idle timeout, waited {elapsed:?}"
+      "Should not wait much longer than idle timeout, waited \
+       {elapsed:?}"
     );
   }
 
   #[tokio::test]
   async fn test_run_tunnel_no_timeout_with_active_data() {
     // Stream with continuous data should survive past idle_timeout.
-    // Use a target that keeps sending data, and a client that drains it.
+    // Use a target that keeps sending data, and a client that drains
+    // it.
     let listener =
       tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -890,12 +887,13 @@ mod tests {
     run_tunnel(client, target, shutdown, idle_timeout, "test").await;
     let elapsed = start.elapsed();
 
-    // Tunnel should have survived well past 200ms because data was flowing,
-    // and only ended when the server stopped sending and closed.
+    // Tunnel should have survived well past 200ms because data was
+    // flowing, and only ended when the server stopped sending and
+    // closed.
     assert!(
       elapsed >= Duration::from_millis(500),
-      "Tunnel should survive past idle_timeout while data flows, \
-       only lasted {elapsed:?}"
+      "Tunnel should survive past idle_timeout while data flows, only \
+       lasted {elapsed:?}"
     );
 
     let _ = server_handle.await;
@@ -946,7 +944,8 @@ mod tests {
     let idle_timeout = Duration::from_secs(60);
 
     let tunnel_task = tokio::spawn(async move {
-      run_tunnel(client, server, shutdown_clone, idle_timeout, "test").await;
+      run_tunnel(client, server, shutdown_clone, idle_timeout, "test")
+        .await;
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;

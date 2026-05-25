@@ -1,7 +1,7 @@
-use super::*;
-use super::{Address, QuicConfig};
-use super::utils::resolve_address;
 use std::cell::Cell;
+
+use super::utils::resolve_address;
+use super::{Address, QuicConfig, *};
 
 fn dummy_http3() -> Http3Client {
   super::Http3Client {

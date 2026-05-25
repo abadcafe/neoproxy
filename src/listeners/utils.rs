@@ -9,7 +9,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::context::RequestContext;
-use crate::http_utils::{build_error_response, BytesBufBodyWrapper, Response, ResponseBody};
+use crate::http_utils::{
+  BytesBufBodyWrapper, Response, ResponseBody, build_error_response,
+};
 use crate::server::{Server, ServerRouter};
 
 /// Listener shutdown timeout in seconds.
@@ -35,7 +37,8 @@ where
 /// they MUST contain the same value. Comparison is case-insensitive.
 ///
 /// # Arguments
-/// * `authority_str` - The full authority string (e.g., "example.com:443")
+/// * `authority_str` - The full authority string (e.g.,
+///   "example.com:443")
 /// * `host_header` - The raw Host header value
 ///
 /// # Returns
@@ -125,13 +128,13 @@ pub fn get_server_id(ctx: &RequestContext) -> Option<String> {
   Some(format!("{ip}:{port}"))
 }
 
-
 /// Build a 403 Forbidden response.
 ///
 /// This response is sent when a server requires client certificate
 /// authentication but the client did not present one.
 pub fn build_403_forbidden(msg: &str) -> Response {
-  let body = http_body_util::Full::new(bytes::Bytes::from(msg.to_string()));
+  let body =
+    http_body_util::Full::new(bytes::Bytes::from(msg.to_string()));
   let bytes_buf = BytesBufBodyWrapper::new(body);
   let body = ResponseBody::new(bytes_buf);
   let mut resp = Response::new(body);
@@ -161,7 +164,10 @@ mod tests {
 
   #[test]
   fn test_check_authority_vs_host_match() {
-    assert!(!check_authority_vs_host("api.example.com", "api.example.com"));
+    assert!(!check_authority_vs_host(
+      "api.example.com",
+      "api.example.com"
+    ));
   }
 
   #[test]
@@ -207,7 +213,6 @@ mod tests {
     assert!(!check_authority_vs_host("api.example.com", ""));
   }
 
-
   // ============== validate_and_route Tests ==============
 
   #[test]
@@ -220,7 +225,9 @@ mod tests {
       .unwrap();
     let result = validate_and_route(&req, &router);
     match result {
-      Err(resp) => assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST),
+      Err(resp) => {
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST)
+      }
       Ok(_) => panic!("expected error"),
     }
   }
@@ -236,7 +243,9 @@ mod tests {
       .unwrap();
     let result = validate_and_route(&req, &router);
     match result {
-      Err(resp) => assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST),
+      Err(resp) => {
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST)
+      }
       Ok(_) => panic!("expected error"),
     }
   }
@@ -252,7 +261,9 @@ mod tests {
       .unwrap();
     let result = validate_and_route(&req, &router);
     match result {
-      Err(resp) => assert_eq!(resp.status(), http::StatusCode::NOT_FOUND),
+      Err(resp) => {
+        assert_eq!(resp.status(), http::StatusCode::NOT_FOUND)
+      }
       Ok(_) => panic!("expected error"),
     }
   }

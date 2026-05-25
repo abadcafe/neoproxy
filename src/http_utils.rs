@@ -55,7 +55,8 @@ pub type ResponseBody = UnsyncBoxBody<Bytes, anyhow::Error>;
 pub type Request = http::Request<RequestBody>;
 pub type Response = http::Response<ResponseBody>;
 
-/// Build a Proxy-Status header value with just an identifier (success case).
+/// Build a Proxy-Status header value with just an identifier (success
+/// case).
 #[cfg(test)]
 pub fn build_proxy_status(identifier: &str) -> http::HeaderValue {
   http::HeaderValue::from_str(identifier)
@@ -68,11 +69,13 @@ pub fn build_proxy_status_error(
   error: &str,
 ) -> http::HeaderValue {
   let val = format!("{identifier}; error={error}");
-  http::HeaderValue::from_str(&val)
-    .unwrap_or_else(|_| http::HeaderValue::from_static("neoproxy; error=unknown"))
+  http::HeaderValue::from_str(&val).unwrap_or_else(|_| {
+    http::HeaderValue::from_static("neoproxy; error=unknown")
+  })
 }
 
-/// Build a Proxy-Status header value with received-status only (no error).
+/// Build a Proxy-Status header value with received-status only (no
+/// error).
 pub fn build_proxy_status_with_status(
   identifier: &str,
   status: u16,
@@ -82,13 +85,14 @@ pub fn build_proxy_status_with_status(
     .unwrap_or_else(|_| http::HeaderValue::from_static("neoproxy"))
 }
 
-/// Append a new entry to an existing Proxy-Status Structured Fields List value.
+/// Append a new entry to an existing Proxy-Status Structured Fields
+/// List value.
 ///
-/// Per RFC 9209 Section 2, intermediaries SHOULD preserve existing members of the
-/// Proxy-Status field to allow debugging of the entire chain.  This function
-/// combines the existing value (e.g. from the upstream proxy) with the current
-/// proxy's entry by comma-separating them as required by the Structured Fields
-/// List format.
+/// Per RFC 9209 Section 2, intermediaries SHOULD preserve existing
+/// members of the Proxy-Status field to allow debugging of the entire
+/// chain.  This function combines the existing value (e.g. from the
+/// upstream proxy) with the current proxy's entry by comma-separating
+/// them as required by the Structured Fields List format.
 pub fn append_proxy_status(
   existing: Option<&http::HeaderValue>,
   new_entry: &http::HeaderValue,
@@ -160,8 +164,7 @@ mod tests {
 
   #[test]
   fn test_build_proxy_status_error() {
-    let val =
-      build_proxy_status_error("myproxy", "connection_refused");
+    let val = build_proxy_status_error("myproxy", "connection_refused");
     assert_eq!(
       val.to_str().unwrap(),
       "myproxy; error=connection_refused"
@@ -171,10 +174,7 @@ mod tests {
   #[test]
   fn test_build_proxy_status_with_status() {
     let val = build_proxy_status_with_status("myproxy", 502);
-    assert_eq!(
-      val.to_str().unwrap(),
-      "myproxy; received-status=502"
-    );
+    assert_eq!(val.to_str().unwrap(), "myproxy; received-status=502");
   }
 
   #[test]
@@ -187,10 +187,7 @@ mod tests {
   fn test_build_proxy_status_error_fallback() {
     let val =
       build_proxy_status_error("my\x00proxy", "connection_refused");
-    assert_eq!(
-      val.to_str().unwrap(),
-      "neoproxy; error=unknown"
-    );
+    assert_eq!(val.to_str().unwrap(), "neoproxy; error=unknown");
   }
 
   #[test]
@@ -206,18 +203,14 @@ mod tests {
     let existing = build_proxy_status("upproxy");
     let new_entry = build_proxy_status("myproxy");
     let val = append_proxy_status(Some(&existing), &new_entry);
-    assert_eq!(
-      val.to_str().unwrap(),
-      "upproxy, myproxy"
-    );
+    assert_eq!(val.to_str().unwrap(), "upproxy, myproxy");
   }
 
   #[test]
   fn test_append_proxy_status_with_existing_with_params() {
     let existing =
       build_proxy_status_error("upproxy", "connection_refused");
-    let new_entry =
-      build_proxy_status_with_status("myproxy", 502);
+    let new_entry = build_proxy_status_with_status("myproxy", 502);
     let val = append_proxy_status(Some(&existing), &new_entry);
     assert_eq!(
       val.to_str().unwrap(),

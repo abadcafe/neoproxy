@@ -5,20 +5,34 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
-use crate::config::UserCredential;
 use super::inherit::{resolve_field, resolve_field_with_default};
+use crate::config::UserCredential;
 
 // ============================================================================
 // Defaults
 // ============================================================================
 
-fn default_weight() -> usize { 1 }
-fn default_connect_timeout() -> Duration { Duration::from_secs(10) }
-fn default_tunnel_idle_timeout() -> Duration { Duration::from_secs(60) }
-fn default_tls_handshake_timeout() -> Duration { Duration::from_secs(10) }
-fn default_keep_alive_interval() -> Duration { Duration::from_secs(3) }
-fn default_max_idle_per_host() -> usize { 32 }
-fn default_idle_timeout() -> Duration { Duration::from_secs(90) }
+fn default_weight() -> usize {
+  1
+}
+fn default_connect_timeout() -> Duration {
+  Duration::from_secs(10)
+}
+fn default_tunnel_idle_timeout() -> Duration {
+  Duration::from_secs(60)
+}
+fn default_tls_handshake_timeout() -> Duration {
+  Duration::from_secs(10)
+}
+fn default_keep_alive_interval() -> Duration {
+  Duration::from_secs(3)
+}
+fn default_max_idle_per_host() -> usize {
+  32
+}
+fn default_idle_timeout() -> Duration {
+  Duration::from_secs(90)
+}
 
 // ============================================================================
 // Credential Types
@@ -35,8 +49,8 @@ pub(crate) struct ClientCertCredential {
 // Serde Config Structs (all deny_unknown_fields)
 // ============================================================================
 
-/// Global TLS client identity configuration. Shared across all upstreams.
-/// Does NOT participate in three-level inheritance.
+/// Global TLS client identity configuration. Shared across all
+/// upstreams. Does NOT participate in three-level inheritance.
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CertificateConfig {
@@ -69,7 +83,10 @@ impl CertificateConfig {
 pub(crate) struct QuicConfig {
   #[serde(with = "humantime_serde", default)]
   pub(crate) max_idle_timeout: Option<Duration>,
-  #[serde(with = "humantime_serde", default = "default_keep_alive_interval")]
+  #[serde(
+    with = "humantime_serde",
+    default = "default_keep_alive_interval"
+  )]
   pub(crate) keep_alive_interval: Duration,
   #[serde(default)]
   pub(crate) max_concurrent_bidi_streams: Option<u64>,
@@ -81,7 +98,8 @@ pub(crate) struct QuicConfig {
   pub(crate) receive_window: Option<u64>,
 }
 
-/// HTTP protocol configuration. Participates in three-level inheritance.
+/// HTTP protocol configuration. Participates in three-level
+/// inheritance.
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HttpProtocolConfig {
@@ -89,7 +107,8 @@ pub(crate) struct HttpProtocolConfig {
   pub(crate) connect_timeout: Option<Duration>,
 }
 
-/// HTTPS protocol configuration. Participates in three-level inheritance.
+/// HTTPS protocol configuration. Participates in three-level
+/// inheritance.
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HttpsProtocolConfig {
@@ -99,8 +118,9 @@ pub(crate) struct HttpsProtocolConfig {
   pub(crate) tls_handshake_timeout: Option<Duration>,
 }
 
-/// HTTP/3 protocol configuration. Participates in three-level inheritance.
-/// No `connect_timeout` — QUIC connection timeout governed by quinn transport config.
+/// HTTP/3 protocol configuration. Participates in three-level
+/// inheritance. No `connect_timeout` — QUIC connection timeout governed
+/// by quinn transport config.
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Http3ProtocolConfig {
@@ -110,7 +130,8 @@ pub(crate) struct Http3ProtocolConfig {
   pub(crate) quic: Option<QuicConfig>,
 }
 
-/// Connection pool configuration. At upstream level only, NOT inherited.
+/// Connection pool configuration. At upstream level only, NOT
+/// inherited.
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PoolConfig {
@@ -129,7 +150,8 @@ impl Default for PoolConfig {
   }
 }
 
-/// Upstream address configuration. Exactly one protocol block must be set.
+/// Upstream address configuration. Exactly one protocol block must be
+/// set.
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpstreamAddressConfig {
@@ -152,13 +174,15 @@ pub(crate) struct UpstreamAddressConfig {
 
 impl UpstreamAddressConfig {
   pub(crate) fn protocol(&self) -> Result<ProtocolKind> {
-    let count = [self.http.is_some(), self.https.is_some(), self.http3.is_some()]
-      .iter()
-      .filter(|&&x| x)
-      .count();
+    let count =
+      [self.http.is_some(), self.https.is_some(), self.http3.is_some()]
+        .iter()
+        .filter(|&&x| x)
+        .count();
     match count {
       0 => bail!(
-        "address '{}' must specify exactly one protocol block (http, https, or http3)",
+        "address '{}' must specify exactly one protocol block (http, \
+         https, or http3)",
         self.address
       ),
       1 => {
@@ -172,7 +196,8 @@ impl UpstreamAddressConfig {
       }
       _ => bail!(
         "address '{}' must have exactly one protocol block, found {}",
-        self.address, count
+        self.address,
+        count
       ),
     }
   }
@@ -226,8 +251,9 @@ pub(crate) struct HttpUpstreamPluginConfig {
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpstreamServiceArgs {
-  /// Upstream name (required). References an upstream in the plugin config.
-  /// An upstream with no addresses = direct mode; with addresses = chain mode.
+  /// Upstream name (required). References an upstream in the plugin
+  /// config. An upstream with no addresses = direct mode; with
+  /// addresses = chain mode.
   pub(crate) upstream: String,
 }
 
@@ -257,17 +283,9 @@ pub(crate) struct QuicResolved {
 /// Resolved protocol with all fields filled.
 #[derive(Clone, Debug)]
 pub(crate) enum Protocol {
-  Http {
-    connect_timeout: Duration,
-  },
-  Https {
-    connect_timeout: Duration,
-    tls_handshake_timeout: Duration,
-  },
-  Http3 {
-    tls_handshake_timeout: Duration,
-    quic: QuicResolved,
-  },
+  Http { connect_timeout: Duration },
+  Https { connect_timeout: Duration, tls_handshake_timeout: Duration },
+  Http3 { tls_handshake_timeout: Duration, quic: QuicResolved },
 }
 
 /// Resolved address after three-level inheritance.
@@ -361,7 +379,8 @@ pub(crate) fn merge_chain_config(
         plugin.user.as_ref(),
       );
 
-      // Protocol-specific fields: protocol block three-level inheritance
+      // Protocol-specific fields: protocol block three-level
+      // inheritance
       let resolved_protocol = match proto {
         ProtocolKind::Http => {
           let a = addr.http.as_ref();
@@ -445,12 +464,15 @@ pub(crate) fn merge_chain_config(
       default_tunnel_idle_timeout(),
     );
 
-    upstreams.insert(upstream.name.clone(), Upstream {
-      addresses,
-      pool_config,
-      connect_timeout,
-      tunnel_idle_timeout,
-    });
+    upstreams.insert(
+      upstream.name.clone(),
+      Upstream {
+        addresses,
+        pool_config,
+        connect_timeout,
+        tunnel_idle_timeout,
+      },
+    );
   }
 
   Ok(upstreams)
@@ -469,7 +491,8 @@ fn resolve_user(
 // Validation & Helpers
 // ============================================================================
 
-/// Validate that an address string has host:port format without DNS resolution.
+/// Validate that an address string has host:port format without DNS
+/// resolution.
 pub(crate) fn validate_address_format(s: &str) -> Result<()> {
   let colon_pos = s
     .rfind(':')
@@ -512,17 +535,16 @@ mod tests {
 
   #[test]
   fn test_address_protocol_detection() {
-    let addr: UpstreamAddressConfig = serde_yaml::from_str(
-      "address: example.com:443\nhttp3: {}",
-    ).unwrap();
+    let addr: UpstreamAddressConfig =
+      serde_yaml::from_str("address: example.com:443\nhttp3: {}")
+        .unwrap();
     assert_eq!(addr.protocol().unwrap(), ProtocolKind::Http3);
   }
 
   #[test]
   fn test_address_no_protocol_is_error() {
-    let addr: UpstreamAddressConfig = serde_yaml::from_str(
-      "address: example.com:443",
-    ).unwrap();
+    let addr: UpstreamAddressConfig =
+      serde_yaml::from_str("address: example.com:443").unwrap();
     assert!(addr.protocol().is_err());
   }
 
@@ -530,7 +552,8 @@ mod tests {
   fn test_address_multiple_protocols_is_error() {
     let addr: UpstreamAddressConfig = serde_yaml::from_str(
       "address: example.com:443\nhttp: {}\nhttps: {}",
-    ).unwrap();
+    )
+    .unwrap();
     assert!(addr.protocol().is_err());
   }
 
@@ -545,13 +568,20 @@ mod tests {
               tunnel_idle_timeout: 120s
               http3: {}
       "#,
-    ).unwrap();
+    )
+    .unwrap();
     let resolved = merge_chain_config(&config).unwrap();
     let upstream = resolved.get("test").unwrap();
     assert_eq!(upstream.addresses.len(), 1);
     assert_eq!(upstream.addresses[0].address, "proxy.example.com:443");
-    assert!(matches!(upstream.addresses[0].protocol, Protocol::Http3 { .. }));
-    assert_eq!(upstream.addresses[0].tunnel_idle_timeout, Duration::from_secs(120));
+    assert!(matches!(
+      upstream.addresses[0].protocol,
+      Protocol::Http3 { .. }
+    ));
+    assert_eq!(
+      upstream.addresses[0].tunnel_idle_timeout,
+      Duration::from_secs(120)
+    );
   }
 
   #[test]
@@ -567,7 +597,8 @@ mod tests {
             - address: proxy.example.com:8080
               http: {}
       "#,
-    ).unwrap();
+    )
+    .unwrap();
     let resolved = merge_chain_config(&config).unwrap();
     let upstream = resolved.get("test").unwrap();
     assert_eq!(upstream.pool_config.max_idle_per_host, 16);
@@ -591,7 +622,8 @@ mod tests {
             - address: proxy2.example.com:8080
               http: {}
       "#,
-    ).unwrap();
+    )
+    .unwrap();
     let resolved = merge_chain_config(&config).unwrap();
     let upstream = resolved.get("test").unwrap();
 
@@ -602,16 +634,23 @@ mod tests {
       }
       _ => panic!("expected Http protocol"),
     }
-    assert_eq!(upstream.addresses[0].tunnel_idle_timeout, Duration::from_secs(90));
+    assert_eq!(
+      upstream.addresses[0].tunnel_idle_timeout,
+      Duration::from_secs(90)
+    );
 
-    // Falls back to upstream-level connect_timeout, plugin-level tunnel_idle_timeout
+    // Falls back to upstream-level connect_timeout, plugin-level
+    // tunnel_idle_timeout
     match &upstream.addresses[1].protocol {
       Protocol::Http { connect_timeout, .. } => {
         assert_eq!(*connect_timeout, Duration::from_secs(3));
       }
       _ => panic!("expected Http protocol"),
     }
-    assert_eq!(upstream.addresses[1].tunnel_idle_timeout, Duration::from_secs(90));
+    assert_eq!(
+      upstream.addresses[1].tunnel_idle_timeout,
+      Duration::from_secs(90)
+    );
   }
 
   #[test]
@@ -622,9 +661,8 @@ mod tests {
 
   #[test]
   fn test_upstream_service_args_with_upstream() {
-    let args: UpstreamServiceArgs = serde_yaml::from_str(
-      "upstream: test_upstream",
-    ).unwrap();
+    let args: UpstreamServiceArgs =
+      serde_yaml::from_str("upstream: test_upstream").unwrap();
     assert_eq!(args.upstream, "test_upstream");
   }
 
@@ -633,7 +671,10 @@ mod tests {
     let result = serde_yaml::from_str::<UpstreamServiceArgs>(
       "upstream: test\nconnect_timeout: 5s",
     );
-    assert!(result.is_err(), "connect_timeout should be rejected in service args");
+    assert!(
+      result.is_err(),
+      "connect_timeout should be rejected in service args"
+    );
   }
 
   #[test]
@@ -646,7 +687,8 @@ mod tests {
             connect_timeout: 3s
           tunnel_idle_timeout: 45s
       "#,
-    ).unwrap();
+    )
+    .unwrap();
     let resolved = merge_chain_config(&config).unwrap();
     let upstream = resolved.get("direct").unwrap();
     assert!(upstream.addresses.is_empty());
@@ -663,7 +705,8 @@ mod tests {
       upstreams:
         - name: direct
       "#,
-    ).unwrap();
+    )
+    .unwrap();
     let resolved = merge_chain_config(&config).unwrap();
     let upstream = resolved.get("direct").unwrap();
     assert!(upstream.addresses.is_empty());

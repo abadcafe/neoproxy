@@ -7,12 +7,11 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
+#[cfg(feature = "tls-openssl")]
+use rustls_openssl;
 use tokio::signal::unix as signal;
 use tokio::{runtime, sync, task};
 use tracing::{debug, error, info, warn};
-
-#[cfg(feature = "tls-openssl")]
-use rustls_openssl;
 
 use crate::config::{
   CmdOpt, Config, ConfigErrorCollector, validate_config,
@@ -368,14 +367,15 @@ fn install_tls_provider(config: &Config) {
     "openssl" => {
       #[cfg(feature = "tls-openssl")]
       {
-        rustls_openssl::default_provider()
-          .install_default()
-          .expect("Failed to install rustls-openssl rustls crypto provider");
+        rustls_openssl::default_provider().install_default().expect(
+          "Failed to install rustls-openssl rustls crypto provider",
+        );
         return;
       }
       #[cfg(not(feature = "tls-openssl"))]
       panic!(
-        "tls_provider 'openssl' requires the 'tls-openssl' cargo feature"
+        "tls_provider 'openssl' requires the 'tls-openssl' cargo \
+         feature"
       );
     }
     "ring" => {

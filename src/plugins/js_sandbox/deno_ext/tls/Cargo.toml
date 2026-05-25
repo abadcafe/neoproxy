@@ -1,0 +1,22 @@
+[package]
+name = "deno_tls"
+version = "0.235.0"
+edition = "2024"
+description = "TLS for Deno (forked for neoproxy js_sandbox)"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+deno_core.workspace = true
+deno_error.workspace = true
+deno_native_certs = "0.3"
+log = "0.4"
+rustls.workspace = true
+rustls-pemfile.workspace = true
+rustls-tokio-stream = "0.7"
+rustls-webpki.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+webpki-roots.workspace = true

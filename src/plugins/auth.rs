@@ -73,9 +73,7 @@ impl AuthPlugin {
         }
 
         let config: AuthConfig = serde_yaml::from_value(args)?;
-        let auth = UserPasswordAuth::from_users(
-          &config.users,
-        );
+        let auth = UserPasswordAuth::from_users(&config.users);
         Ok(Layer::new(AuthLayer { auth }))
       });
 
@@ -96,7 +94,9 @@ pub fn plugin_name() -> &'static str {
   "auth"
 }
 
-pub fn create_plugin(_config: Option<&SerializedArgs>) -> Box<dyn Plugin> {
+pub fn create_plugin(
+  _config: Option<&SerializedArgs>,
+) -> Box<dyn Plugin> {
   Box::new(AuthPlugin::new())
 }
 
@@ -146,10 +146,8 @@ impl tower::Service<Request> for AuthMiddleware {
       && self.auth.verify_credentials(&username, &password).is_ok()
     {
       ctx.insert("basic_auth.user", username);
-      ctx.insert(
-        "basic_auth.auth_type",
-        AuthType::Password.to_string(),
-      );
+      ctx
+        .insert("basic_auth.auth_type", AuthType::Password.to_string());
 
       let mut inner = self.inner.clone();
       return Box::pin(async move { inner.call(req).await });
@@ -477,10 +475,7 @@ mod middleware_tests {
       let _ = svc.call(req).await;
 
       // Check that auth info was written to the context
-      assert_eq!(
-        ctx.get("basic_auth.user"),
-        Some("admin".to_string())
-      );
+      assert_eq!(ctx.get("basic_auth.user"), Some("admin".to_string()));
       assert_eq!(
         ctx.get("basic_auth.auth_type"),
         Some("password".to_string())

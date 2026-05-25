@@ -1,0 +1,20 @@
+[package]
+name = "deno_ext_web"
+version = "0.279.0"
+edition = "2024"
+description = "Collection of Web APIs (forked for neoproxy js_sandbox)"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+deno_core.workspace = true
+deno_error.workspace = true
+encoding_rs.workspace = true
+futures.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid = { workspace = true, features = ["serde"] }

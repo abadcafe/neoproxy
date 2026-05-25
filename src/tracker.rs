@@ -222,7 +222,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_register_connection_handle_not_finished_while_running() {
+  async fn test_register_connection_handle_not_finished_while_running()
+  {
     let local_set = tokio::task::LocalSet::new();
     local_set
       .run_until(async {
@@ -233,7 +234,8 @@ mod tests {
         // Should NOT be finished yet
         assert!(
           !handle.is_finished(),
-          "AbortHandle should NOT report is_finished while task is running"
+          "AbortHandle should NOT report is_finished while task is \
+           running"
         );
         // Wait for completion
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -244,5 +246,4 @@ mod tests {
       })
       .await;
   }
-
 }

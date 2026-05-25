@@ -1,8 +1,8 @@
 use std::time::Instant;
 
+use super::layer::build_log_entry;
 use crate::context::RequestContext;
 use crate::http_utils::Response;
-use super::layer::build_log_entry;
 
 fn make_ok_result() -> anyhow::Result<Response> {
   Ok(crate::http_utils::build_empty_response(http::StatusCode::OK))
@@ -196,14 +196,15 @@ fn test_build_log_entry_preserves_full_key_no_stripping() {
     &make_ok_result(),
     Instant::now(),
     ctx,
-    vec![
-      "auth.user".to_string(),
-      "audit.user".to_string(),
-    ],
+    vec!["auth.user".to_string(), "audit.user".to_string()],
     "GET",
     "/",
   );
-  assert_eq!(entry.extensions.len(), 2, "Both extension entries must be preserved");
+  assert_eq!(
+    entry.extensions.len(),
+    2,
+    "Both extension entries must be preserved"
+  );
   assert_eq!(
     entry.extensions.get("auth.user"),
     Some(&"admin".to_string()),

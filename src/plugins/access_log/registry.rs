@@ -1,8 +1,7 @@
 //! Writer registry: manages named writer threads.
 
 use std::collections::HashMap;
-use std::sync::mpsc;
-use std::sync::Mutex;
+use std::sync::{Mutex, mpsc};
 
 use tracing::warn;
 
@@ -15,12 +14,12 @@ const QUEUE_SIZE: usize = 4096;
 
 /// Timeout for joining writer threads during reinit or test cleanup.
 ///
-/// Shorter than `super::WRITER_JOIN_TIMEOUT` because during reinit the old
-/// writer threads should exit quickly (all Senders from the registry are
-/// dropped). The shorter timeout prevents unnecessary delays during
-/// configuration changes. If a thread doesn't exit within this time, it
-/// is detached and will be joined during process shutdown (using
-/// `super::WRITER_JOIN_TIMEOUT`).
+/// Shorter than `super::WRITER_JOIN_TIMEOUT` because during reinit the
+/// old writer threads should exit quickly (all Senders from the
+/// registry are dropped). The shorter timeout prevents unnecessary
+/// delays during configuration changes. If a thread doesn't exit within
+/// this time, it is detached and will be joined during process shutdown
+/// (using `super::WRITER_JOIN_TIMEOUT`).
 const WRITER_REINIT_JOIN_TIMEOUT: std::time::Duration =
   std::time::Duration::from_secs(2);
 
@@ -36,8 +35,9 @@ pub struct LogEntry {
 /// to clear the registry and re-initialize with different configs.
 /// In production, the registry is set once during plugin init and
 /// never reset.
-pub(crate) static WRITER_REGISTRY: Mutex<Option<HashMap<String, WriterHandle>>> =
-  Mutex::new(None);
+pub(crate) static WRITER_REGISTRY: Mutex<
+  Option<HashMap<String, WriterHandle>>,
+> = Mutex::new(None);
 
 /// Handle to a named writer thread.
 pub struct WriterHandle {
@@ -72,7 +72,9 @@ impl WriterHandle {
 /// critical sections (idempotency check and registry swap). Directory
 /// creation, thread spawning, and joining old writer threads are done
 /// outside the lock to avoid blocking `get_writer()` callers.
-pub fn init_writer_registry(config: &AccessLogPluginConfig) -> anyhow::Result<()> {
+pub fn init_writer_registry(
+  config: &AccessLogPluginConfig,
+) -> anyhow::Result<()> {
   // Phase 1: Under the lock, check idempotency and take old registry.
   // This is the minimal critical section - only quick operations.
   let old_registry = {
@@ -109,9 +111,12 @@ pub fn init_writer_registry(config: &AccessLogPluginConfig) -> anyhow::Result<()
   // writer threads.
   let mut seen_prefixes = HashMap::new();
   for (i, writer_config) in config.writers.iter().enumerate() {
-    if let Some(&prev_idx) = seen_prefixes.get(&writer_config.path_prefix) {
+    if let Some(&prev_idx) =
+      seen_prefixes.get(&writer_config.path_prefix)
+    {
       return Err(anyhow::anyhow!(
-        "duplicate writer path_prefix: '{}' (defined at index {} and {})",
+        "duplicate writer path_prefix: '{}' (defined at index {} and \
+         {})",
         writer_config.path_prefix,
         prev_idx,
         i
@@ -130,8 +135,10 @@ pub fn init_writer_registry(config: &AccessLogPluginConfig) -> anyhow::Result<()
       if !parent.as_os_str().is_empty() {
         std::fs::create_dir_all(parent).map_err(|e| {
           anyhow::anyhow!(
-            "access_log: failed to create directory for writer '{}': {}",
-            writer_config.path_prefix, e
+            "access_log: failed to create directory for writer '{}': \
+             {}",
+            writer_config.path_prefix,
+            e
           )
         })?;
       }
@@ -145,8 +152,10 @@ pub fn init_writer_registry(config: &AccessLogPluginConfig) -> anyhow::Result<()
   // an error.
   let mut new_registry = HashMap::new();
   for writer_config in &config.writers {
-    let (tx, rx): (mpsc::SyncSender<LogEntry>, mpsc::Receiver<LogEntry>) =
-      mpsc::sync_channel(QUEUE_SIZE);
+    let (tx, rx): (
+      mpsc::SyncSender<LogEntry>,
+      mpsc::Receiver<LogEntry>,
+    ) = mpsc::sync_channel(QUEUE_SIZE);
 
     // Clone path_prefix BEFORE moving config into the thread closure
     // to avoid use-after-move
@@ -174,7 +183,10 @@ pub fn init_writer_registry(config: &AccessLogPluginConfig) -> anyhow::Result<()
 
     match join_handle {
       Ok(jh) => {
-        new_registry.insert(path_prefix, WriterHandle { tx, join_handle: Some(jh) });
+        new_registry.insert(
+          path_prefix,
+          WriterHandle { tx, join_handle: Some(jh) },
+        );
       }
       Err(e) => {
         // Thread spawn failed. Roll back: join already-spawned threads
@@ -183,7 +195,8 @@ pub fn init_writer_registry(config: &AccessLogPluginConfig) -> anyhow::Result<()
         join_writer_handles(new_registry, "partial init rollback");
         return Err(anyhow::anyhow!(
           "access_log: failed to spawn writer thread for '{}': {}",
-          path_prefix, e
+          path_prefix,
+          e
         ));
       }
     }
@@ -201,9 +214,9 @@ pub fn init_writer_registry(config: &AccessLogPluginConfig) -> anyhow::Result<()
     if guard.is_some() {
       // Another thread beat us; shut down our newly spawned threads.
       // Drop the lock before joining to avoid blocking get_writer()
-      // callers (CR-010). Use join_writer_handles which has a per-thread
-      // timeout to prevent indefinite blocking if a writer thread hangs
-      // (CR-012).
+      // callers (CR-010). Use join_writer_handles which has a
+      // per-thread timeout to prevent indefinite blocking if a
+      // writer thread hangs (CR-012).
       drop(guard);
       join_writer_handles(new_registry, "concurrent init cleanup");
       return Ok(());
@@ -226,7 +239,8 @@ pub(crate) fn join_writer_handles(
   context: &str,
 ) {
   // Extract JoinHandles and drop Senders
-  let mut join_handles: Vec<(String, std::thread::JoinHandle<()>)> = vec![];
+  let mut join_handles: Vec<(String, std::thread::JoinHandle<()>)> =
+    vec![];
   for (path_prefix, mut handle) in registry {
     if let Some(jh) = handle.join_handle.take() {
       join_handles.push((path_prefix, jh));
@@ -236,13 +250,19 @@ pub(crate) fn join_writer_handles(
 
   // Join old writer threads (with a short timeout since they should
   // exit quickly once all Senders are dropped)
-  join_writer_threads(join_handles, WRITER_REINIT_JOIN_TIMEOUT, context);
+  join_writer_threads(
+    join_handles,
+    WRITER_REINIT_JOIN_TIMEOUT,
+    context,
+  );
 }
 
 /// Look up a writer by path_prefix.
 ///
 /// Returns an error if the writer is not found in the registry.
-pub fn get_writer(path_prefix: &str) -> anyhow::Result<mpsc::SyncSender<LogEntry>> {
+pub fn get_writer(
+  path_prefix: &str,
+) -> anyhow::Result<mpsc::SyncSender<LogEntry>> {
   let guard = WRITER_REGISTRY.lock().unwrap();
   let registry = guard.as_ref().ok_or_else(|| {
     anyhow::anyhow!("access_log writer registry not initialized")
@@ -302,8 +322,8 @@ pub(crate) fn join_writer_threads(
       }
       Err(_) => {
         warn!(
-          "access_log: writer thread '{}' did not exit within \
-           {:?} during {}, detaching",
+          "access_log: writer thread '{}' did not exit within {:?} \
+           during {}, detaching",
           path_prefix, timeout, context
         );
       }

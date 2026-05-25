@@ -32,8 +32,10 @@ fn matches_hostname(pattern: &str, hostname: &str) -> bool {
 
   // Wildcard match
   if let Some(suffix) = pattern_lower.strip_prefix("*.") {
-    // hostname must end with .suffix and have exactly one additional level
-    if let Some(rest) = hostname_lower.strip_suffix(&format!(".{}", suffix))
+    // hostname must end with .suffix and have exactly one additional
+    // level
+    if let Some(rest) =
+      hostname_lower.strip_suffix(&format!(".{}", suffix))
     {
       // rest should not contain any dots (single level)
       return !rest.contains('.');
@@ -77,16 +79,13 @@ impl Server {
     self.service_name.clone()
   }
 
-  /// Check whether this server requires client certificate authentication.
+  /// Check whether this server requires client certificate
+  /// authentication.
   ///
-  /// Returns true if the server has TLS config with client CA certificates
-  /// configured, meaning mTLS is required.
+  /// Returns true if the server has TLS config with client CA
+  /// certificates configured, meaning mTLS is required.
   pub fn requires_client_cert(&self) -> bool {
-    self
-      .tls
-      .as_ref()
-      .and_then(|t| t.client_ca_certs.as_ref())
-      .is_some()
+    self.tls.as_ref().and_then(|t| t.client_ca_certs.as_ref()).is_some()
   }
 }
 

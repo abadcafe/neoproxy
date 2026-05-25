@@ -1,0 +1,11 @@
+[package]
+name = "deno_ext_webidl"
+version = "0.248.0"
+edition = "2024"
+description = "WebIDL implementation for Deno (forked for neoproxy js_sandbox)"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+deno_core.workspace = true

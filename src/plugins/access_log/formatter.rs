@@ -102,10 +102,14 @@ fn format_json(entry: &AccessLogEntry) -> Vec<u8> {
     for (key, value) in sorted_exts {
       ext_obj.insert(key.clone(), json!(value));
     }
-    obj.insert("extensions".to_string(), serde_json::Value::Object(ext_obj));
+    obj.insert(
+      "extensions".to_string(),
+      serde_json::Value::Object(ext_obj),
+    );
   }
 
-  let mut bytes = serde_json::to_string(&obj).unwrap_or_default().into_bytes();
+  let mut bytes =
+    serde_json::to_string(&obj).unwrap_or_default().into_bytes();
   bytes.push(b'\n');
   bytes
 }
@@ -210,7 +214,8 @@ mod tests {
     );
     let text = String::from_utf8(output).unwrap();
     assert!(text.ends_with('\n'));
-    let parsed: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+    let parsed: serde_json::Value =
+      serde_json::from_str(text.trim()).unwrap();
     assert_eq!(parsed["status"], 200);
     assert_eq!(parsed["method"], "GET");
     assert_eq!(parsed["target"], "http://example.com/");
@@ -225,7 +230,8 @@ mod tests {
       LogFormat::Json,
     );
     let text = String::from_utf8(output).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+    let parsed: serde_json::Value =
+      serde_json::from_str(text.trim()).unwrap();
     // CR-001 fix: extensions are nested under "extensions" key
     assert_eq!(parsed["extensions"]["user"], "admin");
   }
@@ -290,47 +296,73 @@ mod tests {
       LogFormat::Json,
     );
     let text = String::from_utf8(output).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+    let parsed: serde_json::Value =
+      serde_json::from_str(text.trim()).unwrap();
     assert_eq!(parsed["status"], 500);
     assert_eq!(parsed["error"], "connection refused");
   }
 
   #[test]
   fn test_format_json_extensions_under_dedicated_key() {
-    // CR-001: Extension keys must be placed under a dedicated "extensions"
-    // object in JSON format, not inserted at the top level alongside
-    // built-in keys. This prevents extension keys from silently
-    // overwriting built-in keys (e.g., a context field producing a key
-    // that matches "status" would overwrite the HTTP status code).
+    // CR-001: Extension keys must be placed under a dedicated
+    // "extensions" object in JSON format, not inserted at the top
+    // level alongside built-in keys. This prevents extension keys
+    // from silently overwriting built-in keys (e.g., a context
+    // field producing a key that matches "status" would overwrite
+    // the HTTP status code).
     let mut entry = make_entry();
     entry.extensions.insert("user".to_string(), "admin".to_string());
-    entry.extensions.insert("role".to_string(), "superuser".to_string());
+    entry
+      .extensions
+      .insert("role".to_string(), "superuser".to_string());
     let output = crate::plugins::access_log::formatter::format_entry(
       &entry,
       LogFormat::Json,
     );
     let text = String::from_utf8(output).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+    let parsed: serde_json::Value =
+      serde_json::from_str(text.trim()).unwrap();
 
     // Built-in keys must remain at the top level
-    assert_eq!(parsed["status"], 200, "Built-in 'status' must not be overwritten");
-    assert_eq!(parsed["method"], "GET", "Built-in 'method' must not be overwritten");
+    assert_eq!(
+      parsed["status"], 200,
+      "Built-in 'status' must not be overwritten"
+    );
+    assert_eq!(
+      parsed["method"], "GET",
+      "Built-in 'method' must not be overwritten"
+    );
 
     // Extensions must be under the "extensions" key
-    let ext = parsed.get("extensions").expect("JSON should have 'extensions' key");
-    assert_eq!(ext["user"], "admin", "Extension 'user' should be under 'extensions'");
-    assert_eq!(ext["role"], "superuser", "Extension 'role' should be under 'extensions'");
+    let ext = parsed
+      .get("extensions")
+      .expect("JSON should have 'extensions' key");
+    assert_eq!(
+      ext["user"], "admin",
+      "Extension 'user' should be under 'extensions'"
+    );
+    assert_eq!(
+      ext["role"], "superuser",
+      "Extension 'role' should be under 'extensions'"
+    );
 
     // Extension keys must NOT be at the top level
-    assert!(parsed.get("user").is_none(), "Extension 'user' must not be at top level");
-    assert!(parsed.get("role").is_none(), "Extension 'role' must not be at top level");
+    assert!(
+      parsed.get("user").is_none(),
+      "Extension 'user' must not be at top level"
+    );
+    assert!(
+      parsed.get("role").is_none(),
+      "Extension 'role' must not be at top level"
+    );
   }
 
   #[test]
   fn test_format_json_extension_key_collides_with_builtin() {
-    // CR-001: Even if an extension key matches a built-in key name (e.g.,
-    // "status"), it must not overwrite the built-in value. The extension
-    // goes under "extensions" while the built-in stays at the top level.
+    // CR-001: Even if an extension key matches a built-in key name
+    // (e.g., "status"), it must not overwrite the built-in value.
+    // The extension goes under "extensions" while the built-in
+    // stays at the top level.
     let mut entry = make_entry();
     entry.extensions.insert("status".to_string(), "ok".to_string());
     let output = crate::plugins::access_log::formatter::format_entry(
@@ -338,14 +370,23 @@ mod tests {
       LogFormat::Json,
     );
     let text = String::from_utf8(output).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+    let parsed: serde_json::Value =
+      serde_json::from_str(text.trim()).unwrap();
 
     // Built-in "status" must remain the HTTP status code (200)
-    assert_eq!(parsed["status"], 200, "Built-in 'status' must not be overwritten by extension");
+    assert_eq!(
+      parsed["status"], 200,
+      "Built-in 'status' must not be overwritten by extension"
+    );
 
     // Extension "status" must be under "extensions"
-    let ext = parsed.get("extensions").expect("JSON should have 'extensions' key");
-    assert_eq!(ext["status"], "ok", "Extension 'status' should be under 'extensions'");
+    let ext = parsed
+      .get("extensions")
+      .expect("JSON should have 'extensions' key");
+    assert_eq!(
+      ext["status"], "ok",
+      "Extension 'status' should be under 'extensions'"
+    );
   }
 
   #[test]
@@ -358,8 +399,12 @@ mod tests {
       LogFormat::Json,
     );
     let text = String::from_utf8(output).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
-    assert!(parsed.get("extensions").is_none(), "No 'extensions' key when no extensions");
+    let parsed: serde_json::Value =
+      serde_json::from_str(text.trim()).unwrap();
+    assert!(
+      parsed.get("extensions").is_none(),
+      "No 'extensions' key when no extensions"
+    );
   }
 
   #[test]
@@ -374,6 +419,9 @@ mod tests {
       LogFormat::Text,
     );
     let text = String::from_utf8(output).unwrap();
-    assert!(text.contains("user=admin"), "Text format should have extension at top level");
+    assert!(
+      text.contains("user=admin"),
+      "Text format should have extension at top level"
+    );
   }
 }

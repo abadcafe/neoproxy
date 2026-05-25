@@ -3,11 +3,11 @@ use std::collections::HashMap;
 
 use crate::listener::{BuildListener, ListenerProps};
 
-pub mod utils;
 pub mod http;
 pub mod http3;
 pub mod https;
 pub mod socks5;
+pub mod utils;
 
 /// Registry for listener builders and their properties.
 ///

@@ -57,7 +57,10 @@ pub struct AccessLogWriterConfig {
   #[serde(default = "default_max_buffer_size")]
   pub max_buffer_size: Byte,
   /// Max time between flushes.
-  #[serde(with = "humantime_serde", default = "default_flush_interval")]
+  #[serde(
+    with = "humantime_serde",
+    default = "default_flush_interval"
+  )]
   pub flush_interval: Duration,
   /// Max file size before rotation.
   #[serde(default = "default_max_file_size")]
@@ -84,7 +87,8 @@ impl Default for AccessLogWriterConfig {
   }
 }
 
-/// Access log plugin-level configuration (the `plugins.access_log` section).
+/// Access log plugin-level configuration (the `plugins.access_log`
+/// section).
 #[derive(Deserialize, Serialize, Clone, Debug, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct AccessLogPluginConfig {
@@ -112,7 +116,8 @@ mod tests {
     let yaml = r#"
 path_prefix: "logs/audit"
 "#;
-    let config: AccessLogWriterConfig = serde_yaml::from_str(yaml).unwrap();
+    let config: AccessLogWriterConfig =
+      serde_yaml::from_str(yaml).unwrap();
     assert_eq!(config.path_prefix, "logs/audit");
     assert_eq!(config.buffer_capacity, Byte::from_u64(32 * 1024));
     assert_eq!(config.max_buffer_size, Byte::from_u64(128 * 1024));
@@ -133,7 +138,8 @@ max_file_size: "500MiB"
 rotate_daily: false
 format: "json"
 "#;
-    let config: AccessLogWriterConfig = serde_yaml::from_str(yaml).unwrap();
+    let config: AccessLogWriterConfig =
+      serde_yaml::from_str(yaml).unwrap();
     assert_eq!(config.path_prefix, "logs/audit");
     assert_eq!(config.buffer_capacity, Byte::from_u64(64 * 1024));
     assert_eq!(config.max_buffer_size, Byte::from_u64(256 * 1024));
@@ -151,7 +157,8 @@ writers:
   - path_prefix: "logs/audit"
     format: "json"
 "#;
-    let config: AccessLogPluginConfig = serde_yaml::from_str(yaml).unwrap();
+    let config: AccessLogPluginConfig =
+      serde_yaml::from_str(yaml).unwrap();
     assert_eq!(config.writers.len(), 2);
     assert_eq!(config.writers[0].path_prefix, "logs/default_access");
     assert_eq!(config.writers[1].path_prefix, "logs/audit");
@@ -183,8 +190,8 @@ context_fields:
   - basic_auth.user
 "#;
     let result: Result<AccessLogConfig, _> = serde_yaml::from_str(yaml);
-    // writer is required (no #[serde(default)]), so deserialization must fail
-    // when the field is missing
+    // writer is required (no #[serde(default)]), so deserialization
+    // must fail when the field is missing
     assert!(result.is_err());
   }
 

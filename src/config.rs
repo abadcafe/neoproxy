@@ -852,7 +852,11 @@ servers: []
     let access_log_config = &raw.plugins["access_log"];
     assert!(access_log_config.as_mapping().is_some());
     let mapping = access_log_config.as_mapping().unwrap();
-    assert!(mapping.contains_key(&serde_yaml::Value::String("writers".to_string())));
+    assert!(
+      mapping.contains_key(&serde_yaml::Value::String(
+        "writers".to_string()
+      ))
+    );
   }
 
   #[test]

@@ -11,8 +11,8 @@ pub mod access_log;
 pub mod auth;
 pub mod echo;
 pub mod http_upstream;
+pub mod js_sandbox;
 pub mod utils;
-
 
 /// Manages plugin lifecycle: registers all plugins at construction,
 /// builds services/layers on demand.
@@ -40,6 +40,10 @@ impl PluginManager {
     plugins.insert(
       http_upstream::plugin_name(),
       http_upstream::create_plugin(plugins_config.get("http_upstream")),
+    );
+    plugins.insert(
+      js_sandbox::plugin_name(),
+      js_sandbox::create_plugin(plugins_config.get("js_sandbox")),
     );
     Self { plugins }
   }

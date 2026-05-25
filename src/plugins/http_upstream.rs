@@ -7,13 +7,12 @@ use std::time::Duration;
 use anyhow::Result;
 use tracing::{info, warn};
 
+use self::config::HttpUpstreamPluginConfig;
+use self::upstream::UpstreamRegistry;
 use crate::config::SerializedArgs;
 use crate::plugin::Plugin;
 use crate::service::{BuildService, Service};
 use crate::tracker::StreamTracker;
-
-use self::config::HttpUpstreamPluginConfig;
-use self::upstream::UpstreamRegistry;
 
 mod config;
 mod error;
@@ -41,15 +40,14 @@ impl HttpUpstreamPlugin {
 
     let upstream_st = stream_tracker.clone();
     let upstream_registry = registry.clone();
-    let upstream_builder: Box<dyn BuildService> = Box::new(
-      move |args: SerializedArgs| -> Result<Service> {
+    let upstream_builder: Box<dyn BuildService> =
+      Box::new(move |args: SerializedArgs| -> Result<Service> {
         service::UpstreamService::new(
           args,
           upstream_st.clone(),
           upstream_registry.clone(),
         )
-      },
-    );
+      });
 
     let mut service_builders = HashMap::new();
     service_builders.insert("upstream", upstream_builder);
@@ -64,11 +62,16 @@ impl HttpUpstreamPlugin {
 }
 
 impl Plugin for HttpUpstreamPlugin {
-  fn service_builder(&self, name: &str) -> Option<&Box<dyn BuildService>> {
+  fn service_builder(
+    &self,
+    name: &str,
+  ) -> Option<&Box<dyn BuildService>> {
     self.service_builders.get(name)
   }
 
-  fn uninstall(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> {
+  fn uninstall(
+    &self,
+  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> {
     if self.is_uninstalled.swap(true, Ordering::SeqCst) {
       return Box::pin(async {});
     }
@@ -84,8 +87,8 @@ impl Plugin for HttpUpstreamPlugin {
         Ok(()) => info!("http_upstream: all tunnels closed gracefully"),
         Err(_) => {
           warn!(
-            "http_upstream: shutdown timed out after {SHUTDOWN_TIMEOUT:?}, \
-             forcing close"
+            "http_upstream: shutdown timed out after \
+             {SHUTDOWN_TIMEOUT:?}, forcing close"
           );
           st.abort_all();
           st.drain().await;
@@ -106,7 +109,9 @@ pub fn plugin_name() -> &'static str {
   "http_upstream"
 }
 
-pub fn create_plugin(config: Option<&SerializedArgs>) -> Box<dyn Plugin> {
+pub fn create_plugin(
+  config: Option<&SerializedArgs>,
+) -> Box<dyn Plugin> {
   let plugin_config: HttpUpstreamPluginConfig = match config {
     Some(args) => serde_yaml::from_value(args.clone())
       .expect("invalid http_upstream plugin config"),
@@ -117,12 +122,17 @@ pub fn create_plugin(config: Option<&SerializedArgs>) -> Box<dyn Plugin> {
     certs.validate().expect("invalid http_upstream certificate config");
   }
 
-  let upstreams = config::merge_chain_config(&plugin_config)
-    .expect("invalid http_upstream config: failed to merge chain config");
+  let upstreams = config::merge_chain_config(&plugin_config).expect(
+    "invalid http_upstream config: failed to merge chain config",
+  );
 
   let tracker = Rc::new(StreamTracker::new());
-  let registry = UpstreamRegistry::new(upstreams, plugin_config.certificates.as_ref(), tracker)
-    .expect("failed to initialize http_upstream registry");
+  let registry = UpstreamRegistry::new(
+    upstreams,
+    plugin_config.certificates.as_ref(),
+    tracker,
+  )
+  .expect("failed to initialize http_upstream registry");
 
   info!(
     "http_upstream: initialized with {} upstream(s)",

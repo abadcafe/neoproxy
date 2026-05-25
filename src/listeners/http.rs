@@ -17,7 +17,9 @@ use tower::util as tower_util;
 use tracing::{error, info, warn};
 
 use crate::config::SerializedArgs;
-use crate::http_utils::{BytesBufBodyWrapper, Request, RequestBody, Response};
+use crate::http_utils::{
+  BytesBufBodyWrapper, Request, RequestBody, Response,
+};
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };
@@ -29,7 +31,6 @@ use crate::server::{Server, ServerRouter};
 #[cfg(test)]
 use crate::service::Service;
 use crate::tracker::StreamTracker;
-
 
 /// HTTP Listener with shared-address routing support.
 ///
@@ -54,7 +55,6 @@ impl HyperServiceAdaptor {
     let server_router = ServerRouter::build(server_routing_table);
     Self { server_router, client_addr, local_addr }
   }
-
 }
 
 impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
@@ -74,11 +74,11 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       RequestBody::new(BytesBufBodyWrapper::new(body)),
     );
 
-    let routing_entry = match validate_and_route(&req, &self.server_router)
-    {
-      Ok(entry) => entry,
-      Err(resp) => return Box::pin(async { Ok(resp) }),
-    };
+    let routing_entry =
+      match validate_and_route(&req, &self.server_router) {
+        Ok(entry) => entry,
+        Err(resp) => return Box::pin(async { Ok(resp) }),
+      };
 
     // Step 5: Build RequestContext with connection-level keys and
     // insert into request extensions. Auth and access logging are
@@ -519,7 +519,9 @@ mod tests {
 
     let result = validate_and_route(&req_no_host, &router);
     match result {
-      Err(resp) => assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST),
+      Err(resp) => {
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST)
+      }
       Ok(_) => panic!("expected error for missing Host header"),
     }
   }
@@ -532,11 +534,8 @@ mod tests {
     let local_addr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
     let service_name = "web_service";
 
-    let ctx = build_request_context(
-      &peer_addr,
-      &local_addr,
-      service_name,
-    );
+    let ctx =
+      build_request_context(&peer_addr, &local_addr, service_name);
 
     assert_eq!(ctx.get("client.ip"), Some("192.168.1.100".to_string()));
     assert_eq!(ctx.get("client.port"), Some("54321".to_string()));
@@ -554,11 +553,8 @@ mod tests {
     let local_addr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
     let service_name = "test_svc";
 
-    let ctx = build_request_context(
-      &peer_addr,
-      &local_addr,
-      service_name,
-    );
+    let ctx =
+      build_request_context(&peer_addr, &local_addr, service_name);
 
     let mut req = http::Request::builder()
       .method("GET")
@@ -613,7 +609,9 @@ mod tests {
 
     let result = validate_and_route(&req, &router);
     match result {
-      Err(resp) => assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST),
+      Err(resp) => {
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST)
+      }
       Ok(_) => panic!("expected error for missing Host header"),
     }
   }

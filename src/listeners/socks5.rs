@@ -32,9 +32,7 @@ use crate::http_utils::{BytesBufBodyWrapper, RequestBody};
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };
-use crate::listeners::utils::{
-  LISTENER_SHUTDOWN_TIMEOUT,
-};
+use crate::listeners::utils::LISTENER_SHUTDOWN_TIMEOUT;
 use crate::service::Service as RuntimeService;
 use crate::shutdown::ShutdownHandle;
 use crate::stream::{
@@ -957,7 +955,9 @@ pub async fn perform_handshake(
     // the auth middleware in the service pipeline.
     let auth_state = proto
       .negotiate_auth(
-        fast_socks5::server::StandardAuthentication::allow_no_auth(true),
+        fast_socks5::server::StandardAuthentication::allow_no_auth(
+          true,
+        ),
       )
       .await?;
 
@@ -1028,9 +1028,7 @@ pub struct Socks5ListenerArgs {
 
 impl Default for Socks5ListenerArgs {
   fn default() -> Self {
-    Self {
-      handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
-    }
+    Self { handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT }
   }
 }
 
@@ -1061,9 +1059,7 @@ pub fn parse_config(
   let config: ConfigYaml = serde_yaml::from_value(args)
     .context("failed to parse SOCKS5 listener config")?;
 
-  Ok(Socks5ListenerArgs {
-    handshake_timeout: config.handshake_timeout,
-  })
+  Ok(Socks5ListenerArgs { handshake_timeout: config.handshake_timeout })
 }
 
 /// Determines if an accept error is fatal and should stop the listener.

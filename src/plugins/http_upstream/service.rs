@@ -7,25 +7,25 @@ use std::time::Duration;
 use anyhow::Result;
 use tracing::warn;
 
+use super::error::UpstreamError;
+use super::upstream::{ConnectResult, UpstreamRegistry};
 use crate::context::RequestContext;
 use crate::http_utils::{
-  Request, RequestBody, Response,
-  append_proxy_status, build_empty_response, build_error_response,
+  Request, RequestBody, Response, append_proxy_status,
+  build_empty_response, build_error_response,
   build_proxy_status_with_status,
 };
 use crate::listeners::utils::get_server_id;
+use crate::plugins::utils::{
+  self, ConnectTargetError, ForwardTargetError,
+};
 use crate::service::Service;
 use crate::stream::{self, Io};
 use crate::tracker::StreamTracker;
 
-use super::error::UpstreamError;
-use super::upstream::{
-  ConnectResult, UpstreamRegistry,
-};
-use crate::plugins::utils::{self, ConnectTargetError, ForwardTargetError};
-
 // ============================================================================
-// Upstream Service (unified: chain mode when upstream is Some, direct when None)
+// Upstream Service (unified: chain mode when upstream is Some, direct
+// when None)
 // ============================================================================
 
 #[derive(Clone)]
@@ -47,7 +47,10 @@ impl UpstreamService {
 
     // Validate upstream exists in registry
     if !registry.borrow().entries.contains_key(&args.upstream) {
-      anyhow::bail!("upstream '{}' not found in registry", args.upstream);
+      anyhow::bail!(
+        "upstream '{}' not found in registry",
+        args.upstream
+      );
     }
 
     Ok(Service::new(Self {
@@ -64,7 +67,8 @@ impl UpstreamService {
 
 impl tower::Service<Request> for UpstreamService {
   type Error = anyhow::Error;
-  type Future = Pin<Box<dyn std::future::Future<Output = Result<Response>>>>;
+  type Future =
+    Pin<Box<dyn std::future::Future<Output = Result<Response>>>>;
   type Response = Response;
 
   fn poll_ready(
@@ -92,14 +96,31 @@ impl tower::Service<Request> for UpstreamService {
     Box::pin(async move {
       if is_shutting_down {
         warn!("UpstreamService: rejecting request during shutdown");
-        return Ok(UpstreamError::ProxyInternalError("shutting down".into())
-          .to_response(&ctx));
+        return Ok(
+          UpstreamError::ProxyInternalError("shutting down".into())
+            .to_response(&ctx),
+        );
       }
 
       if req_headers.method == http::Method::CONNECT {
-        chain_connect(&upstream_name, &registry, &st, req_headers, upgrade, &ctx).await
+        chain_connect(
+          &upstream_name,
+          &registry,
+          &st,
+          req_headers,
+          upgrade,
+          &ctx,
+        )
+        .await
       } else {
-        chain_forward(&upstream_name, &registry, req_headers, req_body, &ctx).await
+        chain_forward(
+          &upstream_name,
+          &registry,
+          req_headers,
+          req_body,
+          &ctx,
+        )
+        .await
       }
     })
   }
@@ -114,7 +135,9 @@ async fn chain_connect(
   registry: &Rc<RefCell<UpstreamRegistry>>,
   st: &Rc<StreamTracker>,
   req_headers: http::request::Parts,
-  upgrade: Option<Pin<Box<dyn std::future::Future<Output = Result<Box<dyn Io>>>>>>,
+  upgrade: Option<
+    Pin<Box<dyn std::future::Future<Output = Result<Box<dyn Io>>>>>,
+  >,
   ctx: &RequestContext,
 ) -> Result<Response> {
   let (host, port) = match utils::parse_connect_target(&req_headers) {
@@ -141,7 +164,9 @@ async fn chain_connect(
 
   let connect_start = std::time::Instant::now();
   let result = match registry.borrow().get_upstream(upstream_name) {
-    Ok(upstream) => upstream.connect_for_tunnel(&target, &tls_config, &tracker).await,
+    Ok(upstream) => {
+      upstream.connect_for_tunnel(&target, &tls_config, &tracker).await
+    }
     Err(e) => return Ok(e.to_response(ctx)),
   };
   let result = match result {
@@ -168,20 +193,30 @@ async fn chain_connect(
     ctx.get("client.ip").unwrap_or_default(),
     ctx.get("client.port").unwrap_or_default(),
   );
-  let upstream_ip = upstream_addr
-    .map(|a| format!(" ({a})"))
-    .unwrap_or_default();
+  let upstream_ip =
+    upstream_addr.map(|a| format!(" ({a})")).unwrap_or_default();
   let tunnel_desc = format!("{client_addr} -> {target}{upstream_ip}");
 
-  complete_tunnel(target_io, st, upgrade, ctx, upstream_proxy_status, tunnel_idle_timeout, &tunnel_desc).await
+  complete_tunnel(
+    target_io,
+    st,
+    upgrade,
+    ctx,
+    upstream_proxy_status,
+    tunnel_idle_timeout,
+    &tunnel_desc,
+  )
+  .await
 }
 
-/// Complete a CONNECT tunnel by building the 200 response and registering
-/// bidirectional transfer.
+/// Complete a CONNECT tunnel by building the 200 response and
+/// registering bidirectional transfer.
 async fn complete_tunnel(
   target: Box<dyn Io>,
   st: &Rc<StreamTracker>,
-  upgrade: Option<Pin<Box<dyn std::future::Future<Output = Result<Box<dyn Io>>>>>>,
+  upgrade: Option<
+    Pin<Box<dyn std::future::Future<Output = Result<Box<dyn Io>>>>>,
+  >,
   ctx: &RequestContext,
   upstream_proxy_status: Option<http::HeaderValue>,
   tunnel_idle_timeout: Duration,
@@ -214,7 +249,14 @@ async fn complete_tunnel(
       }
     };
 
-    stream::run_tunnel(client, target, shutdown_handle, tunnel_idle_timeout, &tunnel_desc).await;
+    stream::run_tunnel(
+      client,
+      target,
+      shutdown_handle,
+      tunnel_idle_timeout,
+      &tunnel_desc,
+    )
+    .await;
   });
 
   Ok(resp)
@@ -265,7 +307,10 @@ async fn chain_forward(
 
   match registry.borrow().get_upstream(upstream_name) {
     Ok(upstream) => {
-      match upstream.forward(&tls_config, &tracker, req_headers, req_body, ctx).await {
+      match upstream
+        .forward(&tls_config, &tracker, req_headers, req_body, ctx)
+        .await
+      {
         Ok(resp) => Ok(resp),
         Err(e) => {
           warn!("UpstreamService: forward failed: {e}");
@@ -282,36 +327,45 @@ async fn chain_forward(
 
 #[cfg(test)]
 mod tests {
+  use futures::task::noop_waker;
+  use tower::Service;
+
   use super::*;
   use crate::context::RequestContext;
   use crate::service::Service as RuntimeService;
-  use futures::task::noop_waker;
-  use tower::Service;
 
   fn make_request(method: http::Method, uri: &str) -> Request {
     let mut req = http::Request::builder()
       .method(method)
       .uri(uri)
       .body(RequestBody::new(
-        crate::http_utils::BytesBufBodyWrapper::new(http_body_util::Empty::new()),
+        crate::http_utils::BytesBufBodyWrapper::new(
+          http_body_util::Empty::new(),
+        ),
       ))
       .unwrap();
     req.extensions_mut().insert(RequestContext::new());
     req
   }
 
-  fn build_registry(plugin_config: super::super::config::HttpUpstreamPluginConfig) -> UpstreamRegistry {
-      let merged = super::super::config::merge_chain_config(&plugin_config).unwrap();
-      let st = Rc::new(StreamTracker::new());
-      UpstreamRegistry::new(merged, None, st.clone()).unwrap()
+  fn build_registry(
+    plugin_config: super::super::config::HttpUpstreamPluginConfig,
+  ) -> UpstreamRegistry {
+    let merged =
+      super::super::config::merge_chain_config(&plugin_config).unwrap();
+    let st = Rc::new(StreamTracker::new());
+    UpstreamRegistry::new(merged, None, st.clone()).unwrap()
   }
 
   fn make_direct_service() -> RuntimeService {
     let plugin_config: super::super::config::HttpUpstreamPluginConfig =
       serde_yaml::from_str("upstreams:\n  - name: direct\n").unwrap();
-    let sargs = serde_yaml::to_value(serde_yaml::Mapping::from_iter([
-      (serde_yaml::Value::String("upstream".into()), serde_yaml::Value::String("direct".into())),
-    ])).unwrap();
+    let sargs =
+      serde_yaml::to_value(serde_yaml::Mapping::from_iter([(
+        serde_yaml::Value::String("upstream".into()),
+        serde_yaml::Value::String("direct".into()),
+      )]))
+      .unwrap();
     let st = Rc::new(StreamTracker::new());
     let registry = Rc::new(RefCell::new(build_registry(plugin_config)));
     UpstreamService::new(sargs, st, registry).unwrap()
@@ -332,9 +386,12 @@ mod tests {
   async fn test_direct_service_new_with_direct_upstream() {
     let plugin_config: super::super::config::HttpUpstreamPluginConfig =
       serde_yaml::from_str("upstreams:\n  - name: direct\n").unwrap();
-    let sargs = serde_yaml::to_value(serde_yaml::Mapping::from_iter([
-      (serde_yaml::Value::String("upstream".into()), serde_yaml::Value::String("direct".into())),
-    ])).unwrap();
+    let sargs =
+      serde_yaml::to_value(serde_yaml::Mapping::from_iter([(
+        serde_yaml::Value::String("upstream".into()),
+        serde_yaml::Value::String("direct".into()),
+      )]))
+      .unwrap();
     let st = Rc::new(StreamTracker::new());
     let registry = Rc::new(RefCell::new(build_registry(plugin_config)));
     let result = UpstreamService::new(sargs, st, registry);
@@ -407,36 +464,49 @@ mod tests {
   async fn test_direct_connect_full_flow() {
     let local = tokio::task::LocalSet::new();
 
-    local.run_until(async {
-      // Start a local TCP echo server
-      let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-      let port = listener.local_addr().unwrap().port();
+    local
+      .run_until(async {
+        // Start a local TCP echo server
+        let listener =
+          tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
 
-      let echo_server = tokio::task::spawn_local(async move {
-        if let Ok((mut stream, _)) = listener.accept().await {
-          let mut buf = [0u8; 64];
-          let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
-          let _ = tokio::io::AsyncWriteExt::write(&mut stream, b"hello").await;
-        }
-      });
+        let echo_server = tokio::task::spawn_local(async move {
+          if let Ok((mut stream, _)) = listener.accept().await {
+            let mut buf = [0u8; 64];
+            let _ =
+              tokio::io::AsyncReadExt::read(&mut stream, &mut buf)
+                .await;
+            let _ =
+              tokio::io::AsyncWriteExt::write(&mut stream, b"hello")
+                .await;
+          }
+        });
 
-      let mut svc = make_direct_service();
-      let req = make_request(http::Method::CONNECT, &format!("127.0.0.1:{port}"));
-      let resp = svc.call(req).await.unwrap();
-      assert_eq!(resp.status(), http::StatusCode::OK);
+        let mut svc = make_direct_service();
+        let req = make_request(
+          http::Method::CONNECT,
+          &format!("127.0.0.1:{port}"),
+        );
+        let resp = svc.call(req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
 
-      echo_server.abort();
-      let _ = echo_server.await;
-    }).await;
+        echo_server.abort();
+        let _ = echo_server.await;
+      })
+      .await;
   }
 
   #[tokio::test]
   async fn test_upstream_service_new_missing_upstream_fails() {
     let plugin_config: super::super::config::HttpUpstreamPluginConfig =
       serde_yaml::from_str("upstreams:\n  - name: direct\n").unwrap();
-    let sargs = serde_yaml::to_value(serde_yaml::Mapping::from_iter([
-      (serde_yaml::Value::String("upstream".into()), serde_yaml::Value::String("nonexistent".into())),
-    ])).unwrap();
+    let sargs =
+      serde_yaml::to_value(serde_yaml::Mapping::from_iter([(
+        serde_yaml::Value::String("upstream".into()),
+        serde_yaml::Value::String("nonexistent".into()),
+      )]))
+      .unwrap();
     let st = Rc::new(StreamTracker::new());
     let registry = Rc::new(RefCell::new(build_registry(plugin_config)));
     let result = UpstreamService::new(sargs, st, registry);
@@ -448,19 +518,25 @@ mod tests {
     let st = Rc::new(StreamTracker::new());
 
     let plugin_config: super::super::config::HttpUpstreamPluginConfig =
-      serde_yaml::from_str(r#"
+      serde_yaml::from_str(
+        r#"
 upstreams:
   - name: test
     addresses:
       - address: "127.0.0.1:8080"
         http: {}
-"#).unwrap();
+"#,
+      )
+      .unwrap();
     let registry = build_registry(plugin_config);
     let registry = Rc::new(RefCell::new(registry));
 
-    let sargs = serde_yaml::to_value(serde_yaml::Mapping::from_iter([
-      (serde_yaml::Value::String("upstream".into()), serde_yaml::Value::String("test".into())),
-    ])).unwrap();
+    let sargs =
+      serde_yaml::to_value(serde_yaml::Mapping::from_iter([(
+        serde_yaml::Value::String("upstream".into()),
+        serde_yaml::Value::String("test".into()),
+      )]))
+      .unwrap();
     let result = UpstreamService::new(sargs, st, registry);
     assert!(result.is_ok());
   }
@@ -469,32 +545,45 @@ upstreams:
   async fn test_direct_forward_success() {
     let local = tokio::task::LocalSet::new();
 
-    local.run_until(async {
-      // Start a local HTTP server
-      let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-      let port = listener.local_addr().unwrap().port();
+    local
+      .run_until(async {
+        // Start a local HTTP server
+        let listener =
+          tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
 
-      let server = tokio::task::spawn_local(async move {
-        if let Ok((stream, _)) = listener.accept().await {
-          let io = hyper_util::rt::TokioIo::new(stream);
-          let _ = hyper::server::conn::http1::Builder::new()
-            .serve_connection(io, hyper::service::service_fn(|_req| async move {
-              Ok::<_, std::convert::Infallible>(http::Response::builder()
-                .status(200)
-                .body(http_body_util::Full::new(bytes::Bytes::from("hello")))
-                .unwrap())
-            }))
-            .await;
-        }
-      });
+        let server = tokio::task::spawn_local(async move {
+          if let Ok((stream, _)) = listener.accept().await {
+            let io = hyper_util::rt::TokioIo::new(stream);
+            let _ = hyper::server::conn::http1::Builder::new()
+              .serve_connection(
+                io,
+                hyper::service::service_fn(|_req| async move {
+                  Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                      .status(200)
+                      .body(http_body_util::Full::new(
+                        bytes::Bytes::from("hello"),
+                      ))
+                      .unwrap(),
+                  )
+                }),
+              )
+              .await;
+          }
+        });
 
-      let mut svc = make_direct_service();
-      let req = make_request(http::Method::GET, &format!("http://127.0.0.1:{port}/"));
-      let resp = svc.call(req).await.unwrap();
-      assert_eq!(resp.status(), http::StatusCode::OK);
+        let mut svc = make_direct_service();
+        let req = make_request(
+          http::Method::GET,
+          &format!("http://127.0.0.1:{port}/"),
+        );
+        let resp = svc.call(req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
 
-      server.abort();
-      let _ = server.await;
-    }).await;
+        server.abort();
+        let _ = server.await;
+      })
+      .await;
   }
 }

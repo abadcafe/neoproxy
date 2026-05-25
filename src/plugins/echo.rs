@@ -75,7 +75,9 @@ pub fn plugin_name() -> &'static str {
   "echo"
 }
 
-pub fn create_plugin(_config: Option<&SerializedArgs>) -> Box<dyn Plugin> {
+pub fn create_plugin(
+  _config: Option<&SerializedArgs>,
+) -> Box<dyn Plugin> {
   Box::new(EchoPlugin::new())
 }
 

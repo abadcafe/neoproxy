@@ -24,7 +24,9 @@ use tower::util as tower_util;
 use tracing::{error, info, warn};
 
 use crate::config::SerializedArgs;
-use crate::http_utils::{BytesBufBodyWrapper, Request, RequestBody, Response};
+use crate::http_utils::{
+  BytesBufBodyWrapper, Request, RequestBody, Response,
+};
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };
@@ -37,8 +39,7 @@ use crate::tls::build_tls_server_config;
 use crate::tracker::StreamTracker;
 
 /// Default TLS handshake timeout.
-const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration =
-  Duration::from_secs(5);
+const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// HTTPS Listener configuration arguments.
 #[derive(Deserialize, Clone, Debug)]
@@ -95,7 +96,12 @@ impl HttpsServiceAdaptor {
     client_cert_presented: bool,
   ) -> Self {
     let server_router = ServerRouter::build(server_routing_table);
-    Self { server_router, client_addr, local_addr, client_cert_presented }
+    Self {
+      server_router,
+      client_addr,
+      local_addr,
+      client_cert_presented,
+    }
   }
 }
 
@@ -116,16 +122,18 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       RequestBody::new(BytesBufBodyWrapper::new(body)),
     );
 
-    let routing_entry = match validate_and_route(&req, &self.server_router)
-    {
-      Ok(entry) => entry,
-      Err(resp) => return Box::pin(async { Ok(resp) }),
-    };
+    let routing_entry =
+      match validate_and_route(&req, &self.server_router) {
+        Ok(entry) => entry,
+        Err(resp) => return Box::pin(async { Ok(resp) }),
+      };
 
     // Check client certificate requirement
     // If the server requires mTLS (has client_ca_certs) but the
     // client did not present a certificate, reject with 403.
-    if routing_entry.requires_client_cert() && !self.client_cert_presented {
+    if routing_entry.requires_client_cert()
+      && !self.client_cert_presented
+    {
       return Box::pin(async {
         Ok(super::utils::build_403_forbidden(
           "Forbidden: client certificate required",
@@ -153,7 +161,8 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
   }
 }
 
-/// Check whether the client presented a certificate during TLS handshake.
+/// Check whether the client presented a certificate during TLS
+/// handshake.
 fn get_client_cert_presented(
   conn: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
 ) -> bool {
@@ -287,7 +296,9 @@ impl HttpsListener {
                   let conn =
                     builder.serve_connection_with_upgrades(io, svc);
                   if let Err(e) = conn.await {
-                    warn!("connection from {raddr} on {local_addr}: {e}");
+                    warn!(
+                      "connection from {raddr} on {local_addr}: {e}"
+                    );
                   }
                 });
               }
@@ -666,7 +677,9 @@ mod tests {
 
     let result = validate_and_route(&req_no_host, &router);
     match result {
-      Err(resp) => assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST),
+      Err(resp) => {
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST)
+      }
       Ok(_) => panic!("expected error for missing Host header"),
     }
   }

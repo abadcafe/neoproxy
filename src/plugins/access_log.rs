@@ -8,23 +8,21 @@ pub mod registry;
 pub mod writer;
 
 #[cfg(test)]
-mod test_utils;
-#[cfg(test)]
 mod build_log_entry_tests;
 #[cfg(test)]
 mod plugin_integration_tests;
 #[cfg(test)]
 mod registry_tests;
+#[cfg(test)]
+mod test_utils;
 
 use std::collections::HashMap;
 
+use self::config::{AccessLogConfig, AccessLogPluginConfig};
+use self::layer::AccessLogLayer;
 use crate::config::SerializedArgs;
 use crate::plugin::Plugin;
 use crate::service::{BuildLayer, Layer};
-
-use self::config::AccessLogConfig;
-use self::config::AccessLogPluginConfig;
-use self::layer::AccessLogLayer;
 
 /// Timeout for joining writer threads during shutdown.
 ///
@@ -43,7 +41,9 @@ pub struct AccessLogPlugin {
 }
 
 impl AccessLogPlugin {
-  pub fn new(is_uninstalled: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+  pub fn new(
+    is_uninstalled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+  ) -> Self {
     let file_layer_builder: Box<dyn BuildLayer> = Box::new(|args| {
       let config: AccessLogConfig = serde_yaml::from_value(args)?;
       let tx = get_writer(&config.writer)?;
@@ -65,18 +65,29 @@ pub fn plugin_name() -> &'static str {
   "access_log"
 }
 
-pub fn create_plugin(config: Option<&SerializedArgs>) -> Box<dyn Plugin> {
+pub fn create_plugin(
+  config: Option<&SerializedArgs>,
+) -> Box<dyn Plugin> {
   if let Some(config_value) = config {
     let plugin_config: AccessLogPluginConfig =
-      serde_yaml::from_value(config_value.clone())
-        .unwrap_or_else(|e| panic!("access_log: failed to parse plugin config: {}", e));
-    init_writer_registry(&plugin_config)
-      .unwrap_or_else(|e| panic!("access_log: failed to initialize writer registry: {}", e));
+      serde_yaml::from_value(config_value.clone()).unwrap_or_else(
+        |e| panic!("access_log: failed to parse plugin config: {}", e),
+      );
+    init_writer_registry(&plugin_config).unwrap_or_else(|e| {
+      panic!("access_log: failed to initialize writer registry: {}", e)
+    });
   } else {
     init_writer_registry(&AccessLogPluginConfig::default())
-      .unwrap_or_else(|e| panic!("access_log: failed to initialize writer registry: {}", e));
+      .unwrap_or_else(|e| {
+        panic!(
+          "access_log: failed to initialize writer registry: {}",
+          e
+        )
+      });
   }
-  Box::new(AccessLogPlugin::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))))
+  Box::new(AccessLogPlugin::new(std::sync::Arc::new(
+    std::sync::atomic::AtomicBool::new(false),
+  )))
 }
 
 impl Plugin for AccessLogPlugin {
@@ -84,8 +95,11 @@ impl Plugin for AccessLogPlugin {
     self.layer_builders.get(name)
   }
 
-  fn uninstall(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> {
+  fn uninstall(
+    &self,
+  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> {
     use std::sync::atomic::Ordering;
+
     use tracing::warn;
 
     if self.is_uninstalled.load(Ordering::SeqCst) {
@@ -100,7 +114,8 @@ impl Plugin for AccessLogPlugin {
       };
 
       if let Some(registry) = old_registry {
-        let mut joins: Vec<(String, std::thread::JoinHandle<()>)> = Vec::new();
+        let mut joins: Vec<(String, std::thread::JoinHandle<()>)> =
+          Vec::new();
         for (path_prefix, mut handle) in registry {
           if let Some(jh) = handle.join_handle.take() {
             joins.push((path_prefix, jh));
@@ -116,11 +131,15 @@ impl Plugin for AccessLogPlugin {
           match rx.recv_timeout(WRITER_JOIN_TIMEOUT) {
             Ok(Ok(())) => {}
             Ok(Err(_)) => {
-              warn!("access_log: writer thread '{}' panicked", path_prefix);
+              warn!(
+                "access_log: writer thread '{}' panicked",
+                path_prefix
+              );
             }
             Err(_) => {
               warn!(
-                "access_log: writer thread '{}' did not exit within {:?}, detaching",
+                "access_log: writer thread '{}' did not exit within \
+                 {:?}, detaching",
                 path_prefix, WRITER_JOIN_TIMEOUT
               );
             }
@@ -131,9 +150,8 @@ impl Plugin for AccessLogPlugin {
   }
 }
 
-pub use self::registry::get_writer;
-pub use self::registry::init_writer_registry;
 #[cfg(test)]
 pub use self::registry::LogEntry;
 #[cfg(test)]
 pub use self::registry::reset_writer_registry;
+pub use self::registry::{get_writer, init_writer_registry};

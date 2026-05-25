@@ -3,7 +3,8 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::time::Instant;
-use tracing::{warn, error};
+
+use tracing::{error, warn};
 
 use super::config::AccessLogWriterConfig;
 use super::context::{AccessLogEntry, LogFormat};
@@ -31,7 +32,9 @@ impl AccessLogWriter {
       current_file: None,
       current_size: 0,
       current_date: String::new(),
-      buffer: Vec::with_capacity(config.buffer_capacity.as_u64() as usize),
+      buffer: Vec::with_capacity(
+        config.buffer_capacity.as_u64() as usize
+      ),
       last_flush: Instant::now(),
       path_prefix: config.path_prefix.clone(),
       buffer_capacity: config.buffer_capacity.as_u64() as usize,
@@ -75,7 +78,9 @@ impl AccessLogWriter {
   /// Called by the writer thread's periodic timeout path to ensure
   /// buffered entries are written even when no new entries arrive.
   pub fn flush_if_interval_elapsed(&mut self) {
-    if self.last_flush.elapsed() >= self.flush_interval && !self.buffer.is_empty() {
+    if self.last_flush.elapsed() >= self.flush_interval
+      && !self.buffer.is_empty()
+    {
       self.do_flush();
     }
   }
@@ -96,15 +101,17 @@ impl AccessLogWriter {
           self.buffer.len()
         );
         // CR-022: Reset current_file to None so that rotate_if_needed()
-        // is triggered on the next flush to attempt opening a fresh file.
-        // Without this, the broken file handle remains and every subsequent
-        // flush fails silently (rotate_if_needed sees current_file is not
+        // is triggered on the next flush to attempt opening a fresh
+        // file. Without this, the broken file handle remains
+        // and every subsequent flush fails silently
+        // (rotate_if_needed sees current_file is not
         // None and doesn't try to open a new file).
         self.current_file = None;
       }
     } else {
       warn!(
-        "access_log: discarding {} bytes of buffered data (no file handle available)",
+        "access_log: discarding {} bytes of buffered data (no file \
+         handle available)",
         self.buffer.len()
       );
     }
@@ -127,7 +134,10 @@ impl AccessLogWriter {
 
     if need_new_file {
       let path = if self.rotate_daily {
-        std::path::PathBuf::from(format!("{}.{}", self.path_prefix, today))
+        std::path::PathBuf::from(format!(
+          "{}.{}",
+          self.path_prefix, today
+        ))
       } else {
         std::path::PathBuf::from(&self.path_prefix)
       };
@@ -162,9 +172,10 @@ impl AccessLogWriter {
 mod tests {
   use std::collections::HashMap;
 
-  use super::*;
-  use super::super::test_utils::TracingCapture;
   use byte_unit::Byte;
+
+  use super::super::test_utils::TracingCapture;
+  use super::*;
 
   fn make_entry() -> AccessLogEntry {
     AccessLogEntry {
@@ -207,7 +218,8 @@ mod tests {
   #[test]
   fn test_writer_rotate_daily_false_uses_path_prefix_directly() {
     let dir = tempfile::tempdir().unwrap();
-    let path_prefix = dir.path().join("logs/norotate").to_string_lossy().to_string();
+    let path_prefix =
+      dir.path().join("logs/norotate").to_string_lossy().to_string();
     let config = AccessLogWriterConfig {
       path_prefix: path_prefix.clone(),
       rotate_daily: false,
@@ -226,7 +238,8 @@ mod tests {
   #[test]
   fn test_writer_rotate_daily_true_uses_date_suffix() {
     let dir = tempfile::tempdir().unwrap();
-    let path_prefix = dir.path().join("logs/daily").to_string_lossy().to_string();
+    let path_prefix =
+      dir.path().join("logs/daily").to_string_lossy().to_string();
     let config = AccessLogWriterConfig {
       path_prefix: path_prefix.clone(),
       rotate_daily: true,
@@ -240,7 +253,8 @@ mod tests {
     // File should be at path_prefix.YYYY-MM-DD
     let today = time::OffsetDateTime::now_utc()
       .format(
-        &time::format_description::parse("[year]-[month]-[day]").unwrap(),
+        &time::format_description::parse("[year]-[month]-[day]")
+          .unwrap(),
       )
       .unwrap();
     let expected_path = format!("{}.{}", path_prefix, today);
@@ -251,10 +265,12 @@ mod tests {
   #[test]
   fn test_writer_configurable_buffer_capacity() {
     let dir = tempfile::tempdir().unwrap();
-    let path_prefix = dir.path().join("logs/buf_cap").to_string_lossy().to_string();
+    let path_prefix =
+      dir.path().join("logs/buf_cap").to_string_lossy().to_string();
     let config = AccessLogWriterConfig {
       path_prefix: path_prefix.clone(),
-      buffer_capacity: Byte::from_u64(16),  // Very small to trigger flush
+      buffer_capacity: Byte::from_u64(16), /* Very small to trigger
+                                            * flush */
       ..AccessLogWriterConfig::default()
     };
     let mut writer = AccessLogWriter::from_config(&config);
@@ -266,14 +282,21 @@ mod tests {
     // triggers flush-to-file. Verify the file exists and contains data.
     let today = time::OffsetDateTime::now_utc()
       .format(
-        &time::format_description::parse("[year]-[month]-[day]").unwrap(),
+        &time::format_description::parse("[year]-[month]-[day]")
+          .unwrap(),
       )
       .unwrap();
     let expected_path = format!("{}.{}", path_prefix, today);
     let content = std::fs::read_to_string(&expected_path)
       .expect("Log file should exist after flush");
-    assert!(!content.is_empty(), "Log file should contain written data");
-    assert!(content.contains("127.0.0.1"), "Log file should contain entry data");
+    assert!(
+      !content.is_empty(),
+      "Log file should contain written data"
+    );
+    assert!(
+      content.contains("127.0.0.1"),
+      "Log file should contain entry data"
+    );
   }
 
   #[test]
@@ -329,7 +352,8 @@ mod tests {
           .unwrap(),
       )
       .unwrap();
-    let mut writer = AccessLogWriter::from_config(&AccessLogWriterConfig::default());
+    let mut writer =
+      AccessLogWriter::from_config(&AccessLogWriterConfig::default());
     writer.current_file = Some(file);
     writer.current_date = today;
     (writer, log_path)
@@ -409,7 +433,8 @@ mod tests {
       )
       .unwrap();
 
-    let mut writer = AccessLogWriter::from_config(&AccessLogWriterConfig::default());
+    let mut writer =
+      AccessLogWriter::from_config(&AccessLogWriterConfig::default());
     writer.current_file = Some(file);
     writer.current_date = today;
 
@@ -430,7 +455,8 @@ mod tests {
 
   #[test]
   fn test_writer_buffer_full_uses_tracing() {
-    // CR-019: buffer full warning must go through tracing, not eprintln!
+    // CR-019: buffer full warning must go through tracing, not
+    // eprintln!
     let (capture, _guard) = TracingCapture::new();
 
     let config = AccessLogWriterConfig::default();
@@ -453,7 +479,8 @@ mod tests {
 
   #[test]
   fn test_writer_write_failure_uses_tracing() {
-    // CR-019: write failure error must go through tracing, not eprintln!
+    // CR-019: write failure error must go through tracing, not
+    // eprintln!
     let (capture, _guard) = TracingCapture::new();
 
     // Use a pipe with read end dropped so write fails with EPIPE
@@ -471,7 +498,8 @@ mod tests {
       )
       .unwrap();
 
-    let mut writer = AccessLogWriter::from_config(&AccessLogWriterConfig::default());
+    let mut writer =
+      AccessLogWriter::from_config(&AccessLogWriterConfig::default());
     writer.current_file = Some(file);
     writer.current_date = today;
 
@@ -479,7 +507,8 @@ mod tests {
     writer.write(&entry);
     writer.do_flush();
 
-    // write_all fails with EPIPE, so the error must be captured by tracing
+    // write_all fails with EPIPE, so the error must be captured by
+    // tracing
     let output = capture.output();
     assert!(
       output.contains("failed to write"),
@@ -490,7 +519,8 @@ mod tests {
 
   #[test]
   fn test_writer_open_failure_uses_tracing() {
-    // CR-019: file open failure error must go through tracing, not eprintln!
+    // CR-019: file open failure error must go through tracing, not
+    // eprintln!
     let (capture, _guard) = TracingCapture::new();
 
     // Create a regular file where a directory should be so that file
@@ -504,9 +534,9 @@ mod tests {
     };
     let mut writer = AccessLogWriter::from_config(&config);
 
-    // Force a flush which triggers rotate_if_needed, which tries to open
-    // the file. The open will fail because the path traverses through a
-    // regular file (block_file), not a directory.
+    // Force a flush which triggers rotate_if_needed, which tries to
+    // open the file. The open will fail because the path traverses
+    // through a regular file (block_file), not a directory.
     let entry = make_entry();
     writer.write(&entry);
     writer.do_flush();
@@ -553,7 +583,8 @@ mod tests {
     let output = capture.output();
     assert!(
       output.contains("failed to create directory"),
-      "tracing should capture 'failed to create directory' error, got: {:?}",
+      "tracing should capture 'failed to create directory' error, \
+       got: {:?}",
       &output[..output.len().min(500)]
     );
   }
@@ -582,7 +613,10 @@ mod tests {
     // write() itself, since we want to control the flush timing)
     let entry = make_entry();
     writer.write(&entry);
-    assert!(!writer.buffer.is_empty(), "Buffer should contain entry data");
+    assert!(
+      !writer.buffer.is_empty(),
+      "Buffer should contain entry data"
+    );
 
     // Now flush - rotate_if_needed will fail (can't open the file),
     // current_file will be None, and do_flush will discard the buffer.
@@ -591,25 +625,30 @@ mod tests {
     // The buffer discard must be captured by tracing as a warning.
     let output = capture.output();
     assert!(
-      output.contains("discarding") && output.contains("no file handle"),
+      output.contains("discarding")
+        && output.contains("no file handle"),
       "tracing should capture buffer discard warning, got: {:?}",
       &output[..output.len().min(500)]
     );
   }
 
   #[test]
-  fn test_flush_if_interval_elapsed_flushes_when_elapsed_and_buffer_nonempty() {
-    // SR-001: flush_if_interval_elapsed must flush when the interval has
-    // elapsed and the buffer is non-empty.
+  fn test_flush_if_interval_elapsed_flushes_when_elapsed_and_buffer_nonempty()
+   {
+    // SR-001: flush_if_interval_elapsed must flush when the interval
+    // has elapsed and the buffer is non-empty.
     let dir = tempfile::tempdir().unwrap();
     let (mut writer, log_path) = make_writer_with_file(&dir);
 
     let entry = make_entry();
     writer.write(&entry);
-    assert!(!writer.buffer.is_empty(), "Buffer should contain entry data");
+    assert!(
+      !writer.buffer.is_empty(),
+      "Buffer should contain entry data"
+    );
 
-    // Set flush_interval to 1ms and last_flush to well in the past so that
-    // the interval has definitely elapsed.
+    // Set flush_interval to 1ms and last_flush to well in the past so
+    // that the interval has definitely elapsed.
     writer.flush_interval = std::time::Duration::from_millis(1);
     writer.last_flush =
       Instant::now() - std::time::Duration::from_secs(10);
@@ -617,26 +656,36 @@ mod tests {
     writer.flush_if_interval_elapsed();
 
     // Buffer should be cleared (flush happened)
-    assert!(writer.buffer.is_empty(), "Buffer should be cleared after flush");
+    assert!(
+      writer.buffer.is_empty(),
+      "Buffer should be cleared after flush"
+    );
     // File should contain the entry
     let content = std::fs::read_to_string(&log_path).unwrap();
     assert!(!content.is_empty(), "File should contain flushed data");
-    assert!(content.contains("127.0.0.1"), "File should contain entry data");
+    assert!(
+      content.contains("127.0.0.1"),
+      "File should contain entry data"
+    );
   }
 
   #[test]
-  fn test_flush_if_interval_elapsed_does_not_flush_when_interval_not_elapsed() {
-    // SR-001: flush_if_interval_elapsed must NOT flush when the interval
-    // has not elapsed, even if the buffer is non-empty.
+  fn test_flush_if_interval_elapsed_does_not_flush_when_interval_not_elapsed()
+   {
+    // SR-001: flush_if_interval_elapsed must NOT flush when the
+    // interval has not elapsed, even if the buffer is non-empty.
     let dir = tempfile::tempdir().unwrap();
     let (mut writer, _log_path) = make_writer_with_file(&dir);
 
     let entry = make_entry();
     writer.write(&entry);
-    assert!(!writer.buffer.is_empty(), "Buffer should contain entry data");
+    assert!(
+      !writer.buffer.is_empty(),
+      "Buffer should contain entry data"
+    );
 
-    // Set flush_interval to 1 hour and last_flush to now so the interval
-    // has NOT elapsed.
+    // Set flush_interval to 1 hour and last_flush to now so the
+    // interval has NOT elapsed.
     writer.flush_interval = std::time::Duration::from_secs(3600);
     writer.last_flush = Instant::now();
 
@@ -651,13 +700,13 @@ mod tests {
 
   #[test]
   fn test_flush_if_interval_elapsed_does_not_flush_when_buffer_empty() {
-    // SR-001: flush_if_interval_elapsed must NOT flush when the buffer is
-    // empty, even if the interval has elapsed.
+    // SR-001: flush_if_interval_elapsed must NOT flush when the buffer
+    // is empty, even if the interval has elapsed.
     let dir = tempfile::tempdir().unwrap();
     let (mut writer, _log_path) = make_writer_with_file(&dir);
 
-    // Buffer is empty (no write call). Set interval to 1ms and last_flush
-    // to well in the past.
+    // Buffer is empty (no write call). Set interval to 1ms and
+    // last_flush to well in the past.
     assert!(writer.buffer.is_empty(), "Buffer should start empty");
     writer.flush_interval = std::time::Duration::from_millis(1);
     writer.last_flush =
@@ -668,16 +717,18 @@ mod tests {
     // Should be a no-op (no panic, no error). Buffer still empty.
     assert!(
       writer.buffer.is_empty(),
-      "Buffer should remain empty when flush_if_interval_elapsed called with empty buffer"
+      "Buffer should remain empty when flush_if_interval_elapsed \
+       called with empty buffer"
     );
   }
 
   #[test]
   fn test_writer_write_failure_resets_current_file_to_none() {
-    // CR-022: When file.write_all() fails in do_flush, current_file must
-    // be reset to None so that rotate_if_needed() on the next flush can
-    // attempt to open a fresh file. Without this fix, the broken file
-    // handle remains and every subsequent flush fails silently.
+    // CR-022: When file.write_all() fails in do_flush, current_file
+    // must be reset to None so that rotate_if_needed() on the next
+    // flush can attempt to open a fresh file. Without this fix, the
+    // broken file handle remains and every subsequent flush fails
+    // silently.
     let (capture, _guard) = TracingCapture::new();
 
     // Use a pipe with read end dropped so write fails with EPIPE
@@ -695,7 +746,8 @@ mod tests {
       )
       .unwrap();
 
-    let mut writer = AccessLogWriter::from_config(&AccessLogWriterConfig::default());
+    let mut writer =
+      AccessLogWriter::from_config(&AccessLogWriterConfig::default());
     writer.current_file = Some(file);
     writer.current_date = today;
 
@@ -709,15 +761,17 @@ mod tests {
     // CR-022 fix: current_file must be None after write failure
     assert!(
       writer.current_file.is_none(),
-      "current_file must be reset to None after write failure, so rotate_if_needed can open a new file on next flush"
+      "current_file must be reset to None after write failure, so \
+       rotate_if_needed can open a new file on next flush"
     );
 
-    // Verify the error message includes byte count (observability parity
-    // with CR-021)
+    // Verify the error message includes byte count (observability
+    // parity with CR-021)
     let output = capture.output();
     assert!(
       output.contains("failed to write") && output.contains("bytes"),
-      "tracing should capture 'failed to write ... bytes' error, got: {:?}",
+      "tracing should capture 'failed to write ... bytes' error, got: \
+       {:?}",
       &output[..output.len().min(500)]
     );
   }

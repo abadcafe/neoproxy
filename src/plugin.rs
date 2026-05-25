@@ -170,5 +170,4 @@ mod tests {
     let result = plugin.layer_builder("any_name");
     assert!(result.is_none());
   }
-
 }

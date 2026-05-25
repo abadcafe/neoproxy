@@ -93,14 +93,15 @@ pub fn parse_connect_target(
 
 /// Parse forward proxy request target address
 ///
-/// Extracts host, port, and origin-form URI from an absolute-form HTTP request.
-/// Only supports http:// scheme (https:// requires CONNECT per RFC).
+/// Extracts host, port, and origin-form URI from an absolute-form HTTP
+/// request. Only supports http:// scheme (https:// requires CONNECT per RFC).
 ///
 /// # Parameters
 /// - `parts`: HTTP request Parts
 ///
 /// # Returns
-/// - `Ok((host, port, origin_uri))`: Target hostname, port, and origin-form URI
+/// - `Ok((host, port, origin_uri))`: Target hostname, port, and
+///   origin-form URI
 /// - `Err(ForwardTargetError)`: Parse failed
 pub fn parse_forward_target(
   parts: &http::request::Parts,
@@ -111,7 +112,8 @@ pub fn parse_forward_target(
 
   let uri = &parts.uri;
 
-  let scheme = uri.scheme().ok_or(ForwardTargetError::NotAbsoluteForm)?;
+  let scheme =
+    uri.scheme().ok_or(ForwardTargetError::NotAbsoluteForm)?;
   if scheme != &http::uri::Scheme::HTTP {
     return Err(ForwardTargetError::UnsupportedScheme);
   }
@@ -129,9 +131,7 @@ pub fn parse_forward_target(
 
   let origin_uri = http::Uri::builder()
     .path_and_query(
-      uri.path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/"),
+      uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/"),
     )
     .build()
     .map_err(|_| ForwardTargetError::NotAbsoluteForm)?;
@@ -152,9 +152,7 @@ pub fn strip_hop_by_hop_headers(headers: &mut http::HeaderMap) {
     .get(http::header::CONNECTION)
     .and_then(|v| v.to_str().ok())
     .map(|s| {
-      s.split(',')
-        .filter_map(|t| t.trim().parse().ok())
-        .collect()
+      s.split(',').filter_map(|t| t.trim().parse().ok()).collect()
     })
     .unwrap_or_default();
 
@@ -312,10 +310,8 @@ mod tests {
 
   #[test]
   fn test_parse_forward_target_https_scheme() {
-    let parts = make_request_parts(
-      http::Method::GET,
-      "https://example.com/path",
-    );
+    let parts =
+      make_request_parts(http::Method::GET, "https://example.com/path");
     let result = parse_forward_target(&parts);
     assert_eq!(result, Err(ForwardTargetError::UnsupportedScheme));
   }
@@ -349,17 +345,27 @@ mod tests {
   fn test_strip_hop_by_hop_headers() {
     let mut headers = http::HeaderMap::new();
     headers.insert(http::header::CONNECTION, "close".parse().unwrap());
-    headers.insert(http::header::HeaderName::from_static("keep-alive"), "timeout=5".parse().unwrap());
+    headers.insert(
+      http::header::HeaderName::from_static("keep-alive"),
+      "timeout=5".parse().unwrap(),
+    );
     headers.insert(
       http::header::PROXY_AUTHORIZATION,
       "Basic abc123".parse().unwrap(),
     );
-    headers.insert(http::header::CONTENT_TYPE, "text/plain".parse().unwrap());
+    headers.insert(
+      http::header::CONTENT_TYPE,
+      "text/plain".parse().unwrap(),
+    );
 
     strip_hop_by_hop_headers(&mut headers);
 
     assert!(headers.get(http::header::CONNECTION).is_none());
-    assert!(headers.get(http::header::HeaderName::from_static("keep-alive")).is_none());
+    assert!(
+      headers
+        .get(http::header::HeaderName::from_static("keep-alive"))
+        .is_none()
+    );
     assert!(headers.get(http::header::PROXY_AUTHORIZATION).is_none());
     assert!(headers.get(http::header::CONTENT_TYPE).is_some());
   }
@@ -376,14 +382,19 @@ mod tests {
       http::header::HeaderName::from_static("x-custom-hop"),
       "value".parse().unwrap(),
     );
-    headers.insert(http::header::CONTENT_TYPE, "text/plain".parse().unwrap());
+    headers.insert(
+      http::header::CONTENT_TYPE,
+      "text/plain".parse().unwrap(),
+    );
 
     strip_hop_by_hop_headers(&mut headers);
 
     assert!(headers.get(http::header::CONNECTION).is_none());
-    assert!(headers
-      .get(http::header::HeaderName::from_static("x-custom-hop"))
-      .is_none());
+    assert!(
+      headers
+        .get(http::header::HeaderName::from_static("x-custom-hop"))
+        .is_none()
+    );
     assert!(headers.get(http::header::CONTENT_TYPE).is_some());
   }
 
@@ -403,4 +414,3 @@ mod tests {
     );
   }
 }
-

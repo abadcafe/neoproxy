@@ -6,7 +6,10 @@ use base64::Engine;
 use crate::http_utils::{BytesBufBodyWrapper, RequestBody};
 use crate::plugins::http_upstream::error::DnsResolveError;
 
-pub(crate) fn apply_proxy_auth(user: &Option<crate::config::UserCredential>, req: &mut http::Request<()>) {
+pub(crate) fn apply_proxy_auth(
+  user: &Option<crate::config::UserCredential>,
+  req: &mut http::Request<()>,
+) {
   if let Some(user) = user {
     let credentials = base64::engine::general_purpose::STANDARD
       .encode(format!("{}:{}", user.username, user.password));
@@ -23,11 +26,14 @@ pub(crate) fn resolve_address(s: &str) -> Result<SocketAddr> {
     .or_else(|_| {
       std::net::ToSocketAddrs::to_socket_addrs(s)
         .map_err(|e| {
-          anyhow::Error::from(DnsResolveError(e))
-            .context(format!("address '{s}' is neither IP:port nor resolvable hostname"))
+          anyhow::Error::from(DnsResolveError(e)).context(format!(
+            "address '{s}' is neither IP:port nor resolvable hostname"
+          ))
         })
         .and_then(|mut addrs| {
-          addrs.next().ok_or_else(|| anyhow!("address '{s}' resolved to no addresses"))
+          addrs.next().ok_or_else(|| {
+            anyhow!("address '{s}' resolved to no addresses")
+          })
         })
     })
     .with_context(|| format!("address '{s}'"))

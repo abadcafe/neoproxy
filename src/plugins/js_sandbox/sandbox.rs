@@ -22,13 +22,13 @@ extension!(
   ],
 );
 
-/// Script that loads lazy deno extension scripts and installs Web API
-/// globals. deno_fetch/deno_web use `lazy_loaded_js` which are NOT
-/// auto-evaluated at runtime creation. We must load them via
-/// `Deno.core.loadExtScript()` and put the constructors on globalThis
-/// so both the bridge script and user code can use them.
-const GLOBALS_SCRIPT: &str = r#"
-(function() {
+/// Combined script that loads Web API globals, then reads the request
+/// from OpState, calls the user's fetch handler, and writes the response
+/// back to OpState. deno_fetch/deno_web extensions use `lazy_loaded_js`
+/// which are NOT auto-evaluated at startup — we must load them via
+/// `Deno.core.loadExtScript()` and put the constructors on globalThis.
+const BOOT_SCRIPT: &str = r#"
+(async () => {
   var load = Deno.core.loadExtScript;
 
   // deno_fetch (cascades to load deno_web + deno_webidl deps)
@@ -77,13 +77,7 @@ const GLOBALS_SCRIPT: &str = r#"
   // MessageChannel
   globalThis.MessageChannel = mp.MessageChannel;
   globalThis.MessagePort = mp.MessagePort;
-})();
-"#;
 
-/// JS bridge script that reads the request from OpState, calls the
-/// user's fetch handler, and writes the response back to OpState.
-const BRIDGE_SCRIPT: &str = r#"
-(async () => {
   try {
     const reqData = Deno.core.ops.op_sandbox_read_request();
     // Request() requires a full URL; prepend a synthetic base for relative paths
@@ -162,14 +156,6 @@ impl Sandbox {
       heap_limit_bytes,
     );
 
-    // Evaluate the globals script to load lazy deno extension scripts
-    // (Request, Response, Headers, fetch, etc.) and put them on
-    // globalThis.
-    runtime.execute_script(
-      "<neoproxy_globals>",
-      ModuleCodeString::from(GLOBALS_SCRIPT.to_string()),
-    )?;
-
     Ok(Self { runtime, config })
   }
 
@@ -224,7 +210,7 @@ impl Sandbox {
       // Run the bridge script that calls the user's fetch handler
       self.runtime.execute_script(
         "<neoproxy_bridge>",
-        ModuleCodeString::from(BRIDGE_SCRIPT.to_string()),
+        ModuleCodeString::from(BOOT_SCRIPT.to_string()),
       )?;
 
       // Drive the event loop until completion

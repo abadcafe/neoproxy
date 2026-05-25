@@ -6,6 +6,15 @@ edition = "2024"
 [features]
 default = []
 tls-openssl = ["dep:rustls-openssl"]
+js-sandbox = [
+  "dep:deno_core",
+  "dep:deno_error",
+  "dep:v8",
+  "dep:deno_ext_webidl",
+  "dep:deno_ext_web",
+  "dep:deno_tls",
+  "dep:deno_ext_fetch",
+]
 
 [dependencies]
 anyhow = "1.0.95"
@@ -45,16 +54,16 @@ humantime = "2.1"
 humantime-serde = "1"
 byte-unit = { version = "5.1", features = ["serde"] }
 tokio-io-timeout = "1.2.1"
-deno_core = "0.401"
-deno_error = "0.7"
-v8 = { version = "149", default-features = false }
+deno_core = { version = "0.401", optional = true }
+deno_error = { version = "0.7", optional = true }
+v8 = { version = "149", default-features = false, optional = true }
 crossbeam-channel = "0.5"
 libc = "0.2"
 nix = { version = "0.29", features = ["signal"] }
-deno_ext_webidl = { path = "src/plugins/js_sandbox/deno_ext/webidl" }
-deno_ext_web = { path = "src/plugins/js_sandbox/deno_ext/web" }
-deno_tls = { path = "src/plugins/js_sandbox/deno_ext/tls" }
-deno_ext_fetch = { path = "src/plugins/js_sandbox/deno_ext/fetch" }
+deno_ext_webidl = { path = "src/plugins/js_sandbox/deno_ext/webidl", optional = true }
+deno_ext_web = { path = "src/plugins/js_sandbox/deno_ext/web", optional = true }
+deno_tls = { path = "src/plugins/js_sandbox/deno_ext/tls", optional = true }
+deno_ext_fetch = { path = "src/plugins/js_sandbox/deno_ext/fetch", optional = true }
 pin-project-lite = "0.2.17"
 
 [dev-dependencies]

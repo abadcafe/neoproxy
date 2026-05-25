@@ -12,6 +12,7 @@ pub mod access_log;
 pub mod auth;
 pub mod echo;
 pub mod http_upstream;
+#[cfg(feature = "js-sandbox")]
 pub mod js_sandbox;
 pub mod utils;
 
@@ -30,6 +31,7 @@ impl PluginManager {
       (auth::plugin_name(), auth::create_plugin),
       (access_log::plugin_name(), access_log::create_plugin),
       (http_upstream::plugin_name(), http_upstream::create_plugin),
+      #[cfg(feature = "js-sandbox")]
       (js_sandbox::plugin_name(), js_sandbox::create_plugin),
     ];
 
@@ -111,6 +113,7 @@ impl PluginManager {
 mod tests {
   use super::*;
 
+  #[cfg(feature = "js-sandbox")]
   fn all_plugins_config() -> HashMap<String, SerializedArgs> {
     const ALL_PLUGINS: &[&str] = &[
       "echo", "auth", "access_log", "http_upstream", "js_sandbox",
@@ -140,6 +143,7 @@ mod tests {
     assert!(pm.plugins.is_empty());
   }
 
+  #[cfg(feature = "js-sandbox")]
   #[test]
   fn test_plugin_manager_all_plugins_config() {
     const ALL_PLUGINS: &[&str] = &[

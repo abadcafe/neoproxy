@@ -25,19 +25,19 @@ pub struct PluginManager {
 
 impl PluginManager {
   pub fn new(plugins_config: HashMap<String, SerializedArgs>) -> Self {
-    const KNOWN_PLUGINS: &[(&str, CreateFn)] = &[
-      ("echo", echo::create_plugin),
-      ("auth", auth::create_plugin),
-      ("access_log", access_log::create_plugin),
-      ("http_upstream", http_upstream::create_plugin),
-      ("js_sandbox", js_sandbox::create_plugin),
+    let known_plugins: &[(&str, CreateFn)] = &[
+      (echo::plugin_name(), echo::create_plugin),
+      (auth::plugin_name(), auth::create_plugin),
+      (access_log::plugin_name(), access_log::create_plugin),
+      (http_upstream::plugin_name(), http_upstream::create_plugin),
+      (js_sandbox::plugin_name(), js_sandbox::create_plugin),
     ];
 
     let mut plugins: HashMap<String, Box<dyn plugin::Plugin>> =
       HashMap::new();
 
     for (name, args) in plugins_config {
-      match KNOWN_PLUGINS.iter().find(|(n, _)| *n == name.as_str()) {
+      match known_plugins.iter().find(|(n, _)| *n == name.as_str()) {
         Some((_, create_fn)) => {
           plugins.insert(name, create_fn(Some(&args)));
         }

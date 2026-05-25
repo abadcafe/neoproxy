@@ -123,12 +123,14 @@ def create_socks5_config(
     else:
         layers_yaml = ""
 
+    auth_plugin_line = "\n  auth:" if (auth_type == "password" and users) else ""
+
     config_content = f"""server_threads: {server_threads}
 
 plugins:
   http_upstream:
     upstreams:
-      - name: direct
+      - name: direct{auth_plugin_line}
 
 services:
 - name: direct

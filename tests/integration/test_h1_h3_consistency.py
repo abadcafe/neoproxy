@@ -63,6 +63,7 @@ def write_h1_h3_config(
 
     config = {
         "server_threads": 2,
+        "plugins": {"echo": None},
         "services": [
             {
                 "name": "echo",
@@ -170,6 +171,7 @@ def write_minimal_echo_config(
 
     config = {
         "server_threads": 1,
+        "plugins": {"echo": None},
         "services": [
             {
                 "name": "echo",
@@ -510,6 +512,7 @@ class TestHTTP3MultiAddress:
             # Create config with multiple HTTP/3 addresses
             config = {
                 "server_threads": 1,
+                "plugins": {"echo": None},
                 "services": [
                     {
                         "name": "echo",
@@ -847,6 +850,7 @@ class TestHTTP3AuthorityHostMismatch:
             # Create HTTP/3 config with echo service
             config = {
                 "server_threads": 1,
+                "plugins": {"echo": None},
                 "services": [
                     {
                         "name": "echo",
@@ -951,6 +955,7 @@ class TestHTTP3AuthorityHostMismatch:
             # Create HTTP/3 config with echo service
             config = {
                 "server_threads": 1,
+                "plugins": {"echo": None},
                 "services": [
                     {
                         "name": "echo",
@@ -1056,6 +1061,7 @@ class TestHTTPSClientCert:
 
             config = {
                 "server_threads": 1,
+                "plugins": {"echo": None},
                 "services": [
                     {
                         "name": "echo",
@@ -1153,6 +1159,7 @@ class TestHTTPSClientCert:
 
             config = {
                 "server_threads": 1,
+                "plugins": {"echo": None},
                 "services": [
                     {
                         "name": "echo",
@@ -1264,6 +1271,7 @@ class TestHTTP3ClientCert:
 
             config = {
                 "server_threads": 1,
+                "plugins": {"echo": None},
                 "services": [
                     {
                         "name": "echo",
@@ -1352,6 +1360,7 @@ class TestHostHeaderRequired:
         try:
             config = {
                 "server_threads": 1,
+                "plugins": {"echo": None},
                 "services": [
                     {
                         "name": "echo",
@@ -1438,6 +1447,7 @@ class TestHostHeaderRequired:
 
             config = {
                 "server_threads": 1,
+                "plugins": {"echo": None},
                 "services": [
                     {
                         "name": "echo",

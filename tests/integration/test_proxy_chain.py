@@ -51,6 +51,7 @@ plugins:
   http_upstream:
     upstreams:
       - name: direct
+  auth:
 
 services:
   - name: tunnel
@@ -150,6 +151,7 @@ plugins:
               username: user1
               password: pass1
             http3: {{}}
+  auth:
 
 services:
   - name: proxy_chain
@@ -203,6 +205,7 @@ plugins:
             hostname: localhost
             weight: 1
             http3: {{}}
+  auth:
 
 services:
   - name: proxy_chain
@@ -255,6 +258,7 @@ plugins:
               username: user1
               password: pass1
             http3: {{}}
+  auth:
 
 services:
   - name: proxy_chain
@@ -308,6 +312,7 @@ plugins:
             hostname: localhost
             weight: 1
             http3: {{}}
+  auth:
 
 services:
   - name: proxy_chain
@@ -696,6 +701,7 @@ plugins:
             hostname: localhost
             weight: 1
             http3: {{}}
+  auth:
 
 services:
   - name: proxy_chain
@@ -745,6 +751,7 @@ plugins:
             hostname: localhost
             weight: 1
             http3: {{}}
+  auth:
 
 services:
   - name: proxy_chain
@@ -798,6 +805,7 @@ plugins:
               username: wrong_user
               password: wrong_pass
             http3: {{}}
+  auth:
 
 services:
   - name: proxy_chain

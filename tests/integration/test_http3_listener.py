@@ -762,6 +762,9 @@ class TestHTTP3EchoService:
             # Create config with echo service
             config_content = f"""server_threads: 1
 
+plugins:
+  echo:
+
 listeners:
 - name: h3_main
   kind: http3

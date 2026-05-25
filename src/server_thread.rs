@@ -362,7 +362,9 @@ mod tests {
   }
 
   fn make_test_plugin_manager() -> PluginManager {
-    PluginManager::new(HashMap::new())
+    let mut config = HashMap::new();
+    config.insert("echo".to_string(), SerializedArgs::Null);
+    PluginManager::new(config)
   }
 
   fn make_test_plugin_manager_with_layers(
@@ -374,7 +376,7 @@ mod tests {
     for (name, counter) in names.iter().zip(counters.iter()) {
       plugin = plugin.with_layer(*name, counter.clone());
     }
-    pm.plugins_mut().insert("test", Box::new(plugin));
+    pm.plugins_mut().insert("test".to_string(), Box::new(plugin));
     pm
   }
 

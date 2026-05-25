@@ -84,8 +84,9 @@ def _access_log_layer_args(
 
 
 def _access_log_plugins(writer: str = "logs/access") -> dict:
-    """Build plugins dict with access_log writer definition."""
+    """Build plugins dict with echo and access_log writer definition."""
     return {
+        "echo": None,
         "access_log": {
             "writers": [{"path_prefix": writer}],
         }
@@ -98,6 +99,7 @@ class TestAuthLayer:
     def test_auth_rejects_without_credentials(self, proxy_with_config) -> None:
         """Request without Proxy-Authorization should get 407."""
         config = {
+            "plugins": {"echo": None, "auth": None},
             "listeners": [
                 {"name": "http_main", "kind": "http", "addresses": ["127.0.0.1:AUTO_PORT"]}
             ],
@@ -128,6 +130,7 @@ class TestAuthLayer:
     def test_auth_accepts_valid_credentials(self, proxy_with_config) -> None:
         """Request with valid credentials should succeed."""
         config = {
+            "plugins": {"echo": None, "auth": None},
             "listeners": [
                 {"name": "http_main", "kind": "http", "addresses": ["127.0.0.1:AUTO_PORT"]}
             ],
@@ -159,6 +162,7 @@ class TestAuthLayer:
     def test_auth_rejects_wrong_password(self, proxy_with_config) -> None:
         """Request with wrong password should get 407."""
         config = {
+            "plugins": {"echo": None, "auth": None},
             "listeners": [
                 {"name": "http_main", "kind": "http", "addresses": ["127.0.0.1:AUTO_PORT"]}
             ],
@@ -190,6 +194,7 @@ class TestAuthLayer:
     def test_auth_rejects_non_basic_scheme(self, proxy_with_config) -> None:
         """Request with non-Basic Proxy-Authorization should get 407."""
         config = {
+            "plugins": {"echo": None, "auth": None},
             "listeners": [
                 {"name": "http_main", "kind": "http", "addresses": ["127.0.0.1:AUTO_PORT"]}
             ],
@@ -220,6 +225,7 @@ class TestAuthLayer:
     def test_auth_rejects_malformed_basic_header(self, proxy_with_config) -> None:
         """Request with malformed Basic header should get 407."""
         config = {
+            "plugins": {"echo": None, "auth": None},
             "listeners": [
                 {"name": "http_main", "kind": "http", "addresses": ["127.0.0.1:AUTO_PORT"]}
             ],
@@ -347,7 +353,7 @@ class TestCombinedLayers:
                     ],
                 }
             ],
-            "plugins": _access_log_plugins(),
+            "plugins": {**_access_log_plugins(), "auth": None},
         }
 
         with proxy_with_config(config) as proxy:
@@ -472,7 +478,7 @@ class TestLayerOrdering:
                     ],
                 }
             ],
-            "plugins": _access_log_plugins(),
+            "plugins": {**_access_log_plugins(), "auth": None},
         }
 
         with proxy_with_config(config) as proxy:

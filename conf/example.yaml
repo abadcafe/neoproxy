@@ -31,6 +31,13 @@ server_threads: 2
 # Each plugin parses its own section independently.
 
 plugins:
+  # Echo plugin - test service, no config needed
+  echo:
+
+  # Auth plugin - proxy authentication
+  auth:
+
+  # Access Log Plugin
   access_log:
     writers:
       # Default access log writer
@@ -67,6 +74,58 @@ plugins:
               username: "admin"
               password: "secret"
             http3: {}
+
+# -----------------------------------------------------------------------------
+# Services
+# -----------------------------------------------------------------------------
+# Services define request handlers. Each service has:
+#   - name: Service name (referenced by servers)
+#   - kind: Service type in "plugin.service" format
+#   - args: Service-specific parameters
+#   - layers: Middleware layers applied to this service (optional)
+
+services:
+  # Echo service - simplest test service, echoes requests back
+  - name: echo
+    kind: echo.echo
+    args: {}
+
+  # Chain proxy service (through upstream H3 proxy)
+  - name: chain
+    kind: http_upstream.upstream
+    args:
+      upstream: local_relay
+    layers:
+      # Basic proxy authentication (used by SOCKS5 listener)
+      - kind: auth.basic_auth
+        args:
+          users:
+            - username: "admin"
+              password: "secret"
+      - kind: access_log.file
+        args:
+          writer: "logs/access.log"
+
+  # Direct proxy service with basic auth layer
+  - name: direct_proxy
+    kind: http_upstream.upstream
+    args:
+      upstream: direct
+    layers:
+      # Basic proxy authentication layer
+      - kind: auth.basic_auth
+        args:
+          users:
+            - username: "admin"
+              password: "secret"
+      # Access log layer (logs to audit file with JSON format)
+      - kind: access_log.file
+        args:
+          writer: "logs/access.log"
+          # Request context fields to include in log entries
+          context_fields:
+            - "basic_auth.user"
+            - "upstream.connect_ms"
 
 # -----------------------------------------------------------------------------
 # Listeners
@@ -137,58 +196,6 @@ listeners:
   - name: socks5_connect
     kind: socks5
     addresses: ["127.0.0.1:11080"]
-
-# -----------------------------------------------------------------------------
-# Services
-# -----------------------------------------------------------------------------
-# Services define request handlers. Each service has:
-#   - name: Service name (referenced by servers)
-#   - kind: Service type in "plugin.service" format
-#   - args: Service-specific parameters
-#   - layers: Middleware layers applied to this service (optional)
-
-services:
-  # Echo service - simplest test service, echoes requests back
-  - name: echo
-    kind: echo.echo
-    args: {}
-
-  # Chain proxy service (through upstream H3 proxy)
-  - name: chain
-    kind: http_upstream.upstream
-    args:
-      upstream: local_relay
-    layers:
-      # Basic proxy authentication (used by SOCKS5 listener)
-      - kind: auth.basic_auth
-        args:
-          users:
-            - username: "admin"
-              password: "secret"
-      - kind: access_log.file
-        args:
-          writer: "logs/access.log"
-
-  # Direct proxy service with basic auth layer
-  - name: direct_proxy
-    kind: http_upstream.upstream
-    args:
-      upstream: direct
-    layers:
-      # Basic proxy authentication layer
-      - kind: auth.basic_auth
-        args:
-          users:
-            - username: "admin"
-              password: "secret"
-      # Access log layer (logs to audit file with JSON format)
-      - kind: access_log.file
-        args:
-          writer: "logs/access.log"
-          # Request context fields to include in log entries
-          context_fields:
-            - "basic_auth.user"
-            - "upstream.connect_ms"
 
 # -----------------------------------------------------------------------------
 # Servers

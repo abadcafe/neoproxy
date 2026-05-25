@@ -179,6 +179,9 @@ servers:
         """
         config = """server_threads: 1
 
+plugins:
+  echo:
+
 listeners:
 - name: http_main
   kind: http
@@ -206,6 +209,9 @@ servers:
         Target: Verify neoproxy fails when listener builder does not exist.
         """
         config = """server_threads: 1
+
+plugins:
+  echo:
 
 listeners:
 - name: bad_listener
@@ -274,6 +280,9 @@ servers:
         """
         http_port = get_unique_port()
         config = f"""server_threads: 1
+
+plugins:
+  echo:
 
 listeners:
 - name: http_main
@@ -423,6 +432,9 @@ servers:
         """
         config = """server_threads: 1
 
+plugins:
+  echo:
+
 listeners:
 - name: http_main
   kind: http
@@ -507,6 +519,11 @@ servers:
         level because the struct uses #[serde(deny_unknown_fields)].
         """
         config = """server_threads: 1
+
+plugins:
+  http_upstream:
+    upstreams:
+      - name: test
 
 listeners:
 - name: http_main
@@ -674,6 +691,9 @@ class TestHostnameRouting:
         socks_port = get_unique_port()
         config = f"""server_threads: 1
 
+plugins:
+  echo:
+
 services:
 - name: echo
   kind: echo.echo
@@ -703,6 +723,9 @@ servers:
         """
         http_port = get_unique_port()
         config = f"""server_threads: 1
+
+plugins:
+  echo:
 
 services:
 - name: echo
@@ -744,6 +767,9 @@ servers:
         http_port = get_unique_port()
         config = f"""server_threads: 1
 
+plugins:
+  echo:
+
 services:
 - name: echo
   kind: echo.echo
@@ -780,6 +806,9 @@ servers:
         """
         http_port = get_unique_port()
         config = f"""server_threads: 1
+
+plugins:
+  echo:
 
 services:
 - name: echo
@@ -912,6 +941,9 @@ servers:
         http_port = get_unique_port()
         config = f"""server_threads: 1
 
+plugins:
+  echo:
+
 services:
 - name: echo
   kind: echo.echo
@@ -956,6 +988,9 @@ servers:
         """
         http_port = get_unique_port()
         config = f"""server_threads: 1
+
+plugins:
+  echo:
 
 services:
 - name: echo

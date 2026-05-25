@@ -2,6 +2,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
+use tracing::warn;
 
 use crate::config::SerializedArgs;
 use crate::plugin;
@@ -14,37 +15,38 @@ pub mod http_upstream;
 pub mod js_sandbox;
 pub mod utils;
 
-/// Manages plugin lifecycle: registers all plugins at construction,
+type CreateFn = fn(Option<&SerializedArgs>) -> Box<dyn plugin::Plugin>;
+
+/// Manages plugin lifecycle: only loads plugins listed in config,
 /// builds services/layers on demand.
 pub struct PluginManager {
-  plugins: HashMap<&'static str, Box<dyn plugin::Plugin>>,
+  plugins: HashMap<String, Box<dyn plugin::Plugin>>,
 }
 
 impl PluginManager {
   pub fn new(plugins_config: HashMap<String, SerializedArgs>) -> Self {
-    let mut plugins: HashMap<&'static str, Box<dyn plugin::Plugin>> =
+    const KNOWN_PLUGINS: &[(&str, CreateFn)] = &[
+      ("echo", echo::create_plugin),
+      ("auth", auth::create_plugin),
+      ("access_log", access_log::create_plugin),
+      ("http_upstream", http_upstream::create_plugin),
+      ("js_sandbox", js_sandbox::create_plugin),
+    ];
+
+    let mut plugins: HashMap<String, Box<dyn plugin::Plugin>> =
       HashMap::new();
 
-    plugins.insert(
-      echo::plugin_name(),
-      echo::create_plugin(plugins_config.get("echo")),
-    );
-    plugins.insert(
-      auth::plugin_name(),
-      auth::create_plugin(plugins_config.get("auth")),
-    );
-    plugins.insert(
-      access_log::plugin_name(),
-      access_log::create_plugin(plugins_config.get("access_log")),
-    );
-    plugins.insert(
-      http_upstream::plugin_name(),
-      http_upstream::create_plugin(plugins_config.get("http_upstream")),
-    );
-    plugins.insert(
-      js_sandbox::plugin_name(),
-      js_sandbox::create_plugin(plugins_config.get("js_sandbox")),
-    );
+    for (name, args) in plugins_config {
+      match KNOWN_PLUGINS.iter().find(|(n, _)| *n == name.as_str()) {
+        Some((_, create_fn)) => {
+          plugins.insert(name, create_fn(Some(&args)));
+        }
+        None => {
+          warn!("unknown plugin '{}' in config, ignored", name);
+        }
+      }
+    }
+
     Self { plugins }
   }
 
@@ -80,7 +82,7 @@ impl PluginManager {
   #[cfg(test)]
   pub fn plugins_mut(
     &mut self,
-  ) -> &mut HashMap<&'static str, Box<dyn plugin::Plugin>> {
+  ) -> &mut HashMap<String, Box<dyn plugin::Plugin>> {
     &mut self.plugins
   }
 
@@ -109,6 +111,22 @@ impl PluginManager {
 mod tests {
   use super::*;
 
+  fn all_plugins_config() -> HashMap<String, SerializedArgs> {
+    const ALL_PLUGINS: &[&str] = &[
+      "echo", "auth", "access_log", "http_upstream", "js_sandbox",
+    ];
+    let mut m = HashMap::new();
+    for &name in ALL_PLUGINS {
+      let cfg = if name == "js_sandbox" {
+        serde_yaml::from_str(r#"source_dir: "/tmp/js_sandbox""#).unwrap()
+      } else {
+        serde_yaml::Value::Null
+      };
+      m.insert(name.to_string(), cfg);
+    }
+    m
+  }
+
   #[test]
   fn test_auth_plugin_name_and_create() {
     assert_eq!(auth::plugin_name(), "auth");
@@ -117,12 +135,56 @@ mod tests {
   }
 
   #[test]
-  fn test_plugin_manager_new_has_all_plugins() {
+  fn test_plugin_manager_empty_config_loads_nothing() {
     let pm = PluginManager::new(HashMap::new());
+    assert!(pm.plugins.is_empty());
+  }
+
+  #[test]
+  fn test_plugin_manager_all_plugins_config() {
+    const ALL_PLUGINS: &[&str] = &[
+      "echo", "auth", "access_log", "http_upstream", "js_sandbox",
+    ];
+    let pm = PluginManager::new(all_plugins_config());
+    for &name in ALL_PLUGINS {
+      assert!(
+        pm.plugins.contains_key(name),
+        "missing plugin '{}'",
+        name
+      );
+    }
+  }
+
+  #[test]
+  fn test_plugin_manager_partial_config() {
+    let mut config = HashMap::new();
+    config.insert("echo".to_string(), serde_yaml::Value::Null);
+    config.insert("auth".to_string(), serde_yaml::Value::Null);
+    let pm = PluginManager::new(config);
     assert!(pm.plugins.contains_key("echo"));
     assert!(pm.plugins.contains_key("auth"));
-    assert!(pm.plugins.contains_key("access_log"));
-    assert!(pm.plugins.contains_key("http_upstream"));
+    assert!(!pm.plugins.contains_key("access_log"));
+    assert!(!pm.plugins.contains_key("http_upstream"));
+    assert!(!pm.plugins.contains_key("js_sandbox"));
+  }
+
+  #[test]
+  fn test_plugin_manager_unknown_plugin_ignored() {
+    let mut config = HashMap::new();
+    config.insert("echo".to_string(), serde_yaml::Value::Null);
+    config.insert("nonexistent".to_string(), serde_yaml::Value::Null);
+    let pm = PluginManager::new(config);
+    assert!(pm.plugins.contains_key("echo"));
+    assert!(!pm.plugins.contains_key("nonexistent"));
+    assert_eq!(pm.plugins.len(), 1);
+  }
+
+  #[test]
+  fn test_plugin_manager_null_config_value() {
+    let mut config = HashMap::new();
+    config.insert("echo".to_string(), serde_yaml::Value::Null);
+    let pm = PluginManager::new(config);
+    assert!(pm.plugins.contains_key("echo"));
   }
 
   #[test]
@@ -140,10 +202,47 @@ mod tests {
   }
 
   #[test]
+  fn test_plugin_manager_build_service_unconfigured_plugin() {
+    let mut config = HashMap::new();
+    config.insert("echo".to_string(), serde_yaml::Value::Null);
+    let pm = PluginManager::new(config);
+    let result =
+      pm.build_service("auth", "basic_auth", serde_yaml::Value::Null);
+    assert!(result.is_err());
+    assert!(
+      result
+        .unwrap_err()
+        .to_string()
+        .contains("plugin 'auth' not found")
+    );
+  }
+
+  #[test]
   fn test_plugin_manager_build_layer_not_found() {
     let pm = PluginManager::new(HashMap::new());
     let result =
       pm.build_layer("nonexistent", "layer", serde_yaml::Value::Null);
     assert!(result.is_err());
+  }
+
+  #[test]
+  fn test_plugin_manager_build_service_with_configured_plugin() {
+    let mut config = HashMap::new();
+    config.insert("echo".to_string(), serde_yaml::Value::Null);
+    let pm = PluginManager::new(config);
+    let result =
+      pm.build_service("echo", "echo", serde_yaml::Value::Null);
+    assert!(result.is_ok());
+  }
+
+  #[test]
+  fn test_plugin_manager_build_layer_with_configured_plugin() {
+    let mut config = HashMap::new();
+    config.insert("auth".to_string(), serde_yaml::Value::Null);
+    let pm = PluginManager::new(config);
+    let args: SerializedArgs =
+      serde_yaml::from_str(r"users: []").unwrap();
+    let result = pm.build_layer("auth", "basic_auth", args);
+    assert!(result.is_ok());
   }
 }

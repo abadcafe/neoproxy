@@ -133,6 +133,9 @@ def create_echo_config(
     """
     config_content = f"""server_threads: {server_threads}
 
+plugins:
+  echo:
+
 listeners:
 - name: http_main
   kind: http

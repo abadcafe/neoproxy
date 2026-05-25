@@ -93,26 +93,15 @@ def write_config(
         ],
     }
 
-    # Only include the plugins key when include_layer=True.
-    # When include_layer=False, omitting the plugins key entirely is
-    # correct because ConfigRaw.plugins has #[serde(default)], so a
-    # missing plugins key defaults to an empty HashMap. Including
-    # plugins: {} would render as "plugins:" (null in YAML), which
-    # causes serde_yaml deserialization to fail because null is not
-    # a valid HashMap<String, SerializedArgs>.
+    plugins: dict = {"echo": None}
     if include_layer:
-        # Omit format key when it's the default "text" value, matching
-        # the pattern in conf/example.yaml where default is not explicit.
         writer_config: dict = {"path_prefix": path_prefix}
         if log_format != "text":
             writer_config["format"] = log_format
         if rotate_daily is not None:
             writer_config["rotate_daily"] = rotate_daily
-        config["plugins"] = {
-            "access_log": {
-                "writers": [writer_config]
-            }
-        }
+        plugins["access_log"] = {"writers": [writer_config]}
+    config["plugins"] = plugins
 
     config_path = os.path.join(config_dir, "server.yaml")
     with open(config_path, "w") as f:
@@ -506,6 +495,7 @@ class TestAccessLogNamedWriters:
 
         config = {
             "plugins": {
+                "echo": None,
                 "access_log": {
                     "writers": [
                         {"path_prefix": "logs/default_access"},
@@ -582,6 +572,7 @@ class TestAccessLogNamedWriters:
 
         config = {
             "plugins": {
+                "echo": None,
                 "access_log": {
                     "writers": [
                         {"path_prefix": "logs/real_writer"},
@@ -670,6 +661,7 @@ class TestAccessLogNamedWriters:
 
         config = {
             "plugins": {
+                "echo": None,
                 "access_log": {
                     "writers": [
                         {"path_prefix": "logs/default"},
@@ -826,6 +818,8 @@ class TestAccessLogContextFieldValues:
 
         config: dict = {
             "plugins": {
+                "echo": None,
+                "auth": None,
                 "access_log": {
                     "writers": [
                         {"path_prefix": "logs/access"},
@@ -916,6 +910,8 @@ class TestAccessLogContextFieldValues:
 
         config: dict = {
             "plugins": {
+                "echo": None,
+                "auth": None,
                 "access_log": {
                     "writers": [
                         {"path_prefix": "logs/json_access", "format": "json"},

@@ -190,6 +190,7 @@ plugins:
   http_upstream:
     upstreams:
       - name: direct
+  auth:
 
 services:
 - name: direct
@@ -342,6 +343,7 @@ plugins:
   http_upstream:
     upstreams:
       - name: direct
+  auth:
 
 services:
 - name: direct

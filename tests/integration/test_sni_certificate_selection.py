@@ -51,6 +51,9 @@ def create_multi_server_config(
     config_lines = [
         f"server_threads: 1",
         "",
+        "plugins:",
+        "  echo:",
+        "",
         "services:",
         "  - name: echo",
         "    kind: echo.echo",
@@ -114,6 +117,9 @@ def create_single_server_config(
     """
     lines = [
         "server_threads: 1",
+        "",
+        "plugins:",
+        "  echo:",
         "",
         "services:",
         "  - name: echo",

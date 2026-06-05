@@ -334,6 +334,16 @@ mod tests {
   use crate::context::RequestContext;
   use crate::service::Service as RuntimeService;
 
+  /// Ensure the rustls crypto provider is installed for tests.
+  fn ensure_crypto_provider() {
+    static CRYPTO_PROVIDER_INSTALLED: std::sync::OnceLock<bool> =
+      std::sync::OnceLock::new();
+    CRYPTO_PROVIDER_INSTALLED.get_or_init(|| {
+      let _ = rustls::crypto::ring::default_provider().install_default();
+      true
+    });
+  }
+
   fn make_request(method: http::Method, uri: &str) -> Request {
     let mut req = http::Request::builder()
       .method(method)
@@ -351,6 +361,7 @@ mod tests {
   fn build_registry(
     plugin_config: super::super::config::HttpUpstreamPluginConfig,
   ) -> UpstreamRegistry {
+    ensure_crypto_provider();
     let merged =
       super::super::config::merge_chain_config(&plugin_config).unwrap();
     let st = Rc::new(StreamTracker::new());

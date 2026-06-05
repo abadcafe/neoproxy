@@ -249,19 +249,24 @@ impl UpstreamRegistry {
     certificates: Option<&CertificateConfig>,
     tracker: Rc<StreamTracker>,
   ) -> Result<Self> {
-    let tls_config = if let Some(certs) = certificates {
-      let roots =
-        build_root_cert_store(certs.server_ca_path.as_deref())?;
-      let ccc = ClientCertCredential {
-        cert_path: certs.client_cert_path.as_ref().map(Into::into),
-        key_path: certs.client_key_path.as_ref().map(Into::into),
+    let tls_config = {
+      let server_ca = certificates.and_then(|c| c.server_ca_path.as_deref());
+      let roots = build_root_cert_store(server_ca)?;
+      let ccc = match certificates {
+        Some(certs) => {
+          // Also validate certs to catch misconfigured client auth early
+          certs.validate()?;
+          ClientCertCredential {
+            cert_path: certs.client_cert_path.as_ref().map(Into::into),
+            key_path: certs.client_key_path.as_ref().map(Into::into),
+          }
+        }
+        None => ClientCertCredential { cert_path: None, key_path: None },
       };
-      let mut https_config = build_tls_config(&ccc, roots)?;
-      https_config.alpn_protocols = vec![b"http/1.1".to_vec()];
-      https_config.key_log = Arc::new(rustls::KeyLogFile::new());
-      Some(Arc::new(https_config))
-    } else {
-      None
+      let mut client_config = build_tls_config(&ccc, roots)?;
+      client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+      client_config.key_log = Arc::new(rustls::KeyLogFile::new());
+      Some(Arc::new(client_config))
     };
 
     let mut entries: HashMap<String, Upstream> = HashMap::new();

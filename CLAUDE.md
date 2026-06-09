@@ -15,7 +15,7 @@ uv run pytest -v tests/integration/  # 集成测试（295个）
 
 **部署目录**: `~/services/neoproxy/`
 
-**部署方式**: systemd --user，**禁止使用 nohup / 直接后台启动**。
+**部署方式 A**: systemd --user
 
 ```bash
 # 构建
@@ -56,6 +56,25 @@ RestartSec=5
 WantedBy=default.target
 ```
 
+**部署方式 B**: status.sh（nohup + 自动重启循环）
+
+```bash
+# 构建 & 部署
+cargo build --release
+cp target/release/neoproxy ~/services/neoproxy/bin/
+
+# 启动 / 停止 / 重启 / 状态
+~/services/neoproxy/bin/status.sh start
+~/services/neoproxy/bin/status.sh stop
+~/services/neoproxy/bin/status.sh restart
+~/services/neoproxy/bin/status.sh status
+
+# 查看日志
+tail -f ~/services/neoproxy/logs/stdout.log
+```
+
+> **注意**: 两种方式的配置等都要维护（目录结构、配置文件互不冲突）。启停优先用 systemctl，systemctl 不可用时再用 status.sh。
+
 **配置**: `~/services/neoproxy/conf/server.yaml`
 
 **验证**:
@@ -63,13 +82,4 @@ WantedBy=default.target
 curl -x http://127.0.0.1:8080 http://www.google.com/ -s -o /dev/null -w "%{http_code}\n"
 # 应返回 200
 ```
-
-## 项目架构
-
-- `src/main.rs` — 入口，信号处理，主循环
-- `src/listener.rs` — `Listener`, `Listening`, `BuildListener`, `ListenerProps`, `TransportLayer` 等抽象
-- `src/listeners/` — 具体 listener 实现 (http, https, http3, socks5) + 注册表 `ListenerManager`
-- `src/plugins/http_upstream/` — 上游代理转发插件，支持 HTTP/HTTPS/H3 协议
-- `src/config/` — 配置加载、验证（三态继承）
-- `tests/integration/` — Python 集成测试（pytest）
 

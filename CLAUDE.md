@@ -73,6 +73,15 @@ cp target/release/neoproxy ~/services/neoproxy/bin/
 tail -f ~/services/neoproxy/logs/stdout.log
 ```
 
+**`bin/status.sh` 文件**: `~/services/neoproxy/bin/status.sh`
+
+```bash
+#!/bin/bash
+
+CMD="bin/neoproxy -c conf/server.yaml"
+. "$(dirname "$0")/../../status.sh"
+```
+
 > **注意**: 两种方式的配置等都要维护（目录结构、配置文件互不冲突）。启停优先用 systemctl，systemctl 不可用时再用 status.sh。
 
 **配置**: `~/services/neoproxy/conf/server.yaml`

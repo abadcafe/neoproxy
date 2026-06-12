@@ -634,7 +634,7 @@ impl ClientProtocol for HttpsClient {
     &'a self,
     target: &'a str,
     tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    _tracker: &'a Rc<StreamTracker>,
+    tracker: &'a Rc<StreamTracker>,
   ) -> Pin<
     Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
   > {
@@ -646,6 +646,7 @@ impl ClientProtocol for HttpsClient {
     let tunnel_idle_timeout = self.tunnel_idle_timeout;
     let user = self.user.clone();
     let tls = tls_config.clone();
+    let tracker = tracker.clone();
     Box::pin(async move {
       let tls = tls.ok_or_else(|| {
         UpstreamError::TlsCertificateError(
@@ -695,7 +696,17 @@ impl ClientProtocol for HttpsClient {
       })?;
 
       let req = build_connect_request(&target, &user);
-      let resp = sr.send_request(req).await.map_err(|e| {
+      let resp_fut = sr.send_request(req);
+
+      // Drive the connection via tracker (spawn_local + graceful
+      // shutdown support) while waiting for the CONNECT response.
+      let (tx, rx) = tokio::sync::oneshot::channel();
+      tracker.register_connection(async move {
+        let parts = conn.without_shutdown().await;
+        let _ = tx.send(parts);
+      });
+
+      let resp = resp_fut.await.map_err(|e| {
         UpstreamError::ConnectionTerminated(e.to_string())
       })?;
 
@@ -711,7 +722,11 @@ impl ClientProtocol for HttpsClient {
         });
       }
 
-      let parts = conn.without_shutdown().await.map_err(|e| {
+      let parts = rx.await.map_err(|e| {
+        UpstreamError::ProxyInternalError(format!(
+          "connection task cancelled: {e}"
+        ))
+      })?.map_err(|e| {
         UpstreamError::ConnectionTerminated(e.to_string())
       })?;
 

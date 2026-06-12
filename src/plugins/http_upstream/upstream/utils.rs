@@ -46,6 +46,7 @@ pub(crate) fn build_connect_request(
   let mut req = http::Request::builder()
     .method(http::Method::CONNECT)
     .uri(target)
+    .header(http::header::HOST, target)
     .body(())
     .expect("building CONNECT request should not fail");
   apply_proxy_auth(user, &mut req);

@@ -15,7 +15,7 @@ use crate::http_utils::{
   build_empty_response, build_error_response,
   build_proxy_status_with_status,
 };
-use crate::listeners::utils::get_server_id;
+use crate::context::get_server_id;
 use crate::plugins::utils::{
   self, ConnectTargetError, ForwardTargetError,
 };

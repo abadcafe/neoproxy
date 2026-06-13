@@ -21,21 +21,22 @@ pub(crate) fn apply_proxy_auth(
   }
 }
 
-pub(crate) fn resolve_address(s: &str) -> Result<SocketAddr> {
-  s.parse()
-    .or_else(|_| {
-      std::net::ToSocketAddrs::to_socket_addrs(s)
-        .map_err(|e| {
-          anyhow::Error::from(DnsResolveError(e)).context(format!(
-            "address '{s}' is neither IP:port nor resolvable hostname"
-          ))
-        })
-        .and_then(|mut addrs| {
-          addrs.next().ok_or_else(|| {
-            anyhow!("address '{s}' resolved to no addresses")
-          })
-        })
-    })
+pub(crate) async fn resolve_address(s: &str) -> Result<SocketAddr> {
+  // Fast path: try parsing as IP:port first (no DNS needed).
+  if let Ok(addr) = s.parse::<SocketAddr>() {
+    return Ok(addr);
+  }
+
+  // Async DNS resolution via tokio's non-blocking lookup_host.
+  tokio::net::lookup_host(s)
+    .await
+    .map_err(|e| {
+      anyhow::Error::from(DnsResolveError(e)).context(format!(
+        "address '{s}' is neither IP:port nor resolvable hostname"
+      ))
+    })?
+    .next()
+    .ok_or_else(|| anyhow!("address '{s}' resolved to no addresses"))
     .with_context(|| format!("address '{s}'"))
 }
 

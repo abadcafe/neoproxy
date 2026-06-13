@@ -26,7 +26,7 @@ use crate::http_utils::{
   append_proxy_status, build_error_response,
   build_proxy_status_with_status,
 };
-use crate::listeners::utils::get_server_id;
+use crate::context::get_server_id;
 use crate::plugins::http_upstream::error::{
   UpstreamError, classify_connect_error, classify_tls_handshake_error,
 };
@@ -154,14 +154,16 @@ impl hyper_util::client::legacy::connect::Connection for TlsConn {
 pub(crate) struct ProxyConnector {
   proxy_addr: String,
   connect_timeout: Duration,
+  dns_resolve_timeout: Duration,
 }
 
 impl ProxyConnector {
   pub(crate) fn new(
     proxy_addr: String,
     connect_timeout: Duration,
+    dns_resolve_timeout: Duration,
   ) -> Self {
-    Self { proxy_addr, connect_timeout }
+    Self { proxy_addr, connect_timeout, dns_resolve_timeout }
   }
 }
 
@@ -184,10 +186,19 @@ impl Service<Uri> for ProxyConnector {
   fn call(&mut self, _uri: Uri) -> Self::Future {
     let proxy_addr = self.proxy_addr.clone();
     let timeout = self.connect_timeout;
+    let dns_timeout = self.dns_resolve_timeout;
     Box::pin(async move {
-      let addr = resolve_address(&proxy_addr).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, e)
-      })?;
+      let addr = tokio::time::timeout(dns_timeout, resolve_address(&proxy_addr))
+        .await
+        .map_err(|_| {
+          std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("DNS resolve for '{proxy_addr}' timed out"),
+          )
+        })?
+        .map_err(|e| {
+          std::io::Error::new(std::io::ErrorKind::Other, e)
+        })?;
       let stream = tokio::time::timeout(
         timeout,
         tokio::net::TcpStream::connect(addr),
@@ -463,6 +474,7 @@ pub(crate) struct HttpClient<C> {
                                           * Some = proxy mode */
   pub(crate) connect_timeout: Duration,
   pub(crate) tunnel_idle_timeout: Duration,
+  pub(crate) dns_resolve_timeout: Duration,
   pub(crate) user: Option<crate::config::UserCredential>,
 }
 
@@ -535,7 +547,10 @@ where
         Some(ref addr) => {
           // Http proxy mode: TCP to proxy + HTTP/1.1 handshake +
           // CONNECT
-          let resolved = resolve_address(addr)
+          let dns_timeout = self.dns_resolve_timeout;
+          let resolved = tokio::time::timeout(dns_timeout, resolve_address(addr))
+            .await
+            .map_err(|_| UpstreamError::DnsError(format!("DNS resolve for '{addr}' timed out")))?
             .map_err(|e| classify_connect_error(e))?;
           let stream = tokio::time::timeout(
             connect_timeout,
@@ -607,6 +622,7 @@ pub(crate) struct HttpsClient {
   pub(crate) connect_timeout: Duration,
   pub(crate) tls_handshake_timeout: Duration,
   pub(crate) tunnel_idle_timeout: Duration,
+  pub(crate) dns_resolve_timeout: Duration,
   pub(crate) user: Option<crate::config::UserCredential>,
 }
 
@@ -654,7 +670,10 @@ impl ClientProtocol for HttpsClient {
         )
       })?;
 
-      let resolved = resolve_address(&addr)
+      let dns_timeout = self.dns_resolve_timeout;
+      let resolved = tokio::time::timeout(dns_timeout, resolve_address(&addr))
+        .await
+        .map_err(|_| UpstreamError::DnsError(format!("DNS resolve for '{addr}' timed out")))?
         .map_err(|e| classify_connect_error(e))?;
       let stream = tokio::time::timeout(
         connect_timeout,

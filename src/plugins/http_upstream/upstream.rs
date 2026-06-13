@@ -294,6 +294,7 @@ impl UpstreamRegistry {
                 proxy_addr: None,
                 connect_timeout: upstream.connect_timeout,
                 tunnel_idle_timeout: upstream.tunnel_idle_timeout,
+                dns_resolve_timeout: upstream.dns_resolve_timeout,
                 user: None,
               },
             )),
@@ -312,6 +313,7 @@ impl UpstreamRegistry {
             let connector = ProxyConnector::new(
               addr.address.clone(),
               *connect_timeout,
+              upstream.dns_resolve_timeout,
             );
             let client =
               Client::builder(hyper_util::rt::TokioExecutor::new())
@@ -329,6 +331,7 @@ impl UpstreamRegistry {
                 proxy_addr: Some(addr.address.clone()),
                 connect_timeout: *connect_timeout,
                 tunnel_idle_timeout: addr.tunnel_idle_timeout,
+                dns_resolve_timeout: upstream.dns_resolve_timeout,
                 user: addr.user.clone(),
               }),
             });
@@ -354,6 +357,7 @@ impl UpstreamRegistry {
             let inner = ProxyConnector::new(
               addr.address.clone(),
               *connect_timeout,
+              upstream.dns_resolve_timeout,
             );
             let connector = http::TlsProxyConnector::new(
               inner,
@@ -379,6 +383,7 @@ impl UpstreamRegistry {
                 connect_timeout: *connect_timeout,
                 tls_handshake_timeout: *tls_handshake_timeout,
                 tunnel_idle_timeout: addr.tunnel_idle_timeout,
+                dns_resolve_timeout: upstream.dns_resolve_timeout,
                 user: addr.user.clone(),
               }),
             });
@@ -396,6 +401,7 @@ impl UpstreamRegistry {
                 hostname: addr.hostname.clone(),
                 tls_handshake_timeout: *tls_handshake_timeout,
                 tunnel_idle_timeout: addr.tunnel_idle_timeout,
+                dns_resolve_timeout: upstream.dns_resolve_timeout,
                 quic: QuicConfig {
                   max_idle_timeout: quic.max_idle_timeout,
                   keep_alive_interval: quic.keep_alive_interval,

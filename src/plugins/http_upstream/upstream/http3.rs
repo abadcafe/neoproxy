@@ -16,7 +16,7 @@ use crate::http_utils::{
   RequestBody, Response, ResponseBody, append_proxy_status,
   build_error_response, build_proxy_status_with_status,
 };
-use crate::listeners::utils::get_server_id;
+use crate::context::get_server_id;
 use crate::plugins::http_upstream::error::{
   UpstreamError, classify_quic_error,
 };
@@ -61,6 +61,7 @@ pub(super) async fn establish_http3_connection(
   hostname: Option<&str>,
   quic: &QuicConfig,
   tls_handshake_timeout: Duration,
+  dns_timeout: Duration,
   tls_config: &rustls::ClientConfig,
   tracker: &Rc<StreamTracker>,
 ) -> Result<
@@ -76,6 +77,7 @@ pub(super) async fn establish_http3_connection(
     quic,
     tls_config,
     tls_handshake_timeout,
+    dns_timeout,
   )
   .await?;
 
@@ -102,6 +104,7 @@ async fn create_quic_connection(
   quic: &QuicConfig,
   tls_config: &rustls::ClientConfig,
   tls_handshake_timeout: Duration,
+  dns_timeout: Duration,
 ) -> Result<quinn::Connection, UpstreamError> {
   let mut tls_config = tls_config.clone();
   tls_config.enable_early_data = true;
@@ -171,8 +174,10 @@ async fn create_quic_connection(
 
   cli_endpoint.set_default_client_config(cli_config);
 
-  let addr =
-    resolve_address(address).map_err(|e| classify_quic_error(e))?;
+  let addr = tokio::time::timeout(dns_timeout, resolve_address(address))
+    .await
+    .map_err(|_| UpstreamError::DnsError(format!("DNS resolve for '{address}' timed out")))?
+    .map_err(|e| classify_quic_error(e))?;
   let host: &str = hostname.unwrap_or_else(|| {
     address.split_at(address.rfind(':').unwrap_or(address.len())).0
   });
@@ -349,6 +354,7 @@ pub(crate) struct Http3Client {
   pub(crate) hostname: Option<String>,
   pub(crate) tls_handshake_timeout: Duration,
   pub(crate) tunnel_idle_timeout: Duration,
+  pub(crate) dns_resolve_timeout: Duration,
   pub(crate) quic: QuicConfig,
   pub(crate) user: Option<crate::config::UserCredential>,
 }
@@ -370,6 +376,7 @@ impl ClientProtocol for Http3Client {
     let hostname = self.hostname.clone();
     let quic = self.quic.clone();
     let tls_handshake_timeout = self.tls_handshake_timeout;
+    let dns_resolve_timeout = self.dns_resolve_timeout;
     let user = self.user.clone();
     Box::pin(async move {
       let tls = tls.ok_or_else(|| {
@@ -386,6 +393,7 @@ impl ClientProtocol for Http3Client {
           hostname.as_deref(),
           &quic,
           tls_handshake_timeout,
+          dns_resolve_timeout,
           &tls,
           &tracker,
         )
@@ -425,6 +433,7 @@ impl ClientProtocol for Http3Client {
     let hostname = self.hostname.clone();
     let tls_handshake_timeout = self.tls_handshake_timeout;
     let tunnel_idle_timeout = self.tunnel_idle_timeout;
+    let dns_resolve_timeout = self.dns_resolve_timeout;
     let quic = self.quic.clone();
     let user = self.user.clone();
     Box::pin(async move {
@@ -442,6 +451,7 @@ impl ClientProtocol for Http3Client {
           hostname.as_deref(),
           &quic,
           tls_handshake_timeout,
+          dns_resolve_timeout,
           &tls,
           &tracker,
         )

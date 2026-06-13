@@ -33,6 +33,9 @@ fn default_max_idle_per_host() -> usize {
 fn default_idle_timeout() -> Duration {
   Duration::from_secs(90)
 }
+fn default_dns_resolve_timeout() -> Duration {
+  Duration::from_secs(5)
+}
 
 // ============================================================================
 // Credential Types
@@ -214,6 +217,8 @@ pub(crate) struct UpstreamConfig {
   pub(crate) pool: Option<PoolConfig>,
   #[serde(with = "humantime_serde", default)]
   pub(crate) tunnel_idle_timeout: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(crate) dns_resolve_timeout: Option<Duration>,
   #[serde(default)]
   pub(crate) user: Option<UserCredential>,
   #[serde(default)]
@@ -232,6 +237,8 @@ pub(crate) struct HttpUpstreamPluginConfig {
   pub(crate) certificates: Option<CertificateConfig>,
   #[serde(with = "humantime_serde", default)]
   pub(crate) tunnel_idle_timeout: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(crate) dns_resolve_timeout: Option<Duration>,
   #[serde(default)]
   pub(crate) user: Option<UserCredential>,
   #[serde(default)]
@@ -307,6 +314,7 @@ pub(crate) struct Upstream {
   /// Direct-mode fields (used when addresses is empty):
   pub(crate) connect_timeout: Duration,
   pub(crate) tunnel_idle_timeout: Duration,
+  pub(crate) dns_resolve_timeout: Duration,
 }
 
 // ============================================================================
@@ -463,6 +471,12 @@ pub(crate) fn merge_chain_config(
       None,
       default_tunnel_idle_timeout(),
     );
+    let dns_resolve_timeout = resolve_field_with_default(
+      upstream.dns_resolve_timeout.as_ref(),
+      plugin.dns_resolve_timeout.as_ref(),
+      None,
+      default_dns_resolve_timeout(),
+    );
 
     upstreams.insert(
       upstream.name.clone(),
@@ -471,6 +485,7 @@ pub(crate) fn merge_chain_config(
         pool_config,
         connect_timeout,
         tunnel_idle_timeout,
+        dns_resolve_timeout,
       },
     );
   }

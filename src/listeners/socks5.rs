@@ -358,7 +358,7 @@ impl Socks5Listener {
               // insert into request extensions. Auth and
               // access logging are now handled by the
               // plugin layer in the service pipeline.
-              let ctx = super::utils::build_request_context(
+              let ctx = crate::context::build_request_context(
                 &peer_addr,
                 &local_addr,
                 &service_name,

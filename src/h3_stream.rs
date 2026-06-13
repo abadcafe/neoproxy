@@ -221,7 +221,7 @@ macro_rules! impl_h3_async_read {
   };
 }
 
-// ---- Client-side (used by http3_chain for outbound connections) ----
+// ---- Client-side (used for outbound connections) ----
 
 impl_h3_async_write!(
   h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>
@@ -247,7 +247,7 @@ impl_h3_async_read!(
 
 /// Client-side H3 bidirectional stream for outbound proxy connections.
 ///
-/// Used by `http3_chain` service when acting as a client connecting to
+/// Used when acting as a client connecting to
 /// upstream HTTP/3 proxies. The stream wraps the client-side H3 request
 /// stream obtained from `h3::client::SendRequest::send_request()`.
 ///

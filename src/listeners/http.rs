@@ -23,9 +23,9 @@ use crate::http_utils::{
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };
+use crate::context::build_request_context;
 use crate::listeners::utils::{
-  LISTENER_SHUTDOWN_TIMEOUT, TokioLocalExecutor, build_request_context,
-  validate_and_route,
+  LISTENER_SHUTDOWN_TIMEOUT, TokioLocalExecutor, validate_and_route,
 };
 use crate::server::{Server, ServerRouter};
 #[cfg(test)]

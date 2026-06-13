@@ -333,7 +333,7 @@ async fn handle_h3_stream(
   // Phase 3: Build RequestContext with connection-level keys and insert
   // into request extensions. Auth and access logging are now handled
   // by the plugin layer in the service pipeline.
-  let ctx = super::utils::build_request_context(
+  let ctx = crate::context::build_request_context(
     &client_addr,
     &local_addr,
     &routing_entry.service_name,

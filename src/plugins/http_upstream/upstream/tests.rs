@@ -10,6 +10,7 @@ fn dummy_http3() -> Http3Client {
     hostname: None,
     tls_handshake_timeout: Duration::from_secs(10),
     tunnel_idle_timeout: Duration::from_secs(60),
+    dns_resolve_timeout: Duration::from_secs(5),
     quic: QuicConfig {
       max_idle_timeout: None,
       keep_alive_interval: Duration::from_secs(3),
@@ -65,13 +66,13 @@ fn test_schedule_wrr_empty() {
   assert_eq!(schedule_wrr(&addresses), None);
 }
 
-#[test]
-fn test_resolve_address_ip_port() {
-  let addr = resolve_address("127.0.0.1:8080").unwrap();
+#[tokio::test]
+async fn test_resolve_address_ip_port() {
+  let addr = resolve_address("127.0.0.1:8080").await.unwrap();
   assert_eq!(addr.port(), 8080);
 }
 
-#[test]
-fn test_resolve_address_invalid() {
-  assert!(resolve_address("invalid").is_err());
+#[tokio::test]
+async fn test_resolve_address_invalid() {
+  assert!(resolve_address("invalid").await.is_err());
 }

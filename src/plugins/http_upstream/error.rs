@@ -195,7 +195,7 @@ pub(crate) fn classify_connect_error(
 }
 
 /// Classify an anyhow error from QUIC connection establishment into an
-/// `UpstreamError`. Adapted from `http3_chain/error.rs` with RFC 9209
+/// `UpstreamError`. With RFC 9209
 /// variants: ConnectionReset → ConnectionTerminated (not
 /// ConnectionRefused), plus TLS error classification.
 pub(crate) fn classify_quic_error(e: anyhow::Error) -> UpstreamError {

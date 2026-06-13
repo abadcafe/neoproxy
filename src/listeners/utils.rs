@@ -4,11 +4,9 @@
 //! to avoid code duplication.
 
 use std::future::Future;
-use std::net::SocketAddr;
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::context::RequestContext;
 use crate::http_utils::{
   BytesBufBodyWrapper, Response, ResponseBody, build_error_response,
 };
@@ -97,35 +95,6 @@ pub fn validate_and_route<B>(
     Some(entry) => Ok(entry),
     None => Err(build_404_response()),
   }
-}
-
-/// Build a RequestContext with connection-level keys.
-///
-/// Populates the context with client/server IP and port, plus the
-/// service name.
-pub fn build_request_context(
-  peer_addr: &SocketAddr,
-  local_addr: &SocketAddr,
-  service_name: &str,
-) -> RequestContext {
-  let ctx = RequestContext::new();
-  ctx.insert("client.ip", peer_addr.ip().to_string());
-  ctx.insert("client.port", peer_addr.port().to_string());
-  ctx.insert("server.ip", local_addr.ip().to_string());
-  ctx.insert("server.port", local_addr.port().to_string());
-  ctx.insert("service.name", service_name);
-  ctx
-}
-
-/// Get the server identifier (`ip:port`) from a RequestContext.
-///
-/// Returns `Some("ip:port")` if both `server.ip` and `server.port` are
-/// present in the context, `None` otherwise. Used for building
-/// Proxy-Status header identifiers (RFC 9209).
-pub fn get_server_id(ctx: &RequestContext) -> Option<String> {
-  let ip = ctx.get("server.ip")?;
-  let port = ctx.get("server.port")?;
-  Some(format!("{ip}:{port}"))
 }
 
 /// Build a 403 Forbidden response.

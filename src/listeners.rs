@@ -1,13 +1,25 @@
+//! Listener registry and concrete implementations.
+//!
+//! This module provides:
+//! - `ListenerManager` - Registry of listener builders and properties
+//! - Concrete listener implementations (http, https, http3, socks5)
+//! - Shared infrastructure (tcp_bind, http_service, header_validation)
+
 #![allow(clippy::borrowed_box)]
 use std::collections::HashMap;
 
+use crate::config::{ListenerPropertiesProvider, ListenerPropertyValues};
 use crate::listener::{BuildListener, ListenerProps};
 
 pub mod http;
 pub mod http3;
 pub mod https;
 pub mod socks5;
-pub mod utils;
+pub(crate) mod header_validation;
+pub(crate) mod error_response;
+pub(crate) mod tcp_bind;
+pub(crate) mod tcp_listener_base;
+pub(crate) mod http_service;
 
 /// Registry for listener builders and their properties.
 ///
@@ -65,48 +77,40 @@ impl ListenerManager {
     })?;
     builder(addresses, args, servers)
   }
+}
 
-  /// Get listener properties by kind.
-  ///
-  /// Used for address conflict detection.
-  pub fn props(&self, kind: &str) -> Option<&ListenerProps> {
-    self.props.get(kind)
+impl ListenerPropertiesProvider for ListenerManager {
+  fn listener_props(
+    &self,
+    kind: &str,
+  ) -> Option<ListenerPropertyValues> {
+    self.props.get(kind).map(|p| ListenerPropertyValues {
+      transport_layer: p.transport_layer(),
+      supports_hostname_routing: p.supports_hostname_routing(),
+    })
   }
 }
 
+// Test modules — siblings of http/https/http3/socks5, can only access
+// pub/pub(crate) items from those modules (black-box testing).
 #[cfg(test)]
-mod tests {
-  use super::*;
+pub(crate) mod test_helpers;
+#[cfg(test)]
+mod http_tests;
+#[cfg(test)]
+mod https_tests;
+#[cfg(test)]
+mod http3_tests;
+#[cfg(test)]
+mod socks5_tests;
+#[cfg(test)]
+mod header_validation_tests;
+#[cfg(test)]
+mod error_response_tests;
+#[cfg(test)]
+mod tcp_bind_tests;
+#[cfg(test)]
+mod http_service_tests;
+#[cfg(test)]
+mod tcp_listener_base_tests;
 
-  #[test]
-  fn test_listener_manager_registered_kinds() {
-    let lm = ListenerManager::new();
-    assert!(lm.props("http").is_some());
-    assert!(lm.props("https").is_some());
-    assert!(lm.props("http3").is_some());
-    assert!(lm.props("socks5").is_some());
-  }
-
-  #[test]
-  fn test_listener_manager_old_kinds_removed() {
-    let lm = ListenerManager::new();
-    assert!(lm.props("hyper.listener").is_none());
-    assert!(lm.props("http3.listener").is_none());
-    assert!(lm.props("fast_socks5.listener").is_none());
-  }
-
-  #[test]
-  fn test_listener_manager_nonexistent_kind() {
-    let lm = ListenerManager::new();
-    assert!(lm.props("nonexistent").is_none());
-  }
-
-  #[test]
-  fn test_listener_manager_new() {
-    let lm = ListenerManager::new();
-    assert!(lm.builders.contains_key("http"));
-    assert!(lm.builders.contains_key("https"));
-    assert!(lm.builders.contains_key("http3"));
-    assert!(lm.builders.contains_key("socks5"));
-  }
-}

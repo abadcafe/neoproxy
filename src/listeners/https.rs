@@ -5,45 +5,49 @@
 
 #![allow(clippy::await_holding_refcell_ref)]
 
-use std::cell::RefCell;
+use std::future;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
-use hyper::{body as hyper_body, service as hyper_svc};
+use anyhow::{Context, Result, bail};
 use hyper_util::rt as rt_util;
 use hyper_util::server::conn::auto as conn_util;
 use serde::Deserialize;
 use tokio::time::timeout;
-use tokio::{net, task};
-use tower::util as tower_util;
 use tracing::{error, info, warn};
 
 use crate::config::SerializedArgs;
-use crate::http_utils::{
-  BytesBufBodyWrapper, Request, RequestBody, Response,
-};
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };
-use crate::context::build_request_context;
-use crate::listeners::utils::{
-  LISTENER_SHUTDOWN_TIMEOUT, TokioLocalExecutor, validate_and_route,
-};
-use crate::server::{Server, ServerRouter};
+use crate::listeners::http_service::HttpServiceAdaptor;
+use crate::listeners::tcp_listener_base::TcpListenerBase;
+use crate::server::Server;
 use crate::tls::build_tls_server_config;
-use crate::tracker::StreamTracker;
+
+/// Executor for spawning tasks on the current tokio LocalSet.
+#[derive(Clone)]
+struct TokioLocalExecutor;
+
+impl<F> hyper::rt::Executor<F> for TokioLocalExecutor
+where
+  F: Future + 'static,
+{
+  fn execute(&self, fut: F) {
+    tokio::task::spawn_local(fut);
+  }
+}
 
 /// Default TLS handshake timeout.
 const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// HTTPS Listener configuration arguments.
 #[derive(Deserialize, Clone, Debug)]
-pub struct HttpsListenerArgs {
+#[serde(deny_unknown_fields)]
+struct HttpsListenerArgs {
   /// TLS handshake timeout (default: 5s).
   /// Protects against slow clients holding connections during TLS
   /// negotiation.
@@ -51,7 +55,7 @@ pub struct HttpsListenerArgs {
     with = "humantime_serde",
     default = "default_tls_handshake_timeout"
   )]
-  pub tls_handshake_timeout: Duration,
+  tls_handshake_timeout: Duration,
 }
 
 impl Default for HttpsListenerArgs {
@@ -76,91 +80,6 @@ fn load_tls_config_from_servers(
   build_tls_server_config(servers, vec![b"http/1.1".to_vec()])
 }
 
-/// HTTPS Service Adaptor with routing support.
-struct HttpsServiceAdaptor {
-  /// Server router for hostname-based routing
-  server_router: ServerRouter,
-  /// Client address for logging
-  client_addr: Option<SocketAddr>,
-  /// Local address from accept
-  local_addr: Option<SocketAddr>,
-  /// Whether client presented a certificate during TLS handshake
-  client_cert_presented: bool,
-}
-
-impl HttpsServiceAdaptor {
-  fn new(
-    server_routing_table: Vec<Server>,
-    client_addr: Option<SocketAddr>,
-    local_addr: Option<SocketAddr>,
-    client_cert_presented: bool,
-  ) -> Self {
-    let server_router = ServerRouter::build(server_routing_table);
-    Self {
-      server_router,
-      client_addr,
-      local_addr,
-      client_cert_presented,
-    }
-  }
-}
-
-impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
-  for HttpsServiceAdaptor
-{
-  type Error = anyhow::Error;
-  type Future = Pin<Box<dyn Future<Output = Result<Response>>>>;
-  type Response = Response;
-
-  fn call(
-    &self,
-    req: http::Request<hyper_body::Incoming>,
-  ) -> Self::Future {
-    let (parts, body) = req.into_parts();
-    let mut req = Request::from_parts(
-      parts,
-      RequestBody::new(BytesBufBodyWrapper::new(body)),
-    );
-
-    let routing_entry =
-      match validate_and_route(&req, &self.server_router) {
-        Ok(entry) => entry,
-        Err(resp) => return Box::pin(async { Ok(resp) }),
-      };
-
-    // Check client certificate requirement
-    // If the server requires mTLS (has client_ca_certs) but the
-    // client did not present a certificate, reject with 403.
-    if routing_entry.requires_client_cert()
-      && !self.client_cert_presented
-    {
-      return Box::pin(async {
-        Ok(super::utils::build_403_forbidden(
-          "Forbidden: client certificate required",
-        ))
-      });
-    }
-
-    // Build RequestContext with connection-level keys and
-    // insert into request extensions. Auth and access logging are
-    // now handled by the plugin layer in the service pipeline.
-    if let (Some(peer_addr), Some(local_addr)) =
-      (self.client_addr, self.local_addr)
-    {
-      let ctx = build_request_context(
-        &peer_addr,
-        &local_addr,
-        &routing_entry.service_name(),
-      );
-      req.extensions_mut().insert(ctx);
-    }
-
-    // Call service (auth/access_log handled by layers)
-    let s = routing_entry.service.clone();
-    Box::pin(async move { tower_util::Oneshot::new(s, req).await })
-  }
-}
-
 /// Check whether the client presented a certificate during TLS
 /// handshake.
 fn get_client_cert_presented(
@@ -171,26 +90,22 @@ fn get_client_cert_presented(
 }
 
 /// HTTPS Listener with shared-address routing support.
-pub struct HttpsListener {
+pub(crate) struct HttpsListener {
   /// Listening addresses
   addresses: Vec<SocketAddr>,
   /// TLS configuration
   tls_config: Arc<rustls::ServerConfig>,
   /// Routing table for hostname-based routing
   server_routing_table: Vec<Server>,
-  /// Listening set for managing accept tasks
-  listening_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
-  /// Stream tracker for graceful shutdown
-  stream_tracker: Rc<StreamTracker>,
-  /// Graceful shutdown timeout
-  graceful_shutdown_timeout: Duration,
   /// TLS handshake timeout
   tls_handshake_timeout: Duration,
+  /// Shared TCP listener base for lifecycle management
+  base: TcpListenerBase,
 }
 
 impl HttpsListener {
   #[allow(clippy::new_ret_no_self)]
-  pub fn new(
+  pub(crate) fn new(
     addresses: Vec<String>,
     sargs: SerializedArgs,
     server_routing_table: Vec<Server>,
@@ -211,24 +126,22 @@ impl HttpsListener {
     let tls_config =
       load_tls_config_from_servers(&server_routing_table)?;
 
-    // Parse addresses
+    // Parse addresses - any invalid address is an error
     let addresses: Vec<SocketAddr> = addresses
       .iter()
-      .filter_map(|s| {
-        s.parse()
-          .inspect_err(|e| warn!("address '{}' invalid: {}", s, e))
-          .ok()
+      .map(|addr| {
+        addr
+          .parse::<SocketAddr>()
+          .with_context(|| format!("Invalid address: {}", addr))
       })
-      .collect();
+      .collect::<Result<Vec<_>>>()?;
 
     Ok(Listener::new(Self {
       addresses,
       tls_config,
       server_routing_table,
-      listening_set: Rc::new(RefCell::new(task::JoinSet::new())),
-      stream_tracker: Rc::new(StreamTracker::new()),
-      graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
       tls_handshake_timeout,
+      base: TcpListenerBase::new(),
     }))
   }
 
@@ -236,18 +149,11 @@ impl HttpsListener {
     &self,
     addr: SocketAddr,
   ) -> Result<Pin<Box<dyn Future<Output = Result<()>>>>> {
-    let socket = match addr {
-      std::net::SocketAddr::V4(_) => net::TcpSocket::new_v4()?,
-      std::net::SocketAddr::V6(_) => net::TcpSocket::new_v6()?,
-    };
-    socket.set_reuseaddr(true)?;
-    socket.set_reuseport(true)?;
-    socket.bind(addr)?;
-    let listener = socket.listen(1024)?;
+    let listener = super::tcp_bind::create_tcp_listener(addr)?;
 
     let tls_config = self.tls_config.clone();
-    let stream_tracker = self.stream_tracker.clone();
-    let shutdown_handle = self.stream_tracker.shutdown_handle();
+    let stream_tracker = self.base.stream_tracker();
+    let shutdown_handle = self.base.shutdown_handle();
     let server_routing_table = self.server_routing_table.clone();
     let tls_handshake_timeout = self.tls_handshake_timeout;
 
@@ -284,7 +190,7 @@ impl HttpsListener {
                   get_client_cert_presented(&tls_stream);
 
                 let io = rt_util::TokioIo::new(tls_stream);
-                let svc = HttpsServiceAdaptor::new(
+                let svc = HttpServiceAdaptor::new_https(
                   server_routing_table.clone(),
                   Some(raddr),
                   Some(local_addr),
@@ -332,56 +238,19 @@ impl HttpsListener {
 
 impl Listening for HttpsListener {
   fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-    let listening_set = self.listening_set.clone();
+    let mut tasks = Vec::new();
     for addr in &self.addresses {
       let addr = *addr;
-      let serve_addr_fut = match self.serve_addr(addr) {
-        Err(e) => return Box::pin(std::future::ready(Err(e))),
-        Ok(f) => f,
-      };
-      listening_set.borrow_mut().spawn_local(serve_addr_fut);
+      match self.serve_addr(addr) {
+        Ok(f) => tasks.push(f),
+        Err(e) => return Box::pin(future::ready(Err(e))),
+      }
     }
-
-    let stream_tracker = self.stream_tracker.clone();
-    let shutdown = self.stream_tracker.shutdown_handle();
-    let graceful_timeout = self.graceful_shutdown_timeout;
-
-    Box::pin(async move {
-      shutdown.notified().await;
-
-      while let Some(res) = listening_set.borrow_mut().join_next().await
-      {
-        match res {
-          Err(e) => error!("listening join error: {}", e),
-          Ok(res) => {
-            if let Err(e) = res {
-              error!("listening error: {}", e);
-            }
-          }
-        }
-      }
-
-      let wait_result = timeout(graceful_timeout, async {
-        stream_tracker.wait_shutdown().await;
-      })
-      .await;
-
-      if wait_result.is_err() {
-        warn!(
-          "graceful shutdown timeout ({:?}) expired, aborting {} \
-           remaining connections",
-          graceful_timeout,
-          stream_tracker.active_count()
-        );
-        stream_tracker.abort_all();
-      }
-
-      Ok(())
-    })
+    self.base.start_with_tasks(tasks)
   }
 
   fn stop(&self) {
-    self.stream_tracker.shutdown();
+    self.base.stop();
   }
 }
 
@@ -392,295 +261,10 @@ pub fn listener_name() -> &'static str {
 
 /// Get listener properties for conflict detection.
 pub fn props() -> ListenerProps {
-  ListenerProps {
-    transport_layer: TransportLayer::Tcp,
-    supports_hostname_routing: true,
-  }
+  ListenerProps::new(TransportLayer::Tcp, true)
 }
 
 /// Create a listener builder
 pub fn create_listener_builder() -> Box<dyn BuildListener> {
   Box::new(HttpsListener::new)
-}
-
-#[cfg(test)]
-mod tests {
-  use std::sync::OnceLock;
-
-  use super::*;
-  use crate::config::{CertificateConfig, ServerTlsConfig};
-
-  static CRYPTO_PROVIDER_INSTALLED: OnceLock<bool> = OnceLock::new();
-
-  /// Ensure the rustls crypto provider is installed for tests.
-  fn ensure_crypto_provider() {
-    CRYPTO_PROVIDER_INSTALLED.get_or_init(|| {
-      let _ =
-        rustls::crypto::ring::default_provider().install_default();
-      true
-    });
-  }
-
-  /// Generate a test certificate and key pair using rcgen.
-  fn generate_test_cert() -> (String, String) {
-    let key_pair = rcgen::KeyPair::generate().unwrap();
-    let mut params = rcgen::CertificateParams::new(vec![
-      "test.local".to_string(),
-      "127.0.0.1".to_string(),
-    ])
-    .unwrap();
-    params.is_ca = rcgen::IsCa::NoCa;
-    params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
-    params.extended_key_usages =
-      vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
-    params.distinguished_name = rcgen::DistinguishedName::new();
-    params
-      .distinguished_name
-      .push(rcgen::DnType::CommonName, "test.local");
-
-    let cert = params.self_signed(&key_pair).unwrap();
-    let cert_pem = cert.pem();
-    let key_pem = key_pair.serialize_pem();
-    (cert_pem, key_pem)
-  }
-
-  /// Write test certificate and key to temp files.
-  fn write_test_cert_files() -> (String, String, tempfile::TempDir) {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let (cert_pem, key_pem) = generate_test_cert();
-
-    let cert_path = temp_dir.path().join("test_cert.pem");
-    let key_path = temp_dir.path().join("test_key.pem");
-
-    std::fs::write(&cert_path, cert_pem).unwrap();
-    std::fs::write(&key_path, key_pem).unwrap();
-
-    (
-      cert_path.to_str().unwrap().to_string(),
-      key_path.to_str().unwrap().to_string(),
-      temp_dir,
-    )
-  }
-
-  #[test]
-  fn test_https_listener_args_deserialize() {
-    let yaml = r#"{}"#;
-    let args: HttpsListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(
-      args.tls_handshake_timeout,
-      DEFAULT_TLS_HANDSHAKE_TIMEOUT
-    );
-  }
-
-  #[test]
-  fn test_https_listener_args_default() {
-    let args = HttpsListenerArgs::default();
-    assert_eq!(
-      args.tls_handshake_timeout,
-      DEFAULT_TLS_HANDSHAKE_TIMEOUT
-    );
-  }
-
-  #[test]
-  fn test_https_listener_args_custom_timeout() {
-    let yaml = r#"tls_handshake_timeout: "10s""#;
-    let args: HttpsListenerArgs = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(args.tls_handshake_timeout, Duration::from_secs(10));
-  }
-
-  #[test]
-  fn test_listener_name() {
-    assert_eq!(listener_name(), "https");
-  }
-
-  #[test]
-  fn test_https_listener_requires_tls_in_context() {
-    ensure_crypto_provider();
-    // HTTPS listener should fail to build if no TLS in routing table
-    let args: SerializedArgs = serde_yaml::from_str(r#"{}"#).unwrap();
-
-    let entry = Server {
-      hostnames: vec![],
-      service: crate::server::placeholder_service(),
-      service_name: "test_service".to_string(),
-      tls: None, // No TLS config - should cause error
-    };
-
-    // This should return an error because tls is required for https
-    let result = HttpsListener::new(
-      vec!["127.0.0.1:8443".to_string()],
-      args,
-      vec![entry],
-    );
-    assert!(
-      result.is_err(),
-      "HTTPS listener should fail without TLS config"
-    );
-    assert!(
-      result.err().unwrap().to_string().contains(
-        "https listener requires server-level tls configuration"
-      ),
-      "Error message should mention TLS requirement"
-    );
-  }
-
-  #[test]
-  fn test_create_listener_builder() {
-    let _builder = create_listener_builder();
-  }
-
-  // ============== load_tls_config_from_servers Tests ==============
-
-  #[test]
-  fn test_load_tls_config_from_servers_valid_cert() {
-    ensure_crypto_provider();
-    let (cert_path, key_path, _temp_dir) = write_test_cert_files();
-
-    let entry = Server {
-      hostnames: vec!["test.local".to_string()],
-      service: crate::server::placeholder_service(),
-      service_name: "test_service".to_string(),
-      tls: Some(ServerTlsConfig {
-        certificates: vec![CertificateConfig { cert_path, key_path }],
-        client_ca_certs: None,
-      }),
-    };
-
-    let result = load_tls_config_from_servers(&[entry]);
-    assert!(result.is_ok(), "Should load valid TLS config");
-  }
-
-  #[test]
-  fn test_load_tls_config_from_servers_empty_certificates() {
-    ensure_crypto_provider();
-
-    let entry = Server {
-      hostnames: vec![],
-      service: crate::server::placeholder_service(),
-      service_name: "test_service".to_string(),
-      tls: Some(ServerTlsConfig {
-        certificates: vec![],
-        client_ca_certs: None,
-      }),
-    };
-
-    // Should succeed but resolver will have no certificates
-    let result = load_tls_config_from_servers(&[entry]);
-    assert!(
-      result.is_ok(),
-      "Should succeed with empty certificates list"
-    );
-  }
-
-  #[test]
-  fn test_load_tls_config_from_servers_multiple_servers() {
-    ensure_crypto_provider();
-    let (cert_path1, key_path1, _temp_dir1) = write_test_cert_files();
-    let (cert_path2, key_path2, _temp_dir2) = write_test_cert_files();
-
-    let entries = vec![
-      Server {
-        hostnames: vec!["app1.test.local".to_string()],
-        service: crate::server::placeholder_service(),
-        service_name: "server1".to_string(),
-        tls: Some(ServerTlsConfig {
-          certificates: vec![CertificateConfig {
-            cert_path: cert_path1,
-            key_path: key_path1,
-          }],
-          client_ca_certs: None,
-        }),
-      },
-      Server {
-        hostnames: vec!["app2.test.local".to_string()],
-        service: crate::server::placeholder_service(),
-        service_name: "server2".to_string(),
-        tls: Some(ServerTlsConfig {
-          certificates: vec![CertificateConfig {
-            cert_path: cert_path2,
-            key_path: key_path2,
-          }],
-          client_ca_certs: None,
-        }),
-      },
-    ];
-
-    let result = load_tls_config_from_servers(&entries);
-    assert!(
-      result.is_ok(),
-      "Should load TLS config from multiple servers"
-    );
-  }
-
-  // ============== Task 009: ServerRouter Routing Behavior Tests
-  // ==============
-
-  #[test]
-  fn test_https_listener_routes_by_hostname() {
-    // Verify that validate_and_route correctly routes requests based
-    // on the Host header via ServerRouter.
-    let servers = vec![
-      Server {
-        hostnames: vec![],
-        service: crate::server::placeholder_service(),
-        service_name: "default".to_string(),
-        tls: None,
-      },
-      Server {
-        hostnames: vec!["api.example.com".to_string()],
-        service: crate::server::placeholder_service(),
-        service_name: "api".to_string(),
-        tls: None,
-      },
-    ];
-
-    let router = ServerRouter::build(servers);
-
-    // Request with Host header matching api.example.com
-    let req_api = http::Request::builder()
-      .method("GET")
-      .uri("/test")
-      .header(http::header::HOST, "api.example.com")
-      .body(())
-      .unwrap();
-
-    let result = validate_and_route(&req_api, &router);
-    assert!(result.is_ok());
-    assert_eq!(
-      result.unwrap().service_name,
-      "api",
-      "Request with Host: api.example.com should route to api server"
-    );
-
-    // Request with Host header not matching any specific server
-    let req_other = http::Request::builder()
-      .method("GET")
-      .uri("/test")
-      .header(http::header::HOST, "other.example.com")
-      .body(())
-      .unwrap();
-
-    let result = validate_and_route(&req_other, &router);
-    assert!(result.is_ok());
-    assert_eq!(
-      result.unwrap().service_name,
-      "default",
-      "Request with non-matching Host should route to default server"
-    );
-
-    // Request without Host header returns 400
-    let req_no_host = http::Request::builder()
-      .method("GET")
-      .uri("/test")
-      .body(())
-      .unwrap();
-
-    let result = validate_and_route(&req_no_host, &router);
-    match result {
-      Err(resp) => {
-        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST)
-      }
-      Ok(_) => panic!("expected error for missing Host header"),
-    }
-  }
 }

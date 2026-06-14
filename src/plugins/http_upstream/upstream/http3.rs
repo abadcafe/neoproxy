@@ -20,7 +20,7 @@ use crate::context::get_server_id;
 use crate::plugins::http_upstream::error::{
   UpstreamError, classify_quic_error,
 };
-use crate::plugins::utils;
+use crate::plugins::http_upstream::target_parser;
 use crate::tracker::StreamTracker;
 
 // ============================================================================
@@ -231,7 +231,7 @@ pub(super) async fn chain_forward_http3(
     .unwrap();
 
   let mut headers = req_headers.headers.clone();
-  utils::strip_hop_by_hop_headers(&mut headers);
+  target_parser::strip_hop_by_hop_headers(&mut headers);
   apply_proxy_auth(&user, &mut fwd_req);
 
   for (name, value) in headers.iter() {
@@ -284,7 +284,7 @@ pub(super) async fn chain_forward_http3(
 
   let (resp_parts, _) = proxy_resp.into_parts();
   let mut resp_headers = resp_parts.headers;
-  utils::strip_hop_by_hop_headers(&mut resp_headers);
+  target_parser::strip_hop_by_hop_headers(&mut resp_headers);
 
   let upstream_ps = resp_headers
     .get(http::header::HeaderName::from_static("proxy-status"))

@@ -1,3 +1,11 @@
+//! HTTP upstream plugin — proxy to upstream HTTP/HTTPS/H3 servers.
+//!
+//! module: http_upstream
+//! responsibilities: forward requests and CONNECT tunnels to upstream servers
+//! public operations: plugin_name, create_plugin
+//! data entities: HttpUpstreamPlugin
+//! tests: service::tests, config::tests, error::tests, inherit::tests, target_parser_tests.rs, upstream::upstream_tests.rs
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -18,7 +26,13 @@ mod config;
 mod error;
 mod inherit;
 mod service;
+mod target_parser;
 mod upstream;
+
+#[cfg(test)]
+mod target_parser_tests;
+#[cfg(test)]
+mod upstream_tests;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -65,8 +79,8 @@ impl Plugin for HttpUpstreamPlugin {
   fn service_builder(
     &self,
     name: &str,
-  ) -> Option<&Box<dyn BuildService>> {
-    self.service_builders.get(name)
+  ) -> Option<&dyn BuildService> {
+    self.service_builders.get(name).map(|b| b.as_ref())
   }
 
   fn uninstall(
@@ -111,33 +125,29 @@ pub fn plugin_name() -> &'static str {
 
 pub fn create_plugin(
   config: Option<&SerializedArgs>,
-) -> Box<dyn Plugin> {
+) -> Result<Box<dyn Plugin>> {
   let plugin_config: HttpUpstreamPluginConfig = match config {
-    Some(args) => serde_yaml::from_value(args.clone())
-      .expect("invalid http_upstream plugin config"),
+    Some(args) => serde_yaml::from_value(args.clone())?,
     None => HttpUpstreamPluginConfig::default(),
   };
 
   if let Some(ref certs) = plugin_config.certificates {
-    certs.validate().expect("invalid http_upstream certificate config");
+    certs.validate()?;
   }
 
-  let upstreams = config::merge_chain_config(&plugin_config).expect(
-    "invalid http_upstream config: failed to merge chain config",
-  );
+  let upstreams = config::merge_chain_config(&plugin_config)?;
 
   let tracker = Rc::new(StreamTracker::new());
   let registry = UpstreamRegistry::new(
     upstreams,
     plugin_config.certificates.as_ref(),
     tracker,
-  )
-  .expect("failed to initialize http_upstream registry");
+  )?;
 
   info!(
     "http_upstream: initialized with {} upstream(s)",
     registry.entries.len()
   );
 
-  Box::new(HttpUpstreamPlugin::new(registry))
+  Ok(Box::new(HttpUpstreamPlugin::new(registry)))
 }

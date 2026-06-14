@@ -16,7 +16,7 @@ use crate::http_utils::{
   build_proxy_status_with_status,
 };
 use crate::context::get_server_id;
-use crate::plugins::utils::{
+use super::target_parser::{
   self, ConnectTargetError, ForwardTargetError,
 };
 use crate::service::Service;
@@ -84,11 +84,18 @@ impl tower::Service<Request> for UpstreamService {
     let registry = self.registry.clone();
     let is_shutting_down = self.is_shutting_down();
 
-    let ctx = req
-      .extensions()
-      .get::<RequestContext>()
-      .cloned()
-      .expect("RequestContext should be present");
+    let ctx = match req.extensions().get::<RequestContext>().cloned() {
+      Some(ctx) => ctx,
+      None => {
+        warn!("UpstreamService: missing RequestContext");
+        return Box::pin(async {
+          Ok(UpstreamError::ProxyInternalError(
+            "missing request context".into(),
+          )
+          .to_response(&RequestContext::new()))
+        });
+      }
+    };
 
     let upgrade = stream::extract_upgrade(&mut req);
     let (req_headers, req_body) = req.into_parts();
@@ -140,7 +147,7 @@ async fn chain_connect(
   >,
   ctx: &RequestContext,
 ) -> Result<Response> {
-  let (host, port) = match utils::parse_connect_target(&req_headers) {
+  let (host, port) = match target_parser::parse_connect_target(&req_headers) {
     Ok(result) => result,
     Err(ConnectTargetError::NotConnectMethod) => {
       return Ok(build_error_response(
@@ -278,7 +285,7 @@ async fn chain_forward(
   ctx: &RequestContext,
 ) -> Result<Response> {
   // Validate forward target
-  match utils::parse_forward_target(&req_headers) {
+  match target_parser::parse_forward_target(&req_headers) {
     Ok(_) => {}
     Err(ForwardTargetError::ConnectMethod) => {
       return Ok(build_error_response(

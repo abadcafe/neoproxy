@@ -22,9 +22,7 @@ use crate::tracker::StreamTracker;
 // Sub-modules organized by protocol
 mod http;
 mod http3;
-#[cfg(test)]
-mod tests;
-mod utils;
+pub(crate) mod utils;
 
 // Re-export client types from sub-modules for use by the registry
 pub(crate) use self::http::{HttpClient, HttpsClient, ProxyConnector};
@@ -91,7 +89,7 @@ pub(crate) struct Address {
 // WRR Scheduling
 // ============================================================================
 
-fn schedule_wrr(addresses: &[Address]) -> Option<usize> {
+pub(crate) fn schedule_wrr(addresses: &[Address]) -> Option<usize> {
   if addresses.is_empty() {
     return None;
   }

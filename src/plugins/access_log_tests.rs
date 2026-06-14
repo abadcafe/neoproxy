@@ -1,7 +1,7 @@
 use serial_test::serial;
 
-use super::test_utils::TracingCapture;
-use super::{
+use super::access_log::test_utils::TracingCapture;
+use super::access_log::{
   AccessLogPlugin, LogEntry, WRITER_JOIN_TIMEOUT, config, context,
   create_plugin, get_writer, layer, reset_writer_registry,
 };
@@ -41,7 +41,7 @@ fn test_access_log_file_layer_builds_with_writer_config() {
     }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-  let _plugin = create_plugin(Some(&config_value));
+  let _plugin = create_plugin(Some(&config_value)).unwrap();
 
   let plugin = AccessLogPlugin::new(std::sync::Arc::new(
     std::sync::atomic::AtomicBool::new(false),
@@ -67,7 +67,7 @@ fn test_access_log_file_layer_unknown_writer_fails() {
 
   let plugin_config = config::AccessLogPluginConfig { writers: vec![] };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-  let _plugin = create_plugin(Some(&config_value));
+  let _plugin = create_plugin(Some(&config_value)).unwrap();
 
   let plugin = AccessLogPlugin::new(std::sync::Arc::new(
     std::sync::atomic::AtomicBool::new(false),
@@ -98,7 +98,7 @@ fn test_access_log_file_layer_builds_with_empty_config() {
     }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-  let _plugin = create_plugin(Some(&config_value));
+  let _plugin = create_plugin(Some(&config_value)).unwrap();
 
   let plugin = AccessLogPlugin::new(std::sync::Arc::new(
     std::sync::atomic::AtomicBool::new(false),
@@ -130,7 +130,7 @@ fn test_access_log_file_layer_builds_with_context_fields() {
     }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-  let _plugin = create_plugin(Some(&config_value));
+  let _plugin = create_plugin(Some(&config_value)).unwrap();
 
   let plugin = AccessLogPlugin::new(std::sync::Arc::new(
     std::sync::atomic::AtomicBool::new(false),
@@ -165,7 +165,7 @@ async fn test_access_log_plugin_uninstall_joins_writer_threads() {
     }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-  let plugin = create_plugin(Some(&config_value));
+  let plugin = create_plugin(Some(&config_value)).unwrap();
 
   let writer = get_writer(&prefix);
   assert!(
@@ -210,7 +210,7 @@ async fn test_access_log_plugin_uninstall_clears_registry() {
     }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-  let plugin = create_plugin(Some(&config_value));
+  let plugin = create_plugin(Some(&config_value)).unwrap();
 
   let writer = get_writer(&prefix);
   assert!(
@@ -245,7 +245,7 @@ async fn test_access_log_plugin_uninstall_returns_quickly_with_stuck_writer()
     }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-  let plugin = create_plugin(Some(&config_value));
+  let plugin = create_plugin(Some(&config_value)).unwrap();
 
   let _sender = get_writer(&prefix).unwrap();
 
@@ -297,7 +297,7 @@ async fn test_uninstall_joins_writer_threads_and_flushes_data() {
     }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-  let plugin = create_plugin(Some(&config_value));
+  let plugin = create_plugin(Some(&config_value)).unwrap();
 
   // Send a log entry and drop our sender so writer thread can exit
   let sender = get_writer(&prefix).unwrap();
@@ -363,33 +363,16 @@ async fn test_uninstall_joins_writer_threads_and_flushes_data() {
 
 #[test]
 #[serial]
-fn test_create_plugin_invalid_config_panics_with_descriptive_message() {
+fn test_create_plugin_invalid_config_returns_error() {
   reset_writer_registry();
 
-  let result = std::panic::catch_unwind(|| {
-    let bad_config =
-      serde_yaml::Value::String("not_a_valid_config".to_string());
-    let _ = create_plugin(Some(&bad_config));
-  });
+  let bad_config =
+    serde_yaml::Value::String("not_a_valid_config".to_string());
+  let result = create_plugin(Some(&bad_config));
 
   assert!(
     result.is_err(),
-    "create_plugin should panic on invalid config"
-  );
-
-  let panic_payload = result.unwrap_err();
-  let message = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-    s.to_string()
-  } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-    s.clone()
-  } else {
-    "unknown panic payload".to_string()
-  };
-
-  assert!(
-    message.contains("access_log:"),
-    "Panic message should contain 'access_log:' prefix, got: {:?}",
-    message
+    "create_plugin should return Err on invalid config"
   );
 }
 

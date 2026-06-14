@@ -1,10 +1,12 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::time::Duration;
 
-use super::utils::resolve_address;
-use super::{Address, QuicConfig, *};
+use super::upstream::utils::resolve_address;
+use super::upstream::{Address, Http3AddressState, Http3Client, QuicConfig, schedule_wrr};
 
 fn dummy_http3() -> Http3Client {
-  super::Http3Client {
+  Http3Client {
     state: Rc::new(RefCell::new(Http3AddressState::new())),
     proxy_addr: String::new(),
     hostname: None,

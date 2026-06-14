@@ -30,7 +30,7 @@ use crate::context::get_server_id;
 use crate::plugins::http_upstream::error::{
   UpstreamError, classify_connect_error, classify_tls_handshake_error,
 };
-use crate::plugins::utils;
+use crate::plugins::http_upstream::target_parser;
 use crate::tracker::StreamTracker;
 
 // ============================================================================
@@ -380,7 +380,7 @@ where
   };
 
   let mut headers = req_headers.headers.clone();
-  utils::strip_hop_by_hop_headers(&mut headers);
+  target_parser::strip_hop_by_hop_headers(&mut headers);
 
   let mut temp_req = http::Request::builder()
     .method(req_headers.method.clone())
@@ -422,7 +422,7 @@ where
 
   let (resp_parts, resp_body) = upstream_resp.into_parts();
   let mut resp_headers = resp_parts.headers;
-  utils::strip_hop_by_hop_headers(&mut resp_headers);
+  target_parser::strip_hop_by_hop_headers(&mut resp_headers);
 
   let upstream_ps = resp_headers
     .get(http::header::HeaderName::from_static("proxy-status"))

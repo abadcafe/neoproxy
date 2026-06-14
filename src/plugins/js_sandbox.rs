@@ -10,6 +10,8 @@ mod service;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use anyhow::Result;
+
 use crate::config::SerializedArgs;
 use crate::plugin::Plugin;
 use crate::plugins::js_sandbox::config::PluginConfig;
@@ -52,8 +54,8 @@ impl Plugin for JsSandboxPlugin {
   fn service_builder(
     &self,
     name: &str,
-  ) -> Option<&Box<dyn BuildService>> {
-    self.service_builders.get(name)
+  ) -> Option<&dyn BuildService> {
+    self.service_builders.get(name).map(|b| b.as_ref())
   }
 
   fn uninstall(
@@ -73,6 +75,6 @@ pub fn plugin_name() -> &'static str {
 
 pub fn create_plugin(
   config: Option<&SerializedArgs>,
-) -> Box<dyn Plugin> {
-  Box::new(JsSandboxPlugin::new(config))
+) -> Result<Box<dyn Plugin>> {
+  Ok(Box::new(JsSandboxPlugin::new(config)))
 }

@@ -32,7 +32,7 @@ fn test_writer_registry_initializes_from_config() {
     ],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-  let _plugin = create_plugin(Some(&config_value));
+  let _plugin = create_plugin(Some(&config_value)).unwrap();
 
   let writer1 = get_writer(&prefix1);
   assert!(writer1.is_ok());
@@ -109,7 +109,7 @@ fn test_reset_writer_registry_joins_writer_threads() {
     }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-  let _plugin = create_plugin(Some(&config_value));
+  let _plugin = create_plugin(Some(&config_value)).unwrap();
 
   let sender = get_writer(&prefix).unwrap();
   let entry = LogEntry {
@@ -181,7 +181,7 @@ fn test_writer_thread_buffers_entries_not_flushed_per_entry() {
     }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-  let _plugin = create_plugin(Some(&config_value));
+  let _plugin = create_plugin(Some(&config_value)).unwrap();
 
   let sender = get_writer(&prefix).unwrap();
   let entry = LogEntry {
@@ -263,7 +263,7 @@ fn test_get_writer_not_blocked_during_reinit() {
     }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-  let _plugin = create_plugin(Some(&config_value));
+  let _plugin = create_plugin(Some(&config_value)).unwrap();
 
   let sender_clone = get_writer(&prefix1).unwrap();
 
@@ -469,7 +469,7 @@ fn test_access_log_uses_tracing_for_warnings() {
     }],
   };
   let config_value = serde_yaml::to_value(&plugin_config).unwrap();
-  let _plugin = create_plugin(Some(&config_value));
+  let _plugin = create_plugin(Some(&config_value)).unwrap();
 
   let _sender = get_writer(&prefix).unwrap();
 

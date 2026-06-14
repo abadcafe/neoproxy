@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::{runtime, sync, task};
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::config::Config;
 use crate::listener::Listener;
@@ -132,8 +132,11 @@ pub fn run_server_thread(
 
   rt.block_on(local_set.run_until(async {
     // Each thread builds its own PluginManager and listeners
-    let mut plugin_manager =
+    let (mut plugin_manager, plugin_errors) =
       PluginManager::new(Config::global().plugins.clone());
+    for err in &plugin_errors {
+      warn!("plugin load error: {}: {}", err.name, err.source);
+    }
     let listener_manager = ListenerManager::new();
 
     let listeners = build_listeners(
@@ -349,34 +352,35 @@ mod tests {
     fn service_builder(
       &self,
       name: &str,
-    ) -> Option<&Box<dyn crate::service::BuildService>> {
-      self.service_builders.get(name)
+    ) -> Option<&dyn crate::service::BuildService> {
+      self.service_builders.get(name).map(|b| b.as_ref())
     }
 
     fn layer_builder(
       &self,
       name: &str,
-    ) -> Option<&Box<dyn BuildLayer>> {
-      self.layer_builders.get(name)
+    ) -> Option<&dyn BuildLayer> {
+      self.layer_builders.get(name).map(|b| b.as_ref())
     }
   }
 
   fn make_test_plugin_manager() -> PluginManager {
     let mut config = HashMap::new();
     config.insert("echo".to_string(), SerializedArgs::Null);
-    PluginManager::new(config)
+    let (pm, _errors) = PluginManager::new(config);
+    pm
   }
 
   fn make_test_plugin_manager_with_layers(
     counters: &[Arc<AtomicUsize>],
     names: &[&'static str],
   ) -> PluginManager {
-    let mut pm = PluginManager::new(HashMap::new());
+    let (mut pm, _errors) = PluginManager::new(HashMap::new());
     let mut plugin = TestAssemblyPlugin::new();
     for (name, counter) in names.iter().zip(counters.iter()) {
       plugin = plugin.with_layer(*name, counter.clone());
     }
-    pm.plugins_mut().insert("test".to_string(), Box::new(plugin));
+    pm.plugins.insert("test".to_string(), Box::new(plugin));
     pm
   }
 
@@ -386,7 +390,7 @@ mod tests {
 
   #[test]
   fn test_build_service_with_layers_not_found() {
-    let pm = PluginManager::new(HashMap::new());
+    let (pm, _errors) = PluginManager::new(HashMap::new());
     let config = Config::default();
     let result = build_service_with_layers(&pm, &config, "nonexistent");
     assert!(result.is_err());
@@ -400,7 +404,7 @@ mod tests {
 
   #[test]
   fn test_build_listeners_empty_config() {
-    let pm = PluginManager::new(HashMap::new());
+    let (pm, _errors) = PluginManager::new(HashMap::new());
     let config = Config::default();
     let listener_manager = ListenerManager::new();
     let result = build_listeners(&pm, &config, &listener_manager);
@@ -650,7 +654,7 @@ mod tests {
 
   #[test]
   fn test_build_service_with_layers_plugin_not_found() {
-    let pm = PluginManager::new(HashMap::new());
+    let (pm, _errors) = PluginManager::new(HashMap::new());
     let config = Config {
       services: vec![ServiceConfig {
         name: "svc".to_string(),

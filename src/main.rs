@@ -25,7 +25,11 @@ mod http_utils;
 mod listener;
 mod listeners;
 mod plugin;
+#[cfg(test)]
+mod plugin_tests;
 mod plugins;
+#[cfg(test)]
+mod plugins_tests;
 mod server;
 mod server_thread;
 mod service;

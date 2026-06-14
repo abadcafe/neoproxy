@@ -1,22 +1,28 @@
-//! Access log plugin.
+//! Access log plugin — file-based access logging.
+//!
+//! module: access_log
+//! responsibilities: log proxy access entries to rotating files
+//! public operations: plugin_name, create_plugin, get_writer, init_writer_registry
+//! data entities: AccessLogPlugin, AccessLogLayer, AccessLogEntry, LogFormat, AccessLogWriter
+//! tests: access_log_tests.rs, layer_tests.rs, registry_tests.rs
 
-pub mod config;
 pub mod context;
 pub mod formatter;
-pub mod layer;
-pub mod registry;
-pub mod writer;
+pub(crate) mod config;
+pub(crate) mod layer;
+pub(crate) mod registry;
+pub(crate) mod writer;
 
 #[cfg(test)]
-mod build_log_entry_tests;
-#[cfg(test)]
-mod plugin_integration_tests;
+mod layer_tests;
 #[cfg(test)]
 mod registry_tests;
 #[cfg(test)]
-mod test_utils;
+pub(crate) mod test_utils;
 
 use std::collections::HashMap;
+
+use anyhow::Result;
 
 use self::config::{AccessLogConfig, AccessLogPluginConfig};
 use self::layer::AccessLogLayer;
@@ -67,32 +73,22 @@ pub fn plugin_name() -> &'static str {
 
 pub fn create_plugin(
   config: Option<&SerializedArgs>,
-) -> Box<dyn Plugin> {
+) -> Result<Box<dyn Plugin>> {
   if let Some(config_value) = config {
     let plugin_config: AccessLogPluginConfig =
-      serde_yaml::from_value(config_value.clone()).unwrap_or_else(
-        |e| panic!("access_log: failed to parse plugin config: {}", e),
-      );
-    init_writer_registry(&plugin_config).unwrap_or_else(|e| {
-      panic!("access_log: failed to initialize writer registry: {}", e)
-    });
+      serde_yaml::from_value(config_value.clone())?;
+    init_writer_registry(&plugin_config)?;
   } else {
-    init_writer_registry(&AccessLogPluginConfig::default())
-      .unwrap_or_else(|e| {
-        panic!(
-          "access_log: failed to initialize writer registry: {}",
-          e
-        )
-      });
+    init_writer_registry(&AccessLogPluginConfig::default())?;
   }
-  Box::new(AccessLogPlugin::new(std::sync::Arc::new(
+  Ok(Box::new(AccessLogPlugin::new(std::sync::Arc::new(
     std::sync::atomic::AtomicBool::new(false),
-  )))
+  ))))
 }
 
 impl Plugin for AccessLogPlugin {
-  fn layer_builder(&self, name: &str) -> Option<&Box<dyn BuildLayer>> {
-    self.layer_builders.get(name)
+  fn layer_builder(&self, name: &str) -> Option<&dyn BuildLayer> {
+    self.layer_builders.get(name).map(|b| b.as_ref())
   }
 
   fn uninstall(

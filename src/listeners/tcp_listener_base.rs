@@ -15,10 +15,7 @@ use tokio::task;
 
 use crate::tracker::StreamTracker;
 
-/// Listener shutdown timeout in seconds.
-/// This is the timeout for Phase 1 of graceful shutdown.
-pub(crate) const LISTENER_SHUTDOWN_TIMEOUT: Duration =
-  Duration::from_secs(3);
+use super::LISTENER_SHUTDOWN_TIMEOUT;
 
 /// Shared base for TCP-based listeners.
 ///

@@ -7,9 +7,14 @@
 
 #![allow(clippy::borrowed_box)]
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::config::{ListenerPropertiesProvider, ListenerPropertyValues};
 use crate::listener::{BuildListener, ListenerProps};
+
+/// Shared listener shutdown timeout for all listener types.
+pub(crate) const LISTENER_SHUTDOWN_TIMEOUT: Duration =
+  Duration::from_secs(3);
 
 pub mod http;
 pub mod http3;

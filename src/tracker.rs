@@ -87,6 +87,25 @@ impl StreamTracker {
     while self.connections.borrow_mut().join_next().await.is_some() {}
   }
 
+  /// Perform a graceful shutdown with timeout.
+  ///
+  /// Triggers shutdown, then waits for all active tasks to complete
+  /// within the given timeout. If the timeout expires, forcefully
+  /// aborts remaining tasks.
+  pub async fn graceful_shutdown(&self, timeout: Duration) {
+    self.shutdown();
+    let result = tokio::time::timeout(timeout, self.wait_shutdown()).await;
+    if result.is_err() {
+      tracing::warn!(
+        "graceful shutdown timeout ({:?}) expired, aborting {} \
+         remaining connections",
+        timeout,
+        self.active_count()
+      );
+      self.abort_all();
+    }
+  }
+
   /// Wait with timeout.
   pub async fn wait_shutdown_with_timeout(
     &self,

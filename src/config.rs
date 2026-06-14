@@ -9,6 +9,7 @@
 mod auth;
 mod error;
 mod listener;
+mod listener_validation;
 mod service;
 mod tls;
 
@@ -23,9 +24,14 @@ use serde::Deserialize;
 pub use self::auth::UserCredential;
 pub use self::error::{ConfigError, ConfigErrorCollector};
 pub use self::listener::{
-  ListenerConfig, validate_address_conflicts, validate_hostname,
-  validate_hostname_conflicts, validate_hostname_routing_compatibility,
-  validate_listener_addresses, validate_listener_references,
+  ListenerConfig, ListenerPropertiesProvider,
+  ListenerPropertyValues, TransportLayer,
+};
+pub use self::listener_validation::{
+  validate_address_conflicts,
+  validate_hostname, validate_hostname_conflicts,
+  validate_hostname_routing_compatibility, validate_listener_addresses,
+  validate_listener_references,
 };
 pub use self::service::{Service, ServiceRaw, validate_service};
 pub use self::tls::{

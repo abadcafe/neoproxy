@@ -10,17 +10,17 @@ use anyhow::Result;
 use super::tcp_listener_base::TcpListenerBase;
 
 #[test]
-fn test_tcp_listener_base_new() {
+fn test_new_initializes_empty_stream_tracker() {
   let base = TcpListenerBase::new();
   assert_eq!(base.stream_tracker().active_count(), 0);
 }
 
 #[test]
-fn test_tcp_listener_base_default_timeout() {
+fn test_new_sets_shutdown_timeout_to_3_seconds() {
   let base = TcpListenerBase::new();
   assert_eq!(
     base.graceful_shutdown_timeout,
-    super::tcp_listener_base::LISTENER_SHUTDOWN_TIMEOUT
+    super::LISTENER_SHUTDOWN_TIMEOUT
   );
 }
 
@@ -118,7 +118,7 @@ async fn test_tcp_listener_base_start_with_failing_task() {
 }
 
 #[test]
-fn test_tcp_listener_base_stop_triggers_shutdown() {
+fn test_stop_notifies_shutdown_handle() {
   let base = TcpListenerBase::new();
   let handle = base.shutdown_handle();
 

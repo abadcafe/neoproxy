@@ -61,24 +61,19 @@ pub(super) async fn handle_h3_stream(
   };
 
   // Phase 1b: If Host header exists, it must equal :authority
-  if let Some(host_val) = req.headers().get(http::header::HOST) {
-    if let Ok(host_str) = host_val.to_str() {
-      if authority_host_mismatch(
-        &authority.to_string(),
-        host_str,
-      ) {
-        let resp = build_error_response(
-          http::StatusCode::BAD_REQUEST,
-          "Bad Request: :authority and Host headers differ",
-        );
-        let mut stream = stream;
-        if let Err(e) = send_h3_response(&mut stream, resp, true).await
-        {
-          warn!("Failed to send 400 response: {e}");
-        }
-        return;
-      }
+  if let Some(host_val) = req.headers().get(http::header::HOST)
+    && let Ok(host_str) = host_val.to_str()
+    && authority_host_mismatch(authority.as_ref(), host_str)
+  {
+    let resp = build_error_response(
+      http::StatusCode::BAD_REQUEST,
+      "Bad Request: :authority and Host headers differ",
+    );
+    let mut stream = stream;
+    if let Err(e) = send_h3_response(&mut stream, resp, true).await {
+      warn!("Failed to send 400 response: {e}");
     }
+    return;
   }
 
   // Phase 2: Route FIRST based on :authority
@@ -181,10 +176,10 @@ pub(super) async fn handle_h3_stream(
       if is_connect {
         if resp.status() == http::StatusCode::OK {
           let resp_headers = resp.headers().clone();
-          if let Some(t) = trigger {
-            if let Err(e) = t.send_success(Some(&resp_headers)).await {
-              warn!("H3 failed to send success: {e}");
-            }
+          if let Some(t) = trigger
+            && let Err(e) = t.send_success(Some(&resp_headers)).await
+          {
+            warn!("H3 failed to send success: {e}");
           }
         } else {
           let resp_headers = resp.headers().clone();
@@ -199,46 +194,40 @@ pub(super) async fn handle_h3_stream(
                 Bytes::new()
               }
             };
-          if let Some(t) = trigger {
-            if let Err(e) = t
+          if let Some(t) = trigger
+            && let Err(e) = t
               .send_error_with_body(
                 status,
                 body_bytes,
                 Some(&resp_headers),
               )
               .await
-            {
-              warn!("H3 failed to send error: {e}");
-            }
+          {
+            warn!("H3 failed to send error: {e}");
           }
         }
-      } else {
-        if let Some(ref mut stream) = stream_holder {
-          if let Err(e) = send_h3_response(stream, resp, true).await {
-            warn!("H3 failed to send response: {e}");
-          }
-        }
+      } else if let Some(ref mut stream) = stream_holder
+        && let Err(e) = send_h3_response(stream, resp, true).await
+      {
+        warn!("H3 failed to send response: {e}");
       }
     }
     Err(e) => {
       warn!("H3 service error: {e}");
       if is_connect {
-        if let Some(t) = trigger {
-          if let Err(e) =
+        if let Some(t) = trigger
+          && let Err(e) =
             t.send_error(http::StatusCode::BAD_GATEWAY).await
-          {
-            warn!("H3 failed to send error: {e}");
-          }
+        {
+          warn!("H3 failed to send error: {e}");
         }
-      } else {
-        if let Some(ref mut stream) = stream_holder {
-          let resp = build_error_response(
-            http::StatusCode::BAD_GATEWAY,
-            "Bad Gateway",
-          );
-          if let Err(e) = send_h3_response(stream, resp, true).await {
-            warn!("H3 failed to send error response: {e}");
-          }
+      } else if let Some(ref mut stream) = stream_holder {
+        let resp = build_error_response(
+          http::StatusCode::BAD_GATEWAY,
+          "Bad Gateway",
+        );
+        if let Err(e) = send_h3_response(stream, resp, true).await {
+          warn!("H3 failed to send error response: {e}");
         }
       }
     }

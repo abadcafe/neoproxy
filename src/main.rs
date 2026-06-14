@@ -34,6 +34,11 @@ mod stream;
 mod tls;
 mod tracker;
 
+#[cfg(test)]
+mod listener_tests;
+#[cfg(test)]
+mod listeners_tests;
+
 /// Thread check interval for detecting server thread exit.
 const THREAD_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 

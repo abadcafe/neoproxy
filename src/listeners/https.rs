@@ -90,7 +90,7 @@ fn get_client_cert_presented(
 }
 
 /// HTTPS Listener with shared-address routing support.
-pub(crate) struct HttpsListener {
+struct HttpsListener {
   /// Listening addresses
   addresses: Vec<SocketAddr>,
   /// TLS configuration
@@ -105,7 +105,7 @@ pub(crate) struct HttpsListener {
 
 impl HttpsListener {
   #[allow(clippy::new_ret_no_self)]
-  pub(crate) fn new(
+  fn new(
     addresses: Vec<String>,
     sargs: SerializedArgs,
     server_routing_table: Vec<Server>,

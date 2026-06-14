@@ -3,6 +3,13 @@ mod quic_config;
 mod recv_body;
 mod stream_handler;
 
+#[cfg(test)]
+mod quic_config_tests;
+#[cfg(test)]
+mod recv_body_tests;
+#[cfg(test)]
+mod stream_handler_tests;
+
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -25,9 +32,7 @@ use crate::tracker::StreamTracker;
 use quic_config::{H3_NO_ERROR_CODE, Http3ListenerArgs, QuicConfig};
 use stream_handler::handle_h3_connection;
 
-/// Listener shutdown timeout in seconds.
-/// This is the timeout for Phase 1 of graceful shutdown.
-const LISTENER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+use super::LISTENER_SHUTDOWN_TIMEOUT;
 
 /// ALPN protocol for HTTP/3
 const H3_ALPN: &[u8] = b"h3";
@@ -37,7 +42,7 @@ const H3_ALPN: &[u8] = b"h3";
 // ============================================================================
 
 /// HTTP/3 Listener implementation with shared-address routing support.
-pub(crate) struct Http3Listener {
+struct Http3Listener {
   /// Listening addresses
   addresses: Vec<SocketAddr>,
   /// TLS configuration
@@ -55,7 +60,7 @@ pub(crate) struct Http3Listener {
 impl Http3Listener {
   /// Create a new HTTP/3 Listener
   #[allow(clippy::new_ret_no_self)]
-  pub(crate) fn new(
+  fn new(
     addresses: Vec<String>,
     sargs: SerializedArgs,
     server_routing_table: Vec<crate::server::Server>,

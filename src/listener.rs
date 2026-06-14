@@ -1,4 +1,4 @@
-//! Runtime listener types.
+//! Listener core abstractions (traits, types, factory).
 //!
 //! This module provides types for building and managing network
 //! listeners:
@@ -6,8 +6,6 @@
 //! - `Listening` - Trait for listener lifecycle (start/stop)
 //! - `BuildListener` - Factory trait for creating listeners
 //! - `ListenerProps` - Metadata for listener conflict detection
-//! - `TransportLayer` - Transport protocol type (TCP/UDP)
-
 use std::future::Future;
 use std::pin::Pin;
 
@@ -16,17 +14,8 @@ use anyhow::Result;
 use crate::config::SerializedArgs;
 use crate::server::Server;
 
-/// Transport layer protocol type.
-///
-/// Used for address conflict detection - listeners on different
-/// transport layers can share the same address.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransportLayer {
-  /// TCP protocol
-  Tcp,
-  /// UDP protocol
-  Udp,
-}
+// Re-export TransportLayer from config (single source of truth).
+pub use crate::config::TransportLayer;
 
 /// Listener metadata for conflict detection.
 ///
@@ -36,11 +25,31 @@ pub enum TransportLayer {
 #[derive(Debug, Clone)]
 pub struct ListenerProps {
   /// Transport layer (TCP or UDP)
-  pub transport_layer: TransportLayer,
+  transport_layer: TransportLayer,
   /// Whether the listener supports hostname-based routing.
   /// If true, multiple listeners of the same kind can share
   /// an address if they have different hostnames configured.
-  pub supports_hostname_routing: bool,
+  supports_hostname_routing: bool,
+}
+
+impl ListenerProps {
+  /// Create new listener properties.
+  pub fn new(
+    transport_layer: TransportLayer,
+    supports_hostname_routing: bool,
+  ) -> Self {
+    Self { transport_layer, supports_hostname_routing }
+  }
+
+  /// Get the transport layer protocol.
+  pub fn transport_layer(&self) -> TransportLayer {
+    self.transport_layer
+  }
+
+  /// Get whether the listener supports hostname-based routing.
+  pub fn supports_hostname_routing(&self) -> bool {
+    self.supports_hostname_routing
+  }
 }
 
 /// Trait for listener lifecycle management.
@@ -109,72 +118,3 @@ impl<F> BuildListener for F where
 {
 }
 
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  fn test_listener_builder(
-    _addresses: Vec<String>,
-    _args: SerializedArgs,
-    _server_routing_table: Vec<Server>,
-  ) -> Result<Listener> {
-    struct DummyListener;
-    impl Listening for DummyListener {
-      fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-        Box::pin(async { Ok(()) })
-      }
-
-      fn stop(&self) {}
-    }
-    Ok(Listener::new(DummyListener))
-  }
-
-  #[test]
-  fn test_build_listener_trait_with_context() {
-    let builder: Box<dyn BuildListener> =
-      Box::new(test_listener_builder);
-    let result = builder(vec![], SerializedArgs::Null, vec![]);
-    assert!(result.is_ok());
-  }
-
-  #[test]
-  fn test_build_listener_with_empty_context() {
-    fn builder(
-      _addresses: Vec<String>,
-      _args: SerializedArgs,
-      _server_routing_table: Vec<Server>,
-    ) -> Result<Listener> {
-      struct DummyListener;
-      impl Listening for DummyListener {
-        fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-          Box::pin(async { Ok(()) })
-        }
-
-        fn stop(&self) {}
-      }
-      Ok(Listener::new(DummyListener))
-    }
-
-    let builder: Box<dyn BuildListener> = Box::new(builder);
-    let result = builder(vec![], SerializedArgs::Null, vec![]);
-    assert!(result.is_ok());
-  }
-
-  #[tokio::test]
-  async fn test_listener_start_stop() {
-    struct TestListener;
-
-    impl Listening for TestListener {
-      fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-        Box::pin(async { Ok(()) })
-      }
-
-      fn stop(&self) {}
-    }
-
-    let listener = Listener::new(TestListener);
-    let result = listener.start().await;
-    assert!(result.is_ok());
-    listener.stop();
-  }
-}

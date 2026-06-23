@@ -18,6 +18,8 @@ pub enum ConfigError {
   InvalidAddress { location: String, message: String },
   /// Address conflict between listeners.
   AddressConflict { location: String, message: String },
+  /// Hostname conflict between servers.
+  HostnameConflict { location: String, message: String },
 }
 
 impl ConfigError {
@@ -27,7 +29,8 @@ impl ConfigError {
       | Self::InvalidFormat { location, .. }
       | Self::NotFound { location, .. }
       | Self::InvalidAddress { location, .. }
-      | Self::AddressConflict { location, .. } => location,
+      | Self::AddressConflict { location, .. }
+      | Self::HostnameConflict { location, .. } => location,
     }
   }
 
@@ -37,7 +40,8 @@ impl ConfigError {
       | Self::InvalidFormat { message, .. }
       | Self::NotFound { message, .. }
       | Self::InvalidAddress { message, .. }
-      | Self::AddressConflict { message, .. } => message,
+      | Self::AddressConflict { message, .. }
+      | Self::HostnameConflict { message, .. } => message,
     }
   }
 }

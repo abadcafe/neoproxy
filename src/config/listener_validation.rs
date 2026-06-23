@@ -325,8 +325,67 @@ pub fn validate_address_conflicts(
   }
 }
 
+/// Collect hostname overlaps from a list of (server_name, hostnames) pairs.
+///
+/// Returns (default_servers, hostname_map) where:
+/// - default_servers: servers with empty hostnames
+/// - hostname_map: lowercase hostname → list of server names
+fn collect_hostname_overlaps<'a>(
+  entries: impl Iterator<Item = (&'a str, &'a [String])>,
+) -> (Vec<&'a str>, HashMap<String, Vec<&'a str>>) {
+  let mut default_servers = Vec::new();
+  let mut hostname_map: HashMap<String, Vec<&str>> = HashMap::new();
+
+  for (server_name, hostnames) in entries {
+    if hostnames.is_empty() {
+      default_servers.push(server_name);
+    } else {
+      for hostname in hostnames {
+        let normalized = hostname.to_lowercase();
+        hostname_map
+          .entry(normalized)
+          .or_default()
+          .push(server_name);
+      }
+    }
+  }
+
+  (default_servers, hostname_map)
+}
+
+/// Report hostname overlap conflicts to the collector.
+fn report_hostname_overlaps(
+  default_servers: &[&str],
+  hostname_map: &HashMap<String, Vec<&str>>,
+  location: &str,
+  collector: &mut ConfigErrorCollector,
+) {
+  if default_servers.len() > 1 {
+    collector.add(ConfigError::HostnameConflict {
+      location: location.to_string(),
+      message: format!(
+        "multiple default servers ({}) with empty hostnames",
+        default_servers.join(", ")
+      ),
+    });
+  }
+
+  for (hostname, servers) in hostname_map {
+    if servers.len() > 1 {
+      collector.add(ConfigError::HostnameConflict {
+        location: location.to_string(),
+        message: format!(
+          "hostname '{}' defined in multiple servers ({})",
+          hostname,
+          servers.join(", ")
+        ),
+      });
+    }
+  }
+}
+
 /// Check for hostname routing conflicts sharing the same address+kind.
-pub fn check_hostname_routing_conflicts(
+fn check_hostname_routing_conflicts(
   usages: &[&AddressUsage],
   addr: SocketAddr,
   registry: &dyn ListenerPropertiesProvider,
@@ -357,46 +416,17 @@ pub fn check_hostname_routing_conflicts(
     return;
   }
 
-  let mut default_servers: Vec<&str> = Vec::new();
-  let mut hostname_map: HashMap<String, Vec<&str>> = HashMap::new();
-
-  for usage in usages {
-    if usage.hostnames.is_empty() {
-      default_servers.push(&usage.server_name);
-    } else {
-      for hostname in &usage.hostnames {
-        let normalized = hostname.to_lowercase();
-        hostname_map
-          .entry(normalized)
-          .or_default()
-          .push(&usage.server_name);
-      }
-    }
-  }
-
-  if default_servers.len() > 1 {
-    collector.add(ConfigError::AddressConflict {
-      location: format!("address conflict on {}", addr),
-      message: format!(
-        "multiple default servers ({}) on same address (only one \
-         server per address can have empty hostnames)",
-        default_servers.join(", ")
-      ),
-    });
-  }
-
-  for (hostname, servers) in hostname_map {
-    if servers.len() > 1 {
-      collector.add(ConfigError::AddressConflict {
-        location: format!("hostname conflict on {}", addr),
-        message: format!(
-          "hostname '{}' defined in multiple servers ({})",
-          hostname,
-          servers.join(", ")
-        ),
-      });
-    }
-  }
+  let entries = usages
+    .iter()
+    .map(|u| (u.server_name.as_str(), u.hostnames.as_slice()));
+  let (default_servers, hostname_map) = collect_hostname_overlaps(entries);
+  let location = format!("address conflict on {}", addr);
+  report_hostname_overlaps(
+    &default_servers,
+    &hostname_map,
+    &location,
+    collector,
+  );
 }
 
 /// Validate hostname conflicts by grouping servers by listener name.
@@ -470,53 +500,48 @@ pub fn validate_hostname_conflicts(
     }
 
     // Hostname-routing listener: check hostname overlaps
-    let mut default_servers: Vec<&str> = Vec::new();
-    let mut hostname_map: std::collections::HashMap<String, Vec<&str>> =
-      std::collections::HashMap::new();
-
-    for server in &servers {
-      if server.hostnames.is_empty() {
-        default_servers.push(&server.name);
-      } else {
-        for hostname in &server.hostnames {
-          let normalized = hostname.to_lowercase();
-          hostname_map
-            .entry(normalized)
-            .or_default()
-            .push(&server.name);
-        }
-      }
-    }
-
-    if default_servers.len() > 1 {
-      collector.add(ConfigError::AddressConflict {
-        location: format!("listener '{}'", listener_name),
-        message: format!(
-          "multiple default servers ({}) with empty hostnames",
-          default_servers.join(", ")
-        ),
-      });
-    }
-
-    for (hostname, server_names) in hostname_map {
-      if server_names.len() > 1 {
-        collector.add(ConfigError::AddressConflict {
-          location: format!("listener '{}'", listener_name),
-          message: format!(
-            "hostname '{}' defined in multiple servers ({})",
-            hostname,
-            server_names.join(", ")
-          ),
-        });
-      }
-    }
+    let entries = servers
+      .iter()
+      .map(|s| (s.name.as_str(), s.hostnames.as_slice()));
+    let (default_servers, hostname_map) = collect_hostname_overlaps(entries);
+    let location = format!("listener '{}'", listener_name);
+    report_hostname_overlaps(
+      &default_servers,
+      &hostname_map,
+      &location,
+      collector,
+    );
   }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::listeners::ListenerManager;
+  use super::super::listener::{
+    ListenerPropertyValues, TransportLayer,
+  };
+
+  /// Mock ListenerPropertiesProvider for tests.
+  struct MockListenerProps;
+
+  impl ListenerPropertiesProvider for MockListenerProps {
+    fn listener_props(
+      &self,
+      kind: &str,
+    ) -> Option<ListenerPropertyValues> {
+      match kind {
+        "http" | "https" | "http3" => Some(ListenerPropertyValues {
+          transport_layer: TransportLayer::Tcp,
+          supports_hostname_routing: true,
+        }),
+        "socks5" => Some(ListenerPropertyValues {
+          transport_layer: TransportLayer::Tcp,
+          supports_hostname_routing: false,
+        }),
+        _ => None,
+      }
+    }
+  }
 
   // =========================================================================
   // validate_listener_addresses Tests
@@ -663,7 +688,7 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_hostname_routing_compatibility(
       &config,
       &mut collector,
@@ -696,7 +721,7 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_hostname_routing_compatibility(
       &config,
       &mut collector,
@@ -725,7 +750,7 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_hostname_routing_compatibility(
       &config,
       &mut collector,
@@ -758,7 +783,7 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_hostname_routing_compatibility(
       &config,
       &mut collector,
@@ -791,7 +816,7 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_hostname_routing_compatibility(
       &config,
       &mut collector,
@@ -832,7 +857,7 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_hostname_routing_compatibility(
       &config,
       &mut collector,
@@ -887,7 +912,7 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_hostname_routing_compatibility(
       &config,
       &mut collector,
@@ -925,7 +950,7 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_hostname_routing_compatibility(
       &config,
       &mut collector,
@@ -955,7 +980,7 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_hostname_routing_compatibility(
       &config,
       &mut collector,
@@ -1006,7 +1031,7 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_hostname_routing_compatibility(
       &config,
       &mut collector,
@@ -1063,7 +1088,7 @@ mod tests {
     };
 
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_address_conflicts(&config, &mut collector, &lm);
     assert!(collector.has_errors());
     assert!(has_error_of_type(&collector, |e| matches!(
@@ -1101,7 +1126,7 @@ mod tests {
     };
 
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_address_conflicts(&config, &mut collector, &lm);
     assert!(!collector.has_errors(), "{:?}", collector.errors());
   }
@@ -1135,12 +1160,12 @@ mod tests {
     };
 
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_address_conflicts(&config, &mut collector, &lm);
     assert!(collector.has_errors());
     assert!(has_error_of_type(&collector, |e| matches!(
       e,
-      ConfigError::AddressConflict { .. }
+      ConfigError::HostnameConflict { .. }
     )));
   }
 
@@ -1173,12 +1198,12 @@ mod tests {
     };
 
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_address_conflicts(&config, &mut collector, &lm);
     assert!(collector.has_errors());
     assert!(has_error_of_type(&collector, |e| matches!(
       e,
-      ConfigError::AddressConflict { .. }
+      ConfigError::HostnameConflict { .. }
     )));
   }
 
@@ -1211,12 +1236,12 @@ mod tests {
     };
 
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_address_conflicts(&config, &mut collector, &lm);
     assert!(collector.has_errors());
     assert!(has_error_of_type(&collector, |e| matches!(
       e,
-      ConfigError::AddressConflict { .. }
+      ConfigError::HostnameConflict { .. }
     )));
   }
 
@@ -1249,12 +1274,12 @@ mod tests {
     };
 
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_address_conflicts(&config, &mut collector, &lm);
     assert!(collector.has_errors());
     assert!(has_error_of_type(&collector, |e| matches!(
       e,
-      ConfigError::AddressConflict { .. }
+      ConfigError::HostnameConflict { .. }
     )));
   }
 
@@ -1287,7 +1312,7 @@ mod tests {
     };
 
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_address_conflicts(&config, &mut collector, &lm);
     let found = has_error_of_type(&collector, |e| {
       matches!(e, ConfigError::AddressConflict { .. })
@@ -1324,7 +1349,7 @@ mod tests {
     };
 
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_address_conflicts(&config, &mut collector, &lm);
     let found = has_error_of_type(&collector, |e| {
       matches!(e, ConfigError::AddressConflict { .. })
@@ -1417,7 +1442,7 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_hostname_conflicts(&config, &mut collector, &lm);
     assert!(collector.has_errors());
     assert!(matches!(
@@ -1446,7 +1471,7 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_hostname_conflicts(&config, &mut collector, &lm);
     assert!(!collector.has_errors(), "{:?}", collector.errors());
   }
@@ -1480,12 +1505,12 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_hostname_conflicts(&config, &mut collector, &lm);
     assert!(collector.has_errors());
     assert!(matches!(
       &collector.errors()[0],
-      ConfigError::AddressConflict { .. }
+      ConfigError::HostnameConflict { .. }
     ));
   }
 
@@ -1518,12 +1543,12 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_hostname_conflicts(&config, &mut collector, &lm);
     assert!(collector.has_errors());
     assert!(matches!(
       &collector.errors()[0],
-      ConfigError::AddressConflict { .. }
+      ConfigError::HostnameConflict { .. }
     ));
   }
 
@@ -1557,7 +1582,7 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_hostname_conflicts(&config, &mut collector, &lm);
     assert!(!collector.has_errors(), "{:?}", collector.errors());
   }
@@ -1582,7 +1607,7 @@ mod tests {
       ..Default::default()
     };
     let mut collector = ConfigErrorCollector::new();
-    let lm = ListenerManager::new();
+    let lm = MockListenerProps;
     validate_hostname_conflicts(&config, &mut collector, &lm);
     assert!(!collector.has_errors(), "{:?}", collector.errors());
   }

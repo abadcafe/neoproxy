@@ -409,7 +409,8 @@ fn main() -> Result<()> {
 
   // Validate config
   let mut collector = ConfigErrorCollector::new();
-  validate_config(&config, &mut collector);
+  let listener_manager = listeners::ListenerManager::new();
+  validate_config(&config, &mut collector, &listener_manager);
   if collector.has_errors() {
     collector.report_and_exit();
   }

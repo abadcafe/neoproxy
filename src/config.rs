@@ -7,36 +7,31 @@
 //! - `SerializedArgs` type for configuration data
 
 mod auth;
+mod cli;
 mod error;
+mod global;
 mod listener;
 mod listener_validation;
 mod service;
 mod tls;
+mod validate;
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, OnceLock};
 
 use anyhow::{Context, Result};
-use clap::Parser;
 use serde::Deserialize;
 
 // Re-export types from submodules
 pub use self::auth::UserCredential;
+pub use self::cli::CmdOpt;
 pub use self::error::{ConfigError, ConfigErrorCollector};
 pub use self::listener::{
   ListenerConfig, ListenerPropertiesProvider,
   ListenerPropertyValues, TransportLayer,
 };
-pub use self::listener_validation::{
-  validate_address_conflicts,
-  validate_hostname, validate_hostname_conflicts,
-  validate_hostname_routing_compatibility, validate_listener_addresses,
-  validate_listener_references,
-};
-pub use self::service::{Service, ServiceRaw, validate_service};
-pub use self::tls::{
-  CertificateConfig, ServerTlsConfig, validate_server_tls,
-};
+pub use self::service::{Service, ServiceRaw};
+pub use self::tls::{CertificateConfig, ServerTlsConfig};
+pub use self::validate::validate_config;
 
 /// Serialized configuration arguments.
 ///
@@ -58,33 +53,6 @@ pub struct Layer {
   pub plugin_name: String,
   pub kind: String,
   pub args: SerializedArgs,
-}
-
-/// Global config instance, initialized via `Config::init_global()`.
-static GLOBAL_CONFIG: OnceLock<Config> = OnceLock::new();
-
-/// Command line options.
-#[derive(Parser, Debug)]
-pub struct CmdOpt {
-  /// Sets a custom config file
-  #[arg(
-    short,
-    long = "config",
-    value_name = "CONFIG_FILE",
-    default_value_t = String::from("conf/server.yaml")
-  )]
-  pub config_file: String,
-
-  /// Gets version
-  #[arg(short, long = "version")]
-  pub version: bool,
-}
-
-impl CmdOpt {
-  pub fn global() -> &'static LazyLock<CmdOpt> {
-    static CMD_OPT: LazyLock<CmdOpt> = LazyLock::new(CmdOpt::parse);
-    &CMD_OPT
-  }
 }
 
 /// Server configuration.
@@ -183,116 +151,6 @@ impl Config {
     config.parse_file(path)?;
     Ok(config)
   }
-
-  /// Initialize the global config. Must be called before
-  /// `Config::global()`.
-  pub fn init_global(config: Config) {
-    GLOBAL_CONFIG.set(config).ok();
-  }
-
-  pub fn global() -> &'static Config {
-    GLOBAL_CONFIG.get().expect(
-      "Config not initialized - call Config::init_global() first",
-    )
-  }
-}
-
-// =========================================================================
-// Validation logic
-// =========================================================================
-
-/// Validate server_threads global setting.
-pub fn validate_server_threads(
-  server_threads: usize,
-  collector: &mut ConfigErrorCollector,
-) {
-  if server_threads == 0 {
-    collector.add(ConfigError::InvalidFormat {
-      location: "server_threads".into(),
-      message: "must be at least 1".into(),
-    });
-  }
-}
-
-/// Validate the entire configuration.
-///
-/// This function validates:
-/// - Global settings (server_threads)
-/// - Service references in servers
-/// - Hostname patterns
-/// - TLS configurations
-/// - Listener address format
-/// - Listener references
-/// - Hostname routing compatibility
-/// - Address conflicts across servers
-/// - Hostname conflicts across servers
-pub fn validate_config(
-  config: &Config,
-  collector: &mut ConfigErrorCollector,
-) {
-  use crate::listeners::ListenerManager;
-  let listener_manager = ListenerManager::new();
-  // Validate global settings
-  validate_server_threads(config.server_threads, collector);
-
-  // Collect all service names for reference validation
-  let service_names: std::collections::HashSet<&str> =
-    config.services.iter().map(|s| s.name.as_str()).collect();
-
-  // Validate servers
-  for (server_idx, server) in config.servers.iter().enumerate() {
-    let server_location = format!("servers[{}]", server_idx);
-
-    // Validate hostnames
-    for (idx, hostname) in server.hostnames.iter().enumerate() {
-      let hostname_location =
-        format!("{}.hostnames[{}]", server_location, idx);
-      validate_hostname(hostname, &hostname_location, collector);
-    }
-
-    // Validate TLS if present
-    if let Some(ref tls) = server.tls {
-      validate_server_tls(
-        tls,
-        &format!("{}.tls", server_location),
-        collector,
-      );
-    }
-
-    // Validate service reference
-    validate_service(
-      &service_names,
-      server_idx,
-      &server.service,
-      collector,
-    );
-  }
-
-  // Validate listener addresses
-  for (idx, listener) in config.listeners.iter().enumerate() {
-    let location = format!("listeners[{}]", idx);
-    validate_listener_addresses(
-      &listener.addresses,
-      &location,
-      collector,
-    );
-  }
-
-  // Validate listener references
-  validate_listener_references(config, collector);
-
-  // Validate hostname routing compatibility
-  validate_hostname_routing_compatibility(
-    config,
-    collector,
-    &listener_manager,
-  );
-
-  // Validate address conflicts across all servers
-  validate_address_conflicts(config, collector, &listener_manager);
-
-  // Validate hostname conflicts across servers
-  validate_hostname_conflicts(config, collector, &listener_manager);
 }
 
 #[cfg(test)]
@@ -353,15 +211,6 @@ server_threads: [
   }
 
   #[test]
-  fn test_service_default() {
-    let service = Service::default();
-    assert!(service.name.is_empty());
-    assert!(service.plugin_name.is_empty());
-    assert!(service.kind.is_empty());
-    assert!(service.layers.is_empty());
-  }
-
-  #[test]
   fn test_listener_config_default() {
     let lc = ListenerConfig::default();
     assert!(lc.name.is_empty());
@@ -409,13 +258,6 @@ servers:
     assert!(server.name.is_empty());
     assert!(server.service.is_empty());
     assert!(server.listeners.is_empty());
-  }
-
-  #[test]
-  fn test_layer_default() {
-    let layer = Layer::default();
-    assert!(layer.plugin_name.is_empty());
-    assert!(layer.kind.is_empty());
   }
 
   #[test]
@@ -663,146 +505,6 @@ servers: []
     assert!(
       result.is_err(),
       "Layer with empty service name should be rejected"
-    );
-  }
-
-  // =========================================================================
-  // validate_config Tests
-  // =========================================================================
-
-  #[test]
-  fn test_validate_config_valid() {
-    let config = Config {
-      listeners: vec![ListenerConfig {
-        name: "http_main".to_string(),
-        kind: "http".to_string(),
-        addresses: vec!["127.0.0.1:8080".to_string()],
-        ..Default::default()
-      }],
-      services: vec![Service {
-        name: "echo".to_string(),
-        plugin_name: "echo".to_string(),
-        kind: "echo".to_string(),
-        args: serde_yaml::Value::Null,
-        layers: vec![],
-      }],
-      servers: vec![Server {
-        name: "server1".to_string(),
-        hostnames: vec![],
-        listeners: vec!["http_main".to_string()],
-        service: "echo".to_string(),
-        tls: None,
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    validate_config(&config, &mut collector);
-    assert!(
-      !collector.has_errors(),
-      "Valid config should pass: {:?}",
-      collector.errors()
-    );
-  }
-
-  #[test]
-  fn test_validate_config_empty() {
-    let config = Config::default();
-    let mut collector = ConfigErrorCollector::new();
-    validate_config(&config, &mut collector);
-    assert!(!collector.has_errors());
-  }
-
-  #[test]
-  fn test_validate_config_server_threads_zero() {
-    let config = Config { server_threads: 0, ..Default::default() };
-    let mut collector = ConfigErrorCollector::new();
-    validate_config(&config, &mut collector);
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    let found = errors.iter().any(|e| {
-      matches!(e, ConfigError::InvalidFormat { location, .. } if location == "server_threads")
-    });
-    assert!(found, "Should have server_threads validation error");
-  }
-
-  #[test]
-  fn test_validate_config_service_reference_not_found() {
-    let config = Config {
-      services: vec![],
-      servers: vec![Server {
-        name: "test_server".to_string(),
-        listeners: vec![],
-        service: "nonexistent".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    validate_config(&config, &mut collector);
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    assert_eq!(errors.len(), 1);
-    assert!(matches!(&errors[0], ConfigError::NotFound { .. }));
-  }
-
-  #[test]
-  fn test_validate_config_invalid_listener_address() {
-    let config = Config {
-      listeners: vec![ListenerConfig {
-        name: "http_main".to_string(),
-        kind: "http".to_string(),
-        addresses: vec!["invalid:address".to_string()],
-        ..Default::default()
-      }],
-      servers: vec![Server {
-        name: "test".to_string(),
-        listeners: vec!["http_main".to_string()],
-        service: "".to_string(),
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    validate_config(&config, &mut collector);
-    assert!(collector.has_errors());
-    let errors = collector.errors();
-    assert!(
-      errors
-        .iter()
-        .any(|e| matches!(e, ConfigError::InvalidAddress { .. }))
-    );
-  }
-
-  #[test]
-  fn test_validate_config_https_without_tls() {
-    // Note: TLS validation for listeners is now done through
-    // validate_listener which is no longer called directly. The
-    // validate_config function validates TLS at the server level.
-    let config = Config {
-      listeners: vec![ListenerConfig {
-        name: "https_main".to_string(),
-        kind: "https".to_string(),
-        addresses: vec!["127.0.0.1:8443".to_string()],
-        ..Default::default()
-      }],
-      servers: vec![Server {
-        name: "https_server".to_string(),
-        listeners: vec!["https_main".to_string()],
-        service: "".to_string(),
-        tls: None,
-        ..Default::default()
-      }],
-      ..Default::default()
-    };
-    let mut collector = ConfigErrorCollector::new();
-    validate_config(&config, &mut collector);
-    // No TLS validation error expected since we removed
-    // validate_listener calls The test now just verifies the config
-    // structure works
-    assert!(
-      !collector.has_errors(),
-      "HTTPS listener without TLS should not produce errors: {:?}",
-      collector.errors()
     );
   }
 

@@ -19,7 +19,8 @@ fn test_shutdown_handle_is_shutdown_after_shutdown() {
   handle.shutdown();
   assert!(
     handle.is_shutdown(),
-    "ShutdownHandle should be in shutdown state after shutdown() is called"
+    "ShutdownHandle should be in shutdown state after shutdown() is \
+     called"
   );
 }
 

@@ -25,9 +25,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use base64::Engine;
+use command::{CommandError, read_command_and_target};
+use handshake::{
+  DEFAULT_HANDSHAKE_TIMEOUT, HandshakeError, perform_handshake,
+};
 use serde::Deserialize;
 use tower::Service;
 
+use super::tcp_listener_base::TcpListenerBase;
 use crate::config::SerializedArgs;
 use crate::http_utils::{BytesBufBodyWrapper, RequestBody};
 use crate::listener::{
@@ -37,13 +42,6 @@ use crate::service::Service as RuntimeService;
 use crate::stream::{
   Socks5UpgradeTrigger, http_status_to_socks5_error,
 };
-
-use command::{CommandError, read_command_and_target};
-use handshake::{
-  DEFAULT_HANDSHAKE_TIMEOUT, HandshakeError, perform_handshake,
-};
-
-use super::tcp_listener_base::TcpListenerBase;
 
 /// SOCKS5 listener implementation.
 ///

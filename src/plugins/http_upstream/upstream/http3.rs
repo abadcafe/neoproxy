@@ -11,8 +11,7 @@ use http_body_util::BodyExt;
 use tracing::{info, warn};
 
 use super::{ClientProtocol, ConnectResult};
-use crate::context::RequestContext;
-use crate::context::get_server_id;
+use crate::context::{RequestContext, get_server_id};
 use crate::http_utils::{
   RequestBody, Response, ResponseBody, append_proxy_status,
   build_error_response, build_proxy_status_with_status,

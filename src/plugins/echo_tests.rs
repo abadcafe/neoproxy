@@ -2,13 +2,12 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures::task::noop_waker;
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, Full};
 use tower::Service;
 
 use super::echo::*;
 use crate::http_utils::{BytesBufBodyWrapper, Request, RequestBody};
 use crate::plugin::Plugin;
-use http_body_util::Full;
 
 // ============== EchoService Tests ==============
 

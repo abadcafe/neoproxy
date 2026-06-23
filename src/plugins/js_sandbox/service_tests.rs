@@ -154,8 +154,8 @@ async fn test_default_mem_and_cpu_used_when_headers_missing() {
   write_js_file(
     tmp.path(),
     "hello",
-    "export default { async fetch(req) { return new Response('ok', \
-     { status: 200 }); } };",
+    "export default { async fetch(req) { return new Response('ok', { \
+     status: 200 }); } };",
   );
   let mut svc = make_full_service(tmp.path());
   let req = make_simple_req("hello");
@@ -170,8 +170,8 @@ async fn test_custom_sandbox_mem_header() {
   write_js_file(
     tmp.path(),
     "hello",
-    "export default { async fetch(req) { return new Response('ok', \
-     { status: 200 }); } };",
+    "export default { async fetch(req) { return new Response('ok', { \
+     status: 200 }); } };",
   );
   let mut svc = make_full_service(tmp.path());
   let req = make_req(
@@ -192,8 +192,8 @@ async fn test_invalid_sandbox_mem_uses_default() {
   write_js_file(
     tmp.path(),
     "hello",
-    "export default { async fetch(req) { return new Response('ok', \
-     { status: 200 }); } };",
+    "export default { async fetch(req) { return new Response('ok', { \
+     status: 200 }); } };",
   );
   let mut svc = make_full_service(tmp.path());
   let req = make_req(
@@ -213,8 +213,8 @@ async fn test_invalid_sandbox_cpu_uses_default() {
   write_js_file(
     tmp.path(),
     "hello",
-    "export default { async fetch(req) { return new Response('ok', \
-     { status: 200 }); } };",
+    "export default { async fetch(req) { return new Response('ok', { \
+     status: 200 }); } };",
   );
   let mut svc = make_full_service(tmp.path());
   let req = make_req(
@@ -234,8 +234,8 @@ async fn test_large_mem_and_cpu_values() {
   write_js_file(
     tmp.path(),
     "hello",
-    "export default { async fetch(req) { return new Response('ok', \
-     { status: 200 }); } };",
+    "export default { async fetch(req) { return new Response('ok', { \
+     status: 200 }); } };",
   );
   let mut svc = make_full_service(tmp.path());
   let req = make_req(
@@ -289,8 +289,8 @@ async fn test_handler_returns_204_no_content() {
   write_js_file(
     tmp.path(),
     "no_content",
-    "export default { async fetch(req) { return new Response(null, \
-     { status: 204 }); } };",
+    "export default { async fetch(req) { return new Response(null, { \
+     status: 204 }); } };",
   );
   let mut svc = make_full_service(tmp.path());
   let req = make_simple_req("no_content");
@@ -322,8 +322,8 @@ async fn test_handler_returns_500() {
   write_js_file(
     tmp.path(),
     "server_err",
-    "export default { async fetch(req) { return new \
-     Response('boom', { status: 500 }); } };",
+    "export default { async fetch(req) { return new Response('boom', \
+     { status: 500 }); } };",
   );
   let mut svc = make_full_service(tmp.path());
   let req = make_simple_req("server_err");
@@ -450,8 +450,8 @@ async fn test_request_headers_pass_through_to_handler() {
     tmp.path(),
     "echo_headers",
     "export default { async fetch(req) { const hdr = \
-     req.headers.get('x-custom'); return new Response(hdr || \
-     'none', { status: 200 }); } };",
+     req.headers.get('x-custom'); return new Response(hdr || 'none', \
+     { status: 200 }); } };",
   );
   let mut svc = make_full_service(tmp.path());
   let req = make_req(
@@ -541,8 +541,8 @@ async fn test_handler_throws_returns_502() {
   write_js_file(
     tmp.path(),
     "thrower",
-    "export default { async fetch(req) { throw new \
-     Error('intentional crash'); } };",
+    "export default { async fetch(req) { throw new Error('intentional \
+     crash'); } };",
   );
   let mut svc = make_full_service(tmp.path());
   let req = make_simple_req("thrower");
@@ -659,8 +659,8 @@ async fn test_sequential_requests_to_same_handler() {
   write_js_file(
     tmp.path(),
     "concurrent",
-    "export default { async fetch(req) { return new Response('ok', \
-     { status: 200 }); } };",
+    "export default { async fetch(req) { return new Response('ok', { \
+     status: 200 }); } };",
   );
 
   let mut svc = make_full_service_with_workers(tmp.path(), 4);
@@ -832,8 +832,7 @@ async fn test_handler_returning_non_response_returns_502() {
   write_js_file(
     tmp.path(),
     "bad_return",
-    "export default { async fetch(req) { return 'not a response'; } \
-     };",
+    "export default { async fetch(req) { return 'not a response'; } };",
   );
   let mut svc = make_full_service(tmp.path());
   let req = make_simple_req("bad_return");

@@ -12,8 +12,7 @@ use super::target_parser::{
   self, ConnectTargetError, ForwardTargetError,
 };
 use super::upstream::{ConnectResult, UpstreamRegistry};
-use crate::context::RequestContext;
-use crate::context::get_server_id;
+use crate::context::{RequestContext, get_server_id};
 use crate::http_utils::{
   Request, RequestBody, Response, append_proxy_status,
   build_empty_response, build_error_response,

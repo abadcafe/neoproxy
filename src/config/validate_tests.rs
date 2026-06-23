@@ -1,6 +1,5 @@
 use super::validate::*;
-use crate::config::listener::ListenerPropertyValues;
-use crate::config::listener::TransportLayer;
+use crate::config::listener::{ListenerPropertyValues, TransportLayer};
 use crate::config::{
   Config, ConfigError, ConfigErrorCollector, ListenerConfig,
   ListenerPropertiesProvider, Server, Service,

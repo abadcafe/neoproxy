@@ -29,7 +29,8 @@ pub(crate) enum ClientCertPolicy {
 }
 
 impl ClientCertPolicy {
-  /// Returns `true` if the policy requires a cert but none was presented.
+  /// Returns `true` if the policy requires a cert but none was
+  /// presented.
   fn is_absent(&self) -> bool {
     matches!(self, ClientCertPolicy::Presented(false))
   }

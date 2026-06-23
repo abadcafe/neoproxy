@@ -228,5 +228,8 @@ fn test_pool_config_defaults() {
   let resolved = merge_chain_config(&config).unwrap();
   let upstream = resolved.get("test").unwrap();
   assert_eq!(upstream.pool_config.max_idle_per_host, 32);
-  assert_eq!(upstream.pool_config.idle_timeout, Duration::from_secs(90));
+  assert_eq!(
+    upstream.pool_config.idle_timeout,
+    Duration::from_secs(90)
+  );
 }

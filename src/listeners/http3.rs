@@ -18,9 +18,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as AnyhowContext, Result, anyhow};
+use quic_config::{H3_NO_ERROR_CODE, Http3ListenerArgs, QuicConfig};
 use quinn::crypto::rustls::QuicServerConfig;
+use stream_handler::handle_h3_connection;
 use tracing::{info, warn};
 
+use super::LISTENER_SHUTDOWN_TIMEOUT;
 use crate::config::SerializedArgs;
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
@@ -28,11 +31,6 @@ use crate::listener::{
 use crate::shutdown::ShutdownHandle;
 use crate::tls::build_tls_server_config;
 use crate::tracker::StreamTracker;
-
-use quic_config::{H3_NO_ERROR_CODE, Http3ListenerArgs, QuicConfig};
-use stream_handler::handle_h3_connection;
-
-use super::LISTENER_SHUTDOWN_TIMEOUT;
 
 /// ALPN protocol for HTTP/3
 const H3_ALPN: &[u8] = b"h3";

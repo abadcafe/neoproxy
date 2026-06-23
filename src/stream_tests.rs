@@ -220,7 +220,8 @@ async fn test_run_tunnel_no_timeout_with_active_data() {
 
   assert!(
     elapsed >= Duration::from_millis(500),
-    "Tunnel should survive past idle_timeout while data flows, only lasted {elapsed:?}"
+    "Tunnel should survive past idle_timeout while data flows, only \
+     lasted {elapsed:?}"
   );
 
   let _ = server_handle.await;
@@ -249,7 +250,8 @@ async fn test_run_tunnel_completes_on_eof() {
 
   assert!(
     elapsed < Duration::from_secs(5),
-    "Tunnel should complete on EOF, not wait for idle timeout. Elapsed: {elapsed:?}"
+    "Tunnel should complete on EOF, not wait for idle timeout. \
+     Elapsed: {elapsed:?}"
   );
 }
 

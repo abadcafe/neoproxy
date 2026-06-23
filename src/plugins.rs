@@ -1,10 +1,11 @@
 //! Plugin registry and lifecycle management.
 //!
 //! module: plugins
-//! responsibilities: manage plugin loading, service/layer building, and shutdown
-//! public operations: PluginManager::new, PluginManager::build_service, PluginManager::build_layer, PluginManager::uninstall_all
-//! data entities: PluginManager, PluginLoadError
-//! tests: plugins_tests.rs
+//! responsibilities: manage plugin loading, service/layer building, and
+//! shutdown public operations: PluginManager::new,
+//! PluginManager::build_service, PluginManager::build_layer,
+//! PluginManager::uninstall_all data entities: PluginManager,
+//! PluginLoadError tests: plugins_tests.rs
 
 use std::collections::HashMap;
 

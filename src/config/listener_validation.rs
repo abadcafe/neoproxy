@@ -326,7 +326,8 @@ pub fn validate_address_conflicts(
   }
 }
 
-/// Collect hostname overlaps from a list of (server_name, hostnames) pairs.
+/// Collect hostname overlaps from a list of (server_name, hostnames)
+/// pairs.
 ///
 /// Returns (default_servers, hostname_map) where:
 /// - default_servers: servers with empty hostnames

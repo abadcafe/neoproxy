@@ -253,7 +253,8 @@ impl UpstreamRegistry {
       let roots = build_root_cert_store(server_ca)?;
       let ccc = match certificates {
         Some(certs) => {
-          // Also validate certs to catch misconfigured client auth early
+          // Also validate certs to catch misconfigured client auth
+          // early
           certs.validate()?;
           ClientCertCredential {
             cert_path: certs.client_cert_path.as_ref().map(Into::into),

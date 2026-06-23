@@ -1,10 +1,10 @@
 //! Plugin trait definition.
 //!
 //! module: plugin
-//! responsibilities: define the interface that all plugins must implement
-//! public operations: Plugin::service_builder, Plugin::layer_builder, Plugin::uninstall
-//! data entities: Plugin (trait)
-//! tests: plugin_tests.rs
+//! responsibilities: define the interface that all plugins must
+//! implement public operations: Plugin::service_builder,
+//! Plugin::layer_builder, Plugin::uninstall data entities: Plugin
+//! (trait) tests: plugin_tests.rs
 
 use std::future::Future;
 use std::pin::Pin;

@@ -2,9 +2,10 @@
 //!
 //! module: access_log
 //! responsibilities: log proxy access entries to rotating files
-//! public operations: plugin_name, create_plugin, get_writer, init_writer_registry
-//! data entities: AccessLogPlugin, AccessLogLayer, AccessLogEntry, LogFormat, AccessLogWriter
-//! tests: access_log_tests.rs, layer_tests.rs, registry_tests.rs
+//! public operations: plugin_name, create_plugin, get_writer,
+//! init_writer_registry data entities: AccessLogPlugin, AccessLogLayer,
+//! AccessLogEntry, LogFormat, AccessLogWriter tests: access_log_tests.
+//! rs, layer_tests.rs, registry_tests.rs
 
 pub(crate) mod config;
 pub mod context;

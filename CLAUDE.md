@@ -8,10 +8,10 @@
 ### 1. Rust：0 编译警告和错误
 
 ```bash
-cargo format # 全量格式化
-cargo clippy # 0 警告和错误
-cargo build  # 0 警告和错误
-cargo test   # 单测全部通过, 禁止跳过
+cargo +nightly fmt # 全量格式化
+cargo clippy       # 0 警告和错误
+cargo build        # 0 警告和错误
+cargo test         # 单测全部通过, 禁止跳过
 uv run --frozen python -m pytest -q tests/unit        # 单测全部通过, 禁止跳过
 uv run --frozen python -m pytest -q tests/integration # 集测全部通过, 禁止跳过
 ```

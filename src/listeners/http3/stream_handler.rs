@@ -7,6 +7,7 @@ use http_body_util::BodyExt;
 use tower::Service;
 use tracing::warn;
 
+use super::recv_body::H3RecvBody;
 use crate::http_utils::{
   BytesBufBodyWrapper, RequestBody, Response, build_error_response,
 };
@@ -14,8 +15,6 @@ use crate::listeners::header_validation::authority_host_mismatch;
 use crate::shutdown::ShutdownHandle;
 use crate::stream::H3UpgradeTrigger;
 use crate::tracker::StreamTracker;
-
-use super::recv_body::H3RecvBody;
 
 /// Handle a single HTTP/3 stream by delegating to the Service.
 ///

@@ -20,8 +20,7 @@ use super::utils::{
   apply_proxy_auth, build_connect_request, resolve_address,
 };
 use super::{ClientProtocol, ConnectResult};
-use crate::context::RequestContext;
-use crate::context::get_server_id;
+use crate::context::{RequestContext, get_server_id};
 use crate::http_utils::{
   BytesBufBodyWrapper, RequestBody, Response, ResponseBody,
   append_proxy_status, build_error_response,

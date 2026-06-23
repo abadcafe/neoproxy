@@ -12,10 +12,9 @@ use std::pin::Pin;
 use anyhow::Result;
 
 use crate::config::SerializedArgs;
-use crate::server::Server;
-
 // Re-export TransportLayer from config (single source of truth).
 pub use crate::config::TransportLayer;
+use crate::server::Server;
 
 /// Listener metadata for conflict detection.
 ///

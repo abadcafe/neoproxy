@@ -13,9 +13,8 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::task;
 
-use crate::tracker::StreamTracker;
-
 use super::LISTENER_SHUTDOWN_TIMEOUT;
+use crate::tracker::StreamTracker;
 
 /// Shared base for TCP-based listeners.
 ///

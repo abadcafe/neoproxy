@@ -346,9 +346,9 @@ pub fn build_tls_server_config(
           let ca_certs: Vec<CertificateDer> =
             rustls_pemfile::certs(&mut ca_reader)
               .collect::<Result<Vec<_>, _>>()
-              .with_context(
-                || "Failed to parse client CA certificates",
-              )?;
+              .with_context(|| {
+                "Failed to parse client CA certificates"
+              })?;
           for cert in ca_certs {
             roots.add(cert)?;
           }

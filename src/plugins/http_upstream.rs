@@ -1,10 +1,11 @@
 //! HTTP upstream plugin — proxy to upstream HTTP/HTTPS/H3 servers.
 //!
 //! module: http_upstream
-//! responsibilities: forward requests and CONNECT tunnels to upstream servers
-//! public operations: plugin_name, create_plugin
+//! responsibilities: forward requests and CONNECT tunnels to upstream
+//! servers public operations: plugin_name, create_plugin
 //! data entities: HttpUpstreamPlugin
-//! tests: service::tests, config::tests, error::tests, inherit::tests, target_parser_tests.rs, upstream::upstream_tests.rs
+//! tests: service::tests, config::tests, error::tests, inherit::tests,
+//! target_parser_tests.rs, upstream::upstream_tests.rs
 
 use std::cell::RefCell;
 use std::collections::HashMap;

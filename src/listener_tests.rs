@@ -55,6 +55,7 @@ fn test_listener_props_udp_with_hostname_routing() {
 #[tokio::test]
 async fn test_start_completes_after_stop() {
   use std::sync::Arc;
+
   use tokio::sync::Notify;
 
   let notify = Arc::new(Notify::new());
@@ -70,6 +71,7 @@ async fn test_start_completes_after_stop() {
         Ok(())
       })
     }
+
     fn stop(&self) {
       self.notify.notify_one();
     }
@@ -87,6 +89,7 @@ async fn test_start_completes_after_stop() {
 async fn test_start_blocks_until_stop_called() {
   use std::sync::Arc;
   use std::sync::atomic::{AtomicBool, Ordering};
+
   use tokio::sync::Notify;
 
   let notify = Arc::new(Notify::new());
@@ -106,6 +109,7 @@ async fn test_start_blocks_until_stop_called() {
         Ok(())
       })
     }
+
     fn stop(&self) {
       self.notify.notify_one();
     }

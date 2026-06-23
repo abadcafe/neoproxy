@@ -73,7 +73,8 @@ fn test_listener_manager_build_unknown_kind_returns_error() {
   );
 }
 
-// ========== listener_props (ListenerPropertiesProvider trait) ==========
+// ========== listener_props (ListenerPropertiesProvider trait)
+// ==========
 
 #[test]
 fn test_listener_manager_http_props_tcp_with_hostname_routing() {

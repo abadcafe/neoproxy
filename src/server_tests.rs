@@ -9,7 +9,8 @@ use crate::server::{Server, ServerRouter, placeholder_service};
 
 // ============== Hostname Matching Tests ==============
 
-// Note: matches_hostname is private, tested indirectly through ServerRouter.
+// Note: matches_hostname is private, tested indirectly through
+// ServerRouter.
 
 // ============== Shared Address Tests ==============
 

@@ -23,10 +23,11 @@ extension!(
 );
 
 /// Combined script that loads Web API globals, then reads the request
-/// from OpState, calls the user's fetch handler, and writes the response
-/// back to OpState. deno_fetch/deno_web extensions use `lazy_loaded_js`
-/// which are NOT auto-evaluated at startup — we must load them via
-/// `Deno.core.loadExtScript()` and put the constructors on globalThis.
+/// from OpState, calls the user's fetch handler, and writes the
+/// response back to OpState. deno_fetch/deno_web extensions use
+/// `lazy_loaded_js` which are NOT auto-evaluated at startup — we must
+/// load them via `Deno.core.loadExtScript()` and put the constructors
+/// on globalThis.
 const BOOT_SCRIPT: &str = r#"
 (async () => {
   var load = Deno.core.loadExtScript;

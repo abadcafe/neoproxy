@@ -356,8 +356,8 @@ fn test_build_service_with_layers_markers_in_reverse_order() {
     .unwrap();
   assert_eq!(
     order, "layer_b;layer_a",
-    "Layers should be applied in reverse config order: inner (layer_b) \
-     first, then outer (layer_a)"
+    "Layers should be applied in reverse config order: inner \
+     (layer_b) first, then outer (layer_a)"
   );
 }
 
@@ -415,8 +415,8 @@ fn test_build_listeners_caches_service_across_servers() {
   assert_eq!(
     counter.load(Ordering::SeqCst),
     1,
-    "Service should be cached - layer applied only once for two servers \
-     sharing same service"
+    "Service should be cached - layer applied only once for two \
+     servers sharing same service"
   );
 }
 

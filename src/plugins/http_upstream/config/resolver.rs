@@ -70,7 +70,8 @@ pub(crate) fn merge_chain_config(
     for addr in &upstream.addresses {
       let proto = addr.protocol()?;
 
-      // Protocol-agnostic fields: address -> upstream -> plugin -> default
+      // Protocol-agnostic fields: address -> upstream -> plugin ->
+      // default
       let tunnel_idle_timeout = resolve_field_with_default(
         addr.tunnel_idle_timeout.as_ref(),
         upstream.tunnel_idle_timeout.as_ref(),

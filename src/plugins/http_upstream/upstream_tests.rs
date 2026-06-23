@@ -3,7 +3,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use super::upstream::utils::resolve_address;
-use super::upstream::{Address, Http3AddressState, Http3Client, QuicConfig, schedule_wrr};
+use super::upstream::{
+  Address, Http3AddressState, Http3Client, QuicConfig, schedule_wrr,
+};
 
 fn dummy_http3() -> Http3Client {
   Http3Client {

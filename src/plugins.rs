@@ -16,17 +16,17 @@ use crate::plugin;
 use crate::service::{Layer, Service};
 
 pub mod access_log;
+#[cfg(test)]
+mod access_log_tests;
 pub mod auth;
+#[cfg(test)]
+mod auth_tests;
 pub mod echo;
+#[cfg(test)]
+mod echo_tests;
 pub mod http_upstream;
 #[cfg(feature = "js-sandbox")]
 pub mod js_sandbox;
-#[cfg(test)]
-mod access_log_tests;
-#[cfg(test)]
-mod auth_tests;
-#[cfg(test)]
-mod echo_tests;
 
 type CreateFn =
   fn(Option<&SerializedArgs>) -> Result<Box<dyn plugin::Plugin>>;

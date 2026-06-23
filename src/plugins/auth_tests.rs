@@ -23,8 +23,7 @@ fn test_parse_basic_auth_valid() {
 
 #[test]
 fn test_parse_basic_auth_no_basic_prefix() {
-  let header =
-    http::HeaderValue::from_str("Bearer token123").unwrap();
+  let header = http::HeaderValue::from_str("Bearer token123").unwrap();
   assert!(parse_basic_auth_header(&header).is_none());
 }
 
@@ -85,12 +84,7 @@ fn test_build_407_response() {
     http::StatusCode::PROXY_AUTHENTICATION_REQUIRED
   );
   assert_eq!(
-    resp
-      .headers()
-      .get("Proxy-Authenticate")
-      .unwrap()
-      .to_str()
-      .unwrap(),
+    resp.headers().get("Proxy-Authenticate").unwrap().to_str().unwrap(),
     "Basic realm=\"proxy\""
   );
 }
@@ -197,8 +191,7 @@ fn make_middleware_service() -> crate::service::Service {
     username: "admin".to_string(),
     password: "secret".to_string(),
   }];
-  let auth =
-    crate::auth::UserPasswordAuth::from_users(&users);
+  let auth = crate::auth::UserPasswordAuth::from_users(&users);
   let layer = crate::service::Layer::new(AuthLayer { auth });
   let inner = crate::server::placeholder_service();
   layer.layer(inner)
@@ -280,9 +273,7 @@ fn test_valid_credentials_sets_context() {
 
     let body: crate::http_utils::RequestBody =
       http_body_util::Empty::<bytes::Bytes>::new()
-        .map_err(|e: std::convert::Infallible| {
-          anyhow::anyhow!("{}", e)
-        })
+        .map_err(|e: std::convert::Infallible| anyhow::anyhow!("{}", e))
         .boxed_unsync();
 
     let auth_header = basic_auth_header("admin", "secret");
@@ -344,11 +335,9 @@ fn test_valid_credentials_returns_inner_response() {
           as std::pin::Pin<
             Box<
               dyn std::future::Future<
-                  Output = anyhow::Result<
-                    crate::http_utils::Response,
-                  >,
+                  Output = anyhow::Result<crate::http_utils::Response>,
                 >,
-            >
+            >,
           >
       },
     ));
@@ -378,9 +367,7 @@ fn test_missing_request_context_returns_error() {
     // Build request WITHOUT RequestContext extension
     let body: crate::http_utils::RequestBody =
       http_body_util::Empty::<bytes::Bytes>::new()
-        .map_err(|e: std::convert::Infallible| {
-          anyhow::anyhow!("{}", e)
-        })
+        .map_err(|e: std::convert::Infallible| anyhow::anyhow!("{}", e))
         .boxed_unsync();
     let req = http::Request::builder().body(body).unwrap();
     // Should NOT panic, should return 407 gracefully

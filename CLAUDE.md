@@ -1,15 +1,37 @@
 # NeoProxy
 
-## 开发
+## 开发铁律（不可违反）
+
+- 所有语言都要像 Rust 一样强类型，编译期解决所有类型错误，禁止忽略和跳过
+- 任何代码修改后都必须全量验证（含格式化，检查，单测，集测等）
+
+### 1. Rust：0 编译警告和错误
 
 ```bash
-cargo build
-cargo test                    # 单元测试
-cargo test --release          # 集成测试也需要先编译 release 二进制
-uv run pytest -v tests/integration/  # 集成测试（295个）
+cargo format # 全量格式化
+cargo clippy # 0 警告和错误
+cargo build  # 0 警告和错误
+cargo test   # 单测全部通过, 禁止跳过
+uv run --frozen python -m pytest -q tests/unit        # 单测全部通过, 禁止跳过
+uv run --frozen python -m pytest -q tests/integration # 集测全部通过, 禁止跳过
 ```
 
-**注意**: 集成测试（`tests/integration/`）是 Python 编写的，需要先编译 release 二进制再运行。
+### 2. Python：100% 类型注解，0 编译警告和错误
+
+- **所有 Python 代码**（包括 `*_tests.py`）必须有完整的类型注解
+- 必须使用 `type` 类型别名语法和泛型函数语法
+- 禁止 `Any`、禁止裸 `list` / `dict` / `tuple`（必须写泛型参数如 `list[str]`）
+- 禁止使用 `# pyright: ignore` 和 `# type: ignore` 掩盖错误
+- 优先使用 `Pydantic` 而不是 `cast`
+- 必须通过 `pyright` **strict 模式**，**0 errors, 0 warnings**
+- 必须通过 `ruff check` 和 `ruff format --check`，**0 errors, 0 warnings**
+
+### 3. Python 错误处理
+
+- **禁止抛异常**：所有业务错误必须用 Result/Optional 机制处理（如 `Ok[T] | Rejected`），像 Rust 一样
+- **编程错误必须崩溃**：**禁止捕获** `AssertionError`、`IndexError`、`KeyError`、`TypeError`、`RuntimeError` 等编程错误，就让它崩溃暴露 bug
+- **第三方异常处理**：第三方库抛出的异常如果是正常流程控制（例如网络错误处理等），则必须在调用点尽量窄地捕获并正确处理, **其他情况禁止捕获**，就让它崩溃暴露 bug
+- **测试代码**：用 `assert isinstance(result, Ok)` / `assert isinstance(result, Rejected)` 替代 `pytest.raises`
 
 ## 本地部署
 
@@ -91,4 +113,3 @@ CMD="bin/neoproxy -c conf/server.yaml"
 curl -x http://127.0.0.1:8080 http://www.google.com/ -s -o /dev/null -w "%{http_code}\n"
 # 应返回 200
 ```
-

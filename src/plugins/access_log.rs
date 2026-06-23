@@ -6,19 +6,25 @@
 //! data entities: AccessLogPlugin, AccessLogLayer, AccessLogEntry, LogFormat, AccessLogWriter
 //! tests: access_log_tests.rs, layer_tests.rs, registry_tests.rs
 
+pub(crate) mod config;
 pub mod context;
 pub mod formatter;
-pub(crate) mod config;
 pub(crate) mod layer;
 pub(crate) mod registry;
 pub(crate) mod writer;
 
+#[cfg(test)]
+mod config_tests;
+#[cfg(test)]
+mod formatter_tests;
 #[cfg(test)]
 mod layer_tests;
 #[cfg(test)]
 mod registry_tests;
 #[cfg(test)]
 pub(crate) mod test_utils;
+#[cfg(test)]
+mod writer_tests;
 
 use std::collections::HashMap;
 

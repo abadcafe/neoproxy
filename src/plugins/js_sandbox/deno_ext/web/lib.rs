@@ -6,6 +6,9 @@ mod message_port;
 mod stream_resource;
 mod url;
 
+#[cfg(test)]
+mod stream_resource_tests;
+
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::Arc;

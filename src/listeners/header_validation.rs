@@ -75,4 +75,3 @@ pub(crate) fn validate_and_route<B>(
     None => Err(super::error_response::build_404_response()),
   }
 }
-

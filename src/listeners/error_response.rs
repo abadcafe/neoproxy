@@ -32,4 +32,3 @@ pub(crate) fn build_404_response() -> Response {
   *resp.status_mut() = http::StatusCode::NOT_FOUND;
   resp
 }
-

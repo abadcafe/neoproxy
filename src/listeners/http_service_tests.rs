@@ -47,21 +47,14 @@ fn multi_servers() -> Vec<Server> {
 
 #[test]
 fn test_http_service_adaptor_new_http_succeeds() {
-  let _adaptor = HttpServiceAdaptor::new_http(
-    test_servers(),
-    None,
-    None,
-  );
+  let _adaptor =
+    HttpServiceAdaptor::new_http(test_servers(), None, None);
 }
 
 #[test]
 fn test_http_service_adaptor_new_https_succeeds() {
-  let _adaptor = HttpServiceAdaptor::new_https(
-    test_servers(),
-    None,
-    None,
-    false,
-  );
+  let _adaptor =
+    HttpServiceAdaptor::new_https(test_servers(), None, None, false);
 }
 
 #[test]
@@ -87,9 +80,6 @@ fn test_http_service_adaptor_new_https_with_client_cert() {
 
 #[test]
 fn test_http_service_adaptor_new_http_multi_servers() {
-  let _adaptor = HttpServiceAdaptor::new_http(
-    multi_servers(),
-    None,
-    None,
-  );
+  let _adaptor =
+    HttpServiceAdaptor::new_http(multi_servers(), None, None);
 }

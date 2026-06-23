@@ -3,6 +3,9 @@
 pub mod dns;
 mod proxy;
 
+#[cfg(test)]
+mod dns_tests;
+
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::min;

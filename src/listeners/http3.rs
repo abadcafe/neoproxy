@@ -87,7 +87,9 @@ impl Http3Listener {
     // Check that at least one server has TLS configured
     let has_tls = server_routing_table.iter().any(|e| e.tls.is_some());
     if !has_tls {
-      anyhow::bail!("http3 listener requires server-level tls configuration");
+      anyhow::bail!(
+        "http3 listener requires server-level tls configuration"
+      );
     }
 
     // Build TLS config from all servers' certificates (SNI-based

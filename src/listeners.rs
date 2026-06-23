@@ -9,22 +9,24 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::config::{ListenerPropertiesProvider, ListenerPropertyValues};
+use crate::config::{
+  ListenerPropertiesProvider, ListenerPropertyValues,
+};
 use crate::listener::{BuildListener, ListenerProps};
 
 /// Shared listener shutdown timeout for all listener types.
 pub(crate) const LISTENER_SHUTDOWN_TIMEOUT: Duration =
   Duration::from_secs(3);
 
+pub(crate) mod error_response;
+pub(crate) mod header_validation;
 pub mod http;
 pub mod http3;
+pub(crate) mod http_service;
 pub mod https;
 pub mod socks5;
-pub(crate) mod header_validation;
-pub(crate) mod error_response;
 pub(crate) mod tcp_bind;
 pub(crate) mod tcp_listener_base;
-pub(crate) mod http_service;
 
 /// Registry for listener builders and their properties.
 ///
@@ -99,23 +101,22 @@ impl ListenerPropertiesProvider for ListenerManager {
 // Test modules — siblings of http/https/http3/socks5, can only access
 // pub/pub(crate) items from those modules (black-box testing).
 #[cfg(test)]
-pub(crate) mod test_helpers;
+mod error_response_tests;
+#[cfg(test)]
+mod header_validation_tests;
+#[cfg(test)]
+mod http3_tests;
+#[cfg(test)]
+mod http_service_tests;
 #[cfg(test)]
 mod http_tests;
 #[cfg(test)]
 mod https_tests;
 #[cfg(test)]
-mod http3_tests;
-#[cfg(test)]
 mod socks5_tests;
-#[cfg(test)]
-mod header_validation_tests;
-#[cfg(test)]
-mod error_response_tests;
 #[cfg(test)]
 mod tcp_bind_tests;
 #[cfg(test)]
-mod http_service_tests;
-#[cfg(test)]
 mod tcp_listener_base_tests;
-
+#[cfg(test)]
+pub(crate) mod test_helpers;

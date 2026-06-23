@@ -15,13 +15,24 @@ import os
 import signal
 import sys
 import errno
+from pathlib import Path
 from typing import Optional, Tuple, List, Callable, Generator
 
 # ==============================================================================
 # Constants
 # ==============================================================================
 
-NEOPROXY_BINARY = "target/release/neoproxy"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+NEOPROXY_BINARY = os.environ.get(
+    "NEOPROXY_BINARY",
+    str(PROJECT_ROOT / "target" / "debug" / "neoproxy"),
+)
+DEFAULT_CARGO_FEATURES = "js-sandbox"
+
+
+def neoproxy_cargo_features() -> str:
+    """Cargo features used for the integration-test binary build."""
+    return os.environ.get("NEOPROXY_CARGO_FEATURES", DEFAULT_CARGO_FEATURES)
 
 
 # ==============================================================================
@@ -39,6 +50,31 @@ def check_binary_exists() -> bool:
     return os.path.exists(NEOPROXY_BINARY)
 
 
+def build_neoproxy_binary() -> None:
+    """Build the neoproxy binary used by integration tests.
+
+    If NEOPROXY_BINARY is set explicitly, tests use that path as-is and
+    only verify it exists. Otherwise, build the default debug binary from
+    the current workspace so tests cannot accidentally run a stale release
+    artifact.
+    """
+    if "NEOPROXY_BINARY" in os.environ:
+        return
+
+    cmd = ["cargo", "build"]
+    features = neoproxy_cargo_features()
+    if features:
+        cmd.extend(["--features", features])
+
+    subprocess.run(
+        cmd,
+        cwd=PROJECT_ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
 def assert_binary_exists() -> None:
     """
     Assert that the neoproxy binary exists.
@@ -46,10 +82,11 @@ def assert_binary_exists() -> None:
     Raises:
         AssertionError: If binary does not exist
     """
+    build_neoproxy_binary()
     if not check_binary_exists():
         print(
             f"\nERROR: neoproxy binary not found at {NEOPROXY_BINARY}\n"
-            f"Please run 'cargo build' before running integration tests.\n",
+            f"Please run 'cargo build' or set NEOPROXY_BINARY.\n",
             file=sys.stderr
         )
         sys.exit(1)

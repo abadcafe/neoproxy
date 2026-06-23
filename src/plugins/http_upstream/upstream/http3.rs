@@ -12,11 +12,11 @@ use tracing::{info, warn};
 
 use super::{ClientProtocol, ConnectResult};
 use crate::context::RequestContext;
+use crate::context::get_server_id;
 use crate::http_utils::{
   RequestBody, Response, ResponseBody, append_proxy_status,
   build_error_response, build_proxy_status_with_status,
 };
-use crate::context::get_server_id;
 use crate::plugins::http_upstream::error::{
   UpstreamError, classify_quic_error,
 };
@@ -174,10 +174,15 @@ async fn create_quic_connection(
 
   cli_endpoint.set_default_client_config(cli_config);
 
-  let addr = tokio::time::timeout(dns_timeout, resolve_address(address))
-    .await
-    .map_err(|_| UpstreamError::DnsError(format!("DNS resolve for '{address}' timed out")))?
-    .map_err(|e| classify_quic_error(e))?;
+  let addr =
+    tokio::time::timeout(dns_timeout, resolve_address(address))
+      .await
+      .map_err(|_| {
+        UpstreamError::DnsError(format!(
+          "DNS resolve for '{address}' timed out"
+        ))
+      })?
+      .map_err(|e| classify_quic_error(e))?;
   let host: &str = hostname.unwrap_or_else(|| {
     address.split_at(address.rfind(':').unwrap_or(address.len())).0
   });

@@ -15,9 +15,9 @@ mod command;
 mod handshake;
 
 #[cfg(test)]
-mod handshake_tests;
-#[cfg(test)]
 mod command_tests;
+#[cfg(test)]
+mod handshake_tests;
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -39,7 +39,9 @@ use crate::stream::{
 };
 
 use command::{CommandError, read_command_and_target};
-use handshake::{DEFAULT_HANDSHAKE_TIMEOUT, HandshakeError, perform_handshake};
+use handshake::{
+  DEFAULT_HANDSHAKE_TIMEOUT, HandshakeError, perform_handshake,
+};
 
 use super::tcp_listener_base::TcpListenerBase;
 
@@ -473,9 +475,7 @@ impl Default for Socks5ListenerArgs {
 }
 
 /// Parses SOCKS5 listener configuration from YAML.
-fn parse_config(
-  args: SerializedArgs,
-) -> Result<Socks5ListenerArgs> {
+fn parse_config(args: SerializedArgs) -> Result<Socks5ListenerArgs> {
   #[derive(Deserialize, Debug)]
   #[serde(deny_unknown_fields)]
   struct ConfigYaml {
@@ -575,4 +575,3 @@ pub fn create_listener_builder() -> Box<dyn BuildListener> {
     },
   )
 }
-

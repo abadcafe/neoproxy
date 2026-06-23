@@ -111,8 +111,10 @@ async fn test_start_blocks_until_stop_called() {
     }
   }
 
-  let listener =
-    Listener::new(NotifyListener { notify, completed: completed.clone() });
+  let listener = Listener::new(NotifyListener {
+    notify,
+    completed: completed.clone(),
+  });
 
   // Before stop, start() should not complete
   // Use tokio::select! with a timeout to verify it blocks

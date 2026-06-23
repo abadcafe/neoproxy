@@ -66,11 +66,8 @@ fn test_socks5_builder_custom_handshake_timeout_succeeds() {
   let builder = socks5::create_listener_builder();
   let args: crate::config::SerializedArgs =
     serde_yaml::from_str(r#"handshake_timeout: "5s""#).unwrap();
-  let result = builder(
-    vec!["127.0.0.1:0".to_string()],
-    args,
-    test_servers(),
-  );
+  let result =
+    builder(vec!["127.0.0.1:0".to_string()], args, test_servers());
   assert!(result.is_ok());
 }
 
@@ -80,11 +77,8 @@ fn test_socks5_builder_invalid_handshake_timeout_returns_error() {
   let args: crate::config::SerializedArgs =
     serde_yaml::from_str(r#"handshake_timeout: "not_a_duration""#)
       .unwrap();
-  let result = builder(
-    vec!["127.0.0.1:0".to_string()],
-    args,
-    test_servers(),
-  );
+  let result =
+    builder(vec!["127.0.0.1:0".to_string()], args, test_servers());
   assert!(result.is_err());
 }
 
@@ -93,22 +87,16 @@ fn test_socks5_builder_unknown_yaml_field_rejected() {
   let builder = socks5::create_listener_builder();
   let args: crate::config::SerializedArgs =
     serde_yaml::from_str(r#"unknown_field: true"#).unwrap();
-  let result = builder(
-    vec!["127.0.0.1:0".to_string()],
-    args,
-    test_servers(),
-  );
+  let result =
+    builder(vec!["127.0.0.1:0".to_string()], args, test_servers());
   assert!(result.is_err());
 }
 
 #[test]
 fn test_socks5_builder_empty_routing_table_succeeds() {
   let builder = socks5::create_listener_builder();
-  let result = builder(
-    vec!["127.0.0.1:0".to_string()],
-    empty_args(),
-    vec![],
-  );
+  let result =
+    builder(vec!["127.0.0.1:0".to_string()], empty_args(), vec![]);
   assert!(result.is_ok());
 }
 
@@ -126,10 +114,7 @@ fn test_socks5_builder_multiple_addresses_succeeds() {
 #[test]
 fn test_socks5_builder_ipv6_address_succeeds() {
   let builder = socks5::create_listener_builder();
-  let result = builder(
-    vec!["[::1]:0".to_string()],
-    empty_args(),
-    test_servers(),
-  );
+  let result =
+    builder(vec!["[::1]:0".to_string()], empty_args(), test_servers());
   assert!(result.is_ok());
 }

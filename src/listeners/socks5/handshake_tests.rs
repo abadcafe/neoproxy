@@ -21,7 +21,9 @@ fn test_handshake_error_display_invalid_version() {
 #[test]
 fn test_handshake_error_display_method_not_acceptable() {
   let err = HandshakeError::MethodNotAcceptable(vec![0x01, 0x02]);
-  assert!(err.to_string().contains("authentication method not acceptable"));
+  assert!(
+    err.to_string().contains("authentication method not acceptable")
+  );
 }
 
 #[test]

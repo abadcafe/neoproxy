@@ -1,9 +1,9 @@
 //! Tests for TcpListenerBase.
 
-use std::pin::Pin;
-use std::future::Future;
-use std::rc::Rc;
 use std::cell::Cell;
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
 
 use anyhow::Result;
 
@@ -99,9 +99,7 @@ async fn test_tcp_listener_base_start_with_failing_task() {
     .run_until(async {
       let base = TcpListenerBase::new();
       let tasks: Vec<Pin<Box<dyn Future<Output = Result<()>>>>> =
-        vec![Box::pin(async {
-          anyhow::bail!("test error")
-        })];
+        vec![Box::pin(async { anyhow::bail!("test error") })];
 
       let fut = base.start_with_tasks(tasks);
       let handle = tokio::task::spawn_local(fut);

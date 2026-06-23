@@ -32,4 +32,3 @@ pub(crate) fn create_tcp_listener(
   socket.bind(addr)?;
   Ok(socket.listen(1024)?)
 }
-

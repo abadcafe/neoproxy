@@ -66,16 +66,8 @@ impl OnUpgrade {
     req.extensions().get::<Self>().is_some()
   }
 
-  /// Create an OnUpgrade for testing purposes.
-  #[cfg(test)]
-  pub fn new_for_test(
-    rx: oneshot::Receiver<Result<Box<dyn Io>>>,
-  ) -> Self {
-    Self { rx: Some(Arc::new(Mutex::new(rx))) }
-  }
-
   /// Create a linked (trigger, on_upgrade) pair.
-  fn pair() -> (UpgradeTrigger, Self) {
+  pub(crate) fn pair() -> (UpgradeTrigger, Self) {
     let (tx, rx) = oneshot::channel();
     (
       UpgradeTrigger { sender: tx },
@@ -369,14 +361,14 @@ pub fn extract_upgrade(
 /// Both sides share one tracker. Any successful read or write on either
 /// side resets the idle deadline.
 #[derive(Clone)]
-struct IdleTracker {
+pub(crate) struct IdleTracker {
   last_active_ms: Arc<AtomicU64>,
   idle_timeout: Duration,
   epoch: tokio::time::Instant,
 }
 
 impl IdleTracker {
-  fn new(idle_timeout: Duration) -> Self {
+  pub(crate) fn new(idle_timeout: Duration) -> Self {
     Self {
       last_active_ms: Arc::new(AtomicU64::new(0)),
       idle_timeout,
@@ -385,21 +377,21 @@ impl IdleTracker {
   }
 
   /// Record activity (called on successful read/write).
-  fn touch(&self) {
+  pub(crate) fn touch(&self) {
     let ms = self.epoch.elapsed().as_millis() as u64;
     self.last_active_ms.store(ms, Ordering::Relaxed);
   }
 
   /// Return the instant at which the idle deadline expires based on
   /// the last recorded activity.
-  fn deadline(&self) -> tokio::time::Instant {
+  pub(crate) fn deadline(&self) -> tokio::time::Instant {
     let last_ms = self.last_active_ms.load(Ordering::Relaxed);
     let last_instant = self.epoch + Duration::from_millis(last_ms);
     last_instant + self.idle_timeout
   }
 
   /// Check whether the connection is genuinely idle right now.
-  fn is_idle(&self) -> bool {
+  pub(crate) fn is_idle(&self) -> bool {
     let now_ms = self.epoch.elapsed().as_millis() as u64;
     let last = self.last_active_ms.load(Ordering::Relaxed);
     now_ms.saturating_sub(last) > self.idle_timeout.as_millis() as u64
@@ -648,329 +640,5 @@ pub async fn run_tunnel<C, T>(
     Err(e) => {
       warn!("tunnel {tunnel_desc}: transfer error: {e}");
     }
-  }
-}
-
-// ============================================================================
-// Tests
-// ============================================================================
-
-#[cfg(test)]
-mod tests {
-  use http_body_util::Empty;
-
-  use super::*;
-  use crate::http_utils::{BytesBufBodyWrapper, RequestBody};
-
-  #[tokio::test]
-  async fn test_on_upgrade_extracts_from_extensions() {
-    let (_trigger, upgrade) = OnUpgrade::pair();
-
-    let mut req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("example.com:443")
-      .body(RequestBody::new(BytesBufBodyWrapper::new(
-        Empty::<Bytes>::new(),
-      )))
-      .unwrap();
-
-    req.extensions_mut().insert(upgrade);
-
-    let extracted = OnUpgrade::on(&mut req);
-    assert!(
-      extracted.is_some(),
-      "Should extract OnUpgrade from extensions"
-    );
-
-    let second = OnUpgrade::on(&mut req);
-    assert!(second.is_none(), "Second extraction should return None");
-  }
-
-  #[tokio::test]
-  async fn test_on_upgrade_is_available() {
-    let (_trigger, upgrade) = OnUpgrade::pair();
-
-    let mut req = http::Request::builder()
-      .method(http::Method::CONNECT)
-      .uri("example.com:443")
-      .body(RequestBody::new(BytesBufBodyWrapper::new(
-        Empty::<Bytes>::new(),
-      )))
-      .unwrap();
-
-    assert!(
-      !OnUpgrade::is_available(&req),
-      "Should not be available before insert"
-    );
-    req.extensions_mut().insert(upgrade);
-    assert!(
-      OnUpgrade::is_available(&req),
-      "Should be available after insert"
-    );
-  }
-
-  #[tokio::test]
-  async fn test_on_upgrade_resolves_with_error_on_cancel() {
-    let (trigger, upgrade) = OnUpgrade::pair();
-    drop(trigger); // Drop trigger to cancel
-
-    let result = upgrade.await;
-    assert!(
-      result.is_err(),
-      "Upgrade should resolve with Err on cancel"
-    );
-  }
-
-  #[tokio::test]
-  async fn test_upgrade_trigger_send_success() {
-    let listener =
-      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let client_fut = tokio::net::TcpStream::connect(addr);
-    let (client, server_res) =
-      tokio::join!(client_fut, listener.accept());
-    let client = client.unwrap();
-    let (server, _) = server_res.unwrap();
-
-    let (trigger, upgrade) = OnUpgrade::pair();
-    trigger.send(Ok(Box::new(client))).unwrap();
-
-    let result = upgrade.await;
-    assert!(result.is_ok(), "Upgrade should resolve with Ok");
-
-    drop(server);
-  }
-
-  #[tokio::test]
-  async fn test_upgrade_trigger_send_error() {
-    let (trigger, upgrade) = OnUpgrade::pair();
-    trigger.send(Err(anyhow::anyhow!("test error"))).unwrap();
-
-    let result = upgrade.await;
-    assert!(result.is_err(), "Upgrade should resolve with Err");
-  }
-
-  // ============== IdleTracker Tests ==============
-
-  #[test]
-  fn test_idle_tracker_new_not_idle() {
-    let tracker = IdleTracker::new(Duration::from_secs(30));
-    assert!(
-      !tracker.is_idle(),
-      "Newly created tracker should not be idle"
-    );
-  }
-
-  #[test]
-  fn test_idle_tracker_touch_updates_deadline() {
-    let tracker = IdleTracker::new(Duration::from_secs(30));
-    let d1 = tracker.deadline();
-    // Simulate passage of time by touching after a short sleep
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    tracker.touch();
-    let d2 = tracker.deadline();
-    assert!(
-      d2 > d1,
-      "After touch, deadline should advance: {d2:?} <= {d1:?}"
-    );
-  }
-
-  #[test]
-  fn test_idle_tracker_stale_alarm_not_idle() {
-    // Simulate the stale alarm scenario:
-    // 1. Tracker created at T+0 with 200ms idle timeout
-    // 2. Other side touches at T+150ms (updates last_active_ms)
-    // 3. At T+200ms, our local Sleep fires but tracker.is_idle() should
-    //    return false because last activity was only 50ms ago.
-    let tracker = IdleTracker::new(Duration::from_millis(200));
-
-    // Not idle initially
-    assert!(!tracker.is_idle());
-
-    // Simulate other side having activity at T+150ms
-    std::thread::sleep(std::time::Duration::from_millis(150));
-    tracker.touch();
-
-    // At this point, only ~0ms since last activity → not idle
-    assert!(!tracker.is_idle(), "Should not be idle right after touch");
-
-    // After 250ms total (50ms after touch), still within 200ms timeout
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    assert!(
-      !tracker.is_idle(),
-      "50ms after touch should not be idle with 200ms timeout"
-    );
-
-    // After 200ms+ since touch → idle
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    assert!(
-      tracker.is_idle(),
-      "200ms after touch should be idle with 200ms timeout"
-    );
-  }
-
-  // ============== run_tunnel Tests ==============
-
-  #[tokio::test]
-  async fn test_run_tunnel_idle_timeout_on_no_data() {
-    // Two connected TCP streams with no data flowing should time out
-    let listener =
-      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let client = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let (server, _) = listener.accept().await.unwrap();
-
-    let shutdown = ShutdownHandle::new();
-    let idle_timeout = Duration::from_millis(200);
-
-    let start = std::time::Instant::now();
-    run_tunnel(client, server, shutdown, idle_timeout, "test").await;
-    let elapsed = start.elapsed();
-
-    assert!(
-      elapsed >= Duration::from_millis(150),
-      "Should wait for idle timeout, only waited {elapsed:?}"
-    );
-    assert!(
-      elapsed < Duration::from_secs(2),
-      "Should not wait much longer than idle timeout, waited \
-       {elapsed:?}"
-    );
-  }
-
-  #[tokio::test]
-  async fn test_run_tunnel_no_timeout_with_active_data() {
-    // Stream with continuous data should survive past idle_timeout.
-    // Use a target that keeps sending data, and a client that drains
-    // it.
-    let listener =
-      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    // server side: continuously writes data
-    let server_handle = tokio::spawn(async move {
-      let (mut server, _) = listener.accept().await.unwrap();
-      let data = vec![0xABu8; 4096];
-      // Send data for longer than idle_timeout (200ms * 10 = 2s)
-      for _ in 0..20 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if server.write_all(&data).await.is_err() {
-          break;
-        }
-      }
-      let _ = server.shutdown().await;
-    });
-
-    // client side: the tunnel side
-    let client = tokio::net::TcpStream::connect(addr).await.unwrap();
-
-    // target: duplex stream to satisfy AsyncRead + AsyncWrite
-    let (target, _drain) = tokio::io::duplex(65536);
-
-    // Drain the target's output so writes don't block
-    let drainer = tokio::spawn(async move {
-      let mut drain = _drain;
-      let mut buf = [0u8; 4096];
-      loop {
-        match drain.read(&mut buf).await {
-          Ok(0) => break,
-          Ok(_) => continue,
-          Err(_) => break,
-        }
-      }
-    });
-
-    let shutdown = ShutdownHandle::new();
-    let idle_timeout = Duration::from_millis(200);
-
-    let start = std::time::Instant::now();
-    run_tunnel(client, target, shutdown, idle_timeout, "test").await;
-    let elapsed = start.elapsed();
-
-    // Tunnel should have survived well past 200ms because data was
-    // flowing, and only ended when the server stopped sending and
-    // closed.
-    assert!(
-      elapsed >= Duration::from_millis(500),
-      "Tunnel should survive past idle_timeout while data flows, only \
-       lasted {elapsed:?}"
-    );
-
-    let _ = server_handle.await;
-    let _ = drainer.await;
-  }
-
-  #[tokio::test]
-  async fn test_run_tunnel_completes_on_eof() {
-    // When one side closes immediately, tunnel should complete quickly
-    let listener =
-      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let client = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let (server, _) = listener.accept().await.unwrap();
-
-    // Server immediately closes
-    drop(server);
-
-    let shutdown = ShutdownHandle::new();
-    let idle_timeout = Duration::from_secs(60);
-
-    // Use duplex as target (sink doesn't impl AsyncRead)
-    let (target, _drain) = tokio::io::duplex(64);
-    drop(_drain);
-
-    let start = std::time::Instant::now();
-    run_tunnel(client, target, shutdown, idle_timeout, "test").await;
-    let elapsed = start.elapsed();
-
-    assert!(
-      elapsed < Duration::from_secs(5),
-      "Tunnel should complete on EOF, not wait for idle timeout. \
-       Elapsed: {elapsed:?}"
-    );
-  }
-
-  #[tokio::test]
-  async fn test_run_tunnel_shutdown_notification() {
-    // Tunnel should exit immediately on shutdown notification
-    let listener =
-      tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let client = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let (server, _) = listener.accept().await.unwrap();
-
-    let shutdown = ShutdownHandle::new();
-    let shutdown_clone = shutdown.clone();
-    let idle_timeout = Duration::from_secs(60);
-
-    let tunnel_task = tokio::spawn(async move {
-      run_tunnel(client, server, shutdown_clone, idle_timeout, "test")
-        .await;
-    });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    shutdown.shutdown();
-
-    let start = std::time::Instant::now();
-    let result = tunnel_task.await;
-    let elapsed = start.elapsed();
-
-    assert!(result.is_ok(), "Tunnel task should complete");
-    assert!(
-      elapsed < Duration::from_secs(2),
-      "Tunnel should exit quickly on shutdown, took {elapsed:?}"
-    );
-  }
-
-  use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-  #[test]
-  fn test_http_status_to_socks5_error_proxy_auth_required() {
-    assert!(matches!(
-      http_status_to_socks5_error(
-        http::StatusCode::PROXY_AUTHENTICATION_REQUIRED
-      ),
-      fast_socks5::ReplyError::ConnectionNotAllowed
-    ));
   }
 }

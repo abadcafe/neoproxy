@@ -32,7 +32,9 @@ fn test_command_error_display_client_disconnected() {
 fn test_command_error_display_io_error() {
   let io_err = io::Error::new(io::ErrorKind::Other, "cmd error");
   let err = CommandError::IoError(io_err);
-  assert!(err.to_string().contains("IO error during command processing"));
+  assert!(
+    err.to_string().contains("IO error during command processing")
+  );
 }
 
 // ========== From<io::Error> ==========
@@ -108,7 +110,10 @@ fn test_command_error_from_socks_unknown_command() {
   let socks_err =
     fast_socks5::server::SocksServerError::UnknownCommand(0x03);
   let err = CommandError::from(socks_err);
-  assert!(matches!(err, CommandError::UnknownCommand { command: 0x03 }));
+  assert!(matches!(
+    err,
+    CommandError::UnknownCommand { command: 0x03 }
+  ));
 }
 
 #[test]

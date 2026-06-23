@@ -75,10 +75,7 @@ fn test_http_builder_multiple_servers_with_hostnames_succeeds() {
       tls: None,
     },
   ];
-  let result = builder(
-    vec!["127.0.0.1:0".to_string()],
-    empty_args(),
-    servers,
-  );
+  let result =
+    builder(vec!["127.0.0.1:0".to_string()], empty_args(), servers);
   assert!(result.is_ok());
 }

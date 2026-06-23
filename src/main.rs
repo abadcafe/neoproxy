@@ -43,6 +43,29 @@ mod listener_tests;
 #[cfg(test)]
 mod listeners_tests;
 
+#[cfg(test)]
+mod auth_tests;
+#[cfg(test)]
+mod config_tests;
+#[cfg(test)]
+mod context_tests;
+#[cfg(test)]
+mod http_utils_tests;
+#[cfg(test)]
+mod server_tests;
+#[cfg(test)]
+mod server_thread_tests;
+#[cfg(test)]
+mod service_tests;
+#[cfg(test)]
+mod shutdown_tests;
+#[cfg(test)]
+mod stream_tests;
+#[cfg(test)]
+mod tls_tests;
+#[cfg(test)]
+mod tracker_tests;
+
 /// Thread check interval for detecting server thread exit.
 const THREAD_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 

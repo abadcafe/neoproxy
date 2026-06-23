@@ -1,7 +1,7 @@
 [project]
 name = "neoproxy-integration-tests"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">=3.14"
 
 [dependency-groups]
 dev = [
@@ -14,4 +14,21 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests/integration"]
+testpaths = ["tests"]
+python_files = ["*_tests.py", "test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --timeout=60 --timeout-method=thread"
+
+[tool.ruff]
+line-length = 72
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.pyright]
+pythonVersion = "3.14"
+typeCheckingMode = "strict"
+include = ["server", "tests"]
+venvPath = "."
+venv = ".venv"

@@ -71,10 +71,7 @@ impl EchoPlugin {
 }
 
 impl Plugin for EchoPlugin {
-  fn service_builder(
-    &self,
-    name: &str,
-  ) -> Option<&dyn BuildService> {
+  fn service_builder(&self, name: &str) -> Option<&dyn BuildService> {
     self.service_builders.get(name).map(|b| b.as_ref())
   }
 }

@@ -54,11 +54,8 @@ fn test_https_builder_custom_handshake_timeout_succeeds() {
   let builder = https::create_listener_builder();
   let args: crate::config::SerializedArgs =
     serde_yaml::from_str(r#"tls_handshake_timeout: "10s""#).unwrap();
-  let result = builder(
-    vec!["127.0.0.1:0".to_string()],
-    args,
-    tls_servers(),
-  );
+  let result =
+    builder(vec!["127.0.0.1:0".to_string()], args, tls_servers());
   assert!(result.is_ok());
 }
 
@@ -89,11 +86,8 @@ fn test_https_builder_unknown_yaml_field_rejected() {
   let builder = https::create_listener_builder();
   let args: crate::config::SerializedArgs =
     serde_yaml::from_str(r#"unknown_field: true"#).unwrap();
-  let result = builder(
-    vec!["127.0.0.1:0".to_string()],
-    args,
-    tls_servers(),
-  );
+  let result =
+    builder(vec!["127.0.0.1:0".to_string()], args, tls_servers());
   assert!(result.is_err());
 }
 
@@ -111,10 +105,7 @@ fn test_https_builder_multiple_addresses_succeeds() {
 #[test]
 fn test_https_builder_ipv6_address_succeeds() {
   let builder = https::create_listener_builder();
-  let result = builder(
-    vec!["[::1]:0".to_string()],
-    empty_args(),
-    tls_servers(),
-  );
+  let result =
+    builder(vec!["[::1]:0".to_string()], empty_args(), tls_servers());
   assert!(result.is_ok());
 }

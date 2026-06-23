@@ -24,8 +24,7 @@ use super::LISTENER_SHUTDOWN_TIMEOUT;
 /// lifecycle management to this base while keeping their own accept
 /// loop logic.
 pub(crate) struct TcpListenerBase {
-  pub(crate) listening_set:
-    Rc<RefCell<task::JoinSet<Result<()>>>>,
+  pub(crate) listening_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
   pub(crate) stream_tracker: Rc<StreamTracker>,
   pub(crate) graceful_shutdown_timeout: Duration,
 }
@@ -50,9 +49,7 @@ impl TcpListenerBase {
     tasks: I,
   ) -> Pin<Box<dyn Future<Output = Result<()>>>>
   where
-    I: IntoIterator<
-      Item = Pin<Box<dyn Future<Output = Result<()>>>>,
-    >,
+    I: IntoIterator<Item = Pin<Box<dyn Future<Output = Result<()>>>>>,
   {
     let listening_set = self.listening_set.clone();
     for task in tasks {
@@ -63,8 +60,7 @@ impl TcpListenerBase {
     let graceful_timeout = self.graceful_shutdown_timeout;
     Box::pin(async move {
       shutdown.notified().await;
-      while let Some(res) =
-        listening_set.borrow_mut().join_next().await
+      while let Some(res) = listening_set.borrow_mut().join_next().await
       {
         match res {
           Err(e) => {

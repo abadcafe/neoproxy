@@ -30,6 +30,14 @@ mod target_parser;
 mod upstream;
 
 #[cfg(test)]
+mod config_tests;
+#[cfg(test)]
+mod error_tests;
+#[cfg(test)]
+mod inherit_tests;
+#[cfg(test)]
+mod service_tests;
+#[cfg(test)]
 mod target_parser_tests;
 #[cfg(test)]
 mod upstream_tests;
@@ -76,10 +84,7 @@ impl HttpUpstreamPlugin {
 }
 
 impl Plugin for HttpUpstreamPlugin {
-  fn service_builder(
-    &self,
-    name: &str,
-  ) -> Option<&dyn BuildService> {
+  fn service_builder(&self, name: &str) -> Option<&dyn BuildService> {
     self.service_builders.get(name).map(|b| b.as_ref())
   }
 

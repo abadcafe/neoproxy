@@ -1443,7 +1443,7 @@ async def perform_h3_request_with_custom_authority(
     else:
         configuration.verify_mode = ssl.CERT_NONE
 
-    configuration.idle_timeout = 30.0
+    configuration.idle_timeout = max(0.1, timeout)
 
     # Set server_name for SNI (required for certificate resolution)
     configuration.server_name = _resolve_sni_hostname(host, server_hostname)

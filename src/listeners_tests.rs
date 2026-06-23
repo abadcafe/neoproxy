@@ -2,7 +2,9 @@
 
 use crate::config::{ListenerPropertiesProvider, TransportLayer};
 use crate::listeners::ListenerManager;
-use crate::listeners::test_helpers::{empty_args, test_servers, tls_servers};
+use crate::listeners::test_helpers::{
+  empty_args, test_servers, tls_servers,
+};
 
 // ========== ListenerManager::new registration ==========
 
@@ -66,10 +68,9 @@ fn test_listener_manager_build_unknown_kind_returns_error() {
     test_servers(),
   );
   assert!(result.is_err());
-  assert!(result
-    .unwrap_err()
-    .to_string()
-    .contains("unknown listener kind"));
+  assert!(
+    result.unwrap_err().to_string().contains("unknown listener kind")
+  );
 }
 
 // ========== listener_props (ListenerPropertiesProvider trait) ==========

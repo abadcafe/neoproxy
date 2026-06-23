@@ -21,12 +21,12 @@ use super::utils::{
 };
 use super::{ClientProtocol, ConnectResult};
 use crate::context::RequestContext;
+use crate::context::get_server_id;
 use crate::http_utils::{
   BytesBufBodyWrapper, RequestBody, Response, ResponseBody,
   append_proxy_status, build_error_response,
   build_proxy_status_with_status,
 };
-use crate::context::get_server_id;
 use crate::plugins::http_upstream::error::{
   UpstreamError, classify_connect_error, classify_tls_handshake_error,
 };
@@ -188,17 +188,18 @@ impl Service<Uri> for ProxyConnector {
     let timeout = self.connect_timeout;
     let dns_timeout = self.dns_resolve_timeout;
     Box::pin(async move {
-      let addr = tokio::time::timeout(dns_timeout, resolve_address(&proxy_addr))
-        .await
-        .map_err(|_| {
-          std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!("DNS resolve for '{proxy_addr}' timed out"),
-          )
-        })?
-        .map_err(|e| {
-          std::io::Error::new(std::io::ErrorKind::Other, e)
-        })?;
+      let addr =
+        tokio::time::timeout(dns_timeout, resolve_address(&proxy_addr))
+          .await
+          .map_err(|_| {
+            std::io::Error::new(
+              std::io::ErrorKind::TimedOut,
+              format!("DNS resolve for '{proxy_addr}' timed out"),
+            )
+          })?
+          .map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, e)
+          })?;
       let stream = tokio::time::timeout(
         timeout,
         tokio::net::TcpStream::connect(addr),
@@ -548,10 +549,15 @@ where
           // Http proxy mode: TCP to proxy + HTTP/1.1 handshake +
           // CONNECT
           let dns_timeout = self.dns_resolve_timeout;
-          let resolved = tokio::time::timeout(dns_timeout, resolve_address(addr))
-            .await
-            .map_err(|_| UpstreamError::DnsError(format!("DNS resolve for '{addr}' timed out")))?
-            .map_err(|e| classify_connect_error(e))?;
+          let resolved =
+            tokio::time::timeout(dns_timeout, resolve_address(addr))
+              .await
+              .map_err(|_| {
+                UpstreamError::DnsError(format!(
+                  "DNS resolve for '{addr}' timed out"
+                ))
+              })?
+              .map_err(|e| classify_connect_error(e))?;
           let stream = tokio::time::timeout(
             connect_timeout,
             tokio::net::TcpStream::connect(resolved),
@@ -671,10 +677,15 @@ impl ClientProtocol for HttpsClient {
       })?;
 
       let dns_timeout = self.dns_resolve_timeout;
-      let resolved = tokio::time::timeout(dns_timeout, resolve_address(&addr))
-        .await
-        .map_err(|_| UpstreamError::DnsError(format!("DNS resolve for '{addr}' timed out")))?
-        .map_err(|e| classify_connect_error(e))?;
+      let resolved =
+        tokio::time::timeout(dns_timeout, resolve_address(&addr))
+          .await
+          .map_err(|_| {
+            UpstreamError::DnsError(format!(
+              "DNS resolve for '{addr}' timed out"
+            ))
+          })?
+          .map_err(|e| classify_connect_error(e))?;
       let stream = tokio::time::timeout(
         connect_timeout,
         tokio::net::TcpStream::connect(resolved),
@@ -741,13 +752,16 @@ impl ClientProtocol for HttpsClient {
         });
       }
 
-      let parts = rx.await.map_err(|e| {
-        UpstreamError::ProxyInternalError(format!(
-          "connection task cancelled: {e}"
-        ))
-      })?.map_err(|e| {
-        UpstreamError::ConnectionTerminated(e.to_string())
-      })?;
+      let parts = rx
+        .await
+        .map_err(|e| {
+          UpstreamError::ProxyInternalError(format!(
+            "connection task cancelled: {e}"
+          ))
+        })?
+        .map_err(|e| {
+          UpstreamError::ConnectionTerminated(e.to_string())
+        })?;
 
       Ok(ConnectResult {
         transport: Box::new(Rewind::new(

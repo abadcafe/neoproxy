@@ -76,11 +76,8 @@ fn test_http3_builder_unknown_yaml_field_rejected() {
   let builder = http3::create_listener_builder();
   let args: crate::config::SerializedArgs =
     serde_yaml::from_str(r#"unknown_field: true"#).unwrap();
-  let result = builder(
-    vec!["127.0.0.1:0".to_string()],
-    args,
-    tls_servers(),
-  );
+  let result =
+    builder(vec!["127.0.0.1:0".to_string()], args, tls_servers());
   assert!(result.is_err());
 }
 
@@ -98,10 +95,7 @@ fn test_http3_builder_multiple_addresses_succeeds() {
 #[test]
 fn test_http3_builder_ipv6_address_succeeds() {
   let builder = http3::create_listener_builder();
-  let result = builder(
-    vec!["[::1]:0".to_string()],
-    empty_args(),
-    tls_servers(),
-  );
+  let result =
+    builder(vec!["[::1]:0".to_string()], empty_args(), tls_servers());
   assert!(result.is_ok());
 }

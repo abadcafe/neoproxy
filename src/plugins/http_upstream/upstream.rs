@@ -248,7 +248,8 @@ impl UpstreamRegistry {
     tracker: Rc<StreamTracker>,
   ) -> Result<Self> {
     let tls_config = {
-      let server_ca = certificates.and_then(|c| c.server_ca_path.as_deref());
+      let server_ca =
+        certificates.and_then(|c| c.server_ca_path.as_deref());
       let roots = build_root_cert_store(server_ca)?;
       let ccc = match certificates {
         Some(certs) => {
@@ -259,7 +260,9 @@ impl UpstreamRegistry {
             key_path: certs.client_key_path.as_ref().map(Into::into),
           }
         }
-        None => ClientCertCredential { cert_path: None, key_path: None },
+        None => {
+          ClientCertCredential { cert_path: None, key_path: None }
+        }
       };
       let mut client_config = build_tls_config(&ccc, roots)?;
       client_config.alpn_protocols = vec![b"http/1.1".to_vec()];

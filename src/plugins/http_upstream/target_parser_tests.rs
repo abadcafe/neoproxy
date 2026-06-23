@@ -15,7 +15,8 @@ fn make_request_parts(
 
 #[test]
 fn test_parse_connect_target_valid() {
-  let parts = make_request_parts(http::Method::CONNECT, "example.com:443");
+  let parts =
+    make_request_parts(http::Method::CONNECT, "example.com:443");
   let result = parse_connect_target(&parts);
   assert_eq!(result, Ok(("example.com".to_string(), 443)));
 }
@@ -172,10 +173,8 @@ fn test_strip_hop_by_hop_headers() {
     http::header::PROXY_AUTHORIZATION,
     "Basic abc123".parse().unwrap(),
   );
-  headers.insert(
-    http::header::CONTENT_TYPE,
-    "text/plain".parse().unwrap(),
-  );
+  headers
+    .insert(http::header::CONTENT_TYPE, "text/plain".parse().unwrap());
 
   strip_hop_by_hop_headers(&mut headers);
 
@@ -201,10 +200,8 @@ fn test_strip_hop_by_hop_headers_connection_tokens() {
     http::header::HeaderName::from_static("x-custom-hop"),
     "value".parse().unwrap(),
   );
-  headers.insert(
-    http::header::CONTENT_TYPE,
-    "text/plain".parse().unwrap(),
-  );
+  headers
+    .insert(http::header::CONTENT_TYPE, "text/plain".parse().unwrap());
 
   strip_hop_by_hop_headers(&mut headers);
 

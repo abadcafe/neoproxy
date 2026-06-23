@@ -20,10 +20,7 @@ pub trait Plugin {
   ///
   /// Returns `None` if the plugin doesn't provide a service with that
   /// name.
-  fn service_builder(
-    &self,
-    _name: &str,
-  ) -> Option<&dyn BuildService> {
+  fn service_builder(&self, _name: &str) -> Option<&dyn BuildService> {
     None
   }
 

@@ -39,11 +39,7 @@ fn test_plugin_manager_all_plugins_config() {
     &["echo", "auth", "access_log", "http_upstream", "js_sandbox"];
   let (pm, _errors) = PluginManager::new(all_plugins_config());
   for &name in ALL_PLUGINS {
-    assert!(
-      pm.plugins.contains_key(name),
-      "missing plugin '{}'",
-      name
-    );
+    assert!(pm.plugins.contains_key(name), "missing plugin '{}'", name);
   }
 }
 
@@ -102,10 +98,7 @@ fn test_plugin_manager_build_service_unconfigured_plugin() {
     pm.build_service("auth", "basic_auth", serde_yaml::Value::Null);
   assert!(result.is_err());
   assert!(
-    result
-      .unwrap_err()
-      .to_string()
-      .contains("plugin 'auth' not found")
+    result.unwrap_err().to_string().contains("plugin 'auth' not found")
   );
 }
 

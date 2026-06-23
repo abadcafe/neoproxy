@@ -12,12 +12,41 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from .helpers import (
+from tests.integration.utils import helpers
+from tests.integration.utils.helpers import (
     wait_for_udp_port_bound,
     wait_for_log_contains,
     curl_request,
     curl_request_with_headers,
 )
+
+
+class TestBuildNeoproxyBinary:
+    """Tests for integration-test binary build selection."""
+
+    def test_build_uses_js_sandbox_feature_by_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("NEOPROXY_BINARY", raising=False)
+        monkeypatch.delenv("NEOPROXY_CARGO_FEATURES", raising=False)
+
+        with patch.object(helpers.subprocess, "run") as mock_run:
+            helpers.build_neoproxy_binary()
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ["cargo", "build", "--features", "js-sandbox"]
+
+    def test_build_allows_features_to_be_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("NEOPROXY_BINARY", raising=False)
+        monkeypatch.setenv("NEOPROXY_CARGO_FEATURES", "")
+
+        with patch.object(helpers.subprocess, "run") as mock_run:
+            helpers.build_neoproxy_binary()
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd == ["cargo", "build"]
 
 
 class TestWaitForUdpPortBound:
@@ -69,7 +98,6 @@ class TestWaitForUdpPortBound:
         This tests CR-001: The function should only return True for EADDRINUSE,
         not for other OSErrors like permission denied.
         """
-        from . import helpers
         with patch.object(helpers, 'socket') as mock_socket:
             mock_sock = MagicMock()
             mock_socket.socket.return_value = mock_sock
@@ -87,7 +115,6 @@ class TestWaitForUdpPortBound:
         This tests CR-001: The function should only return True for EADDRINUSE,
         not for other OSErrors like address not available.
         """
-        from . import helpers
         with patch.object(helpers, 'socket') as mock_socket:
             mock_sock = MagicMock()
             mock_socket.socket.return_value = mock_sock
@@ -163,7 +190,7 @@ class TestWaitForMetricValue:
 
     def test_returns_true_when_metric_matches(self) -> None:
         """Should return True when metric value matches expected."""
-        from .helpers import wait_for_metric_value
+        from tests.integration.utils.helpers import wait_for_metric_value
 
         call_count = 0
 
@@ -179,7 +206,7 @@ class TestWaitForMetricValue:
 
     def test_returns_false_on_timeout(self) -> None:
         """Should return False when value never matches within timeout."""
-        from .helpers import wait_for_metric_value
+        from tests.integration.utils.helpers import wait_for_metric_value
 
         def mock_fetch() -> str:
             return "metric_value 0"
@@ -189,7 +216,7 @@ class TestWaitForMetricValue:
 
     def test_returns_true_immediately_when_already_matches(self) -> None:
         """Should return True immediately when value already matches."""
-        from .helpers import wait_for_metric_value
+        from tests.integration.utils.helpers import wait_for_metric_value
 
         def mock_fetch() -> str:
             return "metric_value 5"
@@ -199,7 +226,7 @@ class TestWaitForMetricValue:
 
     def test_handles_exception_gracefully(self) -> None:
         """Should handle exceptions from fetch function and continue polling."""
-        from .helpers import wait_for_metric_value
+        from tests.integration.utils.helpers import wait_for_metric_value
 
         call_count = 0
 

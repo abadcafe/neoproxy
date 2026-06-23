@@ -8,7 +8,8 @@ use serde::Deserialize;
 pub(super) const DEFAULT_MAX_CONCURRENT_BIDI_STREAMS: u64 = 100;
 
 /// Default maximum idle timeout
-pub(super) const DEFAULT_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const DEFAULT_MAX_IDLE_TIMEOUT: Duration =
+  Duration::from_secs(5);
 
 /// Default initial MTU
 pub(super) const DEFAULT_INITIAL_MTU: u16 = 1200;
@@ -17,7 +18,8 @@ pub(super) const DEFAULT_INITIAL_MTU: u16 = 1200;
 pub(super) const DEFAULT_SEND_WINDOW: Byte = Byte::from_u64(10485760);
 
 /// Default receive window size (10MiB)
-pub(super) const DEFAULT_RECEIVE_WINDOW: Byte = Byte::from_u64(10485760);
+pub(super) const DEFAULT_RECEIVE_WINDOW: Byte =
+  Byte::from_u64(10485760);
 
 /// H3_NO_ERROR error code for CONNECTION_CLOSE frame
 /// See: https://www.rfc-editor.org/rfc/rfc9114.html#errors

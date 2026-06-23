@@ -7,6 +7,13 @@ mod request;
 mod sandbox;
 mod service;
 
+#[cfg(test)]
+mod pool_tests;
+#[cfg(test)]
+mod sandbox_tests;
+#[cfg(test)]
+mod service_tests;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -51,10 +58,7 @@ impl JsSandboxPlugin {
 }
 
 impl Plugin for JsSandboxPlugin {
-  fn service_builder(
-    &self,
-    name: &str,
-  ) -> Option<&dyn BuildService> {
+  fn service_builder(&self, name: &str) -> Option<&dyn BuildService> {
     self.service_builders.get(name).map(|b| b.as_ref())
   }
 

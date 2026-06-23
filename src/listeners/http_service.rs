@@ -78,7 +78,9 @@ impl HttpServiceAdaptor {
       server_router,
       client_addr,
       local_addr,
-      client_cert_policy: ClientCertPolicy::Presented(client_cert_presented),
+      client_cert_policy: ClientCertPolicy::Presented(
+        client_cert_presented,
+      ),
     }
   }
 }
@@ -140,4 +142,3 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
     Box::pin(async move { tower_util::Oneshot::new(s, req).await })
   }
 }
-

@@ -117,4 +117,3 @@ impl<F> BuildListener for F where
   F: Fn(Vec<String>, SerializedArgs, Vec<Server>) -> Result<Listener>
 {
 }
-

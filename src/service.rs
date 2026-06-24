@@ -12,7 +12,7 @@ use std::task::{Context, Poll};
 use anyhow::Result;
 
 use crate::config::SerializedArgs;
-use crate::http_utils::{Request, Response};
+use crate::http_message::{Request, Response};
 
 /// Internal trait for cloning services.
 ///

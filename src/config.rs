@@ -23,6 +23,10 @@ mod error_tests;
 #[cfg(test)]
 mod listener_tests;
 #[cfg(test)]
+mod listener_validation_conflict_tests;
+#[cfg(test)]
+mod listener_validation_test_support;
+#[cfg(test)]
 mod listener_validation_tests;
 #[cfg(test)]
 mod service_tests;

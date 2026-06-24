@@ -5,13 +5,14 @@
 //! stream tracking, and graceful shutdown.
 
 use std::cell::RefCell;
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::Result;
 use tokio::task;
+use tokio::task::JoinError;
 
 use super::LISTENER_SHUTDOWN_TIMEOUT;
 use crate::tracker::StreamTracker;
@@ -59,8 +60,7 @@ impl TcpListenerBase {
     let graceful_timeout = self.graceful_shutdown_timeout;
     Box::pin(async move {
       shutdown.notified().await;
-      while let Some(res) = listening_set.borrow_mut().join_next().await
-      {
+      while let Some(res) = join_next(&listening_set).await {
         match res {
           Err(e) => {
             tracing::error!("listening join error: {}", e)
@@ -93,4 +93,10 @@ impl TcpListenerBase {
   pub(crate) fn stream_tracker(&self) -> Rc<StreamTracker> {
     self.stream_tracker.clone()
   }
+}
+
+async fn join_next(
+  join_set: &RefCell<task::JoinSet<Result<()>>>,
+) -> Option<Result<Result<()>, JoinError>> {
+  poll_fn(|cx| join_set.borrow_mut().poll_join_next(cx)).await
 }

@@ -14,38 +14,29 @@ NOTE: Some tests are skipped due to missing CryptoProvider initialization
 in the main binary. This is a known issue in the implementation.
 """
 
-import subprocess
-import socket
-import threading
-import tempfile
-import shutil
-import time
 import os
+import shutil
 import signal
-import pytest
-from typing import Optional, Tuple, List, Callable
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
+import subprocess
+import tempfile
+import time
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+
+from .conftest import get_unique_port
+from .types import (
+    BytesProcess,
+    StringMap,
+)
+from .utils.config_builders import (
+    create_http3_listener_config,
+)
 from .utils.helpers import (
     NEOPROXY_BINARY,
     start_proxy,
-    wait_for_proxy,
-    create_target_server,
-    terminate_process,
     wait_for_udp_port_bound,
 )
-from .utils.certs import (
-    generate_test_certificates,
-    generate_client_cert,
-)
-
-from .utils.config_builders import (
-    create_http3_listener_config,
-    create_http3_chain_config,
-)
-
-from .conftest import get_unique_port
 
 # Alias for backward compatibility in this file
 
@@ -60,12 +51,12 @@ def run_curl_http3_connect(
     proxy_port: int,
     target_host: str,
     target_port: int,
-    cert_path: Optional[str] = None,
-    ca_path: Optional[str] = None,
-    username: Optional[str] = None,
-    password: Optional[str] = None,
-    timeout: float = 10.0
-) -> Tuple[int, str, str]:
+    cert_path: str | None = None,
+    ca_path: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+    timeout: float = 10.0,
+) -> tuple[int, str, str]:
     """
     Use curl to send HTTP/3 CONNECT request through proxy chain.
 
@@ -84,24 +75,23 @@ def run_curl_http3_connect(
         timeout: Request timeout
 
     Returns:
-        Tuple[int, str, str]: (return_code, stdout, stderr)
+        tuple[int, str, str]: (return_code, stdout, stderr)
     """
     cmd = [
-        "curl", "-s", "-p",
-        "-x", f"http://{proxy_host}:{proxy_port}",
-        "--connect-timeout", str(int(timeout)),
-        f"http://{target_host}:{target_port}/"
+        "curl",
+        "-s",
+        "-p",
+        "-x",
+        f"http://{proxy_host}:{proxy_port}",
+        "--connect-timeout",
+        str(int(timeout)),
+        f"http://{target_host}:{target_port}/",
     ]
 
     if username and password:
         cmd.extend(["-U", f"{username}:{password}"])
 
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout + 5
-    )
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 5)
     return result.returncode, result.stdout, result.stderr
 
 
@@ -113,7 +103,7 @@ def run_curl_http3_connect(
 class TestHTTP3BasicConnection:
     """Test 7.1: Basic HTTP/3 connection scenarios."""
 
-    def test_http3_listener_starts_successfully(self, shared_test_certs: dict) -> None:
+    def test_http3_listener_starts_successfully(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-001: HTTP/3 Listener starts and binds to port.
 
@@ -121,24 +111,20 @@ class TestHTTP3BasicConnection:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            config_path = create_http3_listener_config(
-                proxy_port, cert_path, key_path, temp_dir
-            )
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            config_path = create_http3_listener_config(proxy_port, cert_path, key_path, temp_dir)
 
             proxy_proc = start_proxy(config_path)
 
             # Wait for UDP port to be bound
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
-                "HTTP/3 listener failed to start"
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), "HTTP/3 listener failed to start"
 
             # Verify process is still running
-            assert proxy_proc.poll() is None, \
-                "HTTP/3 listener process crashed"
+            assert proxy_proc.poll() is None, "HTTP/3 listener process crashed"
 
         finally:
             if proxy_proc:
@@ -146,7 +132,7 @@ class TestHTTP3BasicConnection:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_http3_listener_graceful_shutdown(self, shared_test_certs: dict) -> None:
+    def test_http3_listener_graceful_shutdown(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-002: HTTP/3 Listener graceful shutdown.
 
@@ -154,19 +140,16 @@ class TestHTTP3BasicConnection:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            config_path = create_http3_listener_config(
-                proxy_port, cert_path, key_path, temp_dir
-            )
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            config_path = create_http3_listener_config(proxy_port, cert_path, key_path, temp_dir)
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
-                "HTTP/3 listener failed to start"
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), "HTTP/3 listener failed to start"
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -180,8 +163,7 @@ class TestHTTP3BasicConnection:
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
@@ -198,7 +180,7 @@ class TestHTTP3BasicConnection:
 class TestHTTP3Authentication:
     """Test 7.3: HTTP/3 authentication scenarios."""
 
-    def test_no_auth_allows_all(self, shared_test_certs: dict) -> None:
+    def test_no_auth_allows_all(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-AUTH-001: No authentication allows all connections.
 
@@ -206,24 +188,20 @@ class TestHTTP3Authentication:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
             # No auth config means no authentication
-            config_path = create_http3_listener_config(
-                proxy_port, cert_path, key_path, temp_dir
-            )
+            config_path = create_http3_listener_config(proxy_port, cert_path, key_path, temp_dir)
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
-                "HTTP/3 listener failed to start"
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), "HTTP/3 listener failed to start"
 
             # Verify process is running
-            assert proxy_proc.poll() is None, \
-                "HTTP/3 listener should be running"
+            assert proxy_proc.poll() is None, "HTTP/3 listener should be running"
 
         finally:
             if proxy_proc:
@@ -293,7 +271,7 @@ servers:
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=False
+                text=False,
             )
 
             try:
@@ -304,13 +282,12 @@ servers:
                 assert False, "Process did not exit within expected time"
 
             # Should exit with error code
-            assert return_code == 1, \
-                f"Expected exit code 1, got {return_code}"
+            assert return_code == 1, f"Expected exit code 1, got {return_code}"
 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_key_file_not_exist(self, shared_test_certs: dict) -> None:
+    def test_key_file_not_exist(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-ERR-002: Private key file does not exist (NEW config format).
 
@@ -321,7 +298,7 @@ servers:
         proxy_port = get_unique_port()
 
         try:
-            cert_path = shared_test_certs['cert_path']
+            cert_path = shared_test_certs["cert_path"]
 
             # NEW config format: server-level TLS with non-existent key
             config_content = f"""server_threads: 1
@@ -359,7 +336,7 @@ servers:
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=False
+                text=False,
             )
 
             try:
@@ -369,13 +346,12 @@ servers:
                 proc.wait()
                 assert False, "Process did not exit within expected time"
 
-            assert return_code == 1, \
-                f"Expected exit code 1, got {return_code}"
+            assert return_code == 1, f"Expected exit code 1, got {return_code}"
 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_cert_key_mismatch(self, shared_test_certs: dict) -> None:
+    def test_cert_key_mismatch(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-ERR-003: Certificate and key do not match (NEW config format).
 
@@ -387,17 +363,19 @@ servers:
 
         try:
             # Use shared cert but generate a mismatched key
-            cert_path1 = shared_test_certs['cert_path']
+            cert_path1 = shared_test_certs["cert_path"]
 
             # Generate another key
             key_path2 = os.path.join(temp_dir, "wrong.key")
             _key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
             with open(key_path2, "wb") as _f:
-                _f.write(_key.private_bytes(
-                    serialization.Encoding.PEM,
-                    serialization.PrivateFormat.TraditionalOpenSSL,
-                    serialization.NoEncryption(),
-                ))
+                _f.write(
+                    _key.private_bytes(
+                        serialization.Encoding.PEM,
+                        serialization.PrivateFormat.TraditionalOpenSSL,
+                        serialization.NoEncryption(),
+                    )
+                )
 
             # NEW config format: server-level TLS with mismatched cert/key
             config_content = f"""server_threads: 1
@@ -435,7 +413,7 @@ servers:
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=False
+                text=False,
             )
 
             try:
@@ -446,8 +424,7 @@ servers:
                 assert False, "Process did not exit within expected time"
 
             # Should exit with error code due to key mismatch
-            assert return_code != 0, \
-                f"Expected non-zero exit code, got {return_code}"
+            assert return_code != 0, f"Expected non-zero exit code, got {return_code}"
 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -467,7 +444,7 @@ class TestHTTP3ConfigValidation:
     - addresses (plural) field
     """
 
-    def test_invalid_quic_param_uses_default(self, shared_test_certs: dict) -> None:
+    def test_invalid_quic_param_uses_default(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-CFG-001: Invalid QUIC parameter uses default value.
 
@@ -476,27 +453,29 @@ class TestHTTP3ConfigValidation:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
 
             # Invalid QUIC config: max_concurrent_bidi_streams = 0
             quic_config = """      max_concurrent_bidi_streams: 0
       max_idle_timeout: '30s'"""
 
             config_path = create_http3_listener_config(
-                proxy_port, cert_path, key_path, temp_dir,
-                quic_config=quic_config
+                proxy_port,
+                cert_path,
+                key_path,
+                temp_dir,
+                quic_config=quic_config,
             )
 
             proxy_proc = start_proxy(config_path)
 
             # Invalid value is rejected at startup (bail!)
             proxy_proc.wait(timeout=5)
-            assert proxy_proc.returncode != 0, \
-                "HTTP/3 listener should reject invalid max_concurrent_bidi_streams"
+            assert proxy_proc.returncode != 0, "HTTP/3 listener should reject invalid max_concurrent_bidi_streams"
 
         finally:
             if proxy_proc:
@@ -547,7 +526,7 @@ servers:
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=False
+                text=False,
             )
 
             try:
@@ -557,13 +536,12 @@ servers:
                 proc.wait()
                 assert False, "Process did not exit within expected time"
 
-            assert return_code != 0, \
-                f"Expected non-zero exit code, got {return_code}"
+            assert return_code != 0, f"Expected non-zero exit code, got {return_code}"
 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_invalid_address_format(self, shared_test_certs: dict) -> None:
+    def test_invalid_address_format(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-CFG-003: Invalid address format causes startup failure (NEW config format).
 
@@ -571,8 +549,8 @@ servers:
         using the new config format with server-level TLS.
         """
         temp_dir = tempfile.mkdtemp()
-        cert_path = shared_test_certs['cert_path']
-        key_path = shared_test_certs['key_path']
+        cert_path = shared_test_certs["cert_path"]
+        key_path = shared_test_certs["key_path"]
 
         try:
             # NEW config format: server-level TLS with invalid address format
@@ -611,7 +589,7 @@ servers:
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=False
+                text=False,
             )
 
             try:
@@ -621,8 +599,7 @@ servers:
                 proc.wait()
                 assert False, "Process did not exit within expected time"
 
-            assert return_code != 0, \
-                f"Expected non-zero exit code, got {return_code}"
+            assert return_code != 0, f"Expected non-zero exit code, got {return_code}"
 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -636,7 +613,7 @@ servers:
 class TestHTTP3GracefulShutdown:
     """Test 7.4: HTTP/3 graceful shutdown scenarios."""
 
-    def test_shutdown_with_no_connections(self, shared_test_certs: dict) -> None:
+    def test_shutdown_with_no_connections(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-SHUTDOWN-001: Shutdown with no connections completes quickly.
 
@@ -644,19 +621,16 @@ class TestHTTP3GracefulShutdown:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            config_path = create_http3_listener_config(
-                proxy_port, cert_path, key_path, temp_dir
-            )
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            config_path = create_http3_listener_config(proxy_port, cert_path, key_path, temp_dir)
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
-                "HTTP/3 listener failed to start"
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), "HTTP/3 listener failed to start"
 
             start_time = time.time()
             proxy_proc.send_signal(signal.SIGTERM)
@@ -664,12 +638,10 @@ class TestHTTP3GracefulShutdown:
             return_code = proxy_proc.wait(timeout=5)
             elapsed = time.time() - start_time
 
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
             # Should complete quickly (within 2 seconds)
-            assert elapsed < 2.0, \
-                f"Shutdown took too long: {elapsed:.2f}s"
+            assert elapsed < 2.0, f"Shutdown took too long: {elapsed:.2f}s"
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
@@ -677,7 +649,7 @@ class TestHTTP3GracefulShutdown:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_shutdown_with_multiple_workers(self, shared_test_certs: dict) -> None:
+    def test_shutdown_with_multiple_workers(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-SHUTDOWN-002: Shutdown with multiple worker threads.
 
@@ -685,20 +657,22 @@ class TestHTTP3GracefulShutdown:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
             config_path = create_http3_listener_config(
-                proxy_port, cert_path, key_path, temp_dir,
-                server_threads=4
+                proxy_port,
+                cert_path,
+                key_path,
+                temp_dir,
+                server_threads=4,
             )
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
-                "HTTP/3 listener failed to start"
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), "HTTP/3 listener failed to start"
 
             proxy_proc.send_signal(signal.SIGTERM)
 
@@ -709,8 +683,7 @@ class TestHTTP3GracefulShutdown:
                 proxy_proc.wait()
                 assert False, "Process did not exit within expected time"
 
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
@@ -727,7 +700,7 @@ class TestHTTP3GracefulShutdown:
 class TestHTTP3EchoService:
     """Test HTTP/3 listener with echo service for non-CONNECT requests."""
 
-    def test_h3_get_to_echo_service_no_upgrade_error(self, shared_test_certs: dict) -> None:
+    def test_h3_get_to_echo_service_no_upgrade_error(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-ECHO-001: GET request to echo service should not cause upgrade error.
 
@@ -746,18 +719,19 @@ class TestHTTP3EchoService:
         Expected: GET request should return 200 with echoed body, no errors.
         """
         import asyncio
+
         from .utils.http3_client import (
             H3Client,
         )
 
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            ca_path = shared_test_certs["ca_path"]
 
             # Create config with echo service
             config_content = f"""server_threads: 1
@@ -793,8 +767,7 @@ servers:
                 stderr=subprocess.PIPE,
             )
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), \
-                "HTTP/3 listener failed to start"
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), "HTTP/3 listener failed to start"
 
             # Send a GET request using HTTP/3 client
             async def do_get_request():
@@ -805,7 +778,7 @@ servers:
 
                 response = await asyncio.wait_for(
                     client.send_request("GET", "/test-echo"),
-                    timeout=15.0
+                    timeout=15.0,
                 )
                 await client.close()
                 return True, response.status_code, response.body
@@ -813,15 +786,13 @@ servers:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                success, status_code, body = loop.run_until_complete(do_get_request())
+                success, status_code, _body = loop.run_until_complete(do_get_request())
             finally:
                 loop.close()
 
             # KEY ASSERTION: Request should succeed with 200
             assert success, "HTTP/3 connection should succeed"
-            assert status_code == 200, (
-                f"Echo service should return 200, got {status_code}"
-            )
+            assert status_code == 200, f"Echo service should return 200, got {status_code}"
 
         finally:
             if proxy_proc:

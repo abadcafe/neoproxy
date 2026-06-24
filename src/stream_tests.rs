@@ -5,7 +5,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use http_body_util::Empty;
 
-use crate::http_utils::{BytesBufBodyWrapper, RequestBody};
+use crate::http_message::{BytesBufBodyWrapper, RequestBody};
 use crate::shutdown::ShutdownHandle;
 use crate::stream::{
   OnUpgrade, http_status_to_socks5_error, run_tunnel,

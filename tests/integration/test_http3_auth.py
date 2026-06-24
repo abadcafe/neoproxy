@@ -11,52 +11,43 @@ NOTE: These tests use real HTTP/3 clients to verify authentication behavior.
 Passwords are stored in plaintext format in the configuration.
 """
 
-import subprocess
-import socket
-import threading
-import tempfile
-import shutil
-import time
-import os
-import base64
 import asyncio
+import os
+import shutil
 import signal
-import pytest
-from typing import Optional, Tuple, List
+import socket
+import subprocess
+import tempfile
 
+from .conftest import get_unique_port
+from .types import (
+    BytesProcess,
+    StringMap,
+)
+from .utils.certs import (
+    generate_ca,
+    generate_client_cert,
+)
+from .utils.config_builders import (
+    create_http3_listener_config_with_mtls_and_password,
+    create_http3_listener_config_with_password_auth,
+    create_http3_listener_config_with_tls_client_cert,
+)
 from .utils.helpers import (
     NEOPROXY_BINARY,
-    start_proxy,
-    wait_for_proxy,
     create_target_server,
-    terminate_process,
     echo_handler,
+    start_proxy,
     wait_for_udp_port_bound,
 )
 
-from .utils.config_builders import (
-    create_http3_listener_config,
-    create_http3_listener_config_with_password_auth,
-    create_http3_listener_config_with_tls_client_cert,
-    create_http3_listener_config_with_mtls_and_password,
-)
-from .utils.certs import (
-    generate_test_certificates,
-    generate_client_cert,
-    generate_ca,
-)
-
-from .conftest import get_unique_port
-
 # Alias for convenience
-
 from .utils.http3_client import (
     H3Client,
-    perform_h3_connection_test,
     perform_h3_connect_test,
+    perform_h3_connection_test,
     perform_h3_tls_client_cert_test,
 )
-
 
 # ==============================================================================
 # Test cases - 7.3 Password Authentication scenarios
@@ -66,7 +57,7 @@ from .utils.http3_client import (
 class TestHTTP3PasswordAuth:
     """Test 7.3: HTTP/3 password authentication scenarios."""
 
-    def test_password_auth_config_starts(self, shared_test_certs) -> None:
+    def test_password_auth_config_starts(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-AUTH-002: HTTP/3 listener with password auth starts successfully.
 
@@ -75,11 +66,11 @@ class TestHTTP3PasswordAuth:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
 
             config_path = create_http3_listener_config_with_password_auth(
                 proxy_port=proxy_port,
@@ -90,17 +81,17 @@ class TestHTTP3PasswordAuth:
                     ("user1", "password1"),
                     ("user2", "password2"),
                     ("admin", "adminpass"),
-                ]
+                ],
             )
 
             proxy_proc = start_proxy(config_path)
 
             # Verify process starts and stays running
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), (
                 "HTTP/3 listener failed to start with password auth (multiple users)"
+            )
 
-            assert proxy_proc.poll() is None, \
-                "HTTP/3 listener should be running with password auth config"
+            assert proxy_proc.poll() is None, "HTTP/3 listener should be running with password auth config"
 
         finally:
             if proxy_proc:
@@ -108,7 +99,7 @@ class TestHTTP3PasswordAuth:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_password_auth_valid_credentials(self, shared_test_certs) -> None:
+    def test_password_auth_valid_credentials(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-AUTH-003: Password auth - valid credentials accepted.
 
@@ -118,13 +109,13 @@ class TestHTTP3PasswordAuth:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            ca_path = shared_test_certs["ca_path"]
 
             # Use plaintext password
             password = "valid_password_123"
@@ -136,7 +127,7 @@ class TestHTTP3PasswordAuth:
                 temp_dir=temp_dir,
                 users=[
                     ("validuser", password),
-                ]
+                ],
             )
 
             # Create target server
@@ -147,29 +138,34 @@ class TestHTTP3PasswordAuth:
                         if not data:
                             break
                         conn.send(b"ECHO:" + data)
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), (
                 "HTTP/3 listener failed to start"
+            )
 
             # Test with real HTTP/3 client using valid credentials
             async def do_auth_connect():
-                success, status_code, message = await perform_h3_connect_test(
-                    "127.0.0.1", proxy_port,
-                    "127.0.0.1", target_port,
+                (
+                    success,
+                    status_code,
+                    _message,
+                ) = await perform_h3_connect_test(
+                    "127.0.0.1",
+                    proxy_port,
+                    "127.0.0.1",
+                    target_port,
                     ca_path=ca_path,
                     username="validuser",
                     password=password,
-                    timeout=15.0
+                    timeout=15.0,
                 )
                 return success, status_code
 
@@ -182,8 +178,7 @@ class TestHTTP3PasswordAuth:
                 loop.close()
 
             assert success, "CONNECT with valid credentials should succeed"
-            assert status_code == 200, \
-                f"Expected 200 with valid credentials, got {status_code}"
+            assert status_code == 200, f"Expected 200 with valid credentials, got {status_code}"
 
         finally:
             if proxy_proc:
@@ -193,7 +188,7 @@ class TestHTTP3PasswordAuth:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_password_auth_invalid_credentials_returns_407(self, shared_test_certs) -> None:
+    def test_password_auth_invalid_credentials_returns_407(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-AUTH-004: Password auth - invalid credentials return 407.
 
@@ -202,13 +197,13 @@ class TestHTTP3PasswordAuth:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            ca_path = shared_test_certs["ca_path"]
 
             # Use plaintext password
             correct_password = "correct_password"
@@ -220,7 +215,7 @@ class TestHTTP3PasswordAuth:
                 temp_dir=temp_dir,
                 users=[
                     ("testuser", correct_password),
-                ]
+                ],
             )
 
             # Create target server
@@ -231,29 +226,34 @@ class TestHTTP3PasswordAuth:
                         if not data:
                             break
                         conn.send(b"ECHO:" + data)
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), (
                 "HTTP/3 listener failed to start"
+            )
 
             # Test with wrong password
             async def do_auth_connect():
-                success, status_code, message = await perform_h3_connect_test(
-                    "127.0.0.1", proxy_port,
-                    "127.0.0.1", target_port,
+                (
+                    success,
+                    status_code,
+                    _message,
+                ) = await perform_h3_connect_test(
+                    "127.0.0.1",
+                    proxy_port,
+                    "127.0.0.1",
+                    target_port,
                     ca_path=ca_path,
                     username="testuser",
                     password="wrong_password",  # Wrong password
-                    timeout=15.0
+                    timeout=15.0,
                 )
                 return success, status_code
 
@@ -261,13 +261,12 @@ class TestHTTP3PasswordAuth:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                success, status_code = loop.run_until_complete(do_auth_connect())
+                _success, status_code = loop.run_until_complete(do_auth_connect())
             finally:
                 loop.close()
 
             # Should get 407 Proxy Authentication Required
-            assert status_code == 407, \
-                f"Expected 407 for invalid credentials, got {status_code}"
+            assert status_code == 407, f"Expected 407 for invalid credentials, got {status_code}"
 
         finally:
             if proxy_proc:
@@ -286,7 +285,7 @@ class TestHTTP3PasswordAuth:
 class TestHTTP3TLSClientCertAuth:
     """Test 7.3: HTTP/3 TLS client certificate authentication scenarios."""
 
-    def test_tls_client_cert_auth_config_starts(self, shared_test_certs) -> None:
+    def test_tls_client_cert_auth_config_starts(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-AUTH-006: HTTP/3 listener with TLS client cert auth starts.
 
@@ -294,28 +293,28 @@ class TestHTTP3TLSClientCertAuth:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            ca_path = shared_test_certs["ca_path"]
 
             config_path = create_http3_listener_config_with_tls_client_cert(
                 proxy_port=proxy_port,
                 cert_path=cert_path,
                 key_path=key_path,
                 client_ca_path=ca_path,
-                temp_dir=temp_dir
+                temp_dir=temp_dir,
             )
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), (
                 "HTTP/3 listener failed to start with TLS client cert auth"
+            )
 
-            assert proxy_proc.poll() is None, \
-                "HTTP/3 listener should be running with TLS client cert auth"
+            assert proxy_proc.poll() is None, "HTTP/3 listener should be running with TLS client cert auth"
 
         finally:
             if proxy_proc:
@@ -323,7 +322,7 @@ class TestHTTP3TLSClientCertAuth:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_tls_client_cert_missing_ca_rejected(self, shared_test_certs) -> None:
+    def test_tls_client_cert_missing_ca_rejected(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-AUTH-007: TLS client cert auth - missing CA causes startup failure.
 
@@ -334,8 +333,8 @@ class TestHTTP3TLSClientCertAuth:
         proxy_port = get_unique_port()
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
 
             # NEW config format: top-level listener with server-level TLS with non-existent client_ca_certs
             config_content = f"""server_threads: 1
@@ -375,13 +374,12 @@ servers:
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=False
+                text=False,
             )
 
             try:
                 return_code = proc.wait(timeout=5)
-                assert return_code != 0, \
-                    f"Expected non-zero exit code for missing CA file, got {return_code}"
+                assert return_code != 0, f"Expected non-zero exit code for missing CA file, got {return_code}"
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
@@ -390,7 +388,7 @@ servers:
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_tls_client_cert_valid_config(self, shared_test_certs) -> None:
+    def test_tls_client_cert_valid_config(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-AUTH-008: TLS client cert auth - valid configuration.
 
@@ -398,32 +396,32 @@ servers:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            ca_path = shared_test_certs["ca_path"]
 
             config_path = create_http3_listener_config_with_tls_client_cert(
                 proxy_port=proxy_port,
                 cert_path=cert_path,
                 key_path=key_path,
                 client_ca_path=ca_path,
-                temp_dir=temp_dir
+                temp_dir=temp_dir,
             )
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), (
                 "HTTP/3 listener failed to start"
+            )
 
             # Verify graceful shutdown works with TLS client cert auth
             proxy_proc.send_signal(signal.SIGTERM)
             return_code = proxy_proc.wait(timeout=5)
 
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
@@ -431,7 +429,9 @@ servers:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_tls_client_cert_valid_cert_accepted(self, shared_test_certs, shared_client_cert) -> None:
+    def test_tls_client_cert_valid_cert_accepted(
+        self, shared_test_certs: StringMap, shared_client_cert: StringMap
+    ) -> None:
         """
         TC-H3-AUTH-009: TLS client cert auth - valid certificate accepted.
 
@@ -440,43 +440,49 @@ servers:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
-            client_cert_path = shared_client_cert['client_cert_path']
-            client_key_path = shared_client_cert['client_key_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            ca_path = shared_test_certs["ca_path"]
+            client_cert_path = shared_client_cert["client_cert_path"]
+            client_key_path = shared_client_cert["client_key_path"]
 
             config_path = create_http3_listener_config_with_tls_client_cert(
                 proxy_port=proxy_port,
                 cert_path=cert_path,
                 key_path=key_path,
                 client_ca_path=ca_path,
-                temp_dir=temp_dir
+                temp_dir=temp_dir,
             )
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), (
                 "HTTP/3 listener failed to start"
+            )
 
             # Test with real HTTP/3 client using valid client certificate
             async def do_client_cert_connect():
-                success, status_code, message = await perform_h3_tls_client_cert_test(
-                    "127.0.0.1", proxy_port,
+                (
+                    success,
+                    status_code,
+                    message,
+                ) = await perform_h3_tls_client_cert_test(
+                    "127.0.0.1",
+                    proxy_port,
                     ca_path=ca_path,
                     client_cert_path=client_cert_path,
                     client_key_path=client_key_path,
-                    timeout=15.0
+                    timeout=15.0,
                 )
                 return success, status_code, message
 
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                success, status_code, message = loop.run_until_complete(do_client_cert_connect())
+                success, _status_code, message = loop.run_until_complete(do_client_cert_connect())
             finally:
                 loop.close()
 
@@ -488,7 +494,7 @@ servers:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_tls_client_cert_invalid_cert_rejected(self, shared_test_certs) -> None:
+    def test_tls_client_cert_invalid_cert_rejected(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-AUTH-010: TLS client cert auth - invalid certificate handling.
 
@@ -502,19 +508,17 @@ servers:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             # Use shared server certificates
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            ca_path = shared_test_certs["ca_path"]
 
             # Generate a different CA and client cert (not signed by server's CA)
             # This is intentionally NOT using shared certs - we need an invalid cert
-            other_ca_cert_path, other_ca_key_path = generate_ca(
-                temp_dir, cn="OtherCA"
-            )
+            other_ca_cert_path, other_ca_key_path = generate_ca(temp_dir, cn="OtherCA")
 
             # Generate client cert signed by the OTHER CA (invalid for this server)
             invalid_client_cert_path, invalid_client_key_path = generate_client_cert(
@@ -526,42 +530,50 @@ servers:
                 cert_path=cert_path,
                 key_path=key_path,
                 client_ca_path=ca_path,  # Server expects certs signed by this CA
-                temp_dir=temp_dir
+                temp_dir=temp_dir,
             )
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), (
                 "HTTP/3 listener failed to start"
+            )
 
             # Test with HTTP/3 client using INVALID client certificate
             async def do_invalid_client_cert_connect():
-                success, status_code, message = await perform_h3_tls_client_cert_test(
-                    "127.0.0.1", proxy_port,
+                (
+                    success,
+                    status_code,
+                    message,
+                ) = await perform_h3_tls_client_cert_test(
+                    "127.0.0.1",
+                    proxy_port,
                     ca_path=ca_path,
                     client_cert_path=invalid_client_cert_path,
                     client_key_path=invalid_client_key_path,
-                    timeout=5.0
+                    timeout=5.0,
                 )
                 return success, status_code, message
 
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                success, status_code, message = loop.run_until_complete(do_invalid_client_cert_connect())
+                success, _status_code, message = loop.run_until_complete(do_invalid_client_cert_connect())
             finally:
                 loop.close()
 
             # CRITICAL ASSERTION: Invalid client certificates (signed by untrusted CA)
             # are rejected at the TLS layer. The connection must fail.
-            assert not success, \
-                f"SECURITY VIOLATION: Connection with invalid client cert should be rejected. " \
+            assert not success, (
+                f"SECURITY VIOLATION: Connection with invalid client cert should be rejected. "
                 f"Server accepted invalid certificate signed by untrusted CA. Message: {message}"
+            )
 
             # The rejection should happen at TLS layer with a specific error message,
             # not as an HTTP timeout.
-            assert "TLS handshake failed" in message or "invalid peer certificate" in message, \
+            assert "TLS handshake failed" in message or "invalid peer certificate" in message, (
                 f"Expected TLS-layer rejection, got: {message}"
+            )
 
         finally:
             if proxy_proc:
@@ -569,7 +581,7 @@ servers:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_tls_client_cert_no_cert_returns_403(self, shared_test_certs) -> None:
+    def test_tls_client_cert_no_cert_returns_403(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-AUTH-011: TLS client cert auth - no certificate handling.
 
@@ -582,32 +594,38 @@ servers:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            ca_path = shared_test_certs["ca_path"]
 
             config_path = create_http3_listener_config_with_tls_client_cert(
                 proxy_port=proxy_port,
                 cert_path=cert_path,
                 key_path=key_path,
                 client_ca_path=ca_path,
-                temp_dir=temp_dir
+                temp_dir=temp_dir,
             )
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), (
                 "HTTP/3 listener failed to start"
+            )
 
             # Test with HTTP/3 client without client certificate
             async def do_no_cert_connect():
-                success, status_code, message = await perform_h3_connection_test(
-                    "127.0.0.1", proxy_port,
+                (
+                    success,
+                    status_code,
+                    message,
+                ) = await perform_h3_connection_test(
+                    "127.0.0.1",
+                    proxy_port,
                     ca_path=ca_path,
-                    timeout=15.0
+                    timeout=15.0,
                 )
                 return success, status_code, message
 
@@ -620,10 +638,12 @@ servers:
 
             # Plan B: TLS handshake succeeds (allow_unauthenticated), but
             # HTTP layer returns 403 when client cert is required but missing.
-            assert success, \
+            assert success, (
                 f"TLS handshake should succeed without client cert (allow_unauthenticated). Message: {message}"
-            assert status_code == 403, \
+            )
+            assert status_code == 403, (
                 f"Expected 403 Forbidden for missing client certificate, got {status_code}. Message: {message}"
+            )
 
         finally:
             if proxy_proc:
@@ -645,7 +665,9 @@ class TestHTTP3DualAuth:
     then application layer (password).
     """
 
-    def test_dual_auth_valid_cert_valid_password_accepted(self, shared_test_certs, shared_client_cert) -> None:
+    def test_dual_auth_valid_cert_valid_password_accepted(
+        self, shared_test_certs: StringMap, shared_client_cert: StringMap
+    ) -> None:
         """
         TC-H3-DUAL-001: Both valid cert and valid password -> accepted.
 
@@ -655,15 +677,15 @@ class TestHTTP3DualAuth:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
-            client_cert_path = shared_client_cert['client_cert_path']
-            client_key_path = shared_client_cert['client_key_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            ca_path = shared_test_certs["ca_path"]
+            client_cert_path = shared_client_cert["client_cert_path"]
+            client_key_path = shared_client_cert["client_key_path"]
 
             password = "dual_auth_pass"
             config_path = create_http3_listener_config_with_mtls_and_password(
@@ -675,18 +697,18 @@ class TestHTTP3DualAuth:
                 users=[("dualuser", password)],
             )
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), (
                 "HTTP/3 listener failed to start"
+            )
 
             # Use H3Client with client cert AND password
             async def do_dual_auth():
                 client = H3Client(
-                    "127.0.0.1", proxy_port,
+                    "127.0.0.1",
+                    proxy_port,
                     ca_path=ca_path,
                     cert_path=client_cert_path,
                     key_path=client_key_path,
@@ -696,7 +718,8 @@ class TestHTTP3DualAuth:
                     return False, 0
                 try:
                     resp = await client.send_connect_request(
-                        "127.0.0.1", target_port,
+                        "127.0.0.1",
+                        target_port,
                         username="dualuser",
                         password=password,
                     )
@@ -712,8 +735,7 @@ class TestHTTP3DualAuth:
                 loop.close()
 
             assert connected, "Should connect with valid client cert"
-            assert status_code == 200, \
-                f"Expected 200 with valid cert + valid password, got {status_code}"
+            assert status_code == 200, f"Expected 200 with valid cert + valid password, got {status_code}"
 
         finally:
             if proxy_proc:
@@ -723,7 +745,7 @@ class TestHTTP3DualAuth:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_dual_auth_no_cert_with_password_rejected(self, shared_test_certs) -> None:
+    def test_dual_auth_no_cert_with_password_rejected(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-DUAL-002: No client cert but valid password -> rejected at transport.
 
@@ -734,13 +756,13 @@ class TestHTTP3DualAuth:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            ca_path = shared_test_certs["ca_path"]
 
             password = "dual_auth_pass"
             config_path = create_http3_listener_config_with_mtls_and_password(
@@ -752,19 +774,24 @@ class TestHTTP3DualAuth:
                 users=[("dualuser", password)],
             )
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), (
                 "HTTP/3 listener failed to start"
+            )
 
             # Connect WITHOUT client cert - should fail at transport layer
             async def do_no_cert_connect():
-                success, status_code, message = await perform_h3_connect_test(
-                    "127.0.0.1", proxy_port,
-                    "127.0.0.1", target_port,
+                (
+                    success,
+                    status_code,
+                    message,
+                ) = await perform_h3_connect_test(
+                    "127.0.0.1",
+                    proxy_port,
+                    "127.0.0.1",
+                    target_port,
                     ca_path=ca_path,
                     username="dualuser",
                     password=password,
@@ -781,9 +808,10 @@ class TestHTTP3DualAuth:
 
             # CRITICAL: With AND logic, missing cert = transport failure = connection rejected
             # The client should NOT be able to fall back to password auth
-            assert not success, \
-                f"SECURITY: No cert should be rejected at transport layer even with valid password. " \
+            assert not success, (
+                f"SECURITY: No cert should be rejected at transport layer even with valid password. "
                 f"Got success={success}, status={status_code}, msg={message}"
+            )
 
         finally:
             if proxy_proc:
@@ -793,7 +821,9 @@ class TestHTTP3DualAuth:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_dual_auth_valid_cert_wrong_password_returns_407(self, shared_test_certs, shared_client_cert) -> None:
+    def test_dual_auth_valid_cert_wrong_password_returns_407(
+        self, shared_test_certs: StringMap, shared_client_cert: StringMap
+    ) -> None:
         """
         TC-H3-DUAL-003: Valid cert but wrong password -> 407.
 
@@ -804,15 +834,15 @@ class TestHTTP3DualAuth:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
-            client_cert_path = shared_client_cert['client_cert_path']
-            client_key_path = shared_client_cert['client_key_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            ca_path = shared_test_certs["ca_path"]
+            client_cert_path = shared_client_cert["client_cert_path"]
+            client_key_path = shared_client_cert["client_key_path"]
 
             config_path = create_http3_listener_config_with_mtls_and_password(
                 proxy_port=proxy_port,
@@ -823,18 +853,18 @@ class TestHTTP3DualAuth:
                 users=[("dualuser", "correct_password")],
             )
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), (
                 "HTTP/3 listener failed to start"
+            )
 
             # Use H3Client with valid client cert but WRONG password
             async def do_wrong_password():
                 client = H3Client(
-                    "127.0.0.1", proxy_port,
+                    "127.0.0.1",
+                    proxy_port,
                     ca_path=ca_path,
                     cert_path=client_cert_path,
                     key_path=client_key_path,
@@ -844,7 +874,8 @@ class TestHTTP3DualAuth:
                     return False, 0
                 try:
                     resp = await client.send_connect_request(
-                        "127.0.0.1", target_port,
+                        "127.0.0.1",
+                        target_port,
                         username="dualuser",
                         password="wrong_password",
                     )
@@ -860,8 +891,7 @@ class TestHTTP3DualAuth:
                 loop.close()
 
             assert connected, "Should connect with valid client cert (transport passes)"
-            assert status_code == 407, \
-                f"Expected 407 for valid cert + wrong password, got {status_code}"
+            assert status_code == 407, f"Expected 407 for valid cert + wrong password, got {status_code}"
 
         finally:
             if proxy_proc:
@@ -871,7 +901,9 @@ class TestHTTP3DualAuth:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_dual_auth_valid_cert_no_password_returns_407(self, shared_test_certs, shared_client_cert) -> None:
+    def test_dual_auth_valid_cert_no_password_returns_407(
+        self, shared_test_certs: StringMap, shared_client_cert: StringMap
+    ) -> None:
         """
         TC-H3-DUAL-004: Valid cert but no password header -> 407.
 
@@ -882,15 +914,15 @@ class TestHTTP3DualAuth:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
-            client_cert_path = shared_client_cert['client_cert_path']
-            client_key_path = shared_client_cert['client_key_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            ca_path = shared_test_certs["ca_path"]
+            client_cert_path = shared_client_cert["client_cert_path"]
+            client_key_path = shared_client_cert["client_key_path"]
 
             config_path = create_http3_listener_config_with_mtls_and_password(
                 proxy_port=proxy_port,
@@ -901,18 +933,18 @@ class TestHTTP3DualAuth:
                 users=[("dualuser", "some_password")],
             )
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), (
                 "HTTP/3 listener failed to start"
+            )
 
             # Use H3Client with valid client cert but NO password
             async def do_no_password():
                 client = H3Client(
-                    "127.0.0.1", proxy_port,
+                    "127.0.0.1",
+                    proxy_port,
                     ca_path=ca_path,
                     cert_path=client_cert_path,
                     key_path=client_key_path,
@@ -923,7 +955,8 @@ class TestHTTP3DualAuth:
                 try:
                     # Send CONNECT without username/password
                     resp = await client.send_connect_request(
-                        "127.0.0.1", target_port,
+                        "127.0.0.1",
+                        target_port,
                     )
                     return True, resp.status_code
                 finally:
@@ -937,8 +970,7 @@ class TestHTTP3DualAuth:
                 loop.close()
 
             assert connected, "Should connect with valid client cert (transport passes)"
-            assert status_code == 407, \
-                f"Expected 407 for valid cert + no password, got {status_code}"
+            assert status_code == 407, f"Expected 407 for valid cert + no password, got {status_code}"
 
         finally:
             if proxy_proc:
@@ -948,7 +980,7 @@ class TestHTTP3DualAuth:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_dual_auth_invalid_cert_rejected_at_transport(self, shared_test_certs) -> None:
+    def test_dual_auth_invalid_cert_rejected_at_transport(self, shared_test_certs: StringMap) -> None:
         """
         TC-H3-DUAL-005: Invalid cert -> rejected at transport (no password fallback).
 
@@ -958,21 +990,17 @@ class TestHTTP3DualAuth:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            ca_path = shared_test_certs["ca_path"]
 
             # Generate a DIFFERENT CA and client cert (not trusted by server)
             # This is intentionally NOT using shared certs - we need an invalid cert
-            other_ca_cert_path, other_ca_key_path = generate_ca(
-                temp_dir, cn="OtherCA"
-            )
-            invalid_cert_path, invalid_key_path = generate_client_cert(
-                temp_dir, other_ca_cert_path, other_ca_key_path
-            )
+            other_ca_cert_path, other_ca_key_path = generate_ca(temp_dir, cn="OtherCA")
+            invalid_cert_path, invalid_key_path = generate_client_cert(temp_dir, other_ca_cert_path, other_ca_key_path)
 
             config_path = create_http3_listener_config_with_mtls_and_password(
                 proxy_port=proxy_port,
@@ -984,13 +1012,19 @@ class TestHTTP3DualAuth:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), (
                 "HTTP/3 listener failed to start"
+            )
 
             # Connect with INVALID cert - should fail at transport
             async def do_invalid_cert():
-                success, status_code, message = await perform_h3_tls_client_cert_test(
-                    "127.0.0.1", proxy_port,
+                (
+                    success,
+                    status_code,
+                    message,
+                ) = await perform_h3_tls_client_cert_test(
+                    "127.0.0.1",
+                    proxy_port,
                     ca_path=ca_path,
                     client_cert_path=invalid_cert_path,
                     client_key_path=invalid_key_path,
@@ -1001,24 +1035,24 @@ class TestHTTP3DualAuth:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                success, status_code, message = loop.run_until_complete(do_invalid_cert())
+                success, _status_code, message = loop.run_until_complete(do_invalid_cert())
             finally:
                 loop.close()
 
             # CRITICAL: With AND logic, invalid cert = transport failure
             # No fallback to password auth allowed
-            assert not success, \
-                f"SECURITY: Invalid cert should be rejected at transport layer " \
+            assert not success, (
+                f"SECURITY: Invalid cert should be rejected at transport layer "
                 f"even in dual-auth mode. No password fallback. Message: {message}"
+            )
 
             # The rejection should happen at TLS layer with a specific error message
-            assert "TLS handshake failed" in message or "invalid peer certificate" in message, \
+            assert "TLS handshake failed" in message or "invalid peer certificate" in message, (
                 f"Expected TLS-layer rejection, got: {message}"
+            )
 
         finally:
             if proxy_proc:
                 proxy_proc.kill()
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
-
-

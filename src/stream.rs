@@ -20,8 +20,13 @@ use tokio::sync::oneshot;
 use tracing::{info, warn};
 
 use crate::h3_stream::H3ServerBidiStream;
-use crate::http_utils::RequestBody;
+use crate::http_message::RequestBody;
 use crate::shutdown::ShutdownHandle;
+
+type UpgradeReceiver =
+  Arc<Mutex<oneshot::Receiver<Result<Box<dyn Io>>>>>;
+pub type UpgradeFuture =
+  Pin<Box<dyn Future<Output = Result<Box<dyn Io>>>>>;
 
 // ============================================================================
 // Io trait - for trait objects
@@ -43,7 +48,7 @@ impl<T> Io for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 /// the upgraded stream after the listener sends the protocol response.
 #[derive(Clone)]
 pub struct OnUpgrade {
-  rx: Option<Arc<Mutex<oneshot::Receiver<Result<Box<dyn Io>>>>>>,
+  rx: Option<UpgradeReceiver>,
 }
 
 impl std::fmt::Debug for OnUpgrade {
@@ -163,11 +168,10 @@ impl H3UpgradeTrigger {
     // headers (e.g. Proxy-Status per RFC 9209).
     let mut builder =
       http::Response::builder().status(http::StatusCode::OK);
-    if let Some(headers) = resp_headers {
-      if let Some(ref mut hdrs) = builder.headers_mut() {
-        hdrs
-          .extend(headers.iter().map(|(k, v)| (k.clone(), v.clone())));
-      }
+    if let Some(headers) = resp_headers
+      && let Some(ref mut hdrs) = builder.headers_mut()
+    {
+      hdrs.extend(headers.iter().map(|(k, v)| (k.clone(), v.clone())));
     }
     let resp = builder.body(()).unwrap();
     stream.send_response(resp).await?;
@@ -213,11 +217,10 @@ impl H3UpgradeTrigger {
     // Send error response on the H3 stream, preserving upstream
     // headers (e.g. Proxy-Status per RFC 9209).
     let mut builder = http::Response::builder().status(status);
-    if let Some(headers) = resp_headers {
-      if let Some(ref mut hdrs) = builder.headers_mut() {
-        hdrs
-          .extend(headers.iter().map(|(k, v)| (k.clone(), v.clone())));
-      }
+    if let Some(headers) = resp_headers
+      && let Some(ref mut hdrs) = builder.headers_mut()
+    {
+      hdrs.extend(headers.iter().map(|(k, v)| (k.clone(), v.clone())));
     }
     let resp = builder.body(()).unwrap();
     stream.send_response(resp).await?;
@@ -334,8 +337,8 @@ pub fn http_status_to_socks5_error(
 /// Prefers our custom `OnUpgrade` (SOCKS5/H3), falls back to hyper's
 /// HTTP upgrade. Returns `None` if no upgrade is available.
 pub fn extract_upgrade(
-  req: &mut http::Request<crate::http_utils::RequestBody>,
-) -> Option<Pin<Box<dyn Future<Output = Result<Box<dyn Io>>>>>> {
+  req: &mut http::Request<crate::http_message::RequestBody>,
+) -> Option<UpgradeFuture> {
   if let Some(u) = OnUpgrade::on(req) {
     return Some(Box::pin(u));
   }
@@ -447,7 +450,7 @@ impl<S: AsyncRead> AsyncRead for IdleTimeoutStream<S> {
 
     match this.stream.poll_read(cx, buf) {
       Poll::Ready(Ok(())) => {
-        if buf.filled().len() > 0 {
+        if !buf.filled().is_empty() {
           this.tracker.touch();
           this.idle_check.as_mut().reset(this.tracker.deadline());
         }

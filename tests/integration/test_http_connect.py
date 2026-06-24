@@ -5,26 +5,23 @@ HTTP CONNECT 集成测试
 测试性质: 黑盒测试，通过外部接口验证行为
 """
 
-import subprocess
-import socket
-import threading
-import tempfile
 import shutil
-import time
-import os
-import signal
-from typing import Callable, Tuple, List, Dict, Optional
+import socket
+import subprocess
+import tempfile
+import threading
 
+from .conftest import get_unique_port
+from .types import (
+    BytesProcess,
+)
 from .utils.helpers import (
-    NEOPROXY_BINARY,
+    create_target_server,
+    create_test_config,
+    send_raw_request,
     start_proxy,
     wait_for_proxy,
-    create_target_server,
-    send_raw_request,
-    create_test_config,
 )
-from .conftest import get_unique_port
-
 
 # ==============================================================================
 # 测试辅助函数（本模块特有）
@@ -36,8 +33,8 @@ def run_curl_connect(
     proxy_port: int,
     target_host: str,
     target_port: int,
-    timeout: float = 10.0
-) -> Tuple[int, str, str]:
+    timeout: float = 10.0,
+) -> tuple[int, str, str]:
     """
     使用 curl 发送 CONNECT 请求。
 
@@ -49,23 +46,22 @@ def run_curl_connect(
         timeout: curl 超时时间（秒）
 
     Returns:
-        Tuple[int, str, str]:
+        tuple[int, str, str]:
             - 返回码
             - 标准输出
             - 标准错误
     """
-    cmd: List[str] = [
-        "curl", "-s", "-p",  # -p 强制使用 CONNECT 方法建立隧道
-        "-x", f"http://{proxy_host}:{proxy_port}",
-        "--connect-timeout", str(int(timeout)),
-        f"http://{target_host}:{target_port}/"
+    cmd: list[str] = [
+        "curl",
+        "-s",
+        "-p",  # -p 强制使用 CONNECT 方法建立隧道
+        "-x",
+        f"http://{proxy_host}:{proxy_port}",
+        "--connect-timeout",
+        str(int(timeout)),
+        f"http://{target_host}:{target_port}/",
     ]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout + 5
-    )
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 5)
     return result.returncode, result.stdout, result.stderr
 
 
@@ -87,15 +83,15 @@ class TestHTTPConnect:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             # 1. 创建配置文件
             config_path = create_test_config(proxy_port, temp_dir, server_threads=2)
 
             # 2. 启动模拟目标服务器
-            received_messages: List[bytes] = []
+            received_messages: list[bytes] = []
 
             def http_echo_handler(conn: socket.socket) -> None:
                 try:
@@ -105,43 +101,33 @@ class TestHTTPConnect:
                             break
                         received_messages.append(data)
                         # 返回有效的 HTTP 响应
-                        http_response = (
-                            b"HTTP/1.1 200 OK\r\n"
-                            b"Content-Type: text/plain\r\n"
-                            b"Content-Length: 2\r\n"
-                            b"\r\n"
-                            b"OK"
-                        )
+                        http_response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nOK"
                         conn.send(http_response)
                         break  # 发送响应后关闭连接
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, http_echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, http_echo_handler)
 
             # 3. 启动代理服务器
             proxy_proc = start_proxy(config_path)
 
             # 4. 等待代理服务器就绪
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             # 5. 使用 curl 发送 CONNECT 请求并验证隧道
-            returncode, stdout, stderr = run_curl_connect(
+            returncode, _stdout, stderr = run_curl_connect(
                 proxy_host="127.0.0.1",
                 proxy_port=proxy_port,
                 target_host="127.0.0.1",
                 target_port=target_port,
-                timeout=10.0
+                timeout=10.0,
             )
 
             # 6. 验证 curl 成功执行
-            assert returncode == 0, \
-                f"curl failed with return code {returncode}, stderr: {stderr}"
+            assert returncode == 0, f"curl failed with return code {returncode}, stderr: {stderr}"
 
             # 7. 验证目标服务器收到数据并返回响应
             assert len(received_messages) > 0, "Target server did not receive any data"
@@ -165,7 +151,7 @@ class TestHTTPConnect:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             # 1. 创建配置文件
@@ -175,16 +161,16 @@ class TestHTTPConnect:
             proxy_proc = start_proxy(config_path)
 
             # 3. 等待代理服务器就绪
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             # 4. 发送 origin-form GET 请求（非代理请求格式）
             request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
             response = send_raw_request("127.0.0.1", proxy_port, request)
 
             # 5. 验证响应状态码为 400
-            assert b"400" in response or b"Bad Request" in response, \
+            assert b"400" in response or b"Bad Request" in response, (
                 f"Expected 400 Bad Request for origin-form GET, got: {response.decode(errors='ignore')}"
+            )
 
         finally:
             # 6. 清理资源
@@ -201,7 +187,7 @@ class TestHTTPConnect:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             # 1. 创建配置文件
@@ -211,24 +197,25 @@ class TestHTTPConnect:
             proxy_proc = start_proxy(config_path)
 
             # 3. 等待代理服务器就绪
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             # 4. 发送缺少端口号的 CONNECT 请求
             request = b"CONNECT example.com HTTP/1.1\r\nHost: example.com\r\n\r\n"
             response = send_raw_request("127.0.0.1", proxy_port, request)
 
             # 5. 验证响应状态码
-            assert b"400" in response or b"Bad Request" in response, \
+            assert b"400" in response or b"Bad Request" in response, (
                 f"Expected 400 Bad Request, got: {response.decode(errors='ignore')}"
+            )
 
             # 6. 发送端口为 0 的 CONNECT 请求
             request = b"CONNECT example.com:0 HTTP/1.1\r\nHost: example.com\r\n\r\n"
             response = send_raw_request("127.0.0.1", proxy_port, request)
 
             # 7. 验证响应状态码
-            assert b"400" in response or b"Bad Request" in response, \
+            assert b"400" in response or b"Bad Request" in response, (
                 f"Expected 400 Bad Request, got: {response.decode(errors='ignore')}"
+            )
 
         finally:
             # 8. 清理资源
@@ -245,7 +232,7 @@ class TestHTTPConnect:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             # 1. 创建配置文件
@@ -255,8 +242,7 @@ class TestHTTPConnect:
             proxy_proc = start_proxy(config_path)
 
             # 3. 等待代理服务器就绪
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), "Proxy server failed to start"
 
             # 4. 发送 CONNECT 请求到不可达地址
             # 使用本地不存在的端口，会立即收到 connection refused
@@ -288,15 +274,14 @@ class TestHTTPConnect:
             # 代理服务器应返回错误响应或关闭连接
             # 允许 200（先返回200后连接失败）、502（连接失败）、504（网关超时）、或空响应
             is_valid_response = (
-                b"200" in response or
-                b"502" in response or
-                b"504" in response or
-                b"Bad Gateway" in response or
-                b"Gateway Timeout" in response or
-                len(response) == 0
+                b"200" in response
+                or b"502" in response
+                or b"504" in response
+                or b"Bad Gateway" in response
+                or b"Gateway Timeout" in response
+                or len(response) == 0
             )
-            assert is_valid_response, \
-                f"Unexpected response for unreachable target: {response.decode(errors='ignore')}"
+            assert is_valid_response, f"Unexpected response for unreachable target: {response.decode(errors='ignore')}"
 
         finally:
             # 6. 清理资源
@@ -314,15 +299,15 @@ class TestHTTPConnect:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             # 1. 创建配置文件
             config_path = create_test_config(proxy_port, temp_dir, server_threads=2)
 
             # 2. 启动模拟目标服务器
-            received_data: List[bytes] = []
+            received_data: list[bytes] = []
 
             def echo_handler(conn: socket.socket) -> None:
                 try:
@@ -332,21 +317,18 @@ class TestHTTPConnect:
                             break
                         received_data.append(data)
                         conn.send(b"ECHO:" + data)
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
             # 3. 启动代理服务器
             proxy_proc = start_proxy(config_path)
 
             # 4. 等待代理服务器就绪
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             # 5. 建立 CONNECT 隧道并发送数据
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -355,7 +337,9 @@ class TestHTTPConnect:
                 sock.connect(("127.0.0.1", proxy_port))
 
                 # 发送 CONNECT 请求
-                connect_request = f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
+                connect_request = (
+                    f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
+                )
                 sock.sendall(connect_request)
 
                 # 读取 200 响应
@@ -365,8 +349,7 @@ class TestHTTPConnect:
                     if not chunk:
                         break
                     response += chunk
-                assert b"200" in response, \
-                    f"Expected 200 response, got: {response.decode(errors='ignore')}"
+                assert b"200" in response, f"Expected 200 response, got: {response.decode(errors='ignore')}"
 
                 # 发送测试数据
                 test_data = b"HELLO_WORLD_TEST_DATA"
@@ -374,16 +357,18 @@ class TestHTTPConnect:
 
                 # 接收回显数据
                 echo_response = sock.recv(1024)
-                assert echo_response == b"ECHO:" + test_data, \
+                assert echo_response == b"ECHO:" + test_data, (
                     f"Expected 'ECHO:{test_data.decode()}', got: {echo_response.decode(errors='ignore')}"
+                )
 
             finally:
                 sock.close()
 
             # 6. 验证目标服务器收到正确数据
             # Client already received echo, so target has processed the data
-            assert any(test_data in d for d in received_data), \
+            assert any(test_data in d for d in received_data), (
                 f"Target server did not receive correct data. Received: {received_data}"
+            )
 
         finally:
             # 7. 清理资源
@@ -403,8 +388,8 @@ class TestHTTPConnect:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             # 1. 创建配置文件
@@ -426,21 +411,18 @@ class TestHTTPConnect:
                         if not data:
                             break
                     target_socket_closed.set()
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, close_detect_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, close_detect_handler)
 
             # 3. 启动代理服务器
             proxy_proc = start_proxy(config_path)
 
             # 4. 等待代理服务器就绪
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             # 5. 建立 CONNECT 隧道
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -449,7 +431,9 @@ class TestHTTPConnect:
                 sock.connect(("127.0.0.1", proxy_port))
 
                 # 发送 CONNECT 请求
-                connect_request = f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
+                connect_request = (
+                    f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
+                )
                 sock.sendall(connect_request)
 
                 # 读取 200 响应
@@ -459,22 +443,19 @@ class TestHTTPConnect:
                     if not chunk:
                         break
                     response += chunk
-                assert b"200" in response, \
-                    f"Expected 200 response, got: {response.decode(errors='ignore')}"
+                assert b"200" in response, f"Expected 200 response, got: {response.decode(errors='ignore')}"
 
                 # 6. 发送数据并关闭客户端连接
                 sock.sendall(b"TEST_DATA")
                 response = sock.recv(1024)
-                assert b"RESPONSE" in response, \
-                    f"Expected RESPONSE, got: {response.decode(errors='ignore')}"
+                assert b"RESPONSE" in response, f"Expected RESPONSE, got: {response.decode(errors='ignore')}"
 
             finally:
                 # 关闭客户端连接
                 sock.close()
 
             # 7. 等待目标服务器感知关闭
-            assert target_socket_closed.wait(timeout=10.0), \
-                "Target server did not detect client close"
+            assert target_socket_closed.wait(timeout=10.0), "Target server did not detect client close"
 
         finally:
             # 8. 清理资源

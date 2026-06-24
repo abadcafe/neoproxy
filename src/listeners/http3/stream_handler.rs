@@ -8,7 +8,7 @@ use tower::Service;
 use tracing::warn;
 
 use super::recv_body::H3RecvBody;
-use crate::http_utils::{
+use crate::http_message::{
   BytesBufBodyWrapper, RequestBody, Response, build_error_response,
 };
 use crate::listeners::header_validation::authority_host_mismatch;

@@ -5,7 +5,7 @@
 
 use std::rc::Rc;
 
-use crate::http_utils::{Response, build_error_response};
+use crate::http_message::{Response, build_error_response};
 use crate::server::{Server, ServerRouter};
 
 /// Check if authority and Host header values differ.
@@ -41,7 +41,7 @@ pub(crate) fn authority_host_mismatch(
 pub(crate) fn validate_and_route<B>(
   req: &http::Request<B>,
   router: &ServerRouter,
-) -> Result<Rc<Server>, Response> {
+) -> Result<Rc<Server>, Box<Response>> {
   // Host header is required
   let host_header = match req
     .headers()
@@ -51,10 +51,10 @@ pub(crate) fn validate_and_route<B>(
   {
     Some(h) => h,
     None => {
-      return Err(build_error_response(
+      return Err(Box::new(build_error_response(
         http::StatusCode::BAD_REQUEST,
         "Bad Request: Host header is required",
-      ));
+      )));
     }
   };
 
@@ -62,16 +62,16 @@ pub(crate) fn validate_and_route<B>(
   if let Some(authority) = req.uri().authority()
     && authority_host_mismatch(authority.as_ref(), &host_header)
   {
-    return Err(build_error_response(
+    return Err(Box::new(build_error_response(
       http::StatusCode::BAD_REQUEST,
       "Bad Request: :authority and Host headers differ",
-    ));
+    )));
   }
 
   // Route via Host header
   let host = host_header.split(':').next().unwrap_or(&host_header);
   match router.route(Some(host)) {
     Some(entry) => Ok(entry),
-    None => Err(super::error_response::build_404_response()),
+    None => Err(Box::new(super::error_response::build_404_response())),
   }
 }

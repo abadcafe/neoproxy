@@ -5,32 +5,46 @@ This module provides fixtures for managing test environments,
 including temporary directories, proxy processes, and mock servers.
 """
 
-import subprocess
-import socket
-import tempfile
-import shutil
-import threading
-import os
-import sys
-import json
 import contextlib
-import time
-from typing import Optional, Generator, Callable, Dict
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+from collections.abc import Generator
 
 import pytest
 
+from .types import (
+    BytesProcess,
+    ConfigDict,
+    HttpServerInfo,
+    IdleConnectionFactory,
+    JsonValue,
+    PortFactory,
+    ProcessFactory,
+    ProxyContext,
+    ProxyWithConfig,
+    StringMap,
+    TargetHandler,
+    TargetHttpServerFactory,
+    TargetServerFactory,
+    WaitReady,
+)
 from .utils.helpers import (
     NEOPROXY_BINARY,
     build_neoproxy_binary,
     check_binary_exists,
-    create_test_config,
     create_echo_config,
+    create_target_server,
+    create_test_config,
     start_proxy,
     terminate_process,
     wait_for_proxy,
-    create_target_server,
 )
-
 
 # ==============================================================================
 # Port Management
@@ -70,18 +84,13 @@ def get_unique_port() -> int:
 
             # Verify the port is actually available by trying to bind
             # Do NOT use SO_REUSEADDR - we want truly free ports
-            test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
-                # Don't use SO_REUSEADDR - this ensures port is truly free
-                test_sock.bind(("0.0.0.0", port))
-                test_sock.close()
-                return port
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_sock:
+                    # Don't use SO_REUSEADDR - this ensures port is truly free
+                    test_sock.bind(("0.0.0.0", port))
+                    return port
             except OSError:
                 # Port is not available, try next one
-                try:
-                    test_sock.close()
-                except Exception:
-                    pass
                 continue
 
         raise RuntimeError("Could not find an available port after 100 attempts")
@@ -93,7 +102,7 @@ def get_unique_port() -> int:
 
 
 @pytest.fixture
-def proxy_with_config(temp_dir: str) -> Generator:
+def proxy_with_config(temp_dir: str) -> Generator[ProxyWithConfig, None, None]:
     """Start proxy with a given config dict, yield a context manager.
 
     Usage:
@@ -103,22 +112,20 @@ def proxy_with_config(temp_dir: str) -> Generator:
             # proxy.process - the subprocess.Popen object
     """
 
-    class ProxyContext:
-        def __init__(self, process: subprocess.Popen, port: int, working_dir: str):
-            self.process = process
-            self.port = port
-            self.working_dir = working_dir
-
     @contextlib.contextmanager
-    def _proxy_with_config(config_dict: dict) -> Generator[ProxyContext, None, None]:
+    def _proxy_with_config(
+        config_dict: ConfigDict,
+    ) -> Generator[ProxyContext, None, None]:
         port = get_unique_port()
         # Update listener addresses to use the allocated port
-        for listener in config_dict.get("listeners", []):
+        listeners = config_dict.get("listeners", [])
+        assert isinstance(listeners, list)
+        for listener in listeners:
+            assert isinstance(listener, dict)
             addrs = listener.get("addresses", [])
+            assert isinstance(addrs, list)
             listener["addresses"] = [
-                addr.replace("AUTO_PORT", str(port))
-                if "AUTO_PORT" in addr
-                else addr
+                addr.replace("AUTO_PORT", str(port)) if isinstance(addr, str) and "AUTO_PORT" in addr else addr
                 for addr in addrs
             ]
             # If no addresses were specified or all were empty, default to 127.0.0.1:port
@@ -126,7 +133,7 @@ def proxy_with_config(temp_dir: str) -> Generator:
                 listener["addresses"] = [f"127.0.0.1:{port}"]
 
         config_path = os.path.join(temp_dir, f"config_{port}.yaml")
-        yaml_content = _dict_to_yaml(config_dict)
+        yaml_content = dict_to_yaml(config_dict)
         with open(config_path, "w") as f:
             f.write(yaml_content)
 
@@ -151,7 +158,7 @@ def proxy_with_config(temp_dir: str) -> Generator:
     yield _proxy_with_config
 
 
-def _dict_to_yaml(config: dict) -> str:
+def dict_to_yaml(config: ConfigDict) -> str:
     """Convert a config dict to YAML string manually.
 
     Avoids yaml.dump() formatting issues with the Rust serde_yaml parser.
@@ -168,7 +175,7 @@ def _dict_to_yaml(config: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _yaml_dict(d: dict, indent: int, key: str | None = None) -> list[str]:
+def _yaml_dict(d: dict[str, JsonValue], indent: int, key: str | None = None) -> list[str]:
     """Render a dict as YAML key-value lines with proper indentation.
 
     Args:
@@ -196,6 +203,7 @@ def _yaml_dict(d: dict, indent: int, key: str | None = None) -> list[str]:
             if v and isinstance(v[0], dict):
                 lines.append(f"{prefix}{k}:")
                 for item in v:
+                    assert isinstance(item, dict)
                     lines.append(f"{prefix}  -")
                     for ik, iv in item.items():
                         lines.extend(_yaml_value(ik, iv, indent=indent + 4))
@@ -212,7 +220,7 @@ def _yaml_dict(d: dict, indent: int, key: str | None = None) -> list[str]:
     return lines
 
 
-def _yaml_value(key: str, value: object, indent: int = 0) -> list[str]:
+def _yaml_value(key: str, value: JsonValue, indent: int = 0) -> list[str]:
     """Render a single YAML key-value pair, handling dicts, lists, and scalars.
 
     Used for dynamic keys that don't have special rendering rules.
@@ -235,6 +243,7 @@ def _yaml_value(key: str, value: object, indent: int = 0) -> list[str]:
         if value and isinstance(value[0], dict):
             lines.append(f"{prefix}{key}:")
             for item in value:
+                assert isinstance(item, dict)
                 lines.append(f"{prefix}  -")
                 for ik, iv in item.items():
                     lines.extend(_yaml_value(ik, iv, indent=indent + 4))
@@ -252,7 +261,7 @@ def _yaml_value(key: str, value: object, indent: int = 0) -> list[str]:
 
 
 @pytest.fixture
-def target_http_server(available_port: Callable[[], int]) -> Generator:
+def target_http_server(available_port: PortFactory) -> Generator[TargetHttpServerFactory, None, None]:
     """Start a simple HTTP echo server, yield the server info.
 
     Usage:
@@ -261,27 +270,18 @@ def target_http_server(available_port: Callable[[], int]) -> Generator:
             # server.url - base URL like "http://127.0.0.1:PORT"
     """
 
-    class ServerInfo:
-        def __init__(self, port: int, sock: socket.socket) -> None:
-            self.port = port
-            self.socket = sock
-            self.url = f"http://127.0.0.1:{port}"
-
     @contextlib.contextmanager
-    def _target_http_server() -> Generator[ServerInfo, None, None]:
+    def _target_http_server() -> Generator[HttpServerInfo, None, None]:
         port = available_port()
         from .utils.helpers import http_echo_handler
-        thread, sock = create_target_server("127.0.0.1", port, http_echo_handler)
-        assert wait_for_proxy("127.0.0.1", port, timeout=2.0), \
-            f"Target HTTP server failed to start on port {port}"
-        info = ServerInfo(port, sock)
+
+        _thread, sock = create_target_server("127.0.0.1", port, http_echo_handler)
+        assert wait_for_proxy("127.0.0.1", port, timeout=2.0), f"Target HTTP server failed to start on port {port}"
+        info = HttpServerInfo(port, sock)
         try:
             yield info
         finally:
-            try:
-                sock.close()
-            except Exception:
-                pass
+            sock.close()
 
     yield _target_http_server
 
@@ -350,11 +350,7 @@ def echo_config(temp_dir: str) -> Generator[str, None, None]:
 
 
 @pytest.fixture
-def proxy_process() -> Generator[
-    Callable[[str, Optional[int]], subprocess.Popen],
-    None,
-    None
-]:
+def proxy_process() -> Generator[ProcessFactory, None, None]:
     """
     Provide a factory to create and manage proxy processes.
 
@@ -367,12 +363,9 @@ def proxy_process() -> Generator[
             proc = proxy_process(config_path, port)
             # ... test code ...
     """
-    processes: list[subprocess.Popen] = []
+    processes: list[BytesProcess] = []
 
-    def create_process(
-        config_path: str,
-        port: Optional[int] = None
-    ) -> subprocess.Popen:
+    def create_process(config_path: str, port: int | None = None) -> BytesProcess:
         """
         Create and register a proxy process.
 
@@ -400,11 +393,7 @@ def proxy_process() -> Generator[
 
 
 @pytest.fixture
-def target_server() -> Generator[
-    Callable[[int, Callable[[socket.socket], None]], socket.socket],
-    None,
-    None
-]:
+def target_server() -> Generator[TargetServerFactory, None, None]:
     """
     Provide a factory to create mock target servers.
 
@@ -422,10 +411,7 @@ def target_server() -> Generator[
     """
     sockets: list[socket.socket] = []
 
-    def create_server(
-        port: int,
-        handler: Callable[[socket.socket], None]
-    ) -> socket.socket:
+    def create_server(port: int, handler: TargetHandler) -> socket.socket:
         """
         Create and register a mock target server.
 
@@ -444,10 +430,7 @@ def target_server() -> Generator[
 
     # Cleanup: close all registered sockets
     for sock in sockets:
-        try:
-            sock.close()
-        except Exception:
-            pass
+        sock.close()
 
 
 # ==============================================================================
@@ -456,11 +439,7 @@ def target_server() -> Generator[
 
 
 @pytest.fixture
-def idle_connection() -> Generator[
-    Callable[[str, int], socket.socket],
-    None,
-    None
-]:
+def idle_connection() -> Generator[IdleConnectionFactory, None, None]:
     """
     Provide a factory to create idle connections.
 
@@ -491,10 +470,7 @@ def idle_connection() -> Generator[
 
     # Cleanup: close all registered connections
     for conn in connections:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        conn.close()
 
 
 # ==============================================================================
@@ -503,15 +479,17 @@ def idle_connection() -> Generator[
 
 
 @pytest.fixture
-def wait_ready() -> Callable[[str, int, float], bool]:
+def wait_ready() -> WaitReady:
     """
     Provide a function to wait for proxy server to be ready.
 
     Returns:
         Callable that waits for server readiness.
     """
+
     def wait(host: str, port: int, timeout: float = 5.0) -> bool:
         return wait_for_proxy(host, port, timeout)
+
     return wait
 
 
@@ -521,7 +499,7 @@ def wait_ready() -> Callable[[str, int, float], bool]:
 
 
 @pytest.fixture
-def available_port() -> Callable[[], int]:
+def available_port() -> PortFactory:
     """
     Provide a function to get unique available ports.
 
@@ -550,7 +528,7 @@ def shared_certs_dir() -> Generator[str, None, None]:
 
 
 @pytest.fixture(scope="session")
-def shared_test_certs(shared_certs_dir: str) -> Dict[str, str]:
+def shared_test_certs(shared_certs_dir: str) -> StringMap:
     """
     Session-scoped TLS test certificates.
 
@@ -562,19 +540,18 @@ def shared_test_certs(shared_certs_dir: str) -> Dict[str, str]:
         Dict with keys: cert_path, key_path, ca_path, ca_key_path
     """
     from .utils.certs import generate_test_certificates
-    cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(
-        shared_certs_dir
-    )
+
+    cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(shared_certs_dir)
     return {
-        'cert_path': cert_path,
-        'key_path': key_path,
-        'ca_path': ca_path,
-        'ca_key_path': ca_key_path,
+        "cert_path": cert_path,
+        "key_path": key_path,
+        "ca_path": ca_path,
+        "ca_key_path": ca_key_path,
     }
 
 
 @pytest.fixture(scope="session")
-def shared_client_cert(shared_certs_dir: str, shared_test_certs: Dict[str, str]) -> Dict[str, str]:
+def shared_client_cert(shared_certs_dir: str, shared_test_certs: StringMap) -> StringMap:
     """
     Session-scoped client certificate for mTLS tests.
 
@@ -585,14 +562,15 @@ def shared_client_cert(shared_certs_dir: str, shared_test_certs: Dict[str, str])
         Dict with keys: client_cert_path, client_key_path
     """
     from .utils.certs import generate_client_cert
+
     client_cert_path, client_key_path = generate_client_cert(
         shared_certs_dir,
-        shared_test_certs['ca_path'],
-        shared_test_certs['ca_key_path'],
+        shared_test_certs["ca_path"],
+        shared_test_certs["ca_key_path"],
     )
     return {
-        'client_cert_path': client_cert_path,
-        'client_key_path': client_key_path,
+        "client_cert_path": client_cert_path,
+        "client_key_path": client_key_path,
     }
 
 
@@ -608,24 +586,15 @@ def pytest_configure(config: pytest.Config) -> None:
         print(
             f"\nERROR: neoproxy binary not found at {NEOPROXY_BINARY}\n"
             f"Please run 'cargo build' or set NEOPROXY_BINARY.\n",
-            file=sys.stderr
+            file=sys.stderr,
         )
         sys.exit(1)
 
-    config.addinivalue_line(
-        "markers",
-        "integration: mark test as integration test"
-    )
-    config.addinivalue_line(
-        "markers",
-        "slow: mark test as slow running"
-    )
+    config.addinivalue_line("markers", "integration: mark test as integration test")
+    config.addinivalue_line("markers", "slow: mark test as slow running")
 
 
-def pytest_collection_modifyitems(
-    config: pytest.Config,
-    items: list[pytest.Item]
-) -> None:
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Add default markers to integration tests."""
     for item in items:
         # Mark all tests in integration directory as integration tests

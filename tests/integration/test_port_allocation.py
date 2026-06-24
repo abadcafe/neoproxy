@@ -5,21 +5,22 @@ These tests verify that the get_unique_port() function correctly allocates
 ports that are actually available for binding.
 """
 
-import socket
-import subprocess
-import tempfile
 import shutil
-from typing import Optional
+import socket
+import tempfile
 
 import pytest
 
 # Import from conftest
 from .conftest import get_unique_port
+from .types import (
+    BytesProcess,
+)
 from .utils.helpers import (
     create_test_config,
     start_proxy,
-    wait_for_proxy,
     terminate_process,
+    wait_for_proxy,
 )
 
 
@@ -60,7 +61,7 @@ class TestPortAllocation:
         Test that the port returned by get_unique_port can be used to start a proxy.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             port = get_unique_port()
@@ -68,8 +69,7 @@ class TestPortAllocation:
             proxy_proc = start_proxy(config_path)
 
             # Wait for proxy to be ready
-            assert wait_for_proxy("127.0.0.1", port, timeout=5.0), \
-                f"Proxy failed to start on port {port}"
+            assert wait_for_proxy("127.0.0.1", port, timeout=5.0), f"Proxy failed to start on port {port}"
 
         finally:
             if proxy_proc:
@@ -81,7 +81,7 @@ class TestPortAllocation:
         Test that multiple ports can be allocated and used concurrently.
         """
         ports = [get_unique_port() for _ in range(5)]
-        sockets = []
+        sockets: list[socket.socket] = []
 
         try:
             for port in ports:

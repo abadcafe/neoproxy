@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::context::RequestContext;
-use crate::http_utils::{
+use crate::http_message::{
   Response, build_empty_response, build_proxy_status_error,
   build_proxy_status_with_status,
 };
@@ -86,7 +86,7 @@ impl UpstreamError {
         build_proxy_status_with_status(&id, status.as_u16());
       resp.headers_mut().insert(
         http::header::HeaderName::from_static("proxy-status"),
-        crate::http_utils::append_proxy_status(
+        crate::http_message::append_proxy_status(
           upstream_proxy_status.as_ref(),
           &our_entry,
         ),

@@ -6,7 +6,7 @@ use http_body_util::{BodyExt, Full};
 use tower::Service;
 
 use super::echo::*;
-use crate::http_utils::{BytesBufBodyWrapper, Request, RequestBody};
+use crate::http_message::{BytesBufBodyWrapper, Request, RequestBody};
 use crate::plugin::Plugin;
 
 // ============== EchoService Tests ==============

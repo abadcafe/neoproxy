@@ -13,7 +13,7 @@ use super::target_parser::{
 };
 use super::upstream::{ConnectResult, UpstreamRegistry};
 use crate::context::{RequestContext, get_server_id};
-use crate::http_utils::{
+use crate::http_message::{
   Request, RequestBody, Response, append_proxy_status,
   build_empty_response, build_error_response,
   build_proxy_status_with_status,
@@ -45,7 +45,7 @@ impl UpstreamService {
       serde_yaml::from_value(sargs)?;
 
     // Validate upstream exists in registry
-    if !registry.borrow().entries.contains_key(&args.upstream) {
+    if !registry.borrow().contains_upstream(&args.upstream) {
       anyhow::bail!(
         "upstream '{}' not found in registry",
         args.upstream
@@ -143,9 +143,7 @@ async fn chain_connect(
   registry: &Rc<RefCell<UpstreamRegistry>>,
   st: &Rc<StreamTracker>,
   req_headers: http::request::Parts,
-  upgrade: Option<
-    Pin<Box<dyn std::future::Future<Output = Result<Box<dyn Io>>>>>,
-  >,
+  upgrade: Option<stream::UpgradeFuture>,
   ctx: &RequestContext,
 ) -> Result<Response> {
   let (host, port) =
@@ -172,12 +170,12 @@ async fn chain_connect(
   };
 
   let connect_start = std::time::Instant::now();
-  let result = match registry.borrow().get_upstream(upstream_name) {
-    Ok(upstream) => {
-      upstream.connect_for_tunnel(&target, &tls_config, &tracker).await
-    }
+  let upstream = match registry.borrow().get_upstream(upstream_name) {
+    Ok(upstream) => upstream,
     Err(e) => return Ok(e.to_response(ctx)),
   };
+  let result =
+    upstream.connect_for_tunnel(&target, &tls_config, &tracker).await;
   let result = match result {
     Ok(r) => r,
     Err(e) => {
@@ -223,9 +221,7 @@ async fn chain_connect(
 async fn complete_tunnel(
   target: Box<dyn Io>,
   st: &Rc<StreamTracker>,
-  upgrade: Option<
-    Pin<Box<dyn std::future::Future<Output = Result<Box<dyn Io>>>>>,
-  >,
+  upgrade: Option<stream::UpgradeFuture>,
   ctx: &RequestContext,
   upstream_proxy_status: Option<http::HeaderValue>,
   tunnel_idle_timeout: Duration,
@@ -314,21 +310,20 @@ async fn chain_forward(
     (reg.tls_config(), reg.tracker())
   };
 
-  match registry.borrow().get_upstream(upstream_name) {
-    Ok(upstream) => {
-      match upstream
-        .forward(&tls_config, &tracker, req_headers, req_body, ctx)
-        .await
-      {
-        Ok(resp) => Ok(resp),
-        Err(e) => {
-          warn!("UpstreamService: forward failed: {e}");
-          Ok(e.to_response(ctx))
-        }
-      }
-    }
+  let upstream = match registry.borrow().get_upstream(upstream_name) {
+    Ok(upstream) => upstream,
     Err(e) => {
       warn!("UpstreamService: failed to get upstream for forward: {e}");
+      return Ok(e.to_response(ctx));
+    }
+  };
+  match upstream
+    .forward(&tls_config, &tracker, req_headers, req_body, ctx)
+    .await
+  {
+    Ok(resp) => Ok(resp),
+    Err(e) => {
+      warn!("UpstreamService: forward failed: {e}");
       Ok(e.to_response(ctx))
     }
   }

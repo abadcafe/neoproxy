@@ -1,6 +1,7 @@
 //! Black-box tests for the http listener module.
 
-use super::test_helpers::{empty_args, test_servers};
+use super::listener_args_fixture::empty_args;
+use super::server_fixtures::plain_servers;
 use crate::listeners::http;
 use crate::server::Server;
 
@@ -31,7 +32,7 @@ fn test_http_builder_valid_address_succeeds() {
   let result = builder(
     vec!["127.0.0.1:0".to_string()],
     empty_args(),
-    test_servers(),
+    plain_servers(),
   );
   assert!(result.is_ok());
 }
@@ -42,7 +43,7 @@ fn test_http_builder_invalid_address_returns_error() {
   let result = builder(
     vec!["invalid_address".to_string()],
     empty_args(),
-    test_servers(),
+    plain_servers(),
   );
   assert!(result.is_err());
 }
@@ -53,7 +54,7 @@ fn test_http_builder_default_args_succeeds() {
   let result = builder(
     vec!["127.0.0.1:0".to_string()],
     empty_args(),
-    test_servers(),
+    plain_servers(),
   );
   assert!(result.is_ok());
 }

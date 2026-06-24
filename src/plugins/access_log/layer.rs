@@ -12,13 +12,22 @@ use tracing::warn;
 use super::context::AccessLogEntry;
 use super::registry::LogEntry;
 use crate::context::RequestContext;
-use crate::http_utils::{Request, Response};
+use crate::http_message::{Request, Response};
 use crate::service::Service;
 
 /// Layer that creates AccessLogMiddleware instances.
-pub struct AccessLogLayer {
-  pub tx: mpsc::SyncSender<LogEntry>,
-  pub context_fields: Vec<String>,
+pub(crate) struct AccessLogLayer {
+  tx: mpsc::SyncSender<LogEntry>,
+  context_fields: Vec<String>,
+}
+
+impl AccessLogLayer {
+  pub(crate) fn new(
+    tx: mpsc::SyncSender<LogEntry>,
+    context_fields: Vec<String>,
+  ) -> Self {
+    Self { tx, context_fields }
+  }
 }
 
 impl tower::Layer<Service> for AccessLogLayer {
@@ -103,7 +112,7 @@ impl tower::Service<Request> for AccessLogMiddleware {
 
       match result {
         Ok(response) => Ok(response),
-        Err(_) => Ok(crate::http_utils::build_empty_response(
+        Err(_) => Ok(crate::http_message::build_empty_response(
           http::StatusCode::INTERNAL_SERVER_ERROR,
         )),
       }

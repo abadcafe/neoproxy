@@ -35,7 +35,7 @@ impl std::fmt::Display for AuthType {
 
 use crate::config::SerializedArgs;
 use crate::context::RequestContext;
-use crate::http_utils::{
+use crate::http_message::{
   BytesBufBodyWrapper, Request, Response, ResponseBody,
 };
 use crate::plugin::Plugin;

@@ -56,8 +56,8 @@ impl SandboxPool {
       .send(SandboxRequest { config, request, response_tx: tx })
       .is_err()
     {
-      // Worker thread has died; return error via oneshot
-      let _ = rx;
+      // Worker thread has died; dropped sender closes the returned
+      // receiver.
     }
 
     rx

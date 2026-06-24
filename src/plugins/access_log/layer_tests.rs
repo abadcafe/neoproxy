@@ -1,11 +1,13 @@
 use std::time::Instant;
 
-use super::layer::build_log_entry;
+use super::layer::{AccessLogLayer, build_log_entry};
+use super::registry::LogEntry;
+use super::tracing_capture::TracingCapture;
 use crate::context::RequestContext;
-use crate::http_utils::Response;
+use crate::http_message::Response;
 
 fn make_ok_result() -> anyhow::Result<Response> {
-  Ok(crate::http_utils::build_empty_response(http::StatusCode::OK))
+  Ok(crate::http_message::build_empty_response(http::StatusCode::OK))
 }
 
 fn make_err_result() -> anyhow::Result<Response> {
@@ -233,5 +235,87 @@ fn test_build_log_entry_no_dot_key_preserved_as_is() {
   assert_eq!(
     entry.extensions.get("custom_field"),
     Some(&"value".to_string())
+  );
+}
+
+fn empty_request() -> crate::http_message::Request {
+  use http_body_util::BodyExt;
+
+  let body: crate::http_message::RequestBody =
+    http_body_util::Empty::<bytes::Bytes>::new()
+      .map_err(|e: std::convert::Infallible| anyhow::anyhow!("{}", e))
+      .boxed_unsync();
+  http::Request::builder()
+    .method("GET")
+    .uri("http://example.com/")
+    .body(body)
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_access_log_layer_warns_when_channel_full() {
+  use tower::ServiceExt;
+
+  let (capture, _guard) = TracingCapture::new();
+
+  let (tx, _rx) = std::sync::mpsc::sync_channel::<LogEntry>(1);
+  let dummy_entry = LogEntry {
+    entry: super::context::AccessLogEntry {
+      time: time::OffsetDateTime::now_utc(),
+      client_ip: String::new(),
+      client_port: 0,
+      server_ip: String::new(),
+      server_port: 0,
+      method: String::new(),
+      target: String::new(),
+      status: 0,
+      duration_ms: 0,
+      service: String::new(),
+      err: None,
+      extensions: std::collections::HashMap::new(),
+    },
+  };
+  tx.try_send(dummy_entry).unwrap();
+
+  let access_log_layer = AccessLogLayer::new(tx, vec![]);
+  let mut service = tower::Layer::layer(
+    &access_log_layer,
+    crate::server::placeholder_service(),
+  );
+  let svc = service.ready().await.unwrap();
+  let _ = tower::Service::call(svc, empty_request()).await;
+
+  let output = capture.output();
+  assert!(
+    output.contains("channel full"),
+    "tracing should capture 'channel full' warning from middleware, \
+     got: {:?}",
+    &output[..output.len().min(500)]
+  );
+}
+
+#[tokio::test]
+async fn test_access_log_layer_warns_when_channel_closed() {
+  use tower::ServiceExt;
+
+  let (capture, _guard) = TracingCapture::new();
+
+  let (tx, rx) = std::sync::mpsc::sync_channel::<LogEntry>(1);
+  drop(rx);
+
+  let access_log_layer = AccessLogLayer::new(tx, vec![]);
+  let mut service = tower::Layer::layer(
+    &access_log_layer,
+    crate::server::placeholder_service(),
+  );
+  let svc = service.ready().await.unwrap();
+  let _ = tower::Service::call(svc, empty_request()).await;
+
+  let output = capture.output();
+  assert!(
+    output.contains("channel closed"),
+    "tracing should capture 'channel closed' warning from middleware, \
+     got: {:?}",
+    &output[..output.len().min(500)]
   );
 }

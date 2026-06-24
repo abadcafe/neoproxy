@@ -8,7 +8,7 @@ use anyhow::Result;
 use http_body_util::BodyExt;
 use tracing::{error, warn};
 
-use crate::http_utils::{
+use crate::http_message::{
   BytesBufBodyWrapper, Request, Response, ResponseBody,
 };
 use crate::plugins::js_sandbox::config::PluginConfig;
@@ -159,10 +159,9 @@ fn make_response(
   let mut builder = http::Response::builder().status(resp.status);
   for (k, v) in resp.headers {
     if let Ok(name) = http::header::HeaderName::from_bytes(k.as_bytes())
+      && let Ok(val) = http::header::HeaderValue::from_str(&v)
     {
-      if let Ok(val) = http::header::HeaderValue::from_str(&v) {
-        builder = builder.header(name, val);
-      }
+      builder = builder.header(name, val);
     }
   }
 

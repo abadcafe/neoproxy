@@ -1,6 +1,6 @@
-//! Black-box tests for the http_utils module.
+//! Black-box tests for the http_message module.
 
-use crate::http_utils::{
+use crate::http_message::{
   append_proxy_status, build_empty_response, build_error_response,
   build_proxy_status_error, build_proxy_status_with_status,
 };

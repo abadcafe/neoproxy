@@ -10,43 +10,45 @@ Tests:
 import socket
 import subprocess
 import tempfile
-from typing import Optional
 
 from .conftest import get_unique_port
-from .utils.helpers import (
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-    terminate_process,
-    create_target_server,
-    NEOPROXY_BINARY,
+from .types import (
+    BytesProcess,
 )
 from .utils.certs import generate_test_certificates
 from .utils.config_builders import (
-    create_http3_listener_config,
     create_http3_chain_config,
+    create_http3_listener_config,
+)
+from .utils.helpers import (
+    NEOPROXY_BINARY,
+    create_target_server,
+    terminate_process,
+    wait_for_proxy,
+    wait_for_udp_port_bound,
 )
 
 
-def _parse_status_code(response: bytes) -> Optional[int]:
+def _parse_status_code(response: bytes) -> int | None:
     """Parse HTTP status code from response."""
     try:
         status_line = response.split(b"\r\n")[0].decode()
         parts = status_line.split()
         if len(parts) >= 2:
             return int(parts[1])
-    except (IndexError, ValueError):
+    except IndexError, ValueError:
         pass
     return None
 
 
-def _get_header(response: bytes, header_name: str) -> Optional[str]:
+def _get_header(response: bytes, header_name: str) -> str | None:
     """Get a specific header value from HTTP response."""
     for line in response.split(b"\r\n"):
         ascii_lower = line.decode(errors="replace").lower()
         if ascii_lower.startswith(header_name.lower() + ":"):
             colon_pos = line.find(b":")
             if colon_pos != -1:
-                return line[colon_pos + 1:].strip().decode(errors="replace")
+                return line[colon_pos + 1 :].strip().decode(errors="replace")
     return None
 
 
@@ -66,9 +68,9 @@ class TestHttp3ChainProxyStatus:
         h3_port = get_unique_port()
         target_port = get_unique_port()
         cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
-        entry_proc: Optional[subprocess.Popen] = None
-        upstream_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        entry_proc: BytesProcess | None = None
+        upstream_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             # Start a TCP target server
@@ -76,50 +78,47 @@ class TestHttp3ChainProxyStatus:
                 try:
                     conn.recv(1024)
                     conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
             # Start upstream proxy (H3 listener + connect_tcp)
-            upstream_config_path = create_http3_listener_config(
-                h3_port, cert_path, key_path, temp_dir
-            )
+            upstream_config_path = create_http3_listener_config(h3_port, cert_path, key_path, temp_dir)
             upstream_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", upstream_config_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", h3_port, timeout=10.0, proc=upstream_proc
-            ), "Upstream proxy (H3) failed to start"
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=10.0, proc=upstream_proc), (
+                "Upstream proxy (H3) failed to start"
+            )
 
             # Start entry proxy (http3_chain -> H3 upstream)
             entry_config_path = create_http3_chain_config(
                 http_port,
                 [(addr, port, 1) for addr, port, _ in [("127.0.0.1", h3_port, 1)]],
-                ca_path, temp_dir,
+                ca_path,
+                temp_dir,
             )
             entry_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", entry_config_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=10.0, proc=entry_proc
-            ), "Entry proxy (http3_chain) failed to start"
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=10.0, proc=entry_proc), (
+                "Entry proxy (http3_chain) failed to start"
+            )
 
             # Send CONNECT via entry proxy
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(15)
             sock.connect(("127.0.0.1", http_port))
-            sock.sendall(
-                f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\n"
-                f"Host: 127.0.0.1:{target_port}\r\n"
-                f"\r\n".encode()
-            )
+            sock.sendall(f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode())
 
             # Read response headers
             response = b""
@@ -134,26 +133,20 @@ class TestHttp3ChainProxyStatus:
             sock.close()
 
             status = _parse_status_code(response)
-            assert status == 200, \
-                f"Expected 200, got {status}. Response: {response.decode(errors='ignore')[:200]}"
+            assert status == 200, f"Expected 200, got {status}. Response: {response.decode(errors='ignore')[:200]}"
 
             # Verify Proxy-Status header
             ps = _get_header(response, "proxy-status")
-            assert ps is not None, \
-                f"Proxy-Status not found: {response.decode(errors='ignore')[:200]}"
+            assert ps is not None, f"Proxy-Status not found: {response.decode(errors='ignore')[:200]}"
 
             # Should have received-status=200 for upstream relay
-            assert "received-status=200" in ps, \
-                f"Expected received-status=200 in Proxy-Status: {ps}"
-            assert "error=" not in ps, \
-                f"Proxy-Status should not have error= on success: {ps}"
+            assert "received-status=200" in ps, f"Expected received-status=200 in Proxy-Status: {ps}"
+            assert "error=" not in ps, f"Proxy-Status should not have error= on success: {ps}"
 
             # Upstream entry should be preserved (RFC 9209 append).
             # Proxy-Status identifiers use server local addresses.
-            assert "received-status=200" in ps, \
-                f"Expected received-status=200 in Proxy-Status: {ps}"
-            assert ", " in ps, \
-                f"Expected two Proxy-Status entries (upstream + entry): {ps}"
+            assert "received-status=200" in ps, f"Expected received-status=200 in Proxy-Status: {ps}"
+            assert ", " in ps, f"Expected two Proxy-Status entries (upstream + entry): {ps}"
 
         finally:
             if entry_proc:
@@ -163,6 +156,7 @@ class TestHttp3ChainProxyStatus:
             if target_socket:
                 target_socket.close()
             import shutil
+
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_upstream_unreachable_has_error(self) -> None:
@@ -176,7 +170,7 @@ class TestHttp3ChainProxyStatus:
         temp_dir = tempfile.mkdtemp()
         http_port = get_unique_port()
         _, _, ca_path, _ = generate_test_certificates(temp_dir)
-        entry_proc: Optional[subprocess.Popen] = None
+        entry_proc: BytesProcess | None = None
 
         try:
             # Point to an unresolvable hostname — resolve_address()
@@ -217,20 +211,18 @@ servers:
 
             entry_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=10.0, proc=entry_proc
-            ), "Entry proxy (http3_chain) failed to start"
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=10.0, proc=entry_proc), (
+                "Entry proxy (http3_chain) failed to start"
+            )
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10)
             sock.connect(("127.0.0.1", http_port))
-            sock.sendall(
-                b"CONNECT 127.0.0.1:80 HTTP/1.1\r\n"
-                b"Host: 127.0.0.1:80\r\n"
-                b"\r\n"
-            )
+            sock.sendall(b"CONNECT 127.0.0.1:80 HTTP/1.1\r\nHost: 127.0.0.1:80\r\n\r\n")
 
             response = b""
             try:
@@ -243,27 +235,25 @@ servers:
                 pass
             sock.close()
 
-            assert response, \
-                f"Empty response from proxy"
+            assert response, "Empty response from proxy"
 
             status = _parse_status_code(response)
-            assert status is not None, \
-                f"Could not parse status. Response: {response.decode(errors='ignore')[:200]}"
-            assert status == 502 or status == 503, \
+            assert status is not None, f"Could not parse status. Response: {response.decode(errors='ignore')[:200]}"
+            assert status == 502 or status == 503, (
                 f"Expected 502 or 503, got {status}. Response: {response.decode(errors='ignore')[:200]}"
+            )
 
             ps = _get_header(response, "proxy-status")
-            assert ps is not None, \
-                f"Proxy-Status not found: {response.decode(errors='ignore')[:200]}"
+            assert ps is not None, f"Proxy-Status not found: {response.decode(errors='ignore')[:200]}"
 
             # DNS error -> error=dns_error
-            assert "error=dns_error" in ps, \
-                f"Expected error=dns_error in Proxy-Status: {ps}"
+            assert "error=dns_error" in ps, f"Expected error=dns_error in Proxy-Status: {ps}"
 
         finally:
             if entry_proc:
                 terminate_process(entry_proc)
             import shutil
+
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_upstream_error_relayed_with_received_status(self) -> None:
@@ -279,9 +269,9 @@ servers:
         h3_port = get_unique_port()
         target_port = get_unique_port()
         cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
-        entry_proc: Optional[subprocess.Popen] = None
-        upstream_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        entry_proc: BytesProcess | None = None
+        upstream_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             # Start a target server on a different port - but DON'T start
@@ -290,40 +280,39 @@ servers:
             # This makes the upstream return 502.
 
             # Start upstream proxy (H3 listener + connect_tcp)
-            upstream_config_path = create_http3_listener_config(
-                h3_port, cert_path, key_path, temp_dir
-            )
+            upstream_config_path = create_http3_listener_config(h3_port, cert_path, key_path, temp_dir)
             upstream_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", upstream_config_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", h3_port, timeout=10.0, proc=upstream_proc
-            ), "Upstream proxy (H3) failed to start"
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=10.0, proc=upstream_proc), (
+                "Upstream proxy (H3) failed to start"
+            )
 
             # Start entry proxy
             entry_config_path = create_http3_chain_config(
                 http_port,
                 [("127.0.0.1", h3_port, 1)],
-                ca_path, temp_dir,
+                ca_path,
+                temp_dir,
             )
             entry_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", entry_config_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=10.0, proc=entry_proc
-            ), "Entry proxy (http3_chain) failed to start"
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=10.0, proc=entry_proc), (
+                "Entry proxy (http3_chain) failed to start"
+            )
 
             # CONNECT to a port where nothing is listening
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(15)
             sock.connect(("127.0.0.1", http_port))
-            sock.sendall(
-                f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\n"
-                f"Host: 127.0.0.1:{target_port}\r\n"
-                f"\r\n".encode()
-            )
+            sock.sendall(f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode())
 
             response = b""
             try:
@@ -339,22 +328,17 @@ servers:
             status = _parse_status_code(response)
             # The upstream connect_tcp returns 502 on connection refused
             # http3_chain relays the upstream status as-is
-            assert status == 502, \
-                f"Expected 502, got {status}. Response: {response.decode(errors='ignore')[:200]}"
+            assert status == 502, f"Expected 502, got {status}. Response: {response.decode(errors='ignore')[:200]}"
 
             ps = _get_header(response, "proxy-status")
-            assert ps is not None, \
-                f"Proxy-Status not found: {response.decode(errors='ignore')[:200]}"
+            assert ps is not None, f"Proxy-Status not found: {response.decode(errors='ignore')[:200]}"
 
             # Should preserve upstream error AND add our received-status.
             # Upstream connect_tcp sets Proxy-Status with error=connection_refused.
             # Entry http3_chain appends its entry with received-status.
-            assert "error=connection_refused" in ps, \
-                f"Expected error=connection_refused in Proxy-Status: {ps}"
-            assert "received-status=502" in ps, \
-                f"Expected received-status=502 in Proxy-Status: {ps}"
-            assert ", " in ps, \
-                f"Expected two Proxy-Status entries (upstream + entry): {ps}"
+            assert "error=connection_refused" in ps, f"Expected error=connection_refused in Proxy-Status: {ps}"
+            assert "received-status=502" in ps, f"Expected received-status=502 in Proxy-Status: {ps}"
+            assert ", " in ps, f"Expected two Proxy-Status entries (upstream + entry): {ps}"
 
         finally:
             if entry_proc:
@@ -364,4 +348,5 @@ servers:
             if target_socket:
                 target_socket.close()
             import shutil
+
             shutil.rmtree(temp_dir, ignore_errors=True)

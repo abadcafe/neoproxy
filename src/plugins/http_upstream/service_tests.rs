@@ -7,7 +7,7 @@ use tower::Service;
 use super::service::*;
 use super::upstream::UpstreamRegistry;
 use crate::context::RequestContext;
-use crate::http_utils::{Request, RequestBody};
+use crate::http_message::{Request, RequestBody};
 use crate::service::Service as RuntimeService;
 use crate::tracker::StreamTracker;
 
@@ -26,7 +26,7 @@ fn make_request(method: http::Method, uri: &str) -> Request {
     .method(method)
     .uri(uri)
     .body(RequestBody::new(
-      crate::http_utils::BytesBufBodyWrapper::new(
+      crate::http_message::BytesBufBodyWrapper::new(
         http_body_util::Empty::new(),
       ),
     ))

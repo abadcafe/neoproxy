@@ -24,8 +24,8 @@ const WRITER_REINIT_JOIN_TIMEOUT: std::time::Duration =
   std::time::Duration::from_secs(2);
 
 /// Log entry sent through channel.
-pub struct LogEntry {
-  pub entry: AccessLogEntry,
+pub(crate) struct LogEntry {
+  pub(crate) entry: AccessLogEntry,
 }
 
 /// Global writer registry (shared across all server threads).
@@ -40,13 +40,13 @@ pub(crate) static WRITER_REGISTRY: Mutex<
 > = Mutex::new(None);
 
 /// Handle to a named writer thread.
-pub struct WriterHandle {
+pub(crate) struct WriterHandle {
   tx: mpsc::SyncSender<LogEntry>,
   pub(crate) join_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl WriterHandle {
-  pub fn sender(&self) -> mpsc::SyncSender<LogEntry> {
+  pub(crate) fn sender(&self) -> mpsc::SyncSender<LogEntry> {
     self.tx.clone()
   }
 }
@@ -72,7 +72,7 @@ impl WriterHandle {
 /// critical sections (idempotency check and registry swap). Directory
 /// creation, thread spawning, and joining old writer threads are done
 /// outside the lock to avoid blocking `get_writer()` callers.
-pub fn init_writer_registry(
+pub(crate) fn init_writer_registry(
   config: &AccessLogPluginConfig,
 ) -> anyhow::Result<()> {
   // Phase 1: Under the lock, check idempotency and take old registry.
@@ -131,17 +131,16 @@ pub fn init_writer_registry(
   // be slow but must not block get_writer() callers (lock not held).
   for writer_config in &config.writers {
     let path = std::path::PathBuf::from(&writer_config.path_prefix);
-    if let Some(parent) = path.parent() {
-      if !parent.as_os_str().is_empty() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-          anyhow::anyhow!(
-            "access_log: failed to create directory for writer '{}': \
-             {}",
-            writer_config.path_prefix,
-            e
-          )
-        })?;
-      }
+    if let Some(parent) = path.parent()
+      && !parent.as_os_str().is_empty()
+    {
+      std::fs::create_dir_all(parent).map_err(|e| {
+        anyhow::anyhow!(
+          "access_log: failed to create directory for writer '{}': {}",
+          writer_config.path_prefix,
+          e
+        )
+      })?;
     }
   }
 
@@ -260,7 +259,7 @@ pub(crate) fn join_writer_handles(
 /// Look up a writer by path_prefix.
 ///
 /// Returns an error if the writer is not found in the registry.
-pub fn get_writer(
+pub(crate) fn get_writer(
   path_prefix: &str,
 ) -> anyhow::Result<mpsc::SyncSender<LogEntry>> {
   let guard = WRITER_REGISTRY.lock().unwrap();
@@ -283,7 +282,7 @@ pub fn get_writer(
 /// detached writer threads from a previous test may still be running
 /// (holding file handles) when the next test starts.
 #[cfg(test)]
-pub fn reset_writer_registry() {
+pub(crate) fn reset_writer_registry() {
   let old_registry = {
     let mut guard = WRITER_REGISTRY.lock().unwrap();
     guard.take()

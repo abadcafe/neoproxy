@@ -5,7 +5,7 @@
 //! servers public operations: plugin_name, create_plugin
 //! data entities: HttpUpstreamPlugin
 //! tests: service::tests, config::tests, error::tests, inherit::tests,
-//! target_parser_tests.rs, upstream::upstream_tests.rs
+//! target_parser_tests.rs, upstream child module tests
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -40,8 +40,6 @@ mod inherit_tests;
 mod service_tests;
 #[cfg(test)]
 mod target_parser_tests;
-#[cfg(test)]
-mod upstream_tests;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -152,7 +150,7 @@ pub fn create_plugin(
 
   info!(
     "http_upstream: initialized with {} upstream(s)",
-    registry.entries.len()
+    registry.len()
   );
 
   Ok(Box::new(HttpUpstreamPlugin::new(registry)))

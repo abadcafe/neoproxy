@@ -4,7 +4,8 @@
 //! submodule test files: socks5/handshake_tests.rs and
 //! socks5/command_tests.rs.
 
-use super::test_helpers::{empty_args, test_servers};
+use super::listener_args_fixture::empty_args;
+use super::server_fixtures::plain_servers;
 use crate::listeners::socks5;
 
 // ========== listener_name ==========
@@ -34,7 +35,7 @@ fn test_socks5_builder_valid_address_succeeds() {
   let result = builder(
     vec!["127.0.0.1:0".to_string()],
     empty_args(),
-    test_servers(),
+    plain_servers(),
   );
   assert!(result.is_ok());
 }
@@ -45,7 +46,7 @@ fn test_socks5_builder_invalid_address_returns_error() {
   let result = builder(
     vec!["invalid_address".to_string()],
     empty_args(),
-    test_servers(),
+    plain_servers(),
   );
   assert!(result.is_err());
 }
@@ -56,7 +57,7 @@ fn test_socks5_builder_default_args_succeeds() {
   let result = builder(
     vec!["127.0.0.1:0".to_string()],
     empty_args(),
-    test_servers(),
+    plain_servers(),
   );
   assert!(result.is_ok());
 }
@@ -67,7 +68,7 @@ fn test_socks5_builder_custom_handshake_timeout_succeeds() {
   let args: crate::config::SerializedArgs =
     serde_yaml::from_str(r#"handshake_timeout: "5s""#).unwrap();
   let result =
-    builder(vec!["127.0.0.1:0".to_string()], args, test_servers());
+    builder(vec!["127.0.0.1:0".to_string()], args, plain_servers());
   assert!(result.is_ok());
 }
 
@@ -78,7 +79,7 @@ fn test_socks5_builder_invalid_handshake_timeout_returns_error() {
     serde_yaml::from_str(r#"handshake_timeout: "not_a_duration""#)
       .unwrap();
   let result =
-    builder(vec!["127.0.0.1:0".to_string()], args, test_servers());
+    builder(vec!["127.0.0.1:0".to_string()], args, plain_servers());
   assert!(result.is_err());
 }
 
@@ -88,7 +89,7 @@ fn test_socks5_builder_unknown_yaml_field_rejected() {
   let args: crate::config::SerializedArgs =
     serde_yaml::from_str(r#"unknown_field: true"#).unwrap();
   let result =
-    builder(vec!["127.0.0.1:0".to_string()], args, test_servers());
+    builder(vec!["127.0.0.1:0".to_string()], args, plain_servers());
   assert!(result.is_err());
 }
 
@@ -106,7 +107,7 @@ fn test_socks5_builder_multiple_addresses_succeeds() {
   let result = builder(
     vec!["127.0.0.1:0".to_string(), "127.0.0.1:0".to_string()],
     empty_args(),
-    test_servers(),
+    plain_servers(),
   );
   assert!(result.is_ok());
 }
@@ -115,6 +116,6 @@ fn test_socks5_builder_multiple_addresses_succeeds() {
 fn test_socks5_builder_ipv6_address_succeeds() {
   let builder = socks5::create_listener_builder();
   let result =
-    builder(vec!["[::1]:0".to_string()], empty_args(), test_servers());
+    builder(vec!["[::1]:0".to_string()], empty_args(), plain_servers());
   assert!(result.is_ok());
 }

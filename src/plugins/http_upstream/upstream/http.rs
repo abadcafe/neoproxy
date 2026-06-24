@@ -16,12 +16,12 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tower::Service;
 use tracing::warn;
 
-use super::utils::{
-  apply_proxy_auth, build_connect_request, resolve_address,
-};
+use super::address_resolution::resolve_address;
+use super::connect_request::build_connect_request;
+use super::proxy_auth::apply_proxy_auth;
 use super::{ClientProtocol, ConnectResult};
 use crate::context::{RequestContext, get_server_id};
-use crate::http_utils::{
+use crate::http_message::{
   BytesBufBodyWrapper, RequestBody, Response, ResponseBody,
   append_proxy_status, build_error_response,
   build_proxy_status_with_status,
@@ -196,9 +196,7 @@ impl Service<Uri> for ProxyConnector {
               format!("DNS resolve for '{proxy_addr}' timed out"),
             )
           })?
-          .map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, e)
-          })?;
+          .map_err(std::io::Error::other)?;
       let stream = tokio::time::timeout(
         timeout,
         tokio::net::TcpStream::connect(addr),
@@ -304,19 +302,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for Rewind<T> {
     cx: &mut std::task::Context<'_>,
     buf: &mut tokio::io::ReadBuf<'_>,
   ) -> std::task::Poll<std::io::Result<()>> {
-    if let Some(ref mut prefix) = self.prefix {
-      if !prefix.is_empty() {
-        let n = std::cmp::min(buf.remaining(), prefix.len());
-        if n > 0 {
-          buf.put_slice(&prefix[..n]);
-          *prefix = prefix.slice(n..);
-          if prefix.is_empty() {
-            self.prefix = None;
-          }
-          return std::task::Poll::Ready(Ok(()));
+    if let Some(ref mut prefix) = self.prefix
+      && !prefix.is_empty()
+    {
+      let n = std::cmp::min(buf.remaining(), prefix.len());
+      if n > 0 {
+        buf.put_slice(&prefix[..n]);
+        *prefix = prefix.slice(n..);
+        if prefix.is_empty() {
+          self.prefix = None;
         }
-        self.prefix = None;
+        return std::task::Poll::Ready(Ok(()));
       }
+      self.prefix = None;
     }
     std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
   }
@@ -556,7 +554,7 @@ where
                   "DNS resolve for '{addr}' timed out"
                 ))
               })?
-              .map_err(|e| classify_connect_error(e))?;
+              .map_err(classify_connect_error)?;
           let stream = tokio::time::timeout(
             connect_timeout,
             tokio::net::TcpStream::connect(resolved),
@@ -684,7 +682,7 @@ impl ClientProtocol for HttpsClient {
               "DNS resolve for '{addr}' timed out"
             ))
           })?
-          .map_err(|e| classify_connect_error(e))?;
+          .map_err(classify_connect_error)?;
       let stream = tokio::time::timeout(
         connect_timeout,
         tokio::net::TcpStream::connect(resolved),

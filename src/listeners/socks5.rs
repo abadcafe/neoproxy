@@ -34,7 +34,7 @@ use tower::Service;
 
 use super::tcp_listener_base::TcpListenerBase;
 use crate::config::SerializedArgs;
-use crate::http_utils::{BytesBufBodyWrapper, RequestBody};
+use crate::http_message::{BytesBufBodyWrapper, RequestBody};
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };

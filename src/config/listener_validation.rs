@@ -140,20 +140,20 @@ pub fn validate_hostname_routing_compatibility(
                            * this */
       };
 
-      if let Some(props) = registry.listener_props(listener_kind) {
-        if !props.supports_hostname_routing {
-          collector.add(ConfigError::InvalidFormat {
-            location: format!(
-              "servers[{}].listeners[{}]",
-              server_idx, listener_idx
-            ),
-            message: format!(
-              "listener kind '{}' does not support hostname routing, \
-               but server '{}' has hostnames configured",
-              listener_kind, server.name
-            ),
-          });
-        }
+      if let Some(props) = registry.listener_props(listener_kind)
+        && !props.supports_hostname_routing
+      {
+        collector.add(ConfigError::InvalidFormat {
+          location: format!(
+            "servers[{}].listeners[{}]",
+            server_idx, listener_idx
+          ),
+          message: format!(
+            "listener kind '{}' does not support hostname routing, \
+             but server '{}' has hostnames configured",
+            listener_kind, server.name
+          ),
+        });
       }
     }
   }

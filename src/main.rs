@@ -7,8 +7,6 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-#[cfg(feature = "tls-openssl")]
-use rustls_openssl;
 use tokio::signal::unix as signal;
 use tokio::{runtime, sync, task};
 use tracing::{debug, error, info, warn};
@@ -21,7 +19,7 @@ mod auth;
 mod config;
 mod context;
 mod h3_stream;
-mod http_utils;
+mod http_message;
 mod listener;
 mod listeners;
 mod plugin;
@@ -50,7 +48,7 @@ mod config_tests;
 #[cfg(test)]
 mod context_tests;
 #[cfg(test)]
-mod http_utils_tests;
+mod http_message_tests;
 #[cfg(test)]
 mod server_tests;
 #[cfg(test)]
@@ -393,32 +391,39 @@ fn check_server_threads(
 }
 
 /// Install the rustls crypto provider based on configuration.
-fn install_tls_provider(config: &Config) {
+fn install_tls_provider(config: &Config) -> Result<()> {
   let provider_name = config.tls_provider.as_deref().unwrap_or("ring");
   match provider_name {
+    #[cfg(feature = "tls-openssl")]
     "openssl" => {
-      #[cfg(feature = "tls-openssl")]
-      {
-        rustls_openssl::default_provider().install_default().expect(
-          "Failed to install rustls-openssl rustls crypto provider",
-        );
-        return;
-      }
-      #[cfg(not(feature = "tls-openssl"))]
-      panic!(
+      rustls_openssl::default_provider().install_default().map_err(
+        |_| {
+          anyhow::anyhow!(
+            "Failed to install rustls-openssl rustls crypto provider",
+          )
+        },
+      )?;
+      Ok(())
+    }
+    #[cfg(not(feature = "tls-openssl"))]
+    "openssl" => {
+      anyhow::bail!(
         "tls_provider 'openssl' requires the 'tls-openssl' cargo \
          feature"
-      );
+      )
     }
     "ring" => {
       rustls::crypto::ring::default_provider()
         .install_default()
-        .expect("Failed to install rustls crypto provider");
+        .map_err(|_| {
+          anyhow::anyhow!("Failed to install rustls crypto provider")
+        })?;
+      Ok(())
     }
     other => {
-      panic!(
+      anyhow::bail!(
         "Unknown tls_provider '{other}'. Supported: 'ring', 'openssl'"
-      );
+      )
     }
   }
 }
@@ -428,7 +433,7 @@ fn main() -> Result<()> {
   let config = Config::load(&CmdOpt::global().config_file)?;
 
   // Install rustls crypto provider based on config
-  install_tls_provider(&config);
+  install_tls_provider(&config)?;
 
   // Validate config
   let mut collector = ConfigErrorCollector::new();

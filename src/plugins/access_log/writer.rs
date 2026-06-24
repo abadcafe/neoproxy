@@ -136,16 +136,15 @@ impl AccessLogWriter {
       } else {
         std::path::PathBuf::from(&self.path_prefix)
       };
-      if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-          if let Err(e) = std::fs::create_dir_all(parent) {
-            error!(
-              "access_log: failed to create directory '{}': {}",
-              parent.display(),
-              e
-            );
-          }
-        }
+      if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(e) = std::fs::create_dir_all(parent)
+      {
+        error!(
+          "access_log: failed to create directory '{}': {}",
+          parent.display(),
+          e
+        );
       }
 
       match OpenOptions::new().create(true).append(true).open(&path) {

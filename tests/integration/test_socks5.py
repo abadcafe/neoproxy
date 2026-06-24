@@ -5,27 +5,24 @@ SOCKS5 Listener 集成测试
 测试性质: 黑盒测试，通过外部接口验证行为
 """
 
-import subprocess
-import socket
-import struct
-import threading
-import tempfile
-import shutil
-import time
 import os
+import shutil
 import signal
-from typing import Callable, Tuple, List, Dict, Optional
-
-from .utils.helpers import (
-    NEOPROXY_BINARY,
-    start_proxy,
-    wait_for_proxy,
-    create_target_server,
-    terminate_process,
-)
+import socket
+import tempfile
+import threading
+import time
 
 from .conftest import get_unique_port
-
+from .types import (
+    BytesProcess,
+)
+from .utils.helpers import (
+    create_target_server,
+    start_proxy,
+    terminate_process,
+    wait_for_proxy,
+)
 
 # ==============================================================================
 # Constants
@@ -62,6 +59,13 @@ SOCKS5_REP_ADDRESS_TYPE_NOT_SUPPORTED = 0x08
 PASSWORD_AUTH_SUCCESS = 0x00
 PASSWORD_AUTH_FAILURE = 0x01
 
+type UserConfig = dict[str, str]
+
+
+def send_ok_and_close(conn: socket.socket) -> None:
+    conn.send(b"OK")
+    conn.close()
+
 
 # ==============================================================================
 # Configuration Helpers
@@ -71,11 +75,11 @@ PASSWORD_AUTH_FAILURE = 0x01
 def create_socks5_config(
     proxy_port: int,
     temp_dir: str,
-    auth_type: Optional[str] = None,
-    users: Optional[List[Dict[str, str]]] = None,
-    addresses: Optional[List[str]] = None,
-    handshake_timeout: Optional[str] = None,
-    server_threads: int = 1
+    auth_type: str | None = None,
+    users: list[UserConfig] | None = None,
+    addresses: list[str] | None = None,
+    handshake_timeout: str | None = None,
+    server_threads: int = 1,
 ) -> str:
     """
     Create SOCKS5 listener configuration file.
@@ -96,7 +100,7 @@ def create_socks5_config(
         addresses = [f"0.0.0.0:{proxy_port}"]
 
     # Build args section for the listener
-    args_entries = []
+    args_entries: list[str] = []
     if handshake_timeout:
         args_entries.append(f'    handshake_timeout: "{handshake_timeout}"')
 
@@ -109,16 +113,12 @@ def create_socks5_config(
 
     # Build auth layer for the service
     if auth_type == "password" and users:
-        users_yaml_lines = []
+        users_yaml_lines: list[str] = []
         for u in users:
             users_yaml_lines.append(f'        - username: "{u["username"]}"')
             users_yaml_lines.append(f'          password: "{u["password"]}"')
-        layers_yaml = (
-            "\n  layers:"
-            "\n    - kind: auth.basic_auth"
-            "\n      args:"
-            "\n        users:\n"
-            + "\n".join(users_yaml_lines)
+        layers_yaml = "\n  layers:\n    - kind: auth.basic_auth\n      args:\n        users:\n" + "\n".join(
+            users_yaml_lines
         )
     else:
         layers_yaml = ""
@@ -181,11 +181,7 @@ def socks5_handshake_no_auth(sock: socket.socket) -> bool:
     return response[0] == SOCKS5_VERSION and response[1] == SOCKS5_AUTH_NONE
 
 
-def socks5_handshake_password(
-    sock: socket.socket,
-    username: str,
-    password: str
-) -> Tuple[bool, int]:
+def socks5_handshake_password(sock: socket.socket, username: str, password: str) -> tuple[bool, int]:
     """
     Perform SOCKS5 handshake with username/password authentication.
 
@@ -195,7 +191,7 @@ def socks5_handshake_password(
         password: Password for authentication
 
     Returns:
-        Tuple[bool, int]: (success, auth_status)
+        tuple[bool, int]: (success, auth_status)
     """
     # Send: VER=5, NMETHODS=1, METHOD=0x02
     sock.send(bytes([SOCKS5_VERSION, 0x01, SOCKS5_AUTH_PASSWORD]))
@@ -213,8 +209,7 @@ def socks5_handshake_password(
     username_bytes = username.encode("utf-8")
     password_bytes = password.encode("utf-8")
 
-    auth_request = bytes([0x01, len(username_bytes)]) + username_bytes + \
-                   bytes([len(password_bytes)]) + password_bytes
+    auth_request = bytes([0x01, len(username_bytes)]) + username_bytes + bytes([len(password_bytes)]) + password_bytes
     sock.send(auth_request)
 
     # Receive: VER=1, STATUS
@@ -225,11 +220,7 @@ def socks5_handshake_password(
     return auth_response[1] == PASSWORD_AUTH_SUCCESS, auth_response[1]
 
 
-def socks5_connect_ipv4(
-    sock: socket.socket,
-    target_ip: str,
-    target_port: int
-) -> Tuple[bool, int]:
+def socks5_connect_ipv4(sock: socket.socket, target_ip: str, target_port: int) -> tuple[bool, int]:
     """
     Send SOCKS5 CONNECT command with IPv4 address.
 
@@ -239,21 +230,26 @@ def socks5_connect_ipv4(
         target_port: Target port
 
     Returns:
-        Tuple[bool, int]: (success, reply_code)
+        tuple[bool, int]: (success, reply_code)
     """
     # Parse IPv4 address
     ip_parts = [int(x) for x in target_ip.split(".")]
 
     # Send: VER=5, CMD=CONNECT, RSV=0, ATYP=IPv4, DST.ADDR, DST.PORT
-    request = bytes([
-        SOCKS5_VERSION,
-        SOCKS5_CMD_CONNECT,
-        0x00,
-        SOCKS5_ATYP_IPV4,
-        ip_parts[0], ip_parts[1], ip_parts[2], ip_parts[3],
-        (target_port >> 8) & 0xFF,
-        target_port & 0xFF
-    ])
+    request = bytes(
+        [
+            SOCKS5_VERSION,
+            SOCKS5_CMD_CONNECT,
+            0x00,
+            SOCKS5_ATYP_IPV4,
+            ip_parts[0],
+            ip_parts[1],
+            ip_parts[2],
+            ip_parts[3],
+            (target_port >> 8) & 0xFF,
+            target_port & 0xFF,
+        ]
+    )
     sock.send(request)
 
     # Receive: VER=5, REP, RSV=0, ATYP, BND.ADDR, BND.PORT
@@ -264,11 +260,7 @@ def socks5_connect_ipv4(
     return response[1] == SOCKS5_REP_SUCCESS, response[1]
 
 
-def socks5_connect_ipv6(
-    sock: socket.socket,
-    target_ip: str,
-    target_port: int
-) -> Tuple[bool, int]:
+def socks5_connect_ipv6(sock: socket.socket, target_ip: str, target_port: int) -> tuple[bool, int]:
     """
     Send SOCKS5 CONNECT command with IPv6 address.
 
@@ -278,22 +270,19 @@ def socks5_connect_ipv6(
         target_port: Target port
 
     Returns:
-        Tuple[bool, int]: (success, reply_code)
+        tuple[bool, int]: (success, reply_code)
     """
     # Parse IPv6 address
     import ipaddress
+
     ip_bytes = ipaddress.IPv6Address(target_ip).packed
 
     # Send: VER=5, CMD=CONNECT, RSV=0, ATYP=IPv6, DST.ADDR (16 bytes), DST.PORT
-    request = bytes([
-        SOCKS5_VERSION,
-        SOCKS5_CMD_CONNECT,
-        0x00,
-        SOCKS5_ATYP_IPV6
-    ]) + ip_bytes + bytes([
-        (target_port >> 8) & 0xFF,
-        target_port & 0xFF
-    ])
+    request = (
+        bytes([SOCKS5_VERSION, SOCKS5_CMD_CONNECT, 0x00, SOCKS5_ATYP_IPV6])
+        + ip_bytes
+        + bytes([(target_port >> 8) & 0xFF, target_port & 0xFF])
+    )
     sock.send(request)
 
     # Receive: VER=5, REP, RSV=0, ATYP, BND.ADDR, BND.PORT
@@ -304,11 +293,7 @@ def socks5_connect_ipv6(
     return response[1] == SOCKS5_REP_SUCCESS, response[1]
 
 
-def socks5_connect_domain(
-    sock: socket.socket,
-    domain: str,
-    target_port: int
-) -> Tuple[bool, int]:
+def socks5_connect_domain(sock: socket.socket, domain: str, target_port: int) -> tuple[bool, int]:
     """
     Send SOCKS5 CONNECT command with domain name.
 
@@ -318,21 +303,24 @@ def socks5_connect_domain(
         target_port: Target port
 
     Returns:
-        Tuple[bool, int]: (success, reply_code)
+        tuple[bool, int]: (success, reply_code)
     """
     domain_bytes = domain.encode("utf-8")
 
     # Send: VER=5, CMD=CONNECT, RSV=0, ATYP=DOMAIN, DOMAIN_LEN, DOMAIN, PORT
-    request = bytes([
-        SOCKS5_VERSION,
-        SOCKS5_CMD_CONNECT,
-        0x00,
-        SOCKS5_ATYP_DOMAIN,
-        len(domain_bytes)
-    ]) + domain_bytes + bytes([
-        (target_port >> 8) & 0xFF,
-        target_port & 0xFF
-    ])
+    request = (
+        bytes(
+            [
+                SOCKS5_VERSION,
+                SOCKS5_CMD_CONNECT,
+                0x00,
+                SOCKS5_ATYP_DOMAIN,
+                len(domain_bytes),
+            ]
+        )
+        + domain_bytes
+        + bytes([(target_port >> 8) & 0xFF, target_port & 0xFF])
+    )
     sock.send(request)
 
     # Receive: VER=5, REP, RSV=0, ATYP, BND.ADDR, BND.PORT
@@ -344,7 +332,7 @@ def socks5_connect_domain(
     return response[1] == SOCKS5_REP_SUCCESS, response[1]
 
 
-def socks5_send_bind_command(sock: socket.socket) -> Tuple[bool, int]:
+def socks5_send_bind_command(sock: socket.socket) -> tuple[bool, int]:
     """
     Send SOCKS5 BIND command (not supported).
 
@@ -352,17 +340,23 @@ def socks5_send_bind_command(sock: socket.socket) -> Tuple[bool, int]:
         sock: Socket after successful handshake
 
     Returns:
-        Tuple[bool, int]: (success, reply_code)
+        tuple[bool, int]: (success, reply_code)
     """
     # Send BIND command to localhost:0
-    request = bytes([
-        SOCKS5_VERSION,
-        SOCKS5_CMD_BIND,
-        0x00,
-        SOCKS5_ATYP_IPV4,
-        127, 0, 0, 1,
-        0, 0
-    ])
+    request = bytes(
+        [
+            SOCKS5_VERSION,
+            SOCKS5_CMD_BIND,
+            0x00,
+            SOCKS5_ATYP_IPV4,
+            127,
+            0,
+            0,
+            1,
+            0,
+            0,
+        ]
+    )
     sock.send(request)
 
     response = sock.recv(10)
@@ -372,7 +366,7 @@ def socks5_send_bind_command(sock: socket.socket) -> Tuple[bool, int]:
     return response[1] == SOCKS5_REP_SUCCESS, response[1]
 
 
-def socks5_send_udp_associate(sock: socket.socket) -> Tuple[bool, int]:
+def socks5_send_udp_associate(sock: socket.socket) -> tuple[bool, int]:
     """
     Send SOCKS5 UDP ASSOCIATE command (not supported).
 
@@ -380,17 +374,23 @@ def socks5_send_udp_associate(sock: socket.socket) -> Tuple[bool, int]:
         sock: Socket after successful handshake
 
     Returns:
-        Tuple[bool, int]: (success, reply_code)
+        tuple[bool, int]: (success, reply_code)
     """
     # Send UDP ASSOCIATE command
-    request = bytes([
-        SOCKS5_VERSION,
-        SOCKS5_CMD_UDP_ASSOCIATE,
-        0x00,
-        SOCKS5_ATYP_IPV4,
-        0, 0, 0, 0,
-        0, 0
-    ])
+    request = bytes(
+        [
+            SOCKS5_VERSION,
+            SOCKS5_CMD_UDP_ASSOCIATE,
+            0x00,
+            SOCKS5_ATYP_IPV4,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]
+    )
     sock.send(request)
 
     response = sock.recv(10)
@@ -438,15 +438,15 @@ class TestSocks5BasicConnection:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             # Create config (no auth field = no auth required)
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             # Create target server
-            received_data: List[bytes] = []
+            received_data: list[bytes] = []
 
             def echo_handler(conn: socket.socket) -> None:
                 try:
@@ -456,19 +456,16 @@ class TestSocks5BasicConnection:
                             break
                         received_data.append(data)
                         conn.send(b"ECHO:" + data)
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
             # Start proxy
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
 
             # Connect and perform SOCKS5 handshake
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -487,16 +484,14 @@ class TestSocks5BasicConnection:
                 test_data = b"HELLO_SOCKS5"
                 sock.send(test_data)
                 response = sock.recv(1024)
-                assert response == b"ECHO:" + test_data, \
-                    f"Expected 'ECHO:{test_data}', got: {response}"
+                assert response == b"ECHO:" + test_data, f"Expected 'ECHO:{test_data}', got: {response}"
 
             finally:
                 sock.close()
 
             # Verify target received data
             time.sleep(0.2)
-            assert any(test_data in d for d in received_data), \
-                "Target server did not receive data"
+            assert any(test_data in d for d in received_data), "Target server did not receive data"
 
         finally:
             if proxy_proc:
@@ -514,15 +509,13 @@ class TestSocks5BasicConnection:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             # Create config with password auth
             users = [{"username": "testuser", "password": "testpass"}]
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_type="password", users=users
-            )
+            config_path = create_socks5_config(proxy_port, temp_dir, auth_type="password", users=users)
 
             # Create target server
             def echo_handler(conn: socket.socket) -> None:
@@ -530,19 +523,16 @@ class TestSocks5BasicConnection:
                     data = conn.recv(1024)
                     if data:
                         conn.send(b"OK")
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
             # Start proxy
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
 
             # Connect and authenticate
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -551,9 +541,7 @@ class TestSocks5BasicConnection:
                 sock.connect(("127.0.0.1", proxy_port))
 
                 # Authenticate with correct credentials
-                success, status = socks5_handshake_password(
-                    sock, "testuser", "testpass"
-                )
+                success, status = socks5_handshake_password(sock, "testuser", "testpass")
                 assert success, f"Authentication failed with status {status}"
 
                 # Connect to target
@@ -586,19 +574,16 @@ class TestSocks5BasicConnection:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             # Create config with password auth
             users = [{"username": "testuser", "password": "correctpass"}]
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_type="password", users=users
-            )
+            config_path = create_socks5_config(proxy_port, temp_dir, auth_type="password", users=users)
 
             # Start proxy
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
 
             # Connect and try wrong password
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -607,18 +592,12 @@ class TestSocks5BasicConnection:
                 sock.connect(("127.0.0.1", proxy_port))
 
                 # Handshake always succeeds (auth deferred to middleware)
-                success, status = socks5_handshake_password(
-                    sock, "testuser", "wrongpass"
-                )
-                assert success, \
-                    f"Handshake should succeed (auth is deferred), got status {status}"
+                success, status = socks5_handshake_password(sock, "testuser", "wrongpass")
+                assert success, f"Handshake should succeed (auth is deferred), got status {status}"
 
                 # CONNECT should be rejected by the auth middleware
-                success, reply = socks5_connect_ipv4(
-                    sock, "127.0.0.1", target_port
-                )
-                assert not success, \
-                    f"CONNECT should fail with wrong credentials, got reply {reply}"
+                success, reply = socks5_connect_ipv4(sock, "127.0.0.1", target_port)
+                assert not success, f"CONNECT should fail with wrong credentials, got reply {reply}"
 
             finally:
                 sock.close()
@@ -637,19 +616,16 @@ class TestSocks5BasicConnection:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             # Create config with password auth
             users = [{"username": "testuser", "password": "testpass"}]
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_type="password", users=users
-            )
+            config_path = create_socks5_config(proxy_port, temp_dir, auth_type="password", users=users)
 
             # Start proxy
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
 
             # Request unsupported method (GSSAPI)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -658,8 +634,7 @@ class TestSocks5BasicConnection:
                 sock.connect(("127.0.0.1", proxy_port))
 
                 method = socks5_request_unsupported_method(sock)
-                assert method == SOCKS5_AUTH_NO_ACCEPTABLE, \
-                    f"Expected METHOD=0xFF, got {method}"
+                assert method == SOCKS5_AUTH_NO_ACCEPTABLE, f"Expected METHOD=0xFF, got {method}"
 
             finally:
                 sock.close()
@@ -681,14 +656,13 @@ class TestSocks5UnsupportedCommands:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -699,8 +673,7 @@ class TestSocks5UnsupportedCommands:
 
                 success, reply = socks5_send_bind_command(sock)
                 assert not success, "BIND command should fail"
-                assert reply == SOCKS5_REP_COMMAND_NOT_SUPPORTED, \
-                    f"Expected REP=0x07, got {reply}"
+                assert reply == SOCKS5_REP_COMMAND_NOT_SUPPORTED, f"Expected REP=0x07, got {reply}"
 
             finally:
                 sock.close()
@@ -718,14 +691,13 @@ class TestSocks5UnsupportedCommands:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -736,8 +708,7 @@ class TestSocks5UnsupportedCommands:
 
                 success, reply = socks5_send_udp_associate(sock)
                 assert not success, "UDP ASSOCIATE command should fail"
-                assert reply == SOCKS5_REP_COMMAND_NOT_SUPPORTED, \
-                    f"Expected REP=0x07, got {reply}"
+                assert reply == SOCKS5_REP_COMMAND_NOT_SUPPORTED, f"Expected REP=0x07, got {reply}"
 
             finally:
                 sock.close()
@@ -760,17 +731,14 @@ class TestSocks5HandshakeTimeout:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             # Use 0.5 second timeout for faster test
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, handshake_timeout="0.5s"
-            )
+            config_path = create_socks5_config(proxy_port, temp_dir, handshake_timeout="0.5s")
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(3.0)
@@ -782,15 +750,13 @@ class TestSocks5HandshakeTimeout:
                 try:
                     data = sock.recv(1024)
                     # If we receive data, it should be connection close
-                    assert len(data) == 0, \
-                        "Expected connection close, not response data"
+                    assert len(data) == 0, "Expected connection close, not response data"
                 except socket.timeout:
                     pass
 
                 elapsed = time.time() - start_time
                 # Should timeout around 0.5 seconds
-                assert elapsed >= 0.3, \
-                    f"Timeout too fast: {elapsed}s (expected ~0.5s)"
+                assert elapsed >= 0.3, f"Timeout too fast: {elapsed}s (expected ~0.5s)"
 
             finally:
                 sock.close()
@@ -809,16 +775,13 @@ class TestSocks5HandshakeTimeout:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, handshake_timeout="0.5s"
-            )
+            config_path = create_socks5_config(proxy_port, temp_dir, handshake_timeout="0.5s")
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(3.0)
@@ -833,14 +796,12 @@ class TestSocks5HandshakeTimeout:
                 try:
                     data = sock.recv(1024)
                     # Should not receive any response
-                    assert len(data) == 0, \
-                        "Should not receive response on timeout"
+                    assert len(data) == 0, "Should not receive response on timeout"
                 except socket.timeout:
                     pass
 
                 elapsed = time.time() - start_time
-                assert elapsed >= 0.3, \
-                    f"Timeout too fast: {elapsed}s (expected ~0.5s)"
+                assert elapsed >= 0.3, f"Timeout too fast: {elapsed}s (expected ~0.5s)"
 
             finally:
                 sock.close()
@@ -858,17 +819,14 @@ class TestSocks5HandshakeTimeout:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             # Use 0.5 second timeout
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, handshake_timeout="0.5s"
-            )
+            config_path = create_socks5_config(proxy_port, temp_dir, handshake_timeout="0.5s")
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(3.0)  # Longer than handshake timeout
@@ -884,8 +842,7 @@ class TestSocks5HandshakeTimeout:
 
                 elapsed = time.time() - start_time
                 # Should timeout around 0.5 second
-                assert 0.3 <= elapsed <= 1.5, \
-                    f"Timeout not matching config: {elapsed}s (expected ~0.5s)"
+                assert 0.3 <= elapsed <= 1.5, f"Timeout not matching config: {elapsed}s (expected ~0.5s)"
 
             finally:
                 sock.close()
@@ -908,8 +865,8 @@ class TestSocks5TargetAddressTypes:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
@@ -919,18 +876,15 @@ class TestSocks5TargetAddressTypes:
                     data = conn.recv(1024)
                     if data:
                         conn.send(b"IPV4_OK")
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -964,8 +918,8 @@ class TestSocks5TargetAddressTypes:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
@@ -975,7 +929,7 @@ class TestSocks5TargetAddressTypes:
                     data = conn.recv(1024)
                     if data:
                         conn.send(b"IPV6_OK")
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
@@ -991,7 +945,7 @@ class TestSocks5TargetAddressTypes:
                     target_socket.settimeout(5.0)
                     conn, _ = target_socket.accept()
                     echo_handler(conn)
-                except Exception:
+                except OSError:
                     pass
 
             thread = threading.Thread(target=accept_loop)
@@ -999,8 +953,7 @@ class TestSocks5TargetAddressTypes:
             thread.start()
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -1034,8 +987,8 @@ class TestSocks5TargetAddressTypes:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
@@ -1045,18 +998,15 @@ class TestSocks5TargetAddressTypes:
                     data = conn.recv(1024)
                     if data:
                         conn.send(b"DOMAIN_OK")
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -1095,20 +1045,20 @@ class TestSocks5ConnectionTarget:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             _, target_socket = create_target_server(
-                "127.0.0.1", target_port,
-                lambda conn: conn.send(b"OK") or conn.close()
+                "127.0.0.1",
+                target_port,
+                send_ok_and_close,
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -1118,8 +1068,7 @@ class TestSocks5ConnectionTarget:
 
                 success, reply = socks5_connect_ipv4(sock, "127.0.0.1", target_port)
                 assert success, f"Expected success, got reply {reply}"
-                assert reply == SOCKS5_REP_SUCCESS, \
-                    f"Expected REP=0x00, got {reply}"
+                assert reply == SOCKS5_REP_SUCCESS, f"Expected REP=0x00, got {reply}"
 
             finally:
                 sock.close()
@@ -1140,7 +1089,7 @@ class TestSocks5ConnectionTarget:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
@@ -1148,8 +1097,7 @@ class TestSocks5ConnectionTarget:
             # Don't create target server - port should be unavailable
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -1159,8 +1107,7 @@ class TestSocks5ConnectionTarget:
 
                 success, reply = socks5_connect_ipv4(sock, "127.0.0.1", target_port)
                 assert not success, "Connection should fail"
-                assert reply == SOCKS5_REP_CONNECTION_REFUSED, \
-                    f"Expected REP=0x05, got {reply}"
+                assert reply == SOCKS5_REP_CONNECTION_REFUSED, f"Expected REP=0x05, got {reply}"
 
             finally:
                 sock.close()
@@ -1182,14 +1129,13 @@ class TestSocks5PortBoundary:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -1198,7 +1144,7 @@ class TestSocks5PortBoundary:
                 assert socks5_handshake_no_auth(sock), "Handshake failed"
 
                 # Port 1 - unlikely to have service, should get connection refused
-                success, reply = socks5_connect_ipv4(sock, "127.0.0.1", 1)
+                success, _reply = socks5_connect_ipv4(sock, "127.0.0.1", 1)
                 # Should get some error (connection refused most likely)
                 assert not success, "Connection to port 1 should fail"
 
@@ -1218,14 +1164,13 @@ class TestSocks5PortBoundary:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -1234,7 +1179,7 @@ class TestSocks5PortBoundary:
                 assert socks5_handshake_no_auth(sock), "Handshake failed"
 
                 # Port 65535 - max valid port
-                success, reply = socks5_connect_ipv4(sock, "127.0.0.1", 65535)
+                success, _reply = socks5_connect_ipv4(sock, "127.0.0.1", 65535)
                 # Should get some error (connection refused most likely)
                 assert not success, "Connection to port 65535 should fail"
 
@@ -1259,23 +1204,21 @@ class TestSocks5UsernamePasswordBoundary:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             users = [{"username": "a", "password": "test"}]
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_type="password", users=users
-            )
+            config_path = create_socks5_config(proxy_port, temp_dir, auth_type="password", users=users)
 
             _, target_socket = create_target_server(
-                "127.0.0.1", target_port,
-                lambda conn: conn.send(b"OK") or conn.close()
+                "127.0.0.1",
+                target_port,
+                send_ok_and_close,
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -1304,23 +1247,21 @@ class TestSocks5UsernamePasswordBoundary:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             users = [{"username": "test", "password": "x"}]
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_type="password", users=users
-            )
+            config_path = create_socks5_config(proxy_port, temp_dir, auth_type="password", users=users)
 
             _, target_socket = create_target_server(
-                "127.0.0.1", target_port,
-                lambda conn: conn.send(b"OK") or conn.close()
+                "127.0.0.1",
+                target_port,
+                send_ok_and_close,
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -1349,24 +1290,22 @@ class TestSocks5UsernamePasswordBoundary:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             long_username = "a" * 255
             users = [{"username": long_username, "password": "test"}]
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_type="password", users=users
-            )
+            config_path = create_socks5_config(proxy_port, temp_dir, auth_type="password", users=users)
 
             _, target_socket = create_target_server(
-                "127.0.0.1", target_port,
-                lambda conn: conn.send(b"OK") or conn.close()
+                "127.0.0.1",
+                target_port,
+                send_ok_and_close,
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -1400,14 +1339,13 @@ class TestSocks5DomainBoundary:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5.0)
@@ -1416,7 +1354,7 @@ class TestSocks5DomainBoundary:
                 assert socks5_handshake_no_auth(sock), "Handshake failed"
 
                 # "x.invalid" won't resolve (RFC 2606 reserved TLD)
-                success, reply = socks5_connect_domain(sock, "x.invalid", 80)
+                success, _reply = socks5_connect_domain(sock, "x.invalid", 80)
                 # Will fail because domain won't resolve
                 assert not success, "Connection should fail"
 
@@ -1436,14 +1374,13 @@ class TestSocks5DomainBoundary:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -1453,7 +1390,7 @@ class TestSocks5DomainBoundary:
 
                 # 255-byte domain (valid length)
                 long_domain = "a" * 255
-                success, reply = socks5_connect_domain(sock, long_domain, 80)
+                success, _reply = socks5_connect_domain(sock, long_domain, 80)
                 # Will fail because domain won't resolve
                 assert not success, "Connection should fail"
 
@@ -1479,29 +1416,26 @@ class TestSocks5MultiAddress:
         proxy_port1 = get_unique_port()
         proxy_port2 = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             # Listen on two addresses
             addresses = [
                 f"0.0.0.0:{proxy_port1}",
-                f"0.0.0.0:{proxy_port2}"
+                f"0.0.0.0:{proxy_port2}",
             ]
-            config_path = create_socks5_config(
-                proxy_port1, temp_dir, addresses=addresses
-            )
+            config_path = create_socks5_config(proxy_port1, temp_dir, addresses=addresses)
 
             _, target_socket = create_target_server(
-                "127.0.0.1", target_port,
-                lambda conn: conn.send(b"OK") or conn.close()
+                "127.0.0.1",
+                target_port,
+                send_ok_and_close,
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port1, timeout=5.0), \
-                "Proxy server failed to start on port 1"
-            assert wait_for_proxy("127.0.0.1", proxy_port2, timeout=5.0), \
-                "Proxy server failed to start on port 2"
+            assert wait_for_proxy("127.0.0.1", proxy_port1, timeout=5.0), "Proxy server failed to start on port 1"
+            assert wait_for_proxy("127.0.0.1", proxy_port2, timeout=5.0), "Proxy server failed to start on port 2"
 
             # Test first address
             sock1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1532,6 +1466,7 @@ class TestSocks5MultiAddress:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+
 class TestSocks5ClientDisconnect:
     """Tests for client disconnect scenarios"""
 
@@ -1543,14 +1478,13 @@ class TestSocks5ClientDisconnect:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             # Connect and disconnect immediately
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1564,8 +1498,9 @@ class TestSocks5ClientDisconnect:
                 sock.close()
 
             # Server should still be running
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0), (
                 "Server should still accept connections after client disconnect"
+            )
 
             # Try another connection
             sock2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1594,8 +1529,8 @@ class TestSocks5GracefulShutdown:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
@@ -1605,18 +1540,15 @@ class TestSocks5GracefulShutdown:
                     # Keep connection open
                     time.sleep(10)
                     conn.send(b"DONE")
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, blocking_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, blocking_handler)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(15.0)
@@ -1659,13 +1591,13 @@ class TestSocks5BidirectionalTransfer:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
-            received_from_client: List[bytes] = []
+            received_from_client: list[bytes] = []
 
             def echo_handler(conn: socket.socket) -> None:
                 try:
@@ -1675,18 +1607,15 @@ class TestSocks5BidirectionalTransfer:
                             break
                         received_from_client.append(data)
                         conn.send(b"ECHO:" + data)
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -1701,13 +1630,13 @@ class TestSocks5BidirectionalTransfer:
                 for msg in messages:
                     sock.send(msg)
                     response = sock.recv(1024)
-                    assert response == b"ECHO:" + msg, \
-                        f"Expected 'ECHO:{msg}', got: {response}"
+                    assert response == b"ECHO:" + msg, f"Expected 'ECHO:{msg}', got: {response}"
 
                 # Verify all messages received
                 time.sleep(0.2)
-                assert len(received_from_client) == len(messages), \
+                assert len(received_from_client) == len(messages), (
                     f"Expected {len(messages)} messages, got {len(received_from_client)}"
+                )
 
             finally:
                 sock.close()
@@ -1718,8 +1647,6 @@ class TestSocks5BidirectionalTransfer:
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
-
-
 
 
 class TestSocks5AdditionalBoundary:
@@ -1734,24 +1661,22 @@ class TestSocks5AdditionalBoundary:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
             long_password = "x" * 255
             users = [{"username": "test", "password": long_password}]
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_type="password", users=users
-            )
+            config_path = create_socks5_config(proxy_port, temp_dir, auth_type="password", users=users)
 
             _, target_socket = create_target_server(
-                "127.0.0.1", target_port,
-                lambda conn: conn.send(b"OK") or conn.close()
+                "127.0.0.1",
+                target_port,
+                send_ok_and_close,
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -1779,14 +1704,13 @@ class TestSocks5AdditionalBoundary:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -1795,7 +1719,7 @@ class TestSocks5AdditionalBoundary:
                 assert socks5_handshake_no_auth(sock), "Handshake failed"
 
                 # Port 0 - invalid
-                success, reply = socks5_connect_ipv4(sock, "127.0.0.1", 0)
+                success, _reply = socks5_connect_ipv4(sock, "127.0.0.1", 0)
                 # Should fail
                 assert not success, "Connection to port 0 should fail"
 
@@ -1819,14 +1743,13 @@ class TestSocks5InvalidVersion:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -1840,9 +1763,12 @@ class TestSocks5InvalidVersion:
                 try:
                     data = sock.recv(1024)
                     # If we get data, it should be empty (connection close)
-                    assert len(data) == 0, \
-                        "Should not receive response for invalid version"
-                except (socket.timeout, ConnectionResetError, BrokenPipeError):
+                    assert len(data) == 0, "Should not receive response for invalid version"
+                except (
+                    socket.timeout,
+                    ConnectionResetError,
+                    BrokenPipeError,
+                ):
                     # Connection reset or timeout is acceptable -
                     # server detected invalid version and closed connection
                     pass
@@ -1863,14 +1789,13 @@ class TestSocks5InvalidVersion:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -1887,9 +1812,12 @@ class TestSocks5InvalidVersion:
                     # or not be a valid SOCKS5 response
                     if len(data) > 0:
                         # Should not be SOCKS5 version 5 response
-                        assert data[0] != SOCKS5_VERSION, \
-                            "Should not receive valid SOCKS5 response for HTTP data"
-                except (socket.timeout, ConnectionResetError, BrokenPipeError):
+                        assert data[0] != SOCKS5_VERSION, "Should not receive valid SOCKS5 response for HTTP data"
+                except (
+                    socket.timeout,
+                    ConnectionResetError,
+                    BrokenPipeError,
+                ):
                     # Connection reset or timeout is acceptable
                     pass
 
@@ -1913,17 +1841,14 @@ class TestSocks5HandshakeTimeoutFormat:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             # Use 0.5 second timeout in string format to verify parsing works
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, handshake_timeout="0.5s"
-            )
+            config_path = create_socks5_config(proxy_port, temp_dir, handshake_timeout="0.5s")
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(3.0)
@@ -1940,8 +1865,7 @@ class TestSocks5HandshakeTimeoutFormat:
 
                 elapsed = time.time() - start_time
                 # Should timeout around 0.5 second
-                assert 0.3 <= elapsed <= 1.5, \
-                    f"Timeout not matching config: {elapsed}s (expected ~0.5s)"
+                assert 0.3 <= elapsed <= 1.5, f"Timeout not matching config: {elapsed}s (expected ~0.5s)"
 
             finally:
                 sock.close()
@@ -1959,15 +1883,14 @@ class TestSocks5HandshakeTimeoutFormat:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             # No handshake_timeout specified, should use default 3s
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -1984,8 +1907,7 @@ class TestSocks5HandshakeTimeoutFormat:
 
                 elapsed = time.time() - start_time
                 # Default should be around 3 seconds
-                assert 2.0 <= elapsed <= 6.0, \
-                    f"Timeout not matching default: {elapsed}s (expected ~3s)"
+                assert 2.0 <= elapsed <= 6.0, f"Timeout not matching default: {elapsed}s (expected ~3s)"
 
             finally:
                 sock.close()
@@ -1994,4 +1916,3 @@ class TestSocks5HandshakeTimeoutFormat:
             if proxy_proc:
                 terminate_process(proxy_proc)
             shutil.rmtree(temp_dir, ignore_errors=True)
-

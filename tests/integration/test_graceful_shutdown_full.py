@@ -17,31 +17,29 @@ This test module covers the following scenarios from design document section 7:
 - 7.10 Initialization failure scenarios
 """
 
-import subprocess
-import socket
-import threading
-import tempfile
-import shutil
-import time
 import os
+import shutil
 import signal
-from typing import Optional, Tuple, List, Callable
+import socket
+import subprocess
+import tempfile
+import time
 
-from .utils.helpers import (
-    NEOPROXY_BINARY,
-    LISTENER_SHUTDOWN_TIMEOUT,
-    SERVICE_SHUTDOWN_TIMEOUT,
-    MAX_SHUTDOWN_TIME,
-    start_proxy,
-    wait_for_proxy,
-    create_target_server,
-    establish_connect_tunnel,
-    create_test_config,
-    create_echo_config,
-    wait_for_port_released,
-)
 from .conftest import get_unique_port
-
+from .types import (
+    BytesProcess,
+)
+from .utils.helpers import (
+    MAX_SHUTDOWN_TIME,
+    NEOPROXY_BINARY,
+    create_echo_config,
+    create_target_server,
+    create_test_config,
+    establish_connect_tunnel,
+    start_proxy,
+    wait_for_port_released,
+    wait_for_proxy,
+)
 
 # ==============================================================================
 # Test cases - 7.1 Normal shutdown scenarios
@@ -59,14 +57,13 @@ class TestNormalShutdown:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
 
             # Send SIGINT
             proxy_proc.send_signal(signal.SIGINT)
@@ -80,8 +77,7 @@ class TestNormalShutdown:
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0 (graceful shutdown)
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
@@ -97,14 +93,13 @@ class TestNormalShutdown:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -118,14 +113,14 @@ class TestNormalShutdown:
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0 (graceful shutdown)
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 # ==============================================================================
 # Test cases - 7.2 Repeated signal scenarios
@@ -143,14 +138,13 @@ class TestRepeatedSignal:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
 
             # Send multiple SIGINT signals rapidly
             proxy_proc.send_signal(signal.SIGINT)
@@ -168,8 +162,7 @@ class TestRepeatedSignal:
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
@@ -200,9 +193,9 @@ class TestShutdownTimeout:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
-        client_sock: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
+        client_sock: socket.socket | None = None
 
         try:
             config_path = create_test_config(proxy_port, temp_dir)
@@ -213,24 +206,19 @@ class TestShutdownTimeout:
                     # Keep connection open for a long time
                     # This simulates a long-running tunnel
                     time.sleep(60)
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, blocking_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, blocking_handler)
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
 
             # Establish CONNECT tunnel
-            client_sock = establish_connect_tunnel(
-                "127.0.0.1", proxy_port, "127.0.0.1", target_port
-            )
+            client_sock = establish_connect_tunnel("127.0.0.1", proxy_port, "127.0.0.1", target_port)
             assert client_sock is not None, "Failed to establish tunnel"
 
             # Send SIGTERM while tunnel is active
@@ -245,17 +233,16 @@ class TestShutdownTimeout:
                 proxy_proc.kill()
                 proxy_proc.wait()
                 elapsed = time.time() - start_time
-                assert False, \
-                    f"Process did not exit within expected time (elapsed: {elapsed:.1f}s)"
+                assert False, f"Process did not exit within expected time (elapsed: {elapsed:.1f}s)"
 
             # Verify shutdown completed within timeout
             # Should be approximately MAX_SHUTDOWN_TIME (8s) + some buffer
-            assert elapsed < MAX_SHUTDOWN_TIME + 2, \
+            assert elapsed < MAX_SHUTDOWN_TIME + 2, (
                 f"Shutdown took too long: {elapsed:.1f}s (expected < {MAX_SHUTDOWN_TIME + 2}s)"
+            )
 
             # Verify exit code is 0
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
         finally:
             if client_sock:
@@ -294,16 +281,17 @@ class TestErrorExit:
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        first_proc: Optional[subprocess.Popen] = None
-        second_proc: Optional[subprocess.Popen] = None
+        first_proc: BytesProcess | None = None
+        second_proc: BytesProcess | None = None
 
         try:
             # Start first process
             config_path1 = create_test_config(proxy_port, temp_dir1)
             first_proc = start_proxy(config_path1)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=first_proc), \
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=first_proc), (
                 "First proxy server failed to start"
+            )
 
             # Try to start second process with same port
             config_path2 = create_test_config(proxy_port, temp_dir2)
@@ -320,8 +308,7 @@ class TestErrorExit:
             if poll_result is not None:
                 # Process exited - verify error code
                 # Expected: exit code 2 or 3
-                assert poll_result in [2, 3], \
-                    f"Expected exit code 2 or 3, got {poll_result}"
+                assert poll_result in [2, 3], f"Expected exit code 2 or 3, got {poll_result}"
             else:
                 # Process is still running - send SIGTERM and verify clean exit
                 # This is the current observed behavior
@@ -332,13 +319,11 @@ class TestErrorExit:
                 except subprocess.TimeoutExpired:
                     second_proc.kill()
                     second_proc.wait()
-                    assert False, \
-                        "Second process did not exit even after SIGTERM"
+                    assert False, "Second process did not exit even after SIGTERM"
 
                 # Current behavior: exits with 0 after SIGTERM
                 # This is potentially a bug - should exit with 2 or 3
-                assert return_code == 0, \
-                    f"Expected exit code 0 after SIGTERM, got {return_code}"
+                assert return_code == 0, f"Expected exit code 0 after SIGTERM, got {return_code}"
 
         finally:
             if first_proc and first_proc.poll() is None:
@@ -368,15 +353,15 @@ class TestConnectTunnel:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
-        client_sock: Optional[socket.socket] = None
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
+        client_sock: socket.socket | None = None
 
         try:
             config_path = create_test_config(proxy_port, temp_dir)
 
             # Create target server
-            received_data: List[bytes] = []
+            received_data: list[bytes] = []
 
             def echo_handler(conn: socket.socket) -> None:
                 try:
@@ -386,31 +371,25 @@ class TestConnectTunnel:
                             break
                         received_data.append(data)
                         conn.send(b"ECHO:" + data)
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
 
             # Establish CONNECT tunnel
-            client_sock = establish_connect_tunnel(
-                "127.0.0.1", proxy_port, "127.0.0.1", target_port
-            )
+            client_sock = establish_connect_tunnel("127.0.0.1", proxy_port, "127.0.0.1", target_port)
             assert client_sock is not None, "Failed to establish tunnel"
 
             # Send data through tunnel
             client_sock.sendall(b"TEST_DATA")
             response = client_sock.recv(1024)
-            assert b"ECHO:TEST_DATA" in response, \
-                f"Expected ECHO response, got: {response}"
+            assert b"ECHO:TEST_DATA" in response, f"Expected ECHO response, got: {response}"
 
             # Send SIGTERM while tunnel is active
             proxy_proc.send_signal(signal.SIGTERM)
@@ -424,8 +403,7 @@ class TestConnectTunnel:
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
         finally:
             if client_sock:
@@ -454,14 +432,13 @@ class TestResourceCleanup:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -475,12 +452,12 @@ class TestResourceCleanup:
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
             # Wait for socket to be released
-            assert wait_for_port_released("127.0.0.1", proxy_port, timeout=2.0), \
+            assert wait_for_port_released("127.0.0.1", proxy_port, timeout=2.0), (
                 "Expected socket to be closed after shutdown"
+            )
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
@@ -496,15 +473,14 @@ class TestResourceCleanup:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        client_socks: List[socket.socket] = []
+        proxy_proc: BytesProcess | None = None
+        client_socks: list[socket.socket] = []
 
         try:
             config_path = create_echo_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), "Proxy server failed to start"
 
             # Create multiple idle connections
             num_connections = 5
@@ -526,8 +502,7 @@ class TestResourceCleanup:
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
         finally:
             for sock in client_socks:
@@ -564,7 +539,7 @@ class TestInitializationFailure:
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=False
+                text=False,
             )
 
             try:
@@ -575,8 +550,7 @@ class TestInitializationFailure:
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 1 (config error)
-            assert return_code == 1, \
-                f"Expected exit code 1, got {return_code}"
+            assert return_code == 1, f"Expected exit code 1, got {return_code}"
 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -591,7 +565,7 @@ class TestInitializationFailure:
             [NEOPROXY_BINARY, "--config", "/nonexistent/config.yaml"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=False
+            text=False,
         )
 
         try:
@@ -602,8 +576,7 @@ class TestInitializationFailure:
             assert False, "Process did not exit within expected time"
 
         # Verify exit code is 1 (file not found)
-        assert return_code == 1, \
-            f"Expected exit code 1, got {return_code}"
+        assert return_code == 1, f"Expected exit code 1, got {return_code}"
 
     def test_invalid_service_kind(self) -> None:
         """
@@ -632,7 +605,7 @@ servers:
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=False
+                text=False,
             )
 
             try:
@@ -643,8 +616,7 @@ servers:
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is non-zero (config error)
-            assert return_code != 0, \
-                f"Expected non-zero exit code, got {return_code}"
+            assert return_code != 0, f"Expected non-zero exit code, got {return_code}"
 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -666,16 +638,13 @@ class TestMultipleWorkerThreads:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
-            config_path = create_test_config(
-                proxy_port, temp_dir, server_threads=4
-            )
+            config_path = create_test_config(proxy_port, temp_dir, server_threads=4)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -689,8 +658,7 @@ class TestMultipleWorkerThreads:
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
@@ -698,7 +666,9 @@ class TestMultipleWorkerThreads:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_shutdown_with_multiple_workers_and_connections(self) -> None:
+    def test_shutdown_with_multiple_workers_and_connections(
+        self,
+    ) -> None:
         """
         TC-WORKERS-002: Shutdown with multiple workers and active connections.
 
@@ -707,14 +677,12 @@ class TestMultipleWorkerThreads:
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
-        client_socks: List[socket.socket] = []
+        proxy_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
+        client_socks: list[socket.socket] = []
 
         try:
-            config_path = create_test_config(
-                proxy_port, temp_dir, server_threads=4
-            )
+            config_path = create_test_config(proxy_port, temp_dir, server_threads=4)
 
             # Create target server
             def echo_handler(conn: socket.socket) -> None:
@@ -724,25 +692,20 @@ class TestMultipleWorkerThreads:
                         if not data:
                             break
                         conn.send(b"ECHO:" + data)
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
 
             # Establish multiple tunnels
             for _ in range(5):
-                sock = establish_connect_tunnel(
-                    "127.0.0.1", proxy_port, "127.0.0.1", target_port
-                )
+                sock = establish_connect_tunnel("127.0.0.1", proxy_port, "127.0.0.1", target_port)
                 if sock:
                     client_socks.append(sock)
 
@@ -760,8 +723,7 @@ class TestMultipleWorkerThreads:
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
         finally:
             for sock in client_socks:

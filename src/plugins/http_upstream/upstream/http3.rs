@@ -12,7 +12,7 @@ use tracing::{info, warn};
 
 use super::{ClientProtocol, ConnectResult};
 use crate::context::{RequestContext, get_server_id};
-use crate::http_utils::{
+use crate::http_message::{
   RequestBody, Response, ResponseBody, append_proxy_status,
   build_error_response, build_proxy_status_with_status,
 };
@@ -49,7 +49,8 @@ impl Http3AddressState {
   }
 }
 use super::QuicConfig;
-use super::utils::{apply_proxy_auth, resolve_address};
+use super::address_resolution::resolve_address;
+use super::proxy_auth::apply_proxy_auth;
 
 // ============================================================================
 // Connection Establishment (H3)
@@ -181,7 +182,7 @@ async fn create_quic_connection(
           "DNS resolve for '{address}' timed out"
         ))
       })?
-      .map_err(|e| classify_quic_error(e))?;
+      .map_err(classify_quic_error)?;
   let host: &str = hostname.unwrap_or_else(|| {
     address.split_at(address.rfind(':').unwrap_or(address.len())).0
   });
@@ -252,14 +253,14 @@ pub(super) async fn chain_forward_http3(
     }
   };
 
-  if !body_bytes.is_empty() {
-    if let Err(e) = stream.send_data(body_bytes).await {
-      warn!("http_upstream: H3 failed to send body: {e}");
-      return UpstreamError::ProxyInternalError(format!(
-        "Failed to send request body: {e}"
-      ))
-      .to_response(ctx);
-    }
+  if !body_bytes.is_empty()
+    && let Err(e) = stream.send_data(body_bytes).await
+  {
+    warn!("http_upstream: H3 failed to send body: {e}");
+    return UpstreamError::ProxyInternalError(format!(
+      "Failed to send request body: {e}"
+    ))
+    .to_response(ctx);
   }
 
   if let Err(e) = stream.finish().await {
@@ -331,7 +332,7 @@ pub(super) async fn chain_forward_http3(
     );
   }
 
-  let resp_body_wrapped = crate::http_utils::BytesBufBodyWrapper::new(
+  let resp_body_wrapped = crate::http_message::BytesBufBodyWrapper::new(
     http_body_util::Full::new(body_bytes),
   );
   let resp_body = ResponseBody::new(resp_body_wrapped);

@@ -9,29 +9,23 @@ This test module covers:
 - Additional edge cases for graceful shutdown
 """
 
-import subprocess
-import socket
-import threading
-import tempfile
-import shutil
-import time
 import os
+import shutil
 import signal
-from typing import Optional, Tuple, List, Callable
+import subprocess
+import tempfile
+import time
 
-from .utils.helpers import (
-    NEOPROXY_BINARY,
-    LISTENER_SHUTDOWN_TIMEOUT,
-    SERVICE_SHUTDOWN_TIMEOUT,
-    MAX_SHUTDOWN_TIME,
-    start_proxy,
-    wait_for_proxy,
-    create_target_server,
-    create_test_config,
-    wait_for_process_running,
-)
 from .conftest import get_unique_port
-
+from .types import (
+    BytesProcess,
+)
+from .utils.helpers import (
+    create_test_config,
+    start_proxy,
+    wait_for_process_running,
+    wait_for_proxy,
+)
 
 # ==============================================================================
 # Test helper functions (unique to this module)
@@ -52,7 +46,7 @@ def create_empty_config(temp_dir: str) -> str:
     Returns:
         str: Path to the configuration file
     """
-    config_content = f"""server_threads: 1
+    config_content = """server_threads: 1
 
 services: []
 
@@ -86,15 +80,14 @@ class TestBoundaryConditions:
         active listeners, so shutdown should be near-instant.
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_empty_config(temp_dir)
             proxy_proc = start_proxy(config_path)
 
             # Wait for process to start and confirm it's running
-            assert wait_for_process_running(proxy_proc, timeout=1.0), \
-                "Process should be running with no worker threads"
+            assert wait_for_process_running(proxy_proc, timeout=1.0), "Process should be running with no worker threads"
 
             # Record start time
             start_time = time.time()
@@ -109,16 +102,13 @@ class TestBoundaryConditions:
             except subprocess.TimeoutExpired:
                 proxy_proc.kill()
                 proxy_proc.wait()
-                assert False, \
-                    "Process did not exit within expected time (no worker threads)"
+                assert False, "Process did not exit within expected time (no worker threads)"
 
             # Verify exit code is 0
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
             # Verify exit was fast (should be almost immediate)
-            assert elapsed < 1.0, \
-                f"Process should exit immediately, took {elapsed:.2f}s"
+            assert elapsed < 1.0, f"Process should exit immediately, took {elapsed:.2f}s"
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
@@ -134,15 +124,14 @@ class TestBoundaryConditions:
         (server_threads: 1, no services/servers).
         """
         temp_dir = tempfile.mkdtemp()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_empty_config(temp_dir)
             proxy_proc = start_proxy(config_path)
 
             # Wait for process to start and confirm it's running
-            assert wait_for_process_running(proxy_proc, timeout=1.0), \
-                "Process should be running before sending SIGINT"
+            assert wait_for_process_running(proxy_proc, timeout=1.0), "Process should be running before sending SIGINT"
 
             # Send SIGINT
             proxy_proc.send_signal(signal.SIGINT)
@@ -153,12 +142,10 @@ class TestBoundaryConditions:
             except subprocess.TimeoutExpired:
                 proxy_proc.kill()
                 proxy_proc.wait()
-                assert False, \
-                    "Process did not exit within expected time"
+                assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
@@ -184,14 +171,13 @@ class TestShutdownTiming:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             start_time = time.time()
             proxy_proc.send_signal(signal.SIGTERM)
@@ -199,12 +185,10 @@ class TestShutdownTiming:
             return_code = proxy_proc.wait(timeout=10)
             elapsed = time.time() - start_time
 
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
             # Normal shutdown should complete quickly
-            assert elapsed < 2.0, \
-                f"Normal shutdown should be fast, took {elapsed:.2f}s"
+            assert elapsed < 2.0, f"Normal shutdown should be fast, took {elapsed:.2f}s"
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
@@ -229,14 +213,13 @@ class TestLogVerification:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -244,8 +227,7 @@ class TestLogVerification:
             # Wait for process to exit
             return_code = proxy_proc.wait(timeout=10)
 
-            assert return_code == 0, \
-                f"Expected exit code 0, got {return_code}"
+            assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
             # Wait for log directory to be flushed to disk
             log_dir = os.path.join(temp_dir, "logs")
@@ -257,13 +239,11 @@ class TestLogVerification:
 
             # Check log directory exists
             log_dir = os.path.join(temp_dir, "logs")
-            assert os.path.exists(log_dir), \
-                f"Log directory should exist: {log_dir}"
+            assert os.path.exists(log_dir), f"Log directory should exist: {log_dir}"
 
             # Check for log files
             log_files = os.listdir(log_dir)
-            assert len(log_files) > 0, \
-                "Log files should be created"
+            assert len(log_files) > 0, "Log files should be created"
 
             # Read log content
             log_content = ""
@@ -274,8 +254,9 @@ class TestLogVerification:
 
             # Verify log contains expected keywords
             # The log should contain server start info
-            assert "server" in log_content.lower() or "started" in log_content.lower(), \
+            assert "server" in log_content.lower() or "started" in log_content.lower(), (
                 "Log should contain server start information"
+            )
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:

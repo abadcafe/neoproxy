@@ -10,29 +10,33 @@ This test module covers:
 - SNI mismatch rejection (no default certificate)
 """
 
+import os
+import shutil
 import socket
 import ssl
-import subprocess
 import tempfile
-import shutil
-import os
-from typing import Optional, Tuple, List
-
-from .utils.helpers import (
-    start_proxy,
-    wait_for_proxy,
-    terminate_process,
-)
-from .utils.certs import generate_ca, generate_server_cert
+from dataclasses import dataclass
 
 from .conftest import get_unique_port
+from .types import (
+    BytesProcess,
+)
+from .utils.certs import generate_ca, generate_server_cert
+from .utils.helpers import (
+    start_proxy,
+    terminate_process,
+    wait_for_proxy,
+)
 
 
-def create_multi_server_config(
-    proxy_port: int,
-    temp_dir: str,
-    servers: List[dict]
-) -> str:
+@dataclass(frozen=True)
+class ServerCertificateConfig:
+    cert_path: str
+    key_path: str
+    hostnames: list[str]
+
+
+def create_multi_server_config(proxy_port: int, temp_dir: str, servers: list[ServerCertificateConfig]) -> str:
     """
     Create a config with multiple servers sharing the same address.
 
@@ -49,7 +53,7 @@ def create_multi_server_config(
         str: Path to config file
     """
     config_lines = [
-        f"server_threads: 1",
+        "server_threads: 1",
         "",
         "plugins:",
         "  echo:",
@@ -69,24 +73,28 @@ def create_multi_server_config(
     for i, server in enumerate(servers):
         server_name = f"server_{i}"
         hostnames_line = ""
-        if server.get("hostnames"):
-            hostnames_str = ", ".join(f'"{h}"' for h in server["hostnames"])
+        if server.hostnames:
+            hostnames_str = ", ".join(f'"{h}"' for h in server.hostnames)
             hostnames_line = f"    hostnames: [{hostnames_str}]"
 
-        config_lines.extend([
-            f"  - name: {server_name}",
-        ])
+        config_lines.extend(
+            [
+                f"  - name: {server_name}",
+            ]
+        )
         if hostnames_line:
             config_lines.append(hostnames_line)
-        config_lines.extend([
-            "    tls:",
-            "      certificates:",
-            f'        - cert_path: {server["cert_path"]}',
-            f'          key_path: {server["key_path"]}',
-            '    listeners: ["https_main"]',
-            "    service: echo",
-            "",
-        ])
+        config_lines.extend(
+            [
+                "    tls:",
+                "      certificates:",
+                f"        - cert_path: {server.cert_path}",
+                f"          key_path: {server.key_path}",
+                '    listeners: ["https_main"]',
+                "    service: echo",
+                "",
+            ]
+        )
 
     config_path = os.path.join(temp_dir, "multi_server_config.yaml")
     with open(config_path, "w") as f:
@@ -100,7 +108,7 @@ def create_single_server_config(
     temp_dir: str,
     cert_path: str,
     key_path: str,
-    hostnames: Optional[List[str]] = None
+    hostnames: list[str] | None = None,
 ) -> str:
     """
     Create a config with a single server.
@@ -138,14 +146,16 @@ def create_single_server_config(
         hostnames_str = ", ".join(f'"{h}"' for h in hostnames)
         lines.append(f"    hostnames: [{hostnames_str}]")
 
-    lines.extend([
-        "    tls:",
-        "      certificates:",
-        f"        - cert_path: {cert_path}",
-        f"          key_path: {key_path}",
-        '    listeners: ["https_main"]',
-        "    service: echo",
-    ])
+    lines.extend(
+        [
+            "    tls:",
+            "      certificates:",
+            f"        - cert_path: {cert_path}",
+            f"          key_path: {key_path}",
+            '    listeners: ["https_main"]',
+            "    service: echo",
+        ]
+    )
 
     config_content = "\n".join(lines) + "\n"
 
@@ -161,8 +171,8 @@ def try_tls_connection_with_sni(
     port: int,
     sni: str,
     ca_cert_path: str,
-    timeout: float = 5.0
-) -> Tuple[bool, Optional[str]]:
+    timeout: float = 5.0,
+) -> tuple[bool, str | None]:
     """
     Test TLS connection with specific SNI.
 
@@ -174,7 +184,7 @@ def try_tls_connection_with_sni(
         timeout: Connection timeout
 
     Returns:
-        Tuple[bool, Optional[str]]: (success, error_message)
+        tuple[bool, str | None]: (success, error_message)
     """
     try:
         context = ssl.create_default_context()
@@ -201,23 +211,23 @@ def try_tls_connection_with_sni(
             if ssl_sock:
                 try:
                     ssl_sock.close()
-                except:
+                except OSError:
                     pass
 
     except socket.timeout:
         return False, "Connection timeout"
     except ConnectionRefusedError:
         return False, "Connection refused"
-    except Exception as e:
-        return False, f"Unexpected error: {e}"
+    except OSError as e:
+        return False, f"Network error: {e}"
 
 
-def get_certificate_cn(host: str, port: int, sni: str, ca_cert_path: str) -> Optional[str]:
+def get_certificate_cn(host: str, port: int, sni: str, ca_cert_path: str) -> str | None:
     """
     Get the CN from the certificate presented by the server for a given SNI.
 
     Returns:
-        Optional[str]: The CN of the certificate, or None if failed
+        str | None: The CN of the certificate, or None if failed
     """
     try:
         context = ssl.create_default_context()
@@ -239,14 +249,14 @@ def get_certificate_cn(host: str, port: int, sni: str, ca_cert_path: str) -> Opt
 
         # Extract CN from subject - cert['subject'] is a tuple of tuples
         # e.g., ((('commonName', 'api.test.local'),),)
-        subject = cert.get('subject', ())
+        subject = cert.get("subject", ())
         for rdn in subject:
             for attr_type, attr_value in rdn:
-                if attr_type == 'commonName':
+                if attr_type == "commonName":
                     return attr_value
         return None
 
-    except Exception:
+    except OSError, ssl.SSLError:
         return None
 
 
@@ -258,7 +268,9 @@ def get_certificate_cn(host: str, port: int, sni: str, ca_cert_path: str) -> Opt
 class TestSniCertificateSelection:
     """Test SNI-based certificate selection for shared-address servers."""
 
-    def test_multiple_servers_same_address_different_certs(self) -> None:
+    def test_multiple_servers_same_address_different_certs(
+        self,
+    ) -> None:
         """
         Two servers share the same address with different certificates.
         SNI determines which certificate is used.
@@ -274,7 +286,7 @@ class TestSniCertificateSelection:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             # Generate CA
@@ -282,50 +294,50 @@ class TestSniCertificateSelection:
 
             # Generate two different server certificates
             cert_a_path, key_a_path = generate_server_cert(
-                temp_dir, ca_cert_path, ca_key_path,
+                temp_dir,
+                ca_cert_path,
+                ca_key_path,
                 san_entries=["api.test.local"],
-                cert_name="server_a"
+                cert_name="server_a",
             )
 
             cert_b_path, key_b_path = generate_server_cert(
-                temp_dir, ca_cert_path, ca_key_path,
+                temp_dir,
+                ca_cert_path,
+                ca_key_path,
                 san_entries=["web.test.local"],
-                cert_name="server_b"
+                cert_name="server_b",
             )
 
             # Create config with two servers
             config_path = create_multi_server_config(
-                proxy_port, temp_dir,
+                proxy_port,
+                temp_dir,
                 servers=[
-                    {
-                        "hostnames": ["api.test.local"],
-                        "cert_path": cert_a_path,
-                        "key_path": key_a_path,
-                        "service": "echo"
-                    },
-                    {
-                        "hostnames": ["web.test.local"],
-                        "cert_path": cert_b_path,
-                        "key_path": key_b_path,
-                        "service": "echo"
-                    }
-                ]
+                    ServerCertificateConfig(
+                        hostnames=["api.test.local"],
+                        cert_path=cert_a_path,
+                        key_path=key_a_path,
+                    ),
+                    ServerCertificateConfig(
+                        hostnames=["web.test.local"],
+                        cert_path=cert_b_path,
+                        key_path=key_b_path,
+                    ),
+                ],
             )
 
             # Start proxy
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy failed to start"
 
             # Test SNI=api.test.local -> should get server A's cert
             cn_a = get_certificate_cn("127.0.0.1", proxy_port, "api.test.local", ca_cert_path)
-            assert cn_a == "api.test.local", \
-                f"Expected CN 'api.test.local' for SNI=api.test.local, got '{cn_a}'"
+            assert cn_a == "api.test.local", f"Expected CN 'api.test.local' for SNI=api.test.local, got '{cn_a}'"
 
             # Test SNI=web.test.local -> should get server B's cert
             cn_b = get_certificate_cn("127.0.0.1", proxy_port, "web.test.local", ca_cert_path)
-            assert cn_b == "web.test.local", \
-                f"Expected CN 'web.test.local' for SNI=web.test.local, got '{cn_b}'"
+            assert cn_b == "web.test.local", f"Expected CN 'web.test.local' for SNI=web.test.local, got '{cn_b}'"
 
         finally:
             if proxy_proc:
@@ -341,30 +353,27 @@ class TestSniCertificateSelection:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             ca_cert_path, ca_key_path = generate_ca(temp_dir)
 
             # Generate wildcard certificate
             cert_path, key_path = generate_server_cert(
-                temp_dir, ca_cert_path, ca_key_path,
+                temp_dir,
+                ca_cert_path,
+                ca_key_path,
                 san_entries=["*.test.local"],
-                cert_name="wildcard"
+                cert_name="wildcard",
             )
 
-            config_path = create_single_server_config(
-                proxy_port, temp_dir, cert_path, key_path
-            )
+            config_path = create_single_server_config(proxy_port, temp_dir, cert_path, key_path)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy failed to start"
 
             # Test SNI=foo.test.local -> should succeed
-            success, error = try_tls_connection_with_sni(
-                "127.0.0.1", proxy_port, "foo.test.local", ca_cert_path
-            )
+            success, error = try_tls_connection_with_sni("127.0.0.1", proxy_port, "foo.test.local", ca_cert_path)
             assert success, f"Expected TLS connection to succeed for foo.test.local: {error}"
 
         finally:
@@ -380,32 +389,29 @@ class TestSniCertificateSelection:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             ca_cert_path, ca_key_path = generate_ca(temp_dir)
 
             # Include both wildcard and bare domain in SAN for OpenSSL client verification
             cert_path, key_path = generate_server_cert(
-                temp_dir, ca_cert_path, ca_key_path,
+                temp_dir,
+                ca_cert_path,
+                ca_key_path,
                 san_entries=["*.test.local", "test.local"],
-                cert_name="wildcard"
+                cert_name="wildcard",
             )
 
-            config_path = create_single_server_config(
-                proxy_port, temp_dir, cert_path, key_path
-            )
+            config_path = create_single_server_config(proxy_port, temp_dir, cert_path, key_path)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy failed to start"
 
             # Test SNI=test.local -> should succeed (bare domain match via wildcard)
             # Note: We add test.local to SAN because OpenSSL client verification
             # doesn't recognize bare domain matching wildcard patterns
-            success, error = try_tls_connection_with_sni(
-                "127.0.0.1", proxy_port, "test.local", ca_cert_path
-            )
+            success, error = try_tls_connection_with_sni("127.0.0.1", proxy_port, "test.local", ca_cert_path)
             assert success, f"Expected TLS connection to succeed for test.local: {error}"
 
         finally:
@@ -421,32 +427,33 @@ class TestSniCertificateSelection:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             ca_cert_path, ca_key_path = generate_ca(temp_dir)
 
             cert_path, key_path = generate_server_cert(
-                temp_dir, ca_cert_path, ca_key_path,
+                temp_dir,
+                ca_cert_path,
+                ca_key_path,
                 san_entries=["*.test.local"],
-                cert_name="wildcard"
+                cert_name="wildcard",
             )
 
-            config_path = create_single_server_config(
-                proxy_port, temp_dir, cert_path, key_path
-            )
+            config_path = create_single_server_config(proxy_port, temp_dir, cert_path, key_path)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy failed to start"
 
             # Test SNI=bar.foo.test.local -> should FAIL (multi-level)
             # Since we have no default certificate, TLS handshake should fail
             success, _ = try_tls_connection_with_sni(
-                "127.0.0.1", proxy_port, "bar.foo.test.local", ca_cert_path
+                "127.0.0.1",
+                proxy_port,
+                "bar.foo.test.local",
+                ca_cert_path,
             )
-            assert not success, \
-                "Expected TLS connection to FAIL for bar.foo.test.local (multi-level subdomain)"
+            assert not success, "Expected TLS connection to FAIL for bar.foo.test.local (multi-level subdomain)"
 
         finally:
             if proxy_proc:
@@ -461,33 +468,39 @@ class TestSniCertificateSelection:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             ca_cert_path, ca_key_path = generate_ca(temp_dir)
 
             # Generate certificate for specific domain only
             cert_path, key_path = generate_server_cert(
-                temp_dir, ca_cert_path, ca_key_path,
+                temp_dir,
+                ca_cert_path,
+                ca_key_path,
                 san_entries=["known.test.local"],
-                cert_name="known"
+                cert_name="known",
             )
 
             config_path = create_single_server_config(
-                proxy_port, temp_dir, cert_path, key_path,
-                hostnames=["known.test.local"]
+                proxy_port,
+                temp_dir,
+                cert_path,
+                key_path,
+                hostnames=["known.test.local"],
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy failed to start"
 
             # Test SNI=unknown.test.local -> should FAIL
             success, _ = try_tls_connection_with_sni(
-                "127.0.0.1", proxy_port, "unknown.test.local", ca_cert_path
+                "127.0.0.1",
+                proxy_port,
+                "unknown.test.local",
+                ca_cert_path,
             )
-            assert not success, \
-                "Expected TLS connection to FAIL for unknown.test.local (no matching cert)"
+            assert not success, "Expected TLS connection to FAIL for unknown.test.local (no matching cert)"
 
         finally:
             if proxy_proc:
@@ -508,57 +521,57 @@ class TestSniCertificateSelection:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             ca_cert_path, ca_key_path = generate_ca(temp_dir)
 
             # Generate wildcard certificate
             wildcard_cert_path, wildcard_key_path = generate_server_cert(
-                temp_dir, ca_cert_path, ca_key_path,
+                temp_dir,
+                ca_cert_path,
+                ca_key_path,
                 san_entries=["*.test.local"],
-                cert_name="wildcard"
+                cert_name="wildcard",
             )
 
             # Generate exact match certificate
             exact_cert_path, exact_key_path = generate_server_cert(
-                temp_dir, ca_cert_path, ca_key_path,
+                temp_dir,
+                ca_cert_path,
+                ca_key_path,
                 san_entries=["api.test.local"],
-                cert_name="exact"
+                cert_name="exact",
             )
 
             # Create config with both servers (wildcard first in config)
             config_path = create_multi_server_config(
-                proxy_port, temp_dir,
+                proxy_port,
+                temp_dir,
                 servers=[
-                    {
-                        "hostnames": ["*.test.local"],
-                        "cert_path": wildcard_cert_path,
-                        "key_path": wildcard_key_path,
-                        "service": "echo"
-                    },
-                    {
-                        "hostnames": ["api.test.local"],
-                        "cert_path": exact_cert_path,
-                        "key_path": exact_key_path,
-                        "service": "echo"
-                    }
-                ]
+                    ServerCertificateConfig(
+                        hostnames=["*.test.local"],
+                        cert_path=wildcard_cert_path,
+                        key_path=wildcard_key_path,
+                    ),
+                    ServerCertificateConfig(
+                        hostnames=["api.test.local"],
+                        cert_path=exact_cert_path,
+                        key_path=exact_key_path,
+                    ),
+                ],
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), \
-                "Proxy failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy failed to start"
 
             # Test SNI=api.test.local -> should get exact cert (not wildcard)
             cn = get_certificate_cn("127.0.0.1", proxy_port, "api.test.local", ca_cert_path)
-            assert cn == "api.test.local", \
-                f"Expected exact match cert 'api.test.local', got '{cn}'"
+            assert cn == "api.test.local", f"Expected exact match cert 'api.test.local', got '{cn}'"
 
             # Test SNI=foo.test.local -> should get wildcard cert
             cn = get_certificate_cn("127.0.0.1", proxy_port, "foo.test.local", ca_cert_path)
-            assert cn == "*.test.local", \
-                f"Expected wildcard cert '*.test.local', got '{cn}'"
+            assert cn == "*.test.local", f"Expected wildcard cert '*.test.local', got '{cn}'"
 
         finally:
             if proxy_proc:

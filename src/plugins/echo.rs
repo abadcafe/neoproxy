@@ -15,7 +15,7 @@ use anyhow::Result;
 use http_body_util::{BodyExt, Full};
 
 use crate::config::SerializedArgs;
-use crate::http_utils::{
+use crate::http_message::{
   BytesBufBodyWrapper, Request, Response, ResponseBody,
 };
 use crate::plugin::Plugin;

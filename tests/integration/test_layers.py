@@ -3,13 +3,18 @@
 All HTTP requests use subprocess.run(["curl", ...]) instead of Python requests library.
 This matches real-world proxy usage more closely.
 """
+
 import base64
 import glob
+import os
 import socket
 import threading
 import time
-import os
 
+from .types import (
+    ConfigDict,
+    ProxyWithConfig,
+)
 from .utils.helpers import curl_request, curl_request_with_headers
 
 
@@ -75,36 +80,45 @@ def wait_for_log_file(
 def _access_log_layer_args(
     writer: str = "logs/access",
     context_fields: list[str] | None = None,
-) -> dict:
+) -> ConfigDict:
     """Build access_log.file layer args with the required writer field."""
-    args: dict = {"writer": writer}
+    args: ConfigDict = {"writer": writer}
     if context_fields:
-        args["context_fields"] = context_fields
+        args["context_fields"] = [field for field in context_fields]
     return args
 
 
-def _access_log_plugins(writer: str = "logs/access") -> dict:
+def _access_log_plugins(writer: str = "logs/access") -> ConfigDict:
     """Build plugins dict with echo and access_log writer definition."""
     return {
         "echo": None,
         "access_log": {
             "writers": [{"path_prefix": writer}],
-        }
+        },
     }
 
 
 class TestAuthLayer:
     """Verify auth.basic_auth layer works."""
 
-    def test_auth_rejects_without_credentials(self, proxy_with_config) -> None:
+    def test_auth_rejects_without_credentials(self, proxy_with_config: ProxyWithConfig) -> None:
         """Request without Proxy-Authorization should get 407."""
-        config = {
+        config: ConfigDict = {
             "plugins": {"echo": None, "auth": None},
             "listeners": [
-                {"name": "http_main", "kind": "http", "addresses": ["127.0.0.1:AUTO_PORT"]}
+                {
+                    "name": "http_main",
+                    "kind": "http",
+                    "addresses": ["127.0.0.1:AUTO_PORT"],
+                }
             ],
             "servers": [
-                {"name": "default", "hostnames": [], "listeners": ["http_main"], "service": "echo_svc"}
+                {
+                    "name": "default",
+                    "hostnames": [],
+                    "listeners": ["http_main"],
+                    "service": "echo_svc",
+                }
             ],
             "services": [
                 {
@@ -113,7 +127,14 @@ class TestAuthLayer:
                     "layers": [
                         {
                             "kind": "auth.basic_auth",
-                            "args": {"users": [{"username": "admin", "password": "secret"}]},
+                            "args": {
+                                "users": [
+                                    {
+                                        "username": "admin",
+                                        "password": "secret",
+                                    }
+                                ]
+                            },
                         }
                     ],
                 }
@@ -122,20 +143,30 @@ class TestAuthLayer:
 
         with proxy_with_config(config) as proxy:
             status, headers, _ = curl_request_with_headers(
-                "http://example.com/", proxy.port,
+                "http://example.com/",
+                proxy.port,
             )
             assert status == 407
             assert "proxy-authenticate" in headers
 
-    def test_auth_accepts_valid_credentials(self, proxy_with_config) -> None:
+    def test_auth_accepts_valid_credentials(self, proxy_with_config: ProxyWithConfig) -> None:
         """Request with valid credentials should succeed."""
-        config = {
+        config: ConfigDict = {
             "plugins": {"echo": None, "auth": None},
             "listeners": [
-                {"name": "http_main", "kind": "http", "addresses": ["127.0.0.1:AUTO_PORT"]}
+                {
+                    "name": "http_main",
+                    "kind": "http",
+                    "addresses": ["127.0.0.1:AUTO_PORT"],
+                }
             ],
             "servers": [
-                {"name": "default", "hostnames": [], "listeners": ["http_main"], "service": "echo_svc"}
+                {
+                    "name": "default",
+                    "hostnames": [],
+                    "listeners": ["http_main"],
+                    "service": "echo_svc",
+                }
             ],
             "services": [
                 {
@@ -144,7 +175,14 @@ class TestAuthLayer:
                     "layers": [
                         {
                             "kind": "auth.basic_auth",
-                            "args": {"users": [{"username": "admin", "password": "secret"}]},
+                            "args": {
+                                "users": [
+                                    {
+                                        "username": "admin",
+                                        "password": "secret",
+                                    }
+                                ]
+                            },
                         }
                     ],
                 }
@@ -154,20 +192,30 @@ class TestAuthLayer:
         with proxy_with_config(config) as proxy:
             creds = base64.b64encode(b"admin:secret").decode()
             status = curl_request(
-                "http://example.com/", proxy.port,
+                "http://example.com/",
+                proxy.port,
                 headers={"Proxy-Authorization": f"Basic {creds}"},
             )
             assert status == 200
 
-    def test_auth_rejects_wrong_password(self, proxy_with_config) -> None:
+    def test_auth_rejects_wrong_password(self, proxy_with_config: ProxyWithConfig) -> None:
         """Request with wrong password should get 407."""
-        config = {
+        config: ConfigDict = {
             "plugins": {"echo": None, "auth": None},
             "listeners": [
-                {"name": "http_main", "kind": "http", "addresses": ["127.0.0.1:AUTO_PORT"]}
+                {
+                    "name": "http_main",
+                    "kind": "http",
+                    "addresses": ["127.0.0.1:AUTO_PORT"],
+                }
             ],
             "servers": [
-                {"name": "default", "hostnames": [], "listeners": ["http_main"], "service": "echo_svc"}
+                {
+                    "name": "default",
+                    "hostnames": [],
+                    "listeners": ["http_main"],
+                    "service": "echo_svc",
+                }
             ],
             "services": [
                 {
@@ -176,7 +224,14 @@ class TestAuthLayer:
                     "layers": [
                         {
                             "kind": "auth.basic_auth",
-                            "args": {"users": [{"username": "admin", "password": "secret"}]},
+                            "args": {
+                                "users": [
+                                    {
+                                        "username": "admin",
+                                        "password": "secret",
+                                    }
+                                ]
+                            },
                         }
                     ],
                 }
@@ -186,20 +241,30 @@ class TestAuthLayer:
         with proxy_with_config(config) as proxy:
             creds = base64.b64encode(b"admin:wrong").decode()
             status = curl_request(
-                "http://example.com/", proxy.port,
+                "http://example.com/",
+                proxy.port,
                 headers={"Proxy-Authorization": f"Basic {creds}"},
             )
             assert status == 407
 
-    def test_auth_rejects_non_basic_scheme(self, proxy_with_config) -> None:
+    def test_auth_rejects_non_basic_scheme(self, proxy_with_config: ProxyWithConfig) -> None:
         """Request with non-Basic Proxy-Authorization should get 407."""
-        config = {
+        config: ConfigDict = {
             "plugins": {"echo": None, "auth": None},
             "listeners": [
-                {"name": "http_main", "kind": "http", "addresses": ["127.0.0.1:AUTO_PORT"]}
+                {
+                    "name": "http_main",
+                    "kind": "http",
+                    "addresses": ["127.0.0.1:AUTO_PORT"],
+                }
             ],
             "servers": [
-                {"name": "default", "hostnames": [], "listeners": ["http_main"], "service": "echo_svc"}
+                {
+                    "name": "default",
+                    "hostnames": [],
+                    "listeners": ["http_main"],
+                    "service": "echo_svc",
+                }
             ],
             "services": [
                 {
@@ -208,7 +273,14 @@ class TestAuthLayer:
                     "layers": [
                         {
                             "kind": "auth.basic_auth",
-                            "args": {"users": [{"username": "admin", "password": "secret"}]},
+                            "args": {
+                                "users": [
+                                    {
+                                        "username": "admin",
+                                        "password": "secret",
+                                    }
+                                ]
+                            },
                         }
                     ],
                 }
@@ -217,20 +289,30 @@ class TestAuthLayer:
 
         with proxy_with_config(config) as proxy:
             status = curl_request(
-                "http://example.com/", proxy.port,
+                "http://example.com/",
+                proxy.port,
                 headers={"Proxy-Authorization": "Bearer some-token"},
             )
             assert status == 407
 
-    def test_auth_rejects_malformed_basic_header(self, proxy_with_config) -> None:
+    def test_auth_rejects_malformed_basic_header(self, proxy_with_config: ProxyWithConfig) -> None:
         """Request with malformed Basic header should get 407."""
-        config = {
+        config: ConfigDict = {
             "plugins": {"echo": None, "auth": None},
             "listeners": [
-                {"name": "http_main", "kind": "http", "addresses": ["127.0.0.1:AUTO_PORT"]}
+                {
+                    "name": "http_main",
+                    "kind": "http",
+                    "addresses": ["127.0.0.1:AUTO_PORT"],
+                }
             ],
             "servers": [
-                {"name": "default", "hostnames": [], "listeners": ["http_main"], "service": "echo_svc"}
+                {
+                    "name": "default",
+                    "hostnames": [],
+                    "listeners": ["http_main"],
+                    "service": "echo_svc",
+                }
             ],
             "services": [
                 {
@@ -239,7 +321,14 @@ class TestAuthLayer:
                     "layers": [
                         {
                             "kind": "auth.basic_auth",
-                            "args": {"users": [{"username": "admin", "password": "secret"}]},
+                            "args": {
+                                "users": [
+                                    {
+                                        "username": "admin",
+                                        "password": "secret",
+                                    }
+                                ]
+                            },
                         }
                     ],
                 }
@@ -248,7 +337,8 @@ class TestAuthLayer:
 
         with proxy_with_config(config) as proxy:
             status = curl_request(
-                "http://example.com/", proxy.port,
+                "http://example.com/",
+                proxy.port,
                 headers={"Proxy-Authorization": "Basic not-valid-base64!!!"},
             )
             assert status == 407
@@ -257,14 +347,23 @@ class TestAuthLayer:
 class TestAccessLogLayer:
     """Verify access_log.file layer creates log entries."""
 
-    def test_access_log_creates_file(self, proxy_with_config) -> None:
+    def test_access_log_creates_file(self, proxy_with_config: ProxyWithConfig) -> None:
         """Access log layer should create log file after a request."""
-        config = {
+        config: ConfigDict = {
             "listeners": [
-                {"name": "http_main", "kind": "http", "addresses": ["127.0.0.1:AUTO_PORT"]}
+                {
+                    "name": "http_main",
+                    "kind": "http",
+                    "addresses": ["127.0.0.1:AUTO_PORT"],
+                }
             ],
             "servers": [
-                {"name": "default", "hostnames": [], "listeners": ["http_main"], "service": "echo_svc"}
+                {
+                    "name": "default",
+                    "hostnames": [],
+                    "listeners": ["http_main"],
+                    "service": "echo_svc",
+                }
             ],
             "services": [
                 {
@@ -291,21 +390,33 @@ class TestAccessLogLayer:
             log_dir = os.path.join(proxy.working_dir, "logs")
             assert wait_for_log_file(log_dir), f"Log file should exist in {log_dir}"
 
-    def test_access_log_without_context_fields(self, proxy_with_config) -> None:
+    def test_access_log_without_context_fields(self, proxy_with_config: ProxyWithConfig) -> None:
         """Access log layer with empty context_fields should still log base fields."""
-        config = {
+        config: ConfigDict = {
             "listeners": [
-                {"name": "http_main", "kind": "http", "addresses": ["127.0.0.1:AUTO_PORT"]}
+                {
+                    "name": "http_main",
+                    "kind": "http",
+                    "addresses": ["127.0.0.1:AUTO_PORT"],
+                }
             ],
             "servers": [
-                {"name": "default", "hostnames": [], "listeners": ["http_main"], "service": "echo_svc"}
+                {
+                    "name": "default",
+                    "hostnames": [],
+                    "listeners": ["http_main"],
+                    "service": "echo_svc",
+                }
             ],
             "services": [
                 {
                     "name": "echo_svc",
                     "kind": "echo.echo",
                     "layers": [
-                        {"kind": "access_log.file", "args": _access_log_layer_args()},
+                        {
+                            "kind": "access_log.file",
+                            "args": _access_log_layer_args(),
+                        },
                     ],
                 }
             ],
@@ -323,14 +434,23 @@ class TestAccessLogLayer:
 class TestCombinedLayers:
     """Verify multiple layers work together."""
 
-    def test_auth_then_access_log(self, proxy_with_config) -> None:
+    def test_auth_then_access_log(self, proxy_with_config: ProxyWithConfig) -> None:
         """Auth layer + access_log layer should work together."""
-        config = {
+        config: ConfigDict = {
             "listeners": [
-                {"name": "http_main", "kind": "http", "addresses": ["127.0.0.1:AUTO_PORT"]}
+                {
+                    "name": "http_main",
+                    "kind": "http",
+                    "addresses": ["127.0.0.1:AUTO_PORT"],
+                }
             ],
             "servers": [
-                {"name": "default", "hostnames": [], "listeners": ["http_main"], "service": "echo_svc"}
+                {
+                    "name": "default",
+                    "hostnames": [],
+                    "listeners": ["http_main"],
+                    "service": "echo_svc",
+                }
             ],
             "services": [
                 {
@@ -348,7 +468,14 @@ class TestCombinedLayers:
                         },
                         {
                             "kind": "auth.basic_auth",
-                            "args": {"users": [{"username": "admin", "password": "secret"}]},
+                            "args": {
+                                "users": [
+                                    {
+                                        "username": "admin",
+                                        "password": "secret",
+                                    }
+                                ]
+                            },
                         },
                     ],
                 }
@@ -364,7 +491,8 @@ class TestCombinedLayers:
             # With auth -> 200
             creds = base64.b64encode(b"admin:secret").decode()
             status = curl_request(
-                "http://example.com/", proxy.port,
+                "http://example.com/",
+                proxy.port,
                 headers={"Proxy-Authorization": f"Basic {creds}"},
             )
             assert status == 200
@@ -372,14 +500,15 @@ class TestCombinedLayers:
             # Wait for log file to contain entries
             log_dir = os.path.join(proxy.working_dir, "logs")
             # Wait for either 407 or 200 to appear in log
-            assert wait_for_log_file(log_dir, contains="407") or wait_for_log_file(log_dir, contains="200"), \
-                f"Log should contain request entries"
+            assert wait_for_log_file(log_dir, contains="407") or wait_for_log_file(log_dir, contains="200"), (
+                "Log should contain request entries"
+            )
 
 
 class TestAccessLogErrorHandling:
     """Verify access_log layer handles service errors correctly."""
 
-    def test_access_log_converts_err_to_500(self, proxy_with_config) -> None:
+    def test_access_log_converts_err_to_500(self, proxy_with_config: ProxyWithConfig) -> None:
         """When inner service returns Err, access_log should convert to 5xx response.
 
         Uses connect_tcp service targeting an unreachable address (127.0.0.1:1).
@@ -387,12 +516,21 @@ class TestAccessLogErrorHandling:
         immediately with ConnectionRefused. The access_log layer should catch
         this error and convert it to an HTTP 5xx response.
         """
-        config = {
+        config: ConfigDict = {
             "listeners": [
-                {"name": "http_main", "kind": "http", "addresses": ["127.0.0.1:AUTO_PORT"]}
+                {
+                    "name": "http_main",
+                    "kind": "http",
+                    "addresses": ["127.0.0.1:AUTO_PORT"],
+                }
             ],
             "servers": [
-                {"name": "default", "hostnames": [], "listeners": ["http_main"], "service": "tcp_svc"}
+                {
+                    "name": "default",
+                    "hostnames": [],
+                    "listeners": ["http_main"],
+                    "service": "tcp_svc",
+                }
             ],
             "services": [
                 {
@@ -400,7 +538,10 @@ class TestAccessLogErrorHandling:
                     "kind": "http_upstream.upstream",
                     "args": {"upstream": "direct"},
                     "layers": [
-                        {"kind": "access_log.file", "args": _access_log_layer_args()},
+                        {
+                            "kind": "access_log.file",
+                            "args": _access_log_layer_args(),
+                        },
                     ],
                 }
             ],
@@ -419,11 +560,7 @@ class TestAccessLogErrorHandling:
             # Use a raw TCP connection because curl's -w "%{http_code}"
             # reports 000 for CONNECT tunnel failures.
             sock = socket.create_connection(("127.0.0.1", proxy.port), timeout=5)
-            connect_req = (
-                "CONNECT 127.0.0.1:1 HTTP/1.1\r\n"
-                "Host: 127.0.0.1:1\r\n"
-                "\r\n"
-            )
+            connect_req = "CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n"
             sock.sendall(connect_req.encode())
             response = b""
             while True:
@@ -445,35 +582,53 @@ class TestAccessLogErrorHandling:
 
             # Wait for log file to contain error entry
             log_dir = os.path.join(proxy.working_dir, "logs")
-            assert wait_for_log_file(log_dir, contains=str(status)), \
-                f"Log should contain status {status}"
+            assert wait_for_log_file(log_dir, contains=str(status)), f"Log should contain status {status}"
 
 
 class TestLayerOrdering:
     """Verify layers are applied in correct order (outer first, inner last)."""
 
-    def test_outer_layer_sees_request_first(self, proxy_with_config) -> None:
+    def test_outer_layer_sees_request_first(self, proxy_with_config: ProxyWithConfig) -> None:
         """Outer layer (access_log) should see request before inner layer (auth).
 
         Config lists [access_log, auth] (outer to inner).
         When auth rejects (407), access_log should still record the 407.
         """
-        config = {
+        config: ConfigDict = {
             "listeners": [
-                {"name": "http_main", "kind": "http", "addresses": ["127.0.0.1:AUTO_PORT"]}
+                {
+                    "name": "http_main",
+                    "kind": "http",
+                    "addresses": ["127.0.0.1:AUTO_PORT"],
+                }
             ],
             "servers": [
-                {"name": "default", "hostnames": [], "listeners": ["http_main"], "service": "echo_svc"}
+                {
+                    "name": "default",
+                    "hostnames": [],
+                    "listeners": ["http_main"],
+                    "service": "echo_svc",
+                }
             ],
             "services": [
                 {
                     "name": "echo_svc",
                     "kind": "echo.echo",
                     "layers": [
-                        {"kind": "access_log.file", "args": _access_log_layer_args()},
+                        {
+                            "kind": "access_log.file",
+                            "args": _access_log_layer_args(),
+                        },
                         {
                             "kind": "auth.basic_auth",
-                            "args": {"users": [{"username": "admin", "password": "secret"}]},
+                            "args": {
+                                "users": [
+                                    {
+                                        "username": "admin",
+                                        "password": "secret",
+                                    }
+                                ]
+                            },
                         },
                     ],
                 }
@@ -488,32 +643,43 @@ class TestLayerOrdering:
 
             # Access log should still record this (outer layer)
             log_dir = os.path.join(proxy.working_dir, "logs")
-            assert wait_for_log_file(log_dir, contains="407"), \
-                f"Log should contain 407 status"
+            assert wait_for_log_file(log_dir, contains="407"), "Log should contain 407 status"
 
 
 class TestMultiThreadedAccessLog:
     """Verify access log entries are not interleaved under concurrent load."""
 
-    def test_concurrent_requests_log_integrity(self, proxy_with_config) -> None:
+    def test_concurrent_requests_log_integrity(self, proxy_with_config: ProxyWithConfig) -> None:
         """Send multiple concurrent requests and verify each log line is complete.
 
         The LogService uses a single writer thread with a channel, which inherently
         prevents interleaving. This test verifies that property.
         """
-        config = {
+        config: ConfigDict = {
             "listeners": [
-                {"name": "http_main", "kind": "http", "addresses": ["127.0.0.1:AUTO_PORT"]}
+                {
+                    "name": "http_main",
+                    "kind": "http",
+                    "addresses": ["127.0.0.1:AUTO_PORT"],
+                }
             ],
             "servers": [
-                {"name": "default", "hostnames": [], "listeners": ["http_main"], "service": "echo_svc"}
+                {
+                    "name": "default",
+                    "hostnames": [],
+                    "listeners": ["http_main"],
+                    "service": "echo_svc",
+                }
             ],
             "services": [
                 {
                     "name": "echo_svc",
                     "kind": "echo.echo",
                     "layers": [
-                        {"kind": "access_log.file", "args": _access_log_layer_args()},
+                        {
+                            "kind": "access_log.file",
+                            "args": _access_log_layer_args(),
+                        },
                     ],
                 }
             ],
@@ -522,7 +688,7 @@ class TestMultiThreadedAccessLog:
 
         with proxy_with_config(config) as proxy:
             num_requests = 10
-            results = [None] * num_requests
+            results: list[int | None] = [None] * num_requests
 
             def make_request(idx: int) -> None:
                 results[idx] = curl_request("http://example.com/", proxy.port)
@@ -546,7 +712,7 @@ class TestMultiThreadedAccessLog:
                 if log_path is not None and os.path.exists(log_path):
                     with open(log_path) as f:
                         log_content = f.read()
-                    lines = [line.strip() for line in log_content.strip().split('\n') if line.strip()]
+                    lines = [line.strip() for line in log_content.strip().split("\n") if line.strip()]
                     if len(lines) >= num_requests:
                         break
                 time.sleep(0.1)

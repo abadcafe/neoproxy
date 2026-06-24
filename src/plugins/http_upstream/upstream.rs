@@ -16,17 +16,24 @@ use rustls::pki_types::CertificateDer;
 use super::config::{CertificateConfig, ClientCertCredential};
 use super::error::UpstreamError;
 use crate::context::RequestContext;
-use crate::http_utils::{RequestBody, Response};
+use crate::http_message::{RequestBody, Response};
 use crate::tracker::StreamTracker;
 
 // Sub-modules organized by protocol
+mod address_resolution;
+#[cfg(test)]
+mod address_resolution_tests;
+mod connect_request;
 mod http;
 mod http3;
-pub(crate) mod utils;
+mod proxy_auth;
+mod scheduler;
+#[cfg(test)]
+mod scheduler_tests;
 
-// Re-export client types from sub-modules for use by the registry
-pub(crate) use self::http::{HttpClient, HttpsClient, ProxyConnector};
-pub(crate) use self::http3::{Http3AddressState, Http3Client};
+use self::http::{HttpClient, HttpsClient, ProxyConnector};
+use self::http3::{Http3AddressState, Http3Client};
+use self::scheduler::WeightedItem;
 
 // ============================================================================
 // Runtime Types (self-contained, no dependency on config types)
@@ -73,41 +80,7 @@ pub(crate) trait ClientProtocol {
   fn close(&self) {}
 }
 
-// ============================================================================
-// Address
-// ============================================================================
-
-/// A single upstream address with its pre-built client.
-/// Only routing fields; protocol parameters live in `client`.
-pub(crate) struct Address {
-  pub(crate) weight: usize,
-  pub(crate) current_weight: std::cell::Cell<isize>,
-  pub(crate) client: Box<dyn ClientProtocol>,
-}
-
-// ============================================================================
-// WRR Scheduling
-// ============================================================================
-
-pub(crate) fn schedule_wrr(addresses: &[Address]) -> Option<usize> {
-  if addresses.is_empty() {
-    return None;
-  }
-  let total = addresses.iter().fold(0, |t, a| t + a.weight) as isize;
-  let mut selected_idx = 0usize;
-  let mut selected_weight = 0isize;
-  for (i, a) in addresses.iter().enumerate() {
-    let new_cw = a.current_weight.get() + a.weight as isize;
-    a.current_weight.set(new_cw);
-    if new_cw > selected_weight {
-      selected_weight = new_cw;
-      selected_idx = i;
-    }
-  }
-  let new_cw = addresses[selected_idx].current_weight.get() - total;
-  addresses[selected_idx].current_weight.set(new_cw);
-  Some(selected_idx)
-}
+type Address = WeightedItem<Box<dyn ClientProtocol>>;
 
 // ============================================================================
 // Upstream
@@ -116,7 +89,7 @@ pub(crate) fn schedule_wrr(addresses: &[Address]) -> Option<usize> {
 /// A resolved upstream with its addresses and optional direct-client
 /// fallback.
 pub(crate) struct Upstream {
-  pub(crate) addresses: Vec<Address>,
+  addresses: Vec<Address>,
   direct_client: Option<Box<dyn ClientProtocol>>,
 }
 
@@ -124,9 +97,9 @@ impl Upstream {
   /// Pick a client from WRR-scheduled addresses, falling back to
   /// direct_client.
   fn client(&self) -> Result<&dyn ClientProtocol, UpstreamError> {
-    schedule_wrr(&self.addresses)
-      .map(|idx| &*self.addresses[idx].client)
-      .or_else(|| self.direct_client.as_deref())
+    scheduler::select(&self.addresses)
+      .map(|client| client.as_ref())
+      .or(self.direct_client.as_deref())
       .ok_or_else(|| {
         UpstreamError::ProxyInternalError("no addresses".into())
       })
@@ -236,7 +209,7 @@ fn build_tls_config(
 // ============================================================================
 
 pub(crate) struct UpstreamRegistry {
-  pub(crate) entries: HashMap<String, Upstream>,
+  entries: HashMap<String, Rc<Upstream>>,
   tls_config: Option<Arc<rustls::ClientConfig>>,
   tracker: Rc<StreamTracker>,
 }
@@ -271,7 +244,7 @@ impl UpstreamRegistry {
       Some(Arc::new(client_config))
     };
 
-    let mut entries: HashMap<String, Upstream> = HashMap::new();
+    let mut entries: HashMap<String, Rc<Upstream>> = HashMap::new();
 
     for (upstream_name, upstream) in upstreams {
       if upstream.addresses.is_empty() {
@@ -288,7 +261,7 @@ impl UpstreamRegistry {
 
         entries.insert(
           upstream_name,
-          Upstream {
+          Rc::new(Upstream {
             addresses: vec![],
             direct_client: Some(Box::new(
               HttpClient::<HttpConnector> {
@@ -300,7 +273,7 @@ impl UpstreamRegistry {
                 user: None,
               },
             )),
-          },
+          }),
         );
         continue;
       }
@@ -325,10 +298,9 @@ impl UpstreamRegistry {
                 .pool_idle_timeout(upstream.pool_config.idle_timeout)
                 .build(connector);
 
-            addresses.push(Address {
-              weight: addr.weight,
-              current_weight: std::cell::Cell::new(0),
-              client: Box::new(HttpClient::<ProxyConnector> {
+            addresses.push(Address::new(
+              addr.weight,
+              Box::new(HttpClient::<ProxyConnector> {
                 client,
                 proxy_addr: Some(addr.address.clone()),
                 connect_timeout: *connect_timeout,
@@ -336,7 +308,7 @@ impl UpstreamRegistry {
                 dns_resolve_timeout: upstream.dns_resolve_timeout,
                 user: addr.user.clone(),
               }),
-            });
+            ));
           }
           super::config::Protocol::Https {
             connect_timeout,
@@ -375,10 +347,9 @@ impl UpstreamRegistry {
                 .pool_idle_timeout(upstream.pool_config.idle_timeout)
                 .build(connector);
 
-            addresses.push(Address {
-              weight: addr.weight,
-              current_weight: std::cell::Cell::new(0),
-              client: Box::new(HttpsClient {
+            addresses.push(Address::new(
+              addr.weight,
+              Box::new(HttpsClient {
                 client,
                 proxy_addr: addr.address.clone(),
                 hostname: host.to_string(),
@@ -388,16 +359,15 @@ impl UpstreamRegistry {
                 dns_resolve_timeout: upstream.dns_resolve_timeout,
                 user: addr.user.clone(),
               }),
-            });
+            ));
           }
           super::config::Protocol::Http3 {
             tls_handshake_timeout,
             quic,
           } => {
-            addresses.push(Address {
-              weight: addr.weight,
-              current_weight: std::cell::Cell::new(0),
-              client: Box::new(Http3Client {
+            addresses.push(Address::new(
+              addr.weight,
+              Box::new(Http3Client {
                 state: Rc::new(RefCell::new(Http3AddressState::new())),
                 proxy_addr: addr.address.clone(),
                 hostname: addr.hostname.clone(),
@@ -415,14 +385,14 @@ impl UpstreamRegistry {
                 },
                 user: addr.user.clone(),
               }),
-            });
+            ));
           }
         }
       }
 
       entries.insert(
         upstream_name,
-        Upstream { addresses, direct_client: None },
+        Rc::new(Upstream { addresses, direct_client: None }),
       );
     }
 
@@ -432,12 +402,24 @@ impl UpstreamRegistry {
   pub(crate) fn get_upstream(
     &self,
     name: &str,
-  ) -> Result<&Upstream, UpstreamError> {
-    self.entries.get(name).ok_or_else(|| {
-      UpstreamError::ProxyInternalError(format!(
-        "upstream '{name}' not found"
-      ))
-    })
+  ) -> Result<Rc<Upstream>, UpstreamError> {
+    self
+      .entries
+      .get(name)
+      .ok_or_else(|| {
+        UpstreamError::ProxyInternalError(format!(
+          "upstream '{name}' not found"
+        ))
+      })
+      .cloned()
+  }
+
+  pub(crate) fn contains_upstream(&self, name: &str) -> bool {
+    self.entries.contains_key(name)
+  }
+
+  pub(crate) fn len(&self) -> usize {
+    self.entries.len()
   }
 
   pub(crate) fn tls_config(&self) -> Option<Arc<rustls::ClientConfig>> {
@@ -451,7 +433,7 @@ impl UpstreamRegistry {
   pub(crate) fn close_all(&self) {
     for upstream in self.entries.values() {
       for addr in &upstream.addresses {
-        addr.client.close();
+        addr.item().close();
       }
       if let Some(ref dc) = upstream.direct_client {
         dc.close();

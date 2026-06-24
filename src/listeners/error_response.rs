@@ -3,7 +3,9 @@
 //! Provides helpers for constructing common HTTP error responses
 //! (403 Forbidden, 404 Not Found) used across HTTP-family listeners.
 
-use crate::http_utils::{BytesBufBodyWrapper, Response, ResponseBody};
+use crate::http_message::{
+  BytesBufBodyWrapper, Response, ResponseBody,
+};
 
 /// Build a 403 Forbidden response.
 ///

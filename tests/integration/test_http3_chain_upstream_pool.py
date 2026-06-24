@@ -13,39 +13,35 @@ import os
 import socket
 import subprocess
 import tempfile
-from typing import Optional
 
 from .conftest import get_unique_port
-from .utils.helpers import (
-    wait_for_proxy,
-    wait_for_process_exit,
-    wait_for_udp_port_bound,
-    terminate_process,
-    establish_connect_tunnel,
-    create_target_server,
-    NEOPROXY_BINARY,
+from .types import (
+    BytesProcess,
 )
-from .utils.http_echo import http_echo_handler
 from .utils.certs import generate_test_certificates
 from .utils.config_builders import (
-    create_http3_listener_config,
     create_http3_chain_config,
+    create_http3_listener_config,
 )
+from .utils.helpers import (
+    NEOPROXY_BINARY,
+    create_target_server,
+    establish_connect_tunnel,
+    terminate_process,
+    wait_for_process_exit,
+    wait_for_proxy,
+    wait_for_udp_port_bound,
+)
+from .utils.http_echo import http_echo_handler
 
 
-def _proxy_get(proxy_port, target_host, target_port, timeout=10):
+def _proxy_get(proxy_port: int, target_host: str, target_port: int, timeout: float = 10.0) -> int:
     """Send GET request through CONNECT tunnel via the proxy, return status code."""
-    tunnel = establish_connect_tunnel(
-        "127.0.0.1", proxy_port, target_host, target_port
-    )
+    tunnel = establish_connect_tunnel("127.0.0.1", proxy_port, target_host, target_port)
     if tunnel is None:
         return 0
     try:
-        request = (
-            f"GET / HTTP/1.1\r\n"
-            f"Host: {target_host}:{target_port}\r\n"
-            f"Connection: close\r\n\r\n"
-        ).encode()
+        request = (f"GET / HTTP/1.1\r\nHost: {target_host}:{target_port}\r\nConnection: close\r\n\r\n").encode()
         tunnel.settimeout(timeout)
         tunnel.sendall(request)
         response = b""
@@ -58,7 +54,7 @@ def _proxy_get(proxy_port, target_host, target_port, timeout=10):
         if "200" in status_line:
             return 200
         return 0
-    except Exception:
+    except OSError, UnicodeDecodeError:
         return 0
     finally:
         tunnel.close()
@@ -67,6 +63,7 @@ def _proxy_get(proxy_port, target_host, target_port, timeout=10):
 # ==============================================================================
 # Test: Connection Reuse Within Service
 # ==============================================================================
+
 
 class TestConnectionReuseWithinService:
     """
@@ -84,20 +81,19 @@ class TestConnectionReuseWithinService:
         h3_port = get_unique_port()
         target_port = get_unique_port()
         cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
-        entry_proc: Optional[subprocess.Popen] = None
-        upstream_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        entry_proc: BytesProcess | None = None
+        upstream_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
-            upstream_config_path = create_http3_listener_config(
-                h3_port, cert_path, key_path, temp_dir
-            )
+            upstream_config_path = create_http3_listener_config(h3_port, cert_path, key_path, temp_dir)
             upstream_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", upstream_config_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
-                "Upstream H3 listener did not start"
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), "Upstream H3 listener did not start"
 
             chain_config = create_http3_chain_config(
                 http_port=http_port,
@@ -108,15 +104,19 @@ class TestConnectionReuseWithinService:
             )
 
             entry_proc = subprocess.Popen(
-                [os.path.abspath(NEOPROXY_BINARY), "--config", chain_config],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                [
+                    os.path.abspath(NEOPROXY_BINARY),
+                    "--config",
+                    chain_config,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
             wait_for_proxy("127.0.0.1", http_port, timeout=10)
 
             # Use local echo target to avoid external network
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, http_echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, http_echo_handler)
 
             for i in range(5):
                 status = _proxy_get(http_port, "127.0.0.1", target_port)
@@ -138,6 +138,7 @@ class TestConnectionReuseWithinService:
 # Test: Multiple Services Sharing Same Upstream
 # ==============================================================================
 
+
 class TestMultipleServicesShareUpstream:
     """
     Verify that multiple HTTP/3 chain services can share the same
@@ -154,22 +155,21 @@ class TestMultipleServicesShareUpstream:
         http_port_2 = get_unique_port()
         h3_port = get_unique_port()
         cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
-        entry_proc: Optional[subprocess.Popen] = None
-        upstream_proc: Optional[subprocess.Popen] = None
+        entry_proc: BytesProcess | None = None
+        upstream_proc: BytesProcess | None = None
         target_port = get_unique_port()
-        target_socket: Optional[socket.socket] = None
+        target_socket: socket.socket | None = None
 
         try:
             # Start upstream H3 listener
-            upstream_config_path = create_http3_listener_config(
-                h3_port, cert_path, key_path, temp_dir
-            )
+            upstream_config_path = create_http3_listener_config(h3_port, cert_path, key_path, temp_dir)
             upstream_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", upstream_config_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
-                "Upstream H3 listener did not start"
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), "Upstream H3 listener did not start"
 
             # Build config with two services using the same upstream
             log_dir = os.path.join(temp_dir, "logs")
@@ -220,15 +220,15 @@ servers:
 
             entry_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
             wait_for_proxy("127.0.0.1", http_port_1, timeout=10)
             wait_for_proxy("127.0.0.1", http_port_2, timeout=5)
 
             # Both services should work
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, http_echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, http_echo_handler)
             r1 = _proxy_get(http_port_1, "127.0.0.1", target_port)
             assert r1 == 200, f"Service 1 failed with status {r1}"
 
@@ -251,6 +251,7 @@ servers:
 # Test: Three-Level Config Inheritance
 # ==============================================================================
 
+
 class TestThreeLevelConfigInheritance:
     """
     Verify three-level config inheritance (Plugin -> Upstream -> Address).
@@ -264,15 +265,16 @@ class TestThreeLevelConfigInheritance:
         http_port = get_unique_port()
         h3_port = get_unique_port()
         cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
-        entry_proc: Optional[subprocess.Popen] = None
-        upstream_proc: Optional[subprocess.Popen] = None
+        entry_proc: BytesProcess | None = None
+        upstream_proc: BytesProcess | None = None
         target_port = get_unique_port()
-        target_socket: Optional[socket.socket] = None
+        target_socket: socket.socket | None = None
 
         try:
             from .utils.config_builders import (
                 create_http3_listener_config_with_password_auth,
             )
+
             # Start upstream with password auth (expecting address-level user)
             upstream_config_path = create_http3_listener_config_with_password_auth(
                 proxy_port=h3_port,
@@ -283,10 +285,11 @@ class TestThreeLevelConfigInheritance:
             )
             upstream_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", upstream_config_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
-                "Upstream H3 listener did not start"
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), "Upstream H3 listener did not start"
 
             # Plugin-level has WRONG user, address-level has CORRECT user
             config_content = f"""server_threads: 1
@@ -332,13 +335,13 @@ servers:
 
             entry_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
             wait_for_proxy("127.0.0.1", http_port, timeout=10)
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, http_echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, http_echo_handler)
 
             status = _proxy_get(http_port, "127.0.0.1", target_port)
             assert status == 200, f"Address-level auth should override plugin-level, got {status}"
@@ -362,15 +365,16 @@ servers:
         http_port = get_unique_port()
         h3_port = get_unique_port()
         cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
-        entry_proc: Optional[subprocess.Popen] = None
-        upstream_proc: Optional[subprocess.Popen] = None
+        entry_proc: BytesProcess | None = None
+        upstream_proc: BytesProcess | None = None
         target_port = get_unique_port()
-        target_socket: Optional[socket.socket] = None
+        target_socket: socket.socket | None = None
 
         try:
             from .utils.config_builders import (
                 create_http3_listener_config_with_password_auth,
             )
+
             upstream_config_path = create_http3_listener_config_with_password_auth(
                 proxy_port=h3_port,
                 cert_path=cert_path,
@@ -380,10 +384,11 @@ servers:
             )
             upstream_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", upstream_config_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
-                "Upstream H3 listener did not start"
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), "Upstream H3 listener did not start"
 
             # Plugin-level user, address has NO user -> inherits from plugin
             config_content = f"""server_threads: 1
@@ -426,13 +431,13 @@ servers:
 
             entry_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
             wait_for_proxy("127.0.0.1", http_port, timeout=10)
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, http_echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, http_echo_handler)
 
             status = _proxy_get(http_port, "127.0.0.1", target_port)
             assert status == 200, f"Plugin-level auth should be inherited, got {status}"
@@ -457,15 +462,16 @@ servers:
         http_port = get_unique_port()
         h3_port = get_unique_port()
         cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
-        entry_proc: Optional[subprocess.Popen] = None
-        upstream_proc: Optional[subprocess.Popen] = None
+        entry_proc: BytesProcess | None = None
+        upstream_proc: BytesProcess | None = None
         target_port = get_unique_port()
-        target_socket: Optional[socket.socket] = None
+        target_socket: socket.socket | None = None
 
         try:
             from .utils.config_builders import (
                 create_http3_listener_config_with_password_auth,
             )
+
             upstream_config_path = create_http3_listener_config_with_password_auth(
                 proxy_port=h3_port,
                 cert_path=cert_path,
@@ -475,10 +481,11 @@ servers:
             )
             upstream_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", upstream_config_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), \
-                "Upstream H3 listener did not start"
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), "Upstream H3 listener did not start"
 
             # Plugin has WRONG user, upstream has CORRECT user,
             # address has NO user -> inherits from upstream
@@ -525,13 +532,13 @@ servers:
 
             entry_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
             wait_for_proxy("127.0.0.1", http_port, timeout=10)
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, http_echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, http_echo_handler)
 
             status = _proxy_get(http_port, "127.0.0.1", target_port)
             assert status == 200, f"Upstream-level auth should override plugin-level, got {status}"
@@ -552,6 +559,7 @@ servers:
 # Test: WRR Load Balancing with Pool
 # ==============================================================================
 
+
 class TestWRRLoadBalancingWithPool:
     """
     Verify WRR load balancing works correctly with the global pool.
@@ -567,33 +575,31 @@ class TestWRRLoadBalancingWithPool:
         h3_port_1 = get_unique_port()
         h3_port_2 = get_unique_port()
         cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
-        entry_proc: Optional[subprocess.Popen] = None
-        upstream_proc_1: Optional[subprocess.Popen] = None
-        upstream_proc_2: Optional[subprocess.Popen] = None
+        entry_proc: BytesProcess | None = None
+        upstream_proc_1: BytesProcess | None = None
+        upstream_proc_2: BytesProcess | None = None
         target_port = get_unique_port()
-        target_socket: Optional[socket.socket] = None
+        target_socket: socket.socket | None = None
 
         try:
             # Start two upstream H3 listeners
-            upstream_config_1 = create_http3_listener_config(
-                h3_port_1, cert_path, key_path, temp_dir
-            )
+            upstream_config_1 = create_http3_listener_config(h3_port_1, cert_path, key_path, temp_dir)
             upstream_proc_1 = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", upstream_config_1],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port_1, timeout=5.0), \
-                "Upstream 1 did not start"
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port_1, timeout=5.0), "Upstream 1 did not start"
 
-            upstream_config_2 = create_http3_listener_config(
-                h3_port_2, cert_path, key_path, temp_dir
-            )
+            upstream_config_2 = create_http3_listener_config(h3_port_2, cert_path, key_path, temp_dir)
             upstream_proc_2 = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", upstream_config_2],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port_2, timeout=5.0), \
-                "Upstream 2 did not start"
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port_2, timeout=5.0), "Upstream 2 did not start"
 
             # Config with two addresses, weights 2:1
             config_content = f"""server_threads: 2
@@ -636,14 +642,14 @@ servers:
 
             entry_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
             )
             wait_for_proxy("127.0.0.1", http_port, timeout=10)
 
             # Send 6 requests to local echo target
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, http_echo_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, http_echo_handler)
 
             success_count = 0
             for _ in range(6):
@@ -652,9 +658,7 @@ servers:
                     success_count += 1
 
             # At least 4 should succeed (WRR distributes load)
-            assert success_count >= 4, (
-                f"Expected >=4 successful requests, got {success_count}"
-            )
+            assert success_count >= 4, f"Expected >=4 successful requests, got {success_count}"
 
             # Both upstreams should still be running
             assert upstream_proc_1.poll() is None, "Upstream 1 should be alive"
@@ -677,6 +681,7 @@ servers:
 # ==============================================================================
 # Test: Config Validation
 # ==============================================================================
+
 
 class TestUpstreamPoolConfigValidation:
     """
@@ -719,12 +724,13 @@ servers:
 
         proc = subprocess.Popen(
             [NEOPROXY_BINARY, "--config", config_path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
         )
         try:
             # Proxy should NOT start — upstream validation fails at startup
-            assert not wait_for_proxy("127.0.0.1", port, timeout=5.0), \
-                "Proxy should NOT start with missing upstream"
+            assert not wait_for_proxy("127.0.0.1", port, timeout=5.0), "Proxy should NOT start with missing upstream"
         finally:
             terminate_process(proc, timeout=5, force=True)
 
@@ -765,7 +771,9 @@ servers:
 
         proc = subprocess.Popen(
             [NEOPROXY_BINARY, "--config", config_path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
         )
         try:
             returncode = proc.wait(timeout=5)
@@ -778,6 +786,7 @@ servers:
 # ==============================================================================
 # Test: quic: sub-block and max_idle_timeout format
 # ==============================================================================
+
 
 class TestQuicAndMaxIdleTimeoutConfig:
     """Verify quic: sub-block and max_idle_timeout rename."""
@@ -821,11 +830,12 @@ servers:
             f.write(config)
         proc = subprocess.Popen(
             [NEOPROXY_BINARY, "--config", path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
         )
         try:
-            assert wait_for_proxy("127.0.0.1", port, timeout=5.0), \
-                "Should start with quic: sub-block"
+            assert wait_for_proxy("127.0.0.1", port, timeout=5.0), "Should start with quic: sub-block"
         finally:
             terminate_process(proc, timeout=5, force=True)
 
@@ -863,7 +873,9 @@ servers:
             f.write(config)
         proc = subprocess.Popen(
             [NEOPROXY_BINARY, "--config", path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
         )
         rc, _ = wait_for_process_exit(proc, timeout=5)
         assert rc != 0, "Should reject unknown field in service args"
@@ -897,11 +909,12 @@ servers:
             f.write(config)
         proc = subprocess.Popen(
             [NEOPROXY_BINARY, "--config", path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
         )
         try:
-            assert wait_for_proxy("127.0.0.1", port, timeout=5.0), \
-                "Should start with max_idle_timeout"
+            assert wait_for_proxy("127.0.0.1", port, timeout=5.0), "Should start with max_idle_timeout"
         finally:
             terminate_process(proc, timeout=5, force=True)
 
@@ -934,7 +947,9 @@ servers:
             f.write(config)
         proc = subprocess.Popen(
             [NEOPROXY_BINARY, "--config", path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
         )
         rc, _ = wait_for_process_exit(proc, timeout=5)
         assert rc != 0, "Should reject unknown field in connect_tcp"
@@ -973,7 +988,9 @@ servers:
             f.write(config)
         proc = subprocess.Popen(
             [NEOPROXY_BINARY, "--config", path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
         )
         rc, _ = wait_for_process_exit(proc, timeout=5)
         assert rc != 0, "Should reject unknown field in plugin config"

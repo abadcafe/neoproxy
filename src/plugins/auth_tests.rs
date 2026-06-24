@@ -163,8 +163,8 @@ users: []
 /// Helper to build a request with a RequestContext extension.
 fn make_request_with_ctx(
   proxy_auth: Option<&str>,
-) -> crate::http_utils::Request {
-  let body: crate::http_utils::RequestBody =
+) -> crate::http_message::Request {
+  let body: crate::http_message::RequestBody =
     http_body_util::Empty::<bytes::Bytes>::new()
       .map_err(|e: std::convert::Infallible| anyhow::anyhow!("{}", e))
       .boxed_unsync();
@@ -271,7 +271,7 @@ fn test_valid_credentials_sets_context() {
     let inner = crate::server::placeholder_service();
     let mut svc = layer.layer(inner);
 
-    let body: crate::http_utils::RequestBody =
+    let body: crate::http_message::RequestBody =
       http_body_util::Empty::<bytes::Bytes>::new()
         .map_err(|e: std::convert::Infallible| anyhow::anyhow!("{}", e))
         .boxed_unsync();
@@ -320,22 +320,24 @@ fn test_valid_credentials_returns_inner_response() {
   rt.block_on(async {
     // Create an inner service that returns a successful response
     let inner = crate::service::Service::new(tower::service_fn(
-      |_req: crate::http_utils::Request| {
+      |_req: crate::http_message::Request| {
         Box::pin(async {
-          let body: crate::http_utils::ResponseBody =
+          let body: crate::http_message::ResponseBody =
             http_body_util::Full::new(bytes::Bytes::from("hello"))
               .map_err(|e: std::convert::Infallible| {
                 anyhow::anyhow!("{}", e)
               })
               .boxed_unsync();
-          let mut resp = crate::http_utils::Response::new(body);
+          let mut resp = crate::http_message::Response::new(body);
           *resp.status_mut() = http::StatusCode::OK;
           Ok::<_, anyhow::Error>(resp)
         })
           as std::pin::Pin<
             Box<
               dyn std::future::Future<
-                  Output = anyhow::Result<crate::http_utils::Response>,
+                  Output = anyhow::Result<
+                    crate::http_message::Response,
+                  >,
                 >,
             >,
           >
@@ -365,7 +367,7 @@ fn test_missing_request_context_returns_error() {
   rt.block_on(async {
     let mut svc = make_middleware_service();
     // Build request WITHOUT RequestContext extension
-    let body: crate::http_utils::RequestBody =
+    let body: crate::http_message::RequestBody =
       http_body_util::Empty::<bytes::Bytes>::new()
         .map_err(|e: std::convert::Infallible| anyhow::anyhow!("{}", e))
         .boxed_unsync();

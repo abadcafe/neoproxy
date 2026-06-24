@@ -11,32 +11,33 @@ This module covers:
 - Tunnel max_idle_timeout is configurable
 """
 
-import subprocess
-import socket
-import tempfile
-import shutil
-import time
 import os
-from typing import Optional
+import shutil
+import socket
+import subprocess
+import tempfile
+import time
 
-from .utils.helpers import (
-    start_proxy,
-    wait_for_proxy,
-    create_target_server,
-    wait_for_udp_port_bound,
+from .conftest import get_unique_port
+from .types import (
+    BytesProcess,
+    StringMap,
 )
-
 from .utils.config_builders import (
     create_http3_listener_config,
 )
-
-from .conftest import get_unique_port
+from .utils.helpers import (
+    create_target_server,
+    start_proxy,
+    wait_for_proxy,
+    wait_for_udp_port_bound,
+)
 
 
 class TestTunnelIdleTimeout:
     """Test tunnel idle timeout behavior through the full proxy chain."""
 
-    def test_tunnel_survives_sustained_transfer(self, shared_test_certs) -> None:
+    def test_tunnel_survives_sustained_transfer(self, shared_test_certs: StringMap) -> None:
         """
         TC-IDLE-001: Tunnel survives data transfer longer than max_idle_timeout.
 
@@ -59,14 +60,14 @@ class TestTunnelIdleTimeout:
         h3_port = get_unique_port()
         target_port = get_unique_port()
 
-        chain_proc: Optional[subprocess.Popen] = None
-        h3_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        chain_proc: BytesProcess | None = None
+        h3_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            ca_path = shared_test_certs["ca_path"]
 
             # Create a target server that sends data slowly (longer than max_idle_timeout)
             # It sends 5 chunks of 1KB every 500ms, taking ~2.5s total
@@ -97,25 +98,24 @@ class TestTunnelIdleTimeout:
 
                     # Final chunk
                     conn.sendall(b"0\r\n\r\n")
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, slow_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, slow_handler)
 
             # Start HTTP/3 listener
             h3_config = create_http3_listener_config(
                 proxy_port=h3_port,
                 cert_path=cert_path,
                 key_path=key_path,
-                temp_dir=temp_dir1
+                temp_dir=temp_dir1,
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0, proc=h3_proc), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0, proc=h3_proc), (
                 "HTTP/3 listener failed to start"
+            )
 
             # Start chain service with short max_idle_timeout
             # This config includes max_idle_timeout: 2s
@@ -155,19 +155,23 @@ servers:
                 f.write(config_content)
 
             chain_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=chain_proc), \
-                "HTTP listener failed to start"
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=chain_proc), "HTTP listener failed to start"
 
             # Download through the proxy — should succeed even though
             # transfer takes ~2.5s and max_idle_timeout is 2s
             start = time.time()
             result = subprocess.run(
                 [
-                    "curl", "-s", "-p",
-                    "-x", f"http://127.0.0.1:{http_port}",
+                    "curl",
+                    "-s",
+                    "-p",
+                    "-x",
+                    f"http://127.0.0.1:{http_port}",
                     f"http://127.0.0.1:{target_port}/",
-                    "--connect-timeout", "10",
-                    "--max-time", "15",
+                    "--connect-timeout",
+                    "10",
+                    "--max-time",
+                    "15",
                 ],
                 capture_output=True,
                 text=True,
@@ -175,16 +179,15 @@ servers:
             elapsed = time.time() - start
 
             # The download should succeed — data was flowing the entire time
-            assert result.returncode == 0, \
+            assert result.returncode == 0, (
                 f"curl failed with code {result.returncode}: stdout={result.stdout}, stderr={result.stderr}"
+            )
 
             # Verify we received the expected amount of data (5 * 1024 = 5120 bytes)
-            assert len(result.stdout) == 5120, \
-                f"Expected 5120 bytes, got {len(result.stdout)}"
+            assert len(result.stdout) == 5120, f"Expected 5120 bytes, got {len(result.stdout)}"
 
             # Verify the transfer actually took longer than max_idle_timeout
-            assert elapsed >= 2.0, \
-                f"Transfer should take longer than max_idle_timeout (2s), took {elapsed:.1f}s"
+            assert elapsed >= 2.0, f"Transfer should take longer than max_idle_timeout (2s), took {elapsed:.1f}s"
 
         finally:
             if chain_proc:
@@ -198,7 +201,7 @@ servers:
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
-    def test_tunnel_times_out_when_idle(self, shared_test_certs) -> None:
+    def test_tunnel_times_out_when_idle(self, shared_test_certs: StringMap) -> None:
         """
         TC-IDLE-002: Tunnel times out when no data flows.
 
@@ -215,38 +218,37 @@ servers:
         h3_port = get_unique_port()
         target_port = get_unique_port()
 
-        chain_proc: Optional[subprocess.Popen] = None
-        h3_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        chain_proc: BytesProcess | None = None
+        h3_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            ca_path = shared_test_certs["ca_path"]
 
             # Create target server that accepts but does nothing
             def idle_handler(conn: socket.socket) -> None:
                 try:
                     time.sleep(30)  # Just sit there
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, idle_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, idle_handler)
 
             # Start HTTP/3 listener
             h3_config = create_http3_listener_config(
                 proxy_port=h3_port,
                 cert_path=cert_path,
                 key_path=key_path,
-                temp_dir=temp_dir1
+                temp_dir=temp_dir1,
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0, proc=h3_proc), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0, proc=h3_proc), (
                 "HTTP/3 listener failed to start"
+            )
 
             # Start chain service with short max_idle_timeout
             config_content = f"""server_threads: 1
@@ -285,8 +287,7 @@ servers:
                 f.write(config_content)
 
             chain_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=chain_proc), \
-                "HTTP listener failed to start"
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=chain_proc), "HTTP listener failed to start"
 
             # Use raw socket to establish CONNECT and then idle
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -294,11 +295,7 @@ servers:
             sock.connect(("127.0.0.1", http_port))
 
             # Send CONNECT request
-            sock.sendall(
-                f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\n"
-                f"Host: 127.0.0.1:{target_port}\r\n"
-                "\r\n".encode()
-            )
+            sock.sendall(f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode())
 
             # Read the 200 OK response
             response = b""
@@ -308,8 +305,7 @@ servers:
                     break
                 response += data
 
-            assert b"200" in response, \
-                f"Expected 200 OK from CONNECT, got: {response!r}"
+            assert b"200" in response, f"Expected 200 OK from CONNECT, got: {response!r}"
 
             # Now idle — don't send any data
             # The tunnel should close after max_idle_timeout (2s)
@@ -326,8 +322,7 @@ servers:
 
             # Connection should have been closed within a reasonable time
             # after max_idle_timeout (2s), not stay open forever
-            assert elapsed < 8.0, \
-                f"Idle tunnel should be closed after ~2s, but stayed open for {elapsed:.1f}s"
+            assert elapsed < 8.0, f"Idle tunnel should be closed after ~2s, but stayed open for {elapsed:.1f}s"
 
         finally:
             if chain_proc:
@@ -341,7 +336,7 @@ servers:
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
-    def test_tunnel_unidirectional_transfer_no_false_timeout(self, shared_test_certs) -> None:
+    def test_tunnel_unidirectional_transfer_no_false_timeout(self, shared_test_certs: StringMap) -> None:
         """
         TC-IDLE-003: Unidirectional transfer does not cause false idle timeout.
 
@@ -364,14 +359,14 @@ servers:
         h3_port = get_unique_port()
         target_port = get_unique_port()
 
-        chain_proc: Optional[subprocess.Popen] = None
-        h3_proc: Optional[subprocess.Popen] = None
-        target_socket: Optional[socket.socket] = None
+        chain_proc: BytesProcess | None = None
+        h3_proc: BytesProcess | None = None
+        target_socket: socket.socket | None = None
 
         try:
-            cert_path = shared_test_certs['cert_path']
-            key_path = shared_test_certs['key_path']
-            ca_path = shared_test_certs['ca_path']
+            cert_path = shared_test_certs["cert_path"]
+            key_path = shared_test_certs["key_path"]
+            ca_path = shared_test_certs["ca_path"]
 
             # Server sends data continuously for 5s, client never sends back
             def one_way_handler(conn: socket.socket) -> None:
@@ -399,25 +394,24 @@ servers:
                         time.sleep(0.2)
 
                     conn.sendall(b"0\r\n\r\n")
-                except Exception:
+                except OSError:
                     pass
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, one_way_handler
-            )
+            _, target_socket = create_target_server("127.0.0.1", target_port, one_way_handler)
 
             # Start HTTP/3 listener
             h3_config = create_http3_listener_config(
                 proxy_port=h3_port,
                 cert_path=cert_path,
                 key_path=key_path,
-                temp_dir=temp_dir1
+                temp_dir=temp_dir1,
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0, proc=h3_proc), \
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0, proc=h3_proc), (
                 "HTTP/3 listener failed to start"
+            )
 
             # Start chain service with 2s max_idle_timeout
             config_content = f"""server_threads: 1
@@ -456,35 +450,38 @@ servers:
                 f.write(config_content)
 
             chain_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=chain_proc), \
-                "HTTP listener failed to start"
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=chain_proc), "HTTP listener failed to start"
 
             # Download through the proxy — one-way transfer lasting 5s
             # with 2s max_idle_timeout. Without stale alarm fix, this would fail.
             start = time.time()
             result = subprocess.run(
                 [
-                    "curl", "-s", "-p",
-                    "-x", f"http://127.0.0.1:{http_port}",
+                    "curl",
+                    "-s",
+                    "-p",
+                    "-x",
+                    f"http://127.0.0.1:{http_port}",
                     f"http://127.0.0.1:{target_port}/",
-                    "--connect-timeout", "10",
-                    "--max-time", "15",
+                    "--connect-timeout",
+                    "10",
+                    "--max-time",
+                    "15",
                 ],
                 capture_output=True,
                 text=True,
             )
             elapsed = time.time() - start
 
-            assert result.returncode == 0, \
+            assert result.returncode == 0, (
                 f"curl failed with code {result.returncode}: stdout={result.stdout[:200]}, stderr={result.stderr}"
+            )
 
             # Should have received all the data (25 * 10240 = 256000 bytes)
-            assert len(result.stdout) == 256000, \
-                f"Expected 256000 bytes, got {len(result.stdout)}"
+            assert len(result.stdout) == 256000, f"Expected 256000 bytes, got {len(result.stdout)}"
 
             # Transfer took >2s (the max_idle_timeout), proving no false timeout
-            assert elapsed >= 4.0, \
-                f"Transfer should take ~5s, only took {elapsed:.1f}s"
+            assert elapsed >= 4.0, f"Transfer should take ~5s, only took {elapsed:.1f}s"
 
         finally:
             if chain_proc:

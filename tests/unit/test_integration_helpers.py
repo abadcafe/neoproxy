@@ -3,30 +3,28 @@ Unit tests for helper functions.
 """
 
 import errno
+import os
 import socket
 import tempfile
 import threading
 import time
-import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from tests.integration.utils import helpers
 from tests.integration.utils.helpers import (
-    wait_for_udp_port_bound,
-    wait_for_log_contains,
     curl_request,
     curl_request_with_headers,
+    wait_for_log_contains,
+    wait_for_udp_port_bound,
 )
 
 
 class TestBuildNeoproxyBinary:
     """Tests for integration-test binary build selection."""
 
-    def test_build_uses_js_sandbox_feature_by_default(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_build_uses_js_sandbox_feature_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("NEOPROXY_BINARY", raising=False)
         monkeypatch.delenv("NEOPROXY_CARGO_FEATURES", raising=False)
 
@@ -36,9 +34,7 @@ class TestBuildNeoproxyBinary:
         cmd = mock_run.call_args[0][0]
         assert cmd == ["cargo", "build", "--features", "js-sandbox"]
 
-    def test_build_allows_features_to_be_disabled(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_build_allows_features_to_be_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("NEOPROXY_BINARY", raising=False)
         monkeypatch.setenv("NEOPROXY_CARGO_FEATURES", "")
 
@@ -98,7 +94,7 @@ class TestWaitForUdpPortBound:
         This tests CR-001: The function should only return True for EADDRINUSE,
         not for other OSErrors like permission denied.
         """
-        with patch.object(helpers, 'socket') as mock_socket:
+        with patch.object(helpers, "socket") as mock_socket:
             mock_sock = MagicMock()
             mock_socket.socket.return_value = mock_sock
 
@@ -115,7 +111,7 @@ class TestWaitForUdpPortBound:
         This tests CR-001: The function should only return True for EADDRINUSE,
         not for other OSErrors like address not available.
         """
-        with patch.object(helpers, 'socket') as mock_socket:
+        with patch.object(helpers, "socket") as mock_socket:
             mock_sock = MagicMock()
             mock_socket.socket.return_value = mock_sock
 
@@ -132,7 +128,7 @@ class TestWaitForLogContains:
 
     def test_returns_true_when_pattern_exists(self) -> None:
         """Should return True when pattern exists in log file."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as f:
             f.write("Server started\nListening on port 8080\n")
             log_path = f.name
 
@@ -144,7 +140,7 @@ class TestWaitForLogContains:
 
     def test_returns_false_when_pattern_not_found(self) -> None:
         """Should return False when pattern is never found within timeout."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as f:
             f.write("Server started\n")
             log_path = f.name
 
@@ -156,7 +152,7 @@ class TestWaitForLogContains:
 
     def test_detects_pattern_written_during_wait(self) -> None:
         """Should detect pattern written to log during the wait period."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as f:
             f.write("Server starting...\n")
             log_path = f.name
 
@@ -164,7 +160,7 @@ class TestWaitForLogContains:
 
         def write_later():
             time.sleep(0.2)
-            with open(log_path, 'a') as f:
+            with open(log_path, "a") as f:
                 f.write("READY: Server is ready\n")
                 f.flush()
             written_event.set()
@@ -190,7 +186,9 @@ class TestWaitForMetricValue:
 
     def test_returns_true_when_metric_matches(self) -> None:
         """Should return True when metric value matches expected."""
-        from tests.integration.utils.helpers import wait_for_metric_value
+        from tests.integration.utils.helpers import (
+            wait_for_metric_value,
+        )
 
         call_count = 0
 
@@ -206,7 +204,9 @@ class TestWaitForMetricValue:
 
     def test_returns_false_on_timeout(self) -> None:
         """Should return False when value never matches within timeout."""
-        from tests.integration.utils.helpers import wait_for_metric_value
+        from tests.integration.utils.helpers import (
+            wait_for_metric_value,
+        )
 
         def mock_fetch() -> str:
             return "metric_value 0"
@@ -214,9 +214,13 @@ class TestWaitForMetricValue:
         result = wait_for_metric_value(mock_fetch, "metric_value 999", timeout=0.5)
         assert result is False
 
-    def test_returns_true_immediately_when_already_matches(self) -> None:
+    def test_returns_true_immediately_when_already_matches(
+        self,
+    ) -> None:
         """Should return True immediately when value already matches."""
-        from tests.integration.utils.helpers import wait_for_metric_value
+        from tests.integration.utils.helpers import (
+            wait_for_metric_value,
+        )
 
         def mock_fetch() -> str:
             return "metric_value 5"
@@ -226,7 +230,9 @@ class TestWaitForMetricValue:
 
     def test_handles_exception_gracefully(self) -> None:
         """Should handle exceptions from fetch function and continue polling."""
-        from tests.integration.utils.helpers import wait_for_metric_value
+        from tests.integration.utils.helpers import (
+            wait_for_metric_value,
+        )
 
         call_count = 0
 
@@ -234,7 +240,7 @@ class TestWaitForMetricValue:
             nonlocal call_count
             call_count += 1
             if call_count < 2:
-                raise RuntimeError("Connection error")
+                raise OSError("Connection error")
             return "metric_value 5"
 
         result = wait_for_metric_value(mock_fetch, "metric_value 5", timeout=2.0)
@@ -247,27 +253,21 @@ class TestCurlRequest:
     def test_returns_status_code(self) -> None:
         """Should parse and return HTTP status code from curl output."""
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                stdout="200", stderr="", returncode=0
-            )
+            mock_run.return_value = MagicMock(stdout="200", stderr="", returncode=0)
             result = curl_request("http://example.com/", 8080)
             assert result == 200
 
     def test_returns_zero_on_non_numeric_output(self) -> None:
         """Should return 0 when curl output is not a valid status code."""
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                stdout="", stderr="error", returncode=0
-            )
+            mock_run.return_value = MagicMock(stdout="", stderr="error", returncode=0)
             result = curl_request("http://example.com/", 8080)
             assert result == 0
 
     def test_passes_custom_headers(self) -> None:
         """Should include custom headers in curl command."""
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                stdout="200", stderr="", returncode=0
-            )
+            mock_run.return_value = MagicMock(stdout="200", stderr="", returncode=0)
             curl_request(
                 "http://example.com/",
                 8080,
@@ -281,9 +281,7 @@ class TestCurlRequest:
     def test_clears_no_proxy_env(self) -> None:
         """Should clear no_proxy and NO_PROXY in the environment."""
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                stdout="200", stderr="", returncode=0
-            )
+            mock_run.return_value = MagicMock(stdout="200", stderr="", returncode=0)
             curl_request("http://example.com/", 8080)
             env = mock_run.call_args[1]["env"]
             assert env["no_proxy"] == ""
@@ -292,9 +290,7 @@ class TestCurlRequest:
     def test_uses_proxy_argument(self) -> None:
         """Should use the proxy port in the curl command."""
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                stdout="200", stderr="", returncode=0
-            )
+            mock_run.return_value = MagicMock(stdout="200", stderr="", returncode=0)
             curl_request("http://example.com/", 9090)
             cmd = mock_run.call_args[0][0]
             assert "-x" in cmd
@@ -307,20 +303,10 @@ class TestCurlRequestWithHeaders:
 
     def test_returns_status_code_and_headers(self) -> None:
         """Should parse status code, headers, and body from curl output."""
-        output = (
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/plain\r\n"
-            "Content-Length: 2\r\n"
-            "\r\n"
-            "OK"
-        )
+        output = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nOK"
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                stdout=output, stderr="", returncode=0
-            )
-            status, headers, body = curl_request_with_headers(
-                "http://example.com/", 8080
-            )
+            mock_run.return_value = MagicMock(stdout=output, stderr="", returncode=0)
+            status, headers, body = curl_request_with_headers("http://example.com/", 8080)
             assert status == 200
             assert "content-type" in headers
             assert headers["content-type"] == "text/plain"
@@ -329,12 +315,8 @@ class TestCurlRequestWithHeaders:
     def test_returns_zero_on_empty_output(self) -> None:
         """Should return 0 status when curl returns empty output."""
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                stdout="", stderr="", returncode=0
-            )
-            status, headers, body = curl_request_with_headers(
-                "http://example.com/", 8080
-            )
+            mock_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
+            status, headers, _body = curl_request_with_headers("http://example.com/", 8080)
             assert status == 0
             assert headers == {}
 
@@ -342,18 +324,14 @@ class TestCurlRequestWithHeaders:
         """Should correctly parse multiple response headers."""
         output = (
             "HTTP/1.1 407 Proxy Authentication Required\r\n"
-            "Proxy-Authenticate: Basic realm=\"proxy\"\r\n"
+            'Proxy-Authenticate: Basic realm="proxy"\r\n'
             "Connection: close\r\n"
             "\r\n"
             ""
         )
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                stdout=output, stderr="", returncode=0
-            )
-            status, headers, body = curl_request_with_headers(
-                "http://example.com/", 8080
-            )
+            mock_run.return_value = MagicMock(stdout=output, stderr="", returncode=0)
+            status, headers, _body = curl_request_with_headers("http://example.com/", 8080)
             assert status == 407
             assert "proxy-authenticate" in headers
             assert "connection" in headers
@@ -362,9 +340,7 @@ class TestCurlRequestWithHeaders:
         """Should include custom headers in curl command."""
         output = "HTTP/1.1 200 OK\r\n\r\nOK"
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                stdout=output, stderr="", returncode=0
-            )
+            mock_run.return_value = MagicMock(stdout=output, stderr="", returncode=0)
             curl_request_with_headers(
                 "http://example.com/",
                 8080,
@@ -379,9 +355,7 @@ class TestCurlRequestWithHeaders:
         """Should clear no_proxy and NO_PROXY in the environment."""
         output = "HTTP/1.1 200 OK\r\n\r\nOK"
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                stdout=output, stderr="", returncode=0
-            )
+            mock_run.return_value = MagicMock(stdout=output, stderr="", returncode=0)
             curl_request_with_headers("http://example.com/", 8080)
             env = mock_run.call_args[1]["env"]
             assert env["no_proxy"] == ""

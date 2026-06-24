@@ -31,7 +31,7 @@ pub fn op_sandbox_write_response(
   #[serde] headers: Vec<(String, String)>,
   #[buffer] body: &[u8],
 ) -> Result<(), JsErrorBox> {
-  if status < 100 || status > 599 {
+  if !(100..=599).contains(&status) {
     return Err(JsErrorBox::type_error(format!(
       "invalid status code: {status}"
     )));

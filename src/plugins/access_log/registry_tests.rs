@@ -1,10 +1,10 @@
 use serial_test::serial;
 
-use super::test_utils::TracingCapture;
-use super::{
-  LogEntry, config, context, create_plugin, get_writer,
-  init_writer_registry, reset_writer_registry,
+use super::registry::{
+  LogEntry, get_writer, init_writer_registry, reset_writer_registry,
 };
+use super::tracing_capture::TracingCapture;
+use super::{config, context, create_plugin};
 
 #[test]
 #[serial]

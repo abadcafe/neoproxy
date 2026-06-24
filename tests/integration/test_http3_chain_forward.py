@@ -21,64 +21,67 @@ can take tens of seconds. Tests that exercise this path use curl with a short
 than asserting a specific status code within a tight deadline.
 """
 
+import re
+import shutil
 import subprocess
 import tempfile
-import shutil
-import re
-from typing import Optional, Tuple, Generator
+from collections.abc import Generator
 from contextlib import contextmanager
 
-from .utils.helpers import (
-    start_proxy,
-    wait_for_proxy,
-    send_raw_request,
-    terminate_process,
-)
-from .utils.config_builders import create_http3_chain_config
-from .utils.certs import generate_test_certificates
 from .conftest import get_unique_port
+from .types import (
+    BytesProcess,
+    StringMap,
+)
+from .utils.certs import generate_test_certificates
+from .utils.config_builders import create_http3_chain_config
+from .utils.helpers import (
+    send_raw_request,
+    start_proxy,
+    terminate_process,
+    wait_for_proxy,
+)
 
 
-def parse_http_response(response: bytes) -> Tuple[int, str, dict, bytes]:
+def parse_http_response(
+    response: bytes,
+) -> tuple[int, str, dict[str, str], bytes]:
     """Parse raw HTTP response into (status_code, status_text, headers, body)."""
-    try:
-        if b"\r\n\r\n" in response:
-            header_part, body = response.split(b"\r\n\r\n", 1)
-        else:
-            header_part = response
-            body = b""
+    if b"\r\n\r\n" in response:
+        header_part, body = response.split(b"\r\n\r\n", 1)
+    else:
+        header_part = response
+        body = b""
 
-        lines = header_part.decode("utf-8", errors="ignore").split("\r\n")
-        status_line = lines[0] if lines else ""
+    lines = header_part.decode("utf-8", errors="ignore").split("\r\n")
+    status_line = lines[0] if lines else ""
 
-        status_match = re.match(r"HTTP/\d\.\d\s+(\d+)\s*(.*)", status_line)
-        if status_match:
-            status_code = int(status_match.group(1))
-            status_text = status_match.group(2).strip()
-        else:
-            status_code = 0
-            status_text = ""
+    status_match = re.match(r"HTTP/\d\.\d\s+(\d+)\s*(.*)", status_line)
+    if status_match:
+        status_code = int(status_match.group(1))
+        status_text = status_match.group(2).strip()
+    else:
+        status_code = 0
+        status_text = ""
 
-        headers: dict = {}
-        for line in lines[1:]:
-            if ":" in line:
-                key, value = line.split(":", 1)
-                headers[key.strip().lower()] = value.strip()
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        if ":" in line:
+            key, value = line.split(":", 1)
+            headers[key.strip().lower()] = value.strip()
 
-        return status_code, status_text, headers, body
-    except Exception:
-        return 0, "", {}, response
+    return status_code, status_text, headers, body
 
 
 @contextmanager
 def chain_service_context(
     http_port: int,
     h3_port: int,
-    shared_test_certs: Optional[dict] = None,
-) -> Generator[Tuple[str, subprocess.Popen], None, None]:
+    shared_test_certs: StringMap | None = None,
+) -> Generator[tuple[str, BytesProcess], None, None]:
     """Context manager for http3_chain service setup and teardown."""
     temp_dir = tempfile.mkdtemp()
-    proxy_proc: Optional[subprocess.Popen] = None
+    proxy_proc: BytesProcess | None = None
 
     try:
         if shared_test_certs:
@@ -93,8 +96,7 @@ def chain_service_context(
             temp_dir=temp_dir,
         )
         proxy_proc = start_proxy(config_path)
-        assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), \
-            "HTTP listener failed to start"
+        assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), "HTTP listener failed to start"
 
         yield temp_dir, proxy_proc
 
@@ -112,7 +114,7 @@ class TestHTTP3ChainForwardProxy:
     absolute-form HTTP requests as a forward proxy.
     """
 
-    def test_origin_form_returns_400(self, shared_test_certs: dict) -> None:
+    def test_origin_form_returns_400(self, shared_test_certs: StringMap) -> None:
         """
         TC-CHAIN-FWD-001: Origin-form URI returns 400.
 
@@ -124,19 +126,15 @@ class TestHTTP3ChainForwardProxy:
         h3_port = get_unique_port()
 
         with chain_service_context(http_port, h3_port, shared_test_certs) as (_, _proc):
-            request = (
-                b"GET / HTTP/1.1\r\n"
-                b"Host: localhost\r\n"
-                b"\r\n"
-            )
+            request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
             response = send_raw_request("127.0.0.1", http_port, request)
             status_code, _, _, _ = parse_http_response(response)
 
-            assert status_code == 400, \
-                f"Expected 400 for origin-form GET, got {status_code}. " \
-                f"Response: {response.decode(errors='ignore')}"
+            assert status_code == 400, (
+                f"Expected 400 for origin-form GET, got {status_code}. Response: {response.decode(errors='ignore')}"
+            )
 
-    def test_https_scheme_returns_400(self, shared_test_certs: dict) -> None:
+    def test_https_scheme_returns_400(self, shared_test_certs: StringMap) -> None:
         """
         TC-CHAIN-FWD-002: https:// scheme returns 400.
 
@@ -147,21 +145,15 @@ class TestHTTP3ChainForwardProxy:
         h3_port = get_unique_port()
 
         with chain_service_context(http_port, h3_port, shared_test_certs) as (_, _proc):
-            request = (
-                b"GET https://example.com/ HTTP/1.1\r\n"
-                b"Host: example.com\r\n"
-                b"\r\n"
-            )
+            request = b"GET https://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n"
             response = send_raw_request("127.0.0.1", http_port, request)
             status_code, _, _, _ = parse_http_response(response)
 
-            assert status_code == 400, \
-                f"Expected 400 for https:// scheme, got {status_code}. " \
-                f"Response: {response.decode(errors='ignore')}"
+            assert status_code == 400, (
+                f"Expected 400 for https:// scheme, got {status_code}. Response: {response.decode(errors='ignore')}"
+            )
 
-    def test_absolute_form_with_unreachable_upstream_fails_gracefully(
-        self, shared_test_certs: dict
-    ) -> None:
+    def test_absolute_form_with_unreachable_upstream_fails_gracefully(self, shared_test_certs: StringMap) -> None:
         """
         TC-CHAIN-FWD-003: Valid absolute-form URI with unreachable upstream fails gracefully.
 
@@ -177,9 +169,16 @@ class TestHTTP3ChainForwardProxy:
         with chain_service_context(http_port, h3_port, shared_test_certs) as (_, proc):
             result = subprocess.run(
                 [
-                    "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                    "-x", f"http://127.0.0.1:{http_port}",
-                    "--max-time", "3",
+                    "curl",
+                    "-s",
+                    "-o",
+                    "/dev/null",
+                    "-w",
+                    "%{http_code}",
+                    "-x",
+                    f"http://127.0.0.1:{http_port}",
+                    "--max-time",
+                    "3",
                     "http://example.com/",
                 ],
                 capture_output=True,
@@ -187,16 +186,12 @@ class TestHTTP3ChainForwardProxy:
                 timeout=10,
             )
             # Proxy must still be running (no crash/panic)
-            assert proc.poll() is None, \
-                "Proxy crashed while handling forward request to unreachable upstream"
+            assert proc.poll() is None, "Proxy crashed while handling forward request to unreachable upstream"
             # curl must exit cleanly (not hang); non-200 or curl error both acceptable
             status = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
-            assert status != 200, \
-                f"Expected non-200 for unreachable upstream, got {status}"
+            assert status != 200, f"Expected non-200 for unreachable upstream, got {status}"
 
-    def test_proxy_stays_alive_after_forward_and_connect_requests(
-        self, shared_test_certs: dict
-    ) -> None:
+    def test_proxy_stays_alive_after_forward_and_connect_requests(self, shared_test_certs: StringMap) -> None:
         """
         TC-CHAIN-FWD-004: Proxy stays alive after receiving both forward and CONNECT requests.
 
@@ -214,14 +209,10 @@ class TestHTTP3ChainForwardProxy:
             ]:
                 response = send_raw_request("127.0.0.1", http_port, request)
                 status_code, _, _, _ = parse_http_response(response)
-                assert status_code == 400, \
-                    f"Expected 400, got {status_code}: {response.decode(errors='ignore')}"
-                assert proc.poll() is None, \
-                    "Proxy crashed after receiving a validation-error request"
+                assert status_code == 400, f"Expected 400, got {status_code}: {response.decode(errors='ignore')}"
+                assert proc.poll() is None, "Proxy crashed after receiving a validation-error request"
 
-    def test_connect_dispatch_unaffected_by_forward_proxy(
-        self, shared_test_certs: dict
-    ) -> None:
+    def test_connect_dispatch_unaffected_by_forward_proxy(self, shared_test_certs: StringMap) -> None:
         """
         TC-CHAIN-FWD-005: CONNECT requests are dispatched via CONNECT path, not forward path.
 
@@ -234,11 +225,15 @@ class TestHTTP3ChainForwardProxy:
         h3_port = get_unique_port()  # nothing listening here
 
         with chain_service_context(http_port, h3_port, shared_test_certs) as (_, proc):
-            result = subprocess.run(
+            _result = subprocess.run(
                 [
-                    "curl", "-s", "-p",
-                    "-x", f"http://127.0.0.1:{http_port}",
-                    "--max-time", "3",
+                    "curl",
+                    "-s",
+                    "-p",
+                    "-x",
+                    f"http://127.0.0.1:{http_port}",
+                    "--max-time",
+                    "3",
                     "https://example.com/",
                 ],
                 capture_output=True,
@@ -246,15 +241,12 @@ class TestHTTP3ChainForwardProxy:
                 timeout=10,
             )
             # Proxy must still be running (no crash/panic)
-            assert proc.poll() is None, \
-                "Proxy crashed while handling CONNECT to unreachable upstream"
+            assert proc.poll() is None, "Proxy crashed while handling CONNECT to unreachable upstream"
             # curl must exit (not hang); any non-zero or non-200 is acceptable
             # The key invariant: this did NOT return 400 (which would mean the
             # request was wrongly routed to the forward proxy validation path)
 
-    def test_post_absolute_form_with_unreachable_upstream_fails_gracefully(
-        self, shared_test_certs: dict
-    ) -> None:
+    def test_post_absolute_form_with_unreachable_upstream_fails_gracefully(self, shared_test_certs: StringMap) -> None:
         """
         TC-CHAIN-FWD-006: POST with absolute-form URI and unreachable upstream fails gracefully.
 
@@ -267,10 +259,20 @@ class TestHTTP3ChainForwardProxy:
         with chain_service_context(http_port, h3_port, shared_test_certs) as (_, proc):
             result = subprocess.run(
                 [
-                    "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                    "-x", f"http://127.0.0.1:{http_port}",
-                    "-X", "POST", "-d", "key=value",
-                    "--max-time", "3",
+                    "curl",
+                    "-s",
+                    "-o",
+                    "/dev/null",
+                    "-w",
+                    "%{http_code}",
+                    "-x",
+                    f"http://127.0.0.1:{http_port}",
+                    "-X",
+                    "POST",
+                    "-d",
+                    "key=value",
+                    "--max-time",
+                    "3",
                     "http://example.com/submit",
                 ],
                 capture_output=True,
@@ -278,8 +280,6 @@ class TestHTTP3ChainForwardProxy:
                 timeout=10,
             )
             # Proxy must still be running (no crash/panic)
-            assert proc.poll() is None, \
-                "Proxy crashed while handling POST forward request to unreachable upstream"
+            assert proc.poll() is None, "Proxy crashed while handling POST forward request to unreachable upstream"
             status = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
-            assert status != 200, \
-                f"Expected non-200 for unreachable upstream, got {status}"
+            assert status != 200, f"Expected non-200 for unreachable upstream, got {status}"

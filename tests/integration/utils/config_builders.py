@@ -6,7 +6,10 @@ for HTTP/3 listener and chain proxy test scenarios.
 """
 
 import os
-from typing import Optional, Tuple, List
+
+type WeightedProxy = tuple[str, int, int]
+type BasicUser = tuple[str, str]
+type AuthProxy = tuple[str, int, int, str | None, str | None]
 
 
 def create_http3_listener_config(
@@ -14,9 +17,9 @@ def create_http3_listener_config(
     cert_path: str,
     key_path: str,
     temp_dir: str,
-    auth_config: Optional[str] = None,
-    quic_config: Optional[str] = None,
-    server_threads: int = 1
+    auth_config: str | None = None,
+    quic_config: str | None = None,
+    server_threads: int = 1,
 ) -> str:
     """
     Create HTTP/3 Listener configuration file.
@@ -37,9 +40,7 @@ def create_http3_listener_config(
     quic_section = ""
     if quic_config:
         # Indent each line of quic_config so it nests under 'quic:'
-        indented = "\n".join(
-            "      " + line.strip() for line in quic_config.strip().splitlines()
-        )
+        indented = "\n".join("      " + line.strip() for line in quic_config.strip().splitlines())
         quic_section = f"""
   args:
     quic:
@@ -80,7 +81,7 @@ servers:
 
 def create_http3_chain_config(
     http_port: int,
-    proxy_group: List[Tuple[str, int, int]],
+    proxy_group: list[WeightedProxy],
     ca_path: str,
     temp_dir: str,
     server_threads: int = 1,
@@ -100,7 +101,7 @@ def create_http3_chain_config(
     Returns:
         str: Path to the configuration file
     """
-    address_list = []
+    address_list: list[str] = []
     for addr, port, weight in proxy_group:
         address_list.append(
             f"          - address: {addr}:{port}\n"
@@ -149,9 +150,9 @@ def create_http3_listener_config_with_password_auth(
     cert_path: str,
     key_path: str,
     temp_dir: str,
-    users: List[Tuple[str, str]],
-    quic_config: Optional[str] = None,
-    server_threads: int = 1
+    users: list[BasicUser],
+    quic_config: str | None = None,
+    server_threads: int = 1,
 ) -> str:
     """
     Create HTTP/3 Listener configuration with password authentication.
@@ -170,7 +171,7 @@ def create_http3_listener_config_with_password_auth(
     Returns:
         str: Path to the configuration file
     """
-    user_lines = []
+    user_lines: list[str] = []
     for username, password in users:
         user_lines.append(f'        - username: "{username}"')
         user_lines.append(f'          password: "{password}"')
@@ -229,8 +230,8 @@ def create_http3_listener_config_with_tls_client_cert(
     key_path: str,
     client_ca_path: str,
     temp_dir: str,
-    quic_config: Optional[str] = None,
-    server_threads: int = 1
+    quic_config: str | None = None,
+    server_threads: int = 1,
 ) -> str:
     """
     Create HTTP/3 Listener configuration with TLS client certificate auth.
@@ -297,9 +298,9 @@ def create_http3_listener_config_with_mtls_and_password(
     key_path: str,
     client_ca_path: str,
     temp_dir: str,
-    users: List[Tuple[str, str]],
-    quic_config: Optional[str] = None,
-    server_threads: int = 1
+    users: list[BasicUser],
+    quic_config: str | None = None,
+    server_threads: int = 1,
 ) -> str:
     """
     Create HTTP/3 Listener configuration with BOTH TLS client cert AND password auth.
@@ -323,7 +324,7 @@ def create_http3_listener_config_with_mtls_and_password(
     Returns:
         str: Path to the configuration file
     """
-    user_lines = []
+    user_lines: list[str] = []
     for username, password in users:
         user_lines.append(f'        - username: "{username}"')
         user_lines.append(f'          password: "{password}"')
@@ -380,11 +381,11 @@ servers:
 
 def create_http3_chain_config_with_per_proxy_auth(
     http_port: int,
-    proxy_group: List[Tuple[str, int, int, Optional[str], Optional[str]]],
+    proxy_group: list[AuthProxy],
     ca_path: str,
     temp_dir: str,
-    default_user: Optional[Tuple[str, str]] = None,
-    default_tls: Optional[str] = None,
+    default_user: BasicUser | None = None,
+    default_tls: str | None = None,
     server_threads: int = 1,
     upstream_name: str = "test_upstream",
 ) -> str:
@@ -406,17 +407,19 @@ def create_http3_chain_config_with_per_proxy_auth(
     Returns:
         str: Path to the configuration file
     """
+
     # Helper: indent YAML block
     def indent(text: str, spaces: int) -> str:
         import textwrap
+
         dedented = textwrap.dedent(text)
         prefix = " " * spaces
         return "\n".join(prefix + line for line in dedented.strip().split("\n"))
 
-    address_list = []
+    address_list: list[str] = []
     # Per-address TLS is now global; collect any tls_yaml to merge into
     # plugin-level certificates
-    collected_tls_yaml = None
+    collected_tls_yaml: str | None = None
     for addr, port, weight, user_yaml, tls_yaml in proxy_group:
         # Build address-level user section
         user_section = ""
@@ -438,22 +441,14 @@ def create_http3_chain_config_with_per_proxy_auth(
     # Plugin-level user (goes inside upstream defaults)
     plugin_user_section = ""
     if default_user:
-        plugin_user_section = (
-            f"    user:\n"
-            f'      username: "{default_user[0]}"\n'
-            f'      password: "{default_user[1]}"\n'
-        )
+        plugin_user_section = f'    user:\n      username: "{default_user[0]}"\n      password: "{default_user[1]}"\n'
 
     # Plugin-level tls (global certificates: server_ca_path + optional client certs)
     # Merge default_tls and any per-address tls_yaml into the global certificates
     effective_tls = default_tls or collected_tls_yaml
     plugin_tls_section = ""
     if effective_tls:
-        plugin_tls_section = (
-            f"    certificates:\n"
-            f'      server_ca_path: "{ca_path}"\n'
-            f"{indent(effective_tls, 6)}\n"
-        )
+        plugin_tls_section = f'    certificates:\n      server_ca_path: "{ca_path}"\n{indent(effective_tls, 6)}\n'
     else:
         plugin_tls_section = f'    certificates:\n      server_ca_path: "{ca_path}"\n'
 

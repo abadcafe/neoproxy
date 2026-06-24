@@ -20,27 +20,26 @@ Error types:
 - 500: "Internal Server Error"
 """
 
-import subprocess
-import socket
-import tempfile
-import shutil
-import time
-import os
 import re
-from typing import Optional, Tuple
+import shutil
+import tempfile
 
+from .conftest import get_unique_port
+from .types import (
+    BytesProcess,
+)
 from .utils.helpers import (
-    NEOPROXY_BINARY,
-    start_proxy,
-    wait_for_proxy,
-    send_raw_request,
     create_echo_config,
     create_test_config,
+    send_raw_request,
+    start_proxy,
+    wait_for_proxy,
 )
-from .conftest import get_unique_port
 
 
-def parse_http_response(response: bytes) -> Tuple[int, str, dict, bytes]:
+def parse_http_response(
+    response: bytes,
+) -> tuple[int, str, dict[str, str], bytes]:
     """
     Parse HTTP response into components.
 
@@ -50,37 +49,30 @@ def parse_http_response(response: bytes) -> Tuple[int, str, dict, bytes]:
     Returns:
         Tuple of (status_code, status_text, headers_dict, body)
     """
-    try:
-        # Split headers and body
-        if b"\r\n\r\n" in response:
-            header_part, body = response.split(b"\r\n\r\n", 1)
-        else:
-            header_part = response
-            body = b""
+    if b"\r\n\r\n" in response:
+        header_part, body = response.split(b"\r\n\r\n", 1)
+    else:
+        header_part = response
+        body = b""
 
-        # Parse status line
-        lines = header_part.decode('utf-8', errors='ignore').split("\r\n")
-        status_line = lines[0] if lines else ""
+    lines = header_part.decode("utf-8", errors="ignore").split("\r\n")
+    status_line = lines[0] if lines else ""
 
-        # Parse status code
-        status_match = re.match(r'HTTP/\d\.\d\s+(\d+)\s*(.*)', status_line)
-        if status_match:
-            status_code = int(status_match.group(1))
-            status_text = status_match.group(2).strip()
-        else:
-            status_code = 0
-            status_text = ""
+    status_match = re.match(r"HTTP/\d\.\d\s+(\d+)\s*(.*)", status_line)
+    if status_match:
+        status_code = int(status_match.group(1))
+        status_text = status_match.group(2).strip()
+    else:
+        status_code = 0
+        status_text = ""
 
-        # Parse headers
-        headers = {}
-        for line in lines[1:]:
-            if ":" in line:
-                key, value = line.split(":", 1)
-                headers[key.strip().lower()] = value.strip()
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        if ":" in line:
+            key, value = line.split(":", 1)
+            headers[key.strip().lower()] = value.strip()
 
-        return status_code, status_text, headers, body
-    except Exception:
-        return 0, "", {}, response
+    return status_code, status_text, headers, body
 
 
 # ==============================================================================
@@ -107,29 +99,23 @@ class TestHTTPErrorResponse:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_echo_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             # Send a normal POST request to echo service
             # Echo service should return the body as-is (200 OK)
-            request = (
-                b"POST / HTTP/1.1\r\n"
-                b"Host: localhost\r\n"
-                b"Content-Length: 5\r\n"
-                b"\r\n"
-                b"hello"
-            )
+            request = b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello"
             response = send_raw_request("127.0.0.1", proxy_port, request)
 
             # Verify echo service works correctly (returns 200)
-            assert b"200" in response or b"OK" in response, \
+            assert b"200" in response or b"OK" in response, (
                 f"Echo service should return 200, got: {response.decode(errors='ignore')}"
+            )
 
             # Note: Actually triggering a 500 error in black-box testing is difficult
             # The 500 error handling is verified through unit tests.
@@ -158,33 +144,28 @@ class TestHTTPErrorResponse:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             # Send an origin-form GET request (should return 400)
-            request = (
-                b"GET / HTTP/1.1\r\n"
-                b"Host: localhost\r\n"
-                b"\r\n"
-            )
+            request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
             response = send_raw_request("127.0.0.1", proxy_port, request)
 
             # Parse response
-            status_code, status_text, headers, body = parse_http_response(response)
+            status_code, _status_text, headers, _body = parse_http_response(response)
 
             # Verify status code is 400
-            assert status_code == 400, \
+            assert status_code == 400, (
                 f"Expected status 400, got {status_code}. Response: {response.decode(errors='ignore')}"
+            )
 
             # Verify Content-Type header is present
-            assert "content-type" in headers, \
-                "Expected Content-Type header in error response"
+            assert "content-type" in headers, "Expected Content-Type header in error response"
 
         finally:
             if proxy_proc:
@@ -206,38 +187,34 @@ class TestHTTPErrorResponse:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             # Send CONNECT with invalid target (missing port)
-            request = (
-                b"CONNECT example.com HTTP/1.1\r\n"
-                b"Host: example.com\r\n"
-                b"\r\n"
-            )
+            request = b"CONNECT example.com HTTP/1.1\r\nHost: example.com\r\n\r\n"
             response = send_raw_request("127.0.0.1", proxy_port, request)
 
             # Parse response
-            status_code, status_text, headers, body = parse_http_response(response)
+            status_code, status_text, _headers, _body = parse_http_response(response)
 
             # Verify status code is 400
-            assert status_code == 400, \
+            assert status_code == 400, (
                 f"Expected status 400, got {status_code}. Response: {response.decode(errors='ignore')}"
+            )
 
             # Verify status text contains "Bad Request"
-            assert "Bad Request" in status_text or "bad" in status_text.lower() or "invalid" in status_text.lower(), \
+            assert "Bad Request" in status_text or "bad" in status_text.lower() or "invalid" in status_text.lower(), (
                 f"Status text should indicate bad request, got: {status_text}"
+            )
 
             # Verify response indicates the issue
-            response_str = response.decode('utf-8', errors='ignore')
-            assert "400" in response_str or "bad" in response_str.lower(), \
-                f"Response should indicate bad request"
+            response_str = response.decode("utf-8", errors="ignore")
+            assert "400" in response_str or "bad" in response_str.lower(), "Response should indicate bad request"
 
         finally:
             if proxy_proc:
@@ -253,14 +230,13 @@ class TestHTTPErrorResponse:
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        proxy_proc: Optional[subprocess.Popen] = None
+        proxy_proc: BytesProcess | None = None
 
         try:
             config_path = create_echo_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), \
-                "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
 
             # Test 1: POST with body
             test_body = b"Hello, Echo Service!"
@@ -273,22 +249,15 @@ class TestHTTPErrorResponse:
             response = send_raw_request("127.0.0.1", proxy_port, request)
 
             # Verify 200 OK and body is echoed back
-            assert b"200" in response, \
-                f"Expected 200 response, got: {response.decode(errors='ignore')}"
-            assert test_body in response, \
-                f"Expected echo body in response, got: {response.decode(errors='ignore')}"
+            assert b"200" in response, f"Expected 200 response, got: {response.decode(errors='ignore')}"
+            assert test_body in response, f"Expected echo body in response, got: {response.decode(errors='ignore')}"
 
             # Test 2: GET request (empty body)
-            request = (
-                b"GET /echo HTTP/1.1\r\n"
-                b"Host: localhost\r\n"
-                b"\r\n"
-            )
+            request = b"GET /echo HTTP/1.1\r\nHost: localhost\r\n\r\n"
             response = send_raw_request("127.0.0.1", proxy_port, request)
 
             # Verify 200 OK
-            assert b"200" in response, \
-                f"Expected 200 response, got: {response.decode(errors='ignore')}"
+            assert b"200" in response, f"Expected 200 response, got: {response.decode(errors='ignore')}"
 
         finally:
             if proxy_proc:

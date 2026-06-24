@@ -6,6 +6,10 @@ use bytes::{Buf, Bytes};
 use h3::error::StreamError;
 use tokio::io;
 
+type SendStateFuture<S> = Pin<
+  Box<dyn Future<Output = (S, Result<(), StreamError>)> + Send + Sync>,
+>;
+
 /// State for an in-progress send_data or finish operation.
 /// Generic over the send stream type S.
 ///
@@ -19,21 +23,8 @@ use tokio::io;
 /// in the `H3OnUpgrade` mechanism.
 enum SendState<S> {
   Idle,
-  Sending {
-    fut: Pin<
-      Box<
-        dyn Future<Output = (S, Result<(), StreamError>)> + Send + Sync,
-      >,
-    >,
-    len: usize,
-  },
-  Finishing {
-    fut: Pin<
-      Box<
-        dyn Future<Output = (S, Result<(), StreamError>)> + Send + Sync,
-      >,
-    >,
-  },
+  Sending { fut: SendStateFuture<S>, len: usize },
+  Finishing { fut: SendStateFuture<S> },
 }
 
 /// HTTP/3 bidirectional stream wrapper, generic over send/recv stream

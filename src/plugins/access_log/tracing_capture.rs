@@ -1,23 +1,11 @@
-//! Shared test utilities for the access_log module.
-//!
-//! This module provides common test helpers used by both `plugin_tests`
-//! (in `access_log.rs`) and `writer::tests` (in `writer.rs`), avoiding
-//! DRY violations.
-
 use std::sync::{Arc, Mutex};
 
-/// Helper to capture tracing events in tests.
-///
-/// Encapsulates the RecordingLayer, StringVisitor, subscriber setup,
-/// and output() method into a reusable struct. This avoids duplicating
-/// ~20 lines of boilerplate per test that needs to verify tracing
-/// output.
-pub struct TracingCapture {
+pub(crate) struct TracingCapture {
   captured: Arc<Mutex<Vec<String>>>,
 }
 
 impl TracingCapture {
-  pub fn new() -> (Self, tracing::subscriber::DefaultGuard) {
+  pub(crate) fn new() -> (Self, tracing::subscriber::DefaultGuard) {
     let captured: Arc<Mutex<Vec<String>>> =
       Arc::new(Mutex::new(Vec::new()));
     let captured_clone = captured.clone();
@@ -67,7 +55,7 @@ impl TracingCapture {
     (Self { captured }, guard)
   }
 
-  pub fn output(&self) -> String {
+  pub(crate) fn output(&self) -> String {
     let guard = self.captured.lock().unwrap();
     guard.join(" | ")
   }

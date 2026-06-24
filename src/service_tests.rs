@@ -8,16 +8,16 @@ struct TestMiddleware {
   inner: crate::service::Service,
 }
 
-impl tower::Service<crate::http_utils::Request> for TestMiddleware {
+impl tower::Service<crate::http_message::Request> for TestMiddleware {
   type Error = anyhow::Error;
   type Future = std::pin::Pin<
     Box<
       dyn std::future::Future<
-          Output = anyhow::Result<crate::http_utils::Response>,
+          Output = anyhow::Result<crate::http_message::Response>,
         >,
     >,
   >;
-  type Response = crate::http_utils::Response;
+  type Response = crate::http_message::Response;
 
   fn poll_ready(
     &mut self,
@@ -26,7 +26,10 @@ impl tower::Service<crate::http_utils::Request> for TestMiddleware {
     self.inner.poll_ready(cx)
   }
 
-  fn call(&mut self, req: crate::http_utils::Request) -> Self::Future {
+  fn call(
+    &mut self,
+    req: crate::http_message::Request,
+  ) -> Self::Future {
     self.inner.call(req)
   }
 }

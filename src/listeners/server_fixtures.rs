@@ -1,13 +1,9 @@
-//! Shared test helpers for listener test modules.
-
 use std::sync::OnceLock;
 
-use crate::config::{
-  CertificateConfig, SerializedArgs, ServerTlsConfig,
-};
+use crate::config::{CertificateConfig, ServerTlsConfig};
 use crate::server::Server;
 
-pub(crate) fn test_servers() -> Vec<Server> {
+pub(crate) fn plain_servers() -> Vec<Server> {
   vec![Server {
     hostnames: vec![],
     service: crate::server::placeholder_service(),
@@ -16,20 +12,16 @@ pub(crate) fn test_servers() -> Vec<Server> {
   }]
 }
 
-pub(crate) fn empty_args() -> SerializedArgs {
-  serde_yaml::from_str(r#"{}"#).unwrap()
-}
-
 static CRYPTO_PROVIDER_INSTALLED: OnceLock<bool> = OnceLock::new();
 
-pub(crate) fn ensure_crypto_provider() {
+fn ensure_crypto_provider() {
   CRYPTO_PROVIDER_INSTALLED.get_or_init(|| {
     let _ = rustls::crypto::ring::default_provider().install_default();
     true
   });
 }
 
-pub(crate) fn generate_test_cert() -> (String, String) {
+fn generate_test_cert() -> (String, String) {
   let key_pair = rcgen::KeyPair::generate().unwrap();
   let mut params = rcgen::CertificateParams::new(vec![
     "test.local".to_string(),
@@ -56,7 +48,6 @@ pub(crate) fn tls_servers() -> Vec<Server> {
   let key_path = temp_dir.path().join("key.pem");
   std::fs::write(&cert_path, &cert_pem).unwrap();
   std::fs::write(&key_path, &key_pem).unwrap();
-  // Leak temp_dir to keep files alive for the test
   std::mem::forget(temp_dir);
 
   vec![Server {

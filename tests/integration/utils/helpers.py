@@ -5,18 +5,18 @@ This module provides reusable helper functions for integration testing
 neoproxy server behavior.
 """
 
-import os
-import subprocess
-import socket
-import threading
-import tempfile
-import time
+import errno
 import os
 import signal
+import socket
+import subprocess
 import sys
-import errno
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Optional, Tuple, List, Callable, Generator
+
+from tests.integration.types import BytesProcess, TargetHandler
 
 # ==============================================================================
 # Constants
@@ -87,9 +87,10 @@ def assert_binary_exists() -> None:
         print(
             f"\nERROR: neoproxy binary not found at {NEOPROXY_BINARY}\n"
             f"Please run 'cargo build' or set NEOPROXY_BINARY.\n",
-            file=sys.stderr
+            file=sys.stderr,
         )
         sys.exit(1)
+
 
 # Listener shutdown timeout: 3 seconds (per design doc)
 LISTENER_SHUTDOWN_TIMEOUT = 3
@@ -106,11 +107,7 @@ MAX_SHUTDOWN_TIME = LISTENER_SHUTDOWN_TIMEOUT + SERVICE_SHUTDOWN_TIMEOUT
 # ==============================================================================
 
 
-def create_test_config(
-    proxy_port: int,
-    temp_dir: str,
-    server_threads: int = 1
-) -> str:
+def create_test_config(proxy_port: int, temp_dir: str, server_threads: int = 1) -> str:
     """
     Create test configuration file for direct upstream service.
 
@@ -152,11 +149,7 @@ servers:
     return config_path
 
 
-def create_echo_config(
-    proxy_port: int,
-    temp_dir: str,
-    server_threads: int = 1
-) -> str:
+def create_echo_config(proxy_port: int, temp_dir: str, server_threads: int = 1) -> str:
     """
     Create echo service configuration file.
 
@@ -216,7 +209,7 @@ def create_invalid_config(temp_dir: str) -> str:
 # ==============================================================================
 
 
-def start_proxy(config_path: str) -> subprocess.Popen:
+def start_proxy(config_path: str) -> BytesProcess:
     """
     Start proxy server process.
 
@@ -242,7 +235,7 @@ def wait_for_proxy(
     port: int,
     timeout: float = 5.0,
     interval: float = 0.1,
-    proc: Optional[subprocess.Popen] = None
+    proc: BytesProcess | None = None,
 ) -> bool:
     """
     Wait for proxy server to be ready.
@@ -264,23 +257,16 @@ def wait_for_proxy(
         if proc is not None and proc.poll() is not None:
             return False
 
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(1.0)
             result = sock.connect_ex((host, port))
-            sock.close()
             if result == 0:
                 return True
-        except Exception:
-            pass
         time.sleep(interval)
     return False
 
 
-def wait_for_process_exit(
-    proc: subprocess.Popen,
-    timeout: float = 10.0
-) -> Tuple[int, float]:
+def wait_for_process_exit(proc: BytesProcess, timeout: float = 10.0) -> tuple[int, float]:
     """
     Wait for process to exit and return exit code and elapsed time.
 
@@ -289,7 +275,7 @@ def wait_for_process_exit(
         timeout: Maximum wait time in seconds
 
     Returns:
-        Tuple[int, float]: Exit code and elapsed time in seconds
+        tuple[int, float]: Exit code and elapsed time in seconds
 
     Raises:
         AssertionError: If process does not exit within timeout
@@ -302,17 +288,11 @@ def wait_for_process_exit(
         proc.kill()
         proc.wait()
         elapsed = time.time() - start_time
-        raise AssertionError(
-            f"Process did not exit within expected time (elapsed: {elapsed:.1f}s)"
-        )
+        raise AssertionError(f"Process did not exit within expected time (elapsed: {elapsed:.1f}s)")
     return return_code, elapsed
 
 
-def wait_for_process_running(
-    proc: subprocess.Popen,
-    timeout: float = 1.0,
-    interval: float = 0.05
-) -> bool:
+def wait_for_process_running(proc: BytesProcess, timeout: float = 1.0, interval: float = 0.05) -> bool:
     """
     Wait for a process to be running (not exited).
 
@@ -336,12 +316,7 @@ def wait_for_process_running(
     return proc.poll() is None
 
 
-def wait_for_port_released(
-    host: str,
-    port: int,
-    timeout: float = 2.0,
-    interval: float = 0.05
-) -> bool:
+def wait_for_port_released(host: str, port: int, timeout: float = 2.0, interval: float = 0.05) -> bool:
     """
     Wait for a port to be released (no longer accepting connections).
 
@@ -358,24 +333,16 @@ def wait_for_port_released(
     """
     start_time = time.time()
     while time.time() - start_time < timeout:
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(0.5)
             result = sock.connect_ex((host, port))
-            sock.close()
             if result != 0:
                 return True
-        except Exception:
-            return True
         time.sleep(interval)
     return False
 
 
-def terminate_process(
-    proc: subprocess.Popen,
-    timeout: float = 5.0,
-    force: bool = False
-) -> None:
+def terminate_process(proc: BytesProcess, timeout: float = 5.0, force: bool = False) -> None:
     """
     Terminate a process gracefully, then kill if needed.
 
@@ -401,11 +368,7 @@ def terminate_process(
 # ==============================================================================
 
 
-def create_target_server(
-    host: str,
-    port: int,
-    handler: Callable[[socket.socket], None]
-) -> Tuple[threading.Thread, socket.socket]:
+def create_target_server(host: str, port: int, handler: TargetHandler) -> tuple[threading.Thread, socket.socket]:
     """
     Create a mock target server for testing.
 
@@ -415,7 +378,7 @@ def create_target_server(
         handler: Connection handler function
 
     Returns:
-        Tuple[threading.Thread, socket.socket]: Server thread and socket
+        tuple[threading.Thread, socket.socket]: Server thread and socket
     """
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -435,7 +398,7 @@ def create_target_server(
                 thread.start()
             except socket.timeout:
                 continue
-            except Exception:
+            except OSError:
                 break
 
     thread = threading.Thread(target=server_loop)
@@ -446,11 +409,8 @@ def create_target_server(
 
 
 def establish_connect_tunnel(
-    proxy_host: str,
-    proxy_port: int,
-    target_host: str,
-    target_port: int
-) -> Optional[socket.socket]:
+    proxy_host: str, proxy_port: int, target_host: str, target_port: int
+) -> socket.socket | None:
     """
     Establish a CONNECT tunnel through the proxy.
 
@@ -461,7 +421,7 @@ def establish_connect_tunnel(
         target_port: Target server port
 
     Returns:
-        Optional[socket.socket]: Socket if tunnel established, None otherwise
+        socket.socket | None: Socket if tunnel established, None otherwise
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(5.0)
@@ -469,8 +429,7 @@ def establish_connect_tunnel(
         sock.connect((proxy_host, proxy_port))
 
         connect_request = (
-            f"CONNECT {target_host}:{target_port} HTTP/1.1\r\n"
-            f"Host: {target_host}:{target_port}\r\n\r\n"
+            f"CONNECT {target_host}:{target_port} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\n\r\n"
         ).encode()
         sock.sendall(connect_request)
 
@@ -486,17 +445,12 @@ def establish_connect_tunnel(
         else:
             sock.close()
             return None
-    except Exception:
+    except OSError:
         sock.close()
         return None
 
 
-def send_raw_request(
-    host: str,
-    port: int,
-    request: bytes,
-    timeout: float = 5.0
-) -> bytes:
+def send_raw_request(host: str, port: int, request: bytes, timeout: float = 5.0) -> bytes:
     """
     Send raw HTTP request and read response.
 
@@ -545,7 +499,7 @@ def is_port_available(host: str, port: int) -> bool:
     try:
         result = sock.connect_ex((host, port))
         return result != 0
-    except Exception:
+    except OSError:
         return True
     finally:
         sock.close()
@@ -556,7 +510,7 @@ def is_port_available(host: str, port: int) -> bool:
 # ==============================================================================
 
 
-def send_sigint(proc: subprocess.Popen) -> None:
+def send_sigint(proc: BytesProcess) -> None:
     """
     Send SIGINT signal to a process.
 
@@ -566,7 +520,7 @@ def send_sigint(proc: subprocess.Popen) -> None:
     proc.send_signal(signal.SIGINT)
 
 
-def send_sigterm(proc: subprocess.Popen) -> None:
+def send_sigterm(proc: BytesProcess) -> None:
     """
     Send SIGTERM signal to a process.
 
@@ -581,11 +535,7 @@ def send_sigterm(proc: subprocess.Popen) -> None:
 # ==============================================================================
 
 
-def assert_exit_code(
-    actual: int,
-    expected: int,
-    context: Optional[str] = None
-) -> None:
+def assert_exit_code(actual: int, expected: int, context: str | None = None) -> None:
     """
     Assert that exit code matches expected value.
 
@@ -604,10 +554,10 @@ def assert_exit_code(
 
 
 def assert_process_exits_within(
-    proc: subprocess.Popen,
+    proc: BytesProcess,
     max_time: float,
-    expected_exit_code: Optional[int] = None
-) -> Tuple[int, float]:
+    expected_exit_code: int | None = None,
+) -> tuple[int, float]:
     """
     Assert that process exits within specified time.
 
@@ -617,7 +567,7 @@ def assert_process_exits_within(
         expected_exit_code: Expected exit code (optional)
 
     Returns:
-        Tuple[int, float]: Exit code and elapsed time
+        tuple[int, float]: Exit code and elapsed time
 
     Raises:
         AssertionError: If process doesn't exit in time or exit code is wrong
@@ -629,16 +579,14 @@ def assert_process_exits_within(
         proc.kill()
         proc.wait()
         elapsed = time.time() - start_time
-        raise AssertionError(
-            f"Process did not exit within {max_time}s (elapsed: {elapsed:.1f}s)"
-        )
+        raise AssertionError(f"Process did not exit within {max_time}s (elapsed: {elapsed:.1f}s)")
     elapsed = time.time() - start_time
 
     if expected_exit_code is not None:
         assert_exit_code(
             return_code,
             expected_exit_code,
-            f"Process exited in {elapsed:.1f}s"
+            f"Process exited in {elapsed:.1f}s",
         )
 
     return return_code, elapsed
@@ -662,7 +610,7 @@ def echo_handler(conn: socket.socket) -> None:
             if not data:
                 break
             conn.send(b"ECHO:" + data)
-    except Exception:
+    except OSError:
         pass
     finally:
         conn.close()
@@ -683,7 +631,7 @@ def one_shot_echo_handler(conn: socket.socket) -> None:
         data = conn.recv(1024)
         if data:
             conn.send(b"ECHO:" + data)
-    except Exception:
+    except OSError:
         pass
     finally:
         conn.close()
@@ -699,8 +647,6 @@ def blocking_handler(conn: socket.socket, block_time: float = 60.0) -> None:
     """
     try:
         time.sleep(block_time)
-    except Exception:
-        pass
     finally:
         conn.close()
 
@@ -715,15 +661,9 @@ def http_echo_handler(conn: socket.socket) -> None:
     try:
         data = conn.recv(1024)
         if data:
-            http_response = (
-                b"HTTP/1.1 200 OK\r\n"
-                b"Content-Type: text/plain\r\n"
-                b"Content-Length: 2\r\n"
-                b"\r\n"
-                b"OK"
-            )
+            http_response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nOK"
             conn.send(http_response)
-    except Exception:
+    except OSError:
         pass
     finally:
         conn.close()
@@ -752,11 +692,18 @@ def curl_request(
         HTTP status code (int). Returns 0 on parse failure.
     """
     cmd = [
-        "curl", "-s", "-o", "/dev/null",
-        "-w", "%{http_code}",
-        "-x", f"http://127.0.0.1:{proxy_port}",
-        "--connect-timeout", str(timeout),
-        "--max-time", str(timeout),
+        "curl",
+        "-s",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}",
+        "-x",
+        f"http://127.0.0.1:{proxy_port}",
+        "--connect-timeout",
+        str(timeout),
+        "--max-time",
+        str(timeout),
     ]
 
     if headers:
@@ -768,8 +715,11 @@ def curl_request(
     env = get_curl_env_without_no_proxy()
 
     result = subprocess.run(
-        cmd, capture_output=True, text=True,
-        timeout=timeout + 2, env=env,
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout + 2,
+        env=env,
     )
     status_code = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
     return status_code
@@ -793,10 +743,16 @@ def curl_request_with_headers(
         Tuple of (status_code, response_headers_dict, body).
     """
     cmd = [
-        "curl", "-s", "-D", "-",
-        "-x", f"http://127.0.0.1:{proxy_port}",
-        "--connect-timeout", str(timeout),
-        "--max-time", str(timeout),
+        "curl",
+        "-s",
+        "-D",
+        "-",
+        "-x",
+        f"http://127.0.0.1:{proxy_port}",
+        "--connect-timeout",
+        str(timeout),
+        "--max-time",
+        str(timeout),
     ]
 
     if headers:
@@ -808,33 +764,36 @@ def curl_request_with_headers(
     env = get_curl_env_without_no_proxy()
 
     result = subprocess.run(
-        cmd, capture_output=True, text=True,
-        timeout=timeout + 2, env=env,
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout + 2,
+        env=env,
     )
     output = result.stdout
 
     # Parse status line and headers
-    lines = output.split('\n')
+    lines = output.split("\n")
     status_code = 0
     response_headers: dict[str, str] = {}
     body_start = len(lines)
 
     for i, line in enumerate(lines):
-        if line.startswith('HTTP/'):
+        if line.startswith("HTTP/"):
             parts = line.split()
             if len(parts) >= 2:
                 try:
                     status_code = int(parts[1])
                 except ValueError:
                     pass
-        elif ':' in line and line.strip():
-            key, _, value = line.partition(':')
+        elif ":" in line and line.strip():
+            key, _, value = line.partition(":")
             response_headers[key.strip().lower()] = value.strip()
-        elif line.strip() == '':
+        elif line.strip() == "":
             body_start = i + 1
             break
 
-    body = '\n'.join(lines[body_start:]) if body_start < len(lines) else ''
+    body = "\n".join(lines[body_start:]) if body_start < len(lines) else ""
     return status_code, response_headers, body
 
 
@@ -843,7 +802,7 @@ def curl_request_with_headers(
 # ==============================================================================
 
 
-def get_curl_env_without_no_proxy() -> dict:
+def get_curl_env_without_no_proxy() -> dict[str, str]:
     """
     Get a copy of the environment with no_proxy cleared for curl.
 
@@ -869,7 +828,7 @@ def wait_for_udp_port_bound(
     port: int,
     timeout: float = 5.0,
     interval: float = 0.1,
-    proc: Optional[subprocess.Popen] = None
+    proc: BytesProcess | None = None,
 ) -> bool:
     """
     Wait for UDP port to be bound (indicating server started).
@@ -894,22 +853,16 @@ def wait_for_udp_port_bound(
         if proc is not None and proc.poll() is not None:
             return False
 
+        test_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            test_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
-                test_sock.bind((host, port))
-                test_sock.close()
-                # Port is available, server not started yet
-            except OSError as e:
-                test_sock.close()
-                # Only return True if the error is specifically EADDRINUSE
-                # Other errors (EACCES, EADDRNOTAVAIL, etc.) should continue polling
-                if e.errno == errno.EADDRINUSE:
-                    return True
-                # For other OSError types, continue polling
-        except (socket.error, OSError):
-            # Socket creation or other low-level errors - continue polling
-            pass
+            test_sock.bind((host, port))
+            # Port is available, server not started yet
+        except OSError as e:
+            # Only return True if the error is specifically EADDRINUSE.
+            if e.errno == errno.EADDRINUSE:
+                return True
+        finally:
+            test_sock.close()
         time.sleep(interval)
     return False
 
@@ -923,7 +876,7 @@ def wait_for_log_contains(
     log_path: str,
     pattern: str,
     timeout: float = 5.0,
-    interval: float = 0.1
+    interval: float = 0.1,
 ) -> bool:
     """
     Wait for log file to contain a specific pattern.
@@ -940,7 +893,7 @@ def wait_for_log_contains(
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            with open(log_path, 'r') as f:
+            with open(log_path, "r") as f:
                 if pattern in f.read():
                     return True
         except FileNotFoundError:
@@ -955,10 +908,10 @@ def wait_for_log_contains(
 
 
 def wait_for_metric_value(
-    fetch_func: "Callable[[], str]",
+    fetch_func: Callable[[], str],
     expected: str,
     timeout: float = 5.0,
-    interval: float = 0.1
+    interval: float = 0.1,
 ) -> bool:
     """
     Wait for a metric to have a specific value.
@@ -978,7 +931,7 @@ def wait_for_metric_value(
             response = fetch_func()
             if expected in response:
                 return True
-        except Exception:
+        except OSError:
             pass
         time.sleep(interval)
     return False

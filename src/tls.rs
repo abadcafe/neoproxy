@@ -227,15 +227,14 @@ pub fn extract_san_dns_names(
   // Extract SAN extension
   if let Some(san_ext) = parsed.extensions().iter().find(|ext| {
     ext.oid == x509_parser::oid_registry::OID_X509_EXT_SUBJECT_ALT_NAME
-  }) {
-    if let x509_parser::extensions::ParsedExtension::SubjectAlternativeName(san) = san_ext.parsed_extension() {
+  })
+    && let x509_parser::extensions::ParsedExtension::SubjectAlternativeName(san) = san_ext.parsed_extension() {
             for entry in &san.general_names {
                 if let x509_parser::extensions::GeneralName::DNSName(name) = entry {
                     dns_names.push(name.to_string());
                 }
             }
         }
-  }
 
   Ok(dns_names)
 }
@@ -335,23 +334,23 @@ pub fn build_tls_server_config(
   let mut has_client_ca = false;
 
   for server in servers {
-    if let Some(tls) = &server.tls {
-      if let Some(client_ca_certs) = &tls.client_ca_certs {
-        has_client_ca = true;
-        for ca_path in client_ca_certs {
-          let ca_file = File::open(ca_path).with_context(|| {
-            format!("Failed to open client CA file: {}", ca_path)
-          })?;
-          let mut ca_reader = BufReader::new(ca_file);
-          let ca_certs: Vec<CertificateDer> =
-            rustls_pemfile::certs(&mut ca_reader)
-              .collect::<Result<Vec<_>, _>>()
-              .with_context(|| {
-                "Failed to parse client CA certificates"
-              })?;
-          for cert in ca_certs {
-            roots.add(cert)?;
-          }
+    if let Some(tls) = &server.tls
+      && let Some(client_ca_certs) = &tls.client_ca_certs
+    {
+      has_client_ca = true;
+      for ca_path in client_ca_certs {
+        let ca_file = File::open(ca_path).with_context(|| {
+          format!("Failed to open client CA file: {}", ca_path)
+        })?;
+        let mut ca_reader = BufReader::new(ca_file);
+        let ca_certs: Vec<CertificateDer> =
+          rustls_pemfile::certs(&mut ca_reader)
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| {
+              "Failed to parse client CA certificates"
+            })?;
+        for cert in ca_certs {
+          roots.add(cert)?;
         }
       }
     }

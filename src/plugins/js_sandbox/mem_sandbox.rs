@@ -80,8 +80,10 @@ impl TrackingAllocator {
       return std::ptr::null_mut();
     }
     self.outstanding_size.fetch_add(length, Ordering::Release);
-    Box::into_raw(vec![0u8; length].into_boxed_slice()) as *mut [u8]
-      as *mut c_void
+    let mut store = vec![0u8; length].into_boxed_slice();
+    let data = store.as_mut_ptr();
+    std::mem::forget(store);
+    data.cast::<c_void>()
   }
 
   fn allocate_uninitialized(&self, length: usize) -> *mut c_void {
@@ -89,11 +91,10 @@ impl TrackingAllocator {
       return std::ptr::null_mut();
     }
     self.outstanding_size.fetch_add(length, Ordering::Release);
-    let mut store = Vec::with_capacity(length);
-    unsafe {
-      store.set_len(length);
-    }
-    Box::into_raw(store.into_boxed_slice()) as *mut [u8] as *mut c_void
+    let mut store = vec![0u8; length].into_boxed_slice();
+    let data = store.as_mut_ptr();
+    std::mem::forget(store);
+    data.cast::<c_void>()
   }
 
   fn free(&self, data: *mut c_void, length: usize) {
@@ -111,10 +112,9 @@ impl TrackingAllocator {
       self.outstanding_size.fetch_sub(length, Ordering::Release);
     }
     unsafe {
-      let _ = Box::from_raw(std::slice::from_raw_parts_mut(
-        data as *mut u8,
-        length,
-      ));
+      let slice =
+        std::ptr::slice_from_raw_parts_mut(data.cast::<u8>(), length);
+      drop(Box::from_raw(slice));
     }
   }
 

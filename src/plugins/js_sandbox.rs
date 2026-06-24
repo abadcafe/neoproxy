@@ -12,6 +12,10 @@ mod pool_tests;
 #[cfg(test)]
 mod sandbox_tests;
 #[cfg(test)]
+mod service_runtime_tests;
+#[cfg(test)]
+mod service_test_support;
+#[cfg(test)]
 mod service_tests;
 
 use std::collections::HashMap;
@@ -32,11 +36,10 @@ struct JsSandboxPlugin {
 }
 
 impl JsSandboxPlugin {
-  fn new(config: Option<&SerializedArgs>) -> Self {
+  fn new(config: Option<&SerializedArgs>) -> Result<Self> {
     let plugin_config: PluginConfig = match config {
-      Some(args) => serde_yaml::from_value(args.clone())
-        .expect("failed to parse js_sandbox plugin config"),
-      None => panic!("js_sandbox plugin requires configuration"),
+      Some(args) => serde_yaml::from_value(args.clone())?,
+      None => anyhow::bail!("js_sandbox plugin requires configuration"),
     };
 
     let pool = Arc::new(SandboxPool::new(plugin_config.worker_threads));
@@ -53,7 +56,7 @@ impl JsSandboxPlugin {
 
     let service_builders = HashMap::from([("sandbox", builder)]);
 
-    Self { service_builders, pool }
+    Ok(Self { service_builders, pool })
   }
 }
 
@@ -80,5 +83,5 @@ pub fn plugin_name() -> &'static str {
 pub fn create_plugin(
   config: Option<&SerializedArgs>,
 ) -> Result<Box<dyn Plugin>> {
-  Ok(Box::new(JsSandboxPlugin::new(config)))
+  Ok(Box::new(JsSandboxPlugin::new(config)?))
 }

@@ -5,11 +5,11 @@
 //! streams) for protocols like QUIC.
 
 use std::cell::RefCell;
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::rc::Rc;
 use std::time::Duration;
 
-use tokio::task::JoinSet;
+use tokio::task::{JoinError, JoinSet};
 
 use crate::shutdown::ShutdownHandle;
 
@@ -75,16 +75,16 @@ impl StreamTracker {
   /// locks or in CPU-bound loops, preventing immediate cancellation.
   pub async fn drain(&self) {
     let _ = tokio::time::timeout(Duration::from_secs(2), async {
-      while self.streams.borrow_mut().join_next().await.is_some() {}
-      while self.connections.borrow_mut().join_next().await.is_some() {}
+      drain_join_set(&self.streams).await;
+      drain_join_set(&self.connections).await;
     })
     .await;
   }
 
   /// Wait for all tasks to complete.
   pub async fn wait_shutdown(&self) {
-    while self.streams.borrow_mut().join_next().await.is_some() {}
-    while self.connections.borrow_mut().join_next().await.is_some() {}
+    drain_join_set(&self.streams).await;
+    drain_join_set(&self.connections).await;
   }
 
   /// Perform a graceful shutdown with timeout.
@@ -132,4 +132,14 @@ impl Default for StreamTracker {
   fn default() -> Self {
     Self::new()
   }
+}
+
+async fn join_next(
+  join_set: &RefCell<JoinSet<()>>,
+) -> Option<Result<(), JoinError>> {
+  poll_fn(|cx| join_set.borrow_mut().poll_join_next(cx)).await
+}
+
+async fn drain_join_set(join_set: &RefCell<JoinSet<()>>) {
+  while join_next(join_set).await.is_some() {}
 }

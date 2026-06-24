@@ -8,14 +8,12 @@ Tests verify that invalid/malformed configs are rejected at startup
 with appropriate error messages. Runtime behavior tests belong elsewhere.
 """
 
+import os
 import subprocess
 import tempfile
-import os
-from typing import Tuple, Optional
 
-from .utils.helpers import NEOPROXY_BINARY, wait_for_process_running
 from .conftest import get_unique_port
-
+from .utils.helpers import NEOPROXY_BINARY, wait_for_process_running
 
 # ==============================================================================
 # Test helper functions
@@ -23,10 +21,10 @@ from .conftest import get_unique_port
 
 
 def run_neoproxy_with_config(
-    config_content: Optional[str],
-    config_path: Optional[str] = None,
-    timeout: float = 5.0
-) -> Tuple[int, str, str]:
+    config_content: str | None,
+    config_path: str | None = None,
+    timeout: float = 5.0,
+) -> tuple[int, str, str]:
     """
     Run neoproxy with a given configuration.
 
@@ -36,16 +34,14 @@ def run_neoproxy_with_config(
         timeout: Timeout for the process
 
     Returns:
-        Tuple[int, str, str]: Return code, stdout, stderr
+        tuple[int, str, str]: Return code, stdout, stderr
     """
     temp_file = None
 
     if config_path is None:
         if config_content is None:
             raise ValueError("Either config_content or config_path must be provided")
-        temp_file = tempfile.NamedTemporaryFile(
-            mode='w', suffix='.yaml', delete=False
-        )
+        temp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
         temp_file.write(config_content)
         temp_file.close()
         config_path = temp_file.name
@@ -55,12 +51,19 @@ def run_neoproxy_with_config(
             [NEOPROXY_BINARY, "--config", config_path],
             capture_output=True,
             text=True,
-            timeout=timeout
+            timeout=timeout,
         )
         return result.returncode, result.stdout, result.stderr
     finally:
         if temp_file is not None:
             os.unlink(temp_file.name)
+
+
+def write_and_close_stdin(proc: subprocess.Popen[str], config: str) -> None:
+    stdin = proc.stdin
+    assert stdin is not None
+    stdin.write(config)
+    stdin.close()
 
 
 # ==============================================================================
@@ -79,17 +82,19 @@ class TestYamlFormat:
                 when config file does not exist
         """
         result = subprocess.run(
-            [NEOPROXY_BINARY, "--config", "/nonexistent/config/path.yaml"],
+            [
+                NEOPROXY_BINARY,
+                "--config",
+                "/nonexistent/config/path.yaml",
+            ],
             capture_output=True,
             text=True,
-            timeout=5.0
+            timeout=5.0,
         )
 
-        assert result.returncode == 1, \
-            f"Expected exit code 1, got {result.returncode}"
+        assert result.returncode == 1, f"Expected exit code 1, got {result.returncode}"
 
-        assert "read config file" in result.stderr, \
-            f"Expected 'read config file' in error, got: {result.stderr}"
+        assert "read config file" in result.stderr, f"Expected 'read config file' in error, got: {result.stderr}"
 
     def test_invalid_yaml_syntax(self) -> None:
         """
@@ -102,15 +107,14 @@ server_threads: [
   invalid yaml
 services: []
 """
-        returncode, stdout, stderr = run_neoproxy_with_config(invalid_yaml)
+        returncode, _stdout, stderr = run_neoproxy_with_config(invalid_yaml)
 
-        assert returncode == 1, \
-            f"Expected exit code 1, got {returncode}"
+        assert returncode == 1, f"Expected exit code 1, got {returncode}"
 
         error_output = stderr.lower()
-        assert "error" in error_output or "parse" in error_output or "expected" in error_output, \
+        assert "error" in error_output or "parse" in error_output or "expected" in error_output, (
             f"Expected YAML parse error in output, got: {stderr}"
-
+        )
 
 
 # ==============================================================================
@@ -135,13 +139,13 @@ services:
 
 servers: []
 """
-        returncode, stdout, stderr = run_neoproxy_with_config(config)
+        returncode, _stdout, stderr = run_neoproxy_with_config(config)
 
-        assert returncode == 1, \
-            f"Expected exit code 1, got {returncode}"
+        assert returncode == 1, f"Expected exit code 1, got {returncode}"
 
-        assert "invalid service kind" in stderr or "expected 'plugin_name.service_name'" in stderr, \
+        assert "invalid service kind" in stderr or "expected 'plugin_name.service_name'" in stderr, (
             f"Expected invalid kind format error, got: {stderr}"
+        )
 
     def test_plugin_not_found(self) -> None:
         """
@@ -168,8 +172,7 @@ servers:
 """
         returncode, _, _ = run_neoproxy_with_config(config)
 
-        assert returncode != 0, \
-            f"Expected non-zero exit code, got {returncode}"
+        assert returncode != 0, f"Expected non-zero exit code, got {returncode}"
 
     def test_service_builder_not_found(self) -> None:
         """
@@ -199,8 +202,7 @@ servers:
 """
         returncode, _, _ = run_neoproxy_with_config(config)
 
-        assert returncode != 0, \
-            f"Expected non-zero exit code, got {returncode}"
+        assert returncode != 0, f"Expected non-zero exit code, got {returncode}"
 
     def test_listener_builder_not_found(self) -> None:
         """
@@ -230,8 +232,7 @@ servers:
 """
         returncode, _, _ = run_neoproxy_with_config(config)
 
-        assert returncode != 0, \
-            f"Expected non-zero exit code, got {returncode}"
+        assert returncode != 0, f"Expected non-zero exit code, got {returncode}"
 
     def test_multiple_kind_errors(self) -> None:
         """
@@ -265,11 +266,11 @@ servers:
 """
         returncode, _, stderr = run_neoproxy_with_config(config)
 
-        assert returncode == 1, \
-            f"Expected exit code 1, got {returncode}"
+        assert returncode == 1, f"Expected exit code 1, got {returncode}"
 
-        assert "invalid service kind" in stderr or "expected 'plugin_name.service_name'" in stderr, \
+        assert "invalid service kind" in stderr or "expected 'plugin_name.service_name'" in stderr, (
             f"Expected kind format error, got: {stderr}"
+        )
 
     def test_unused_bad_plugin_accepted(self) -> None:
         """
@@ -301,9 +302,7 @@ servers:
   listeners: ["http_main"]
   service: echo
 """
-        temp_file = tempfile.NamedTemporaryFile(
-            mode='w', suffix='.yaml', delete=False
-        )
+        temp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
         temp_file.write(config)
         temp_file.close()
 
@@ -314,8 +313,7 @@ servers:
         )
         try:
             running = wait_for_process_running(proc, timeout=1.0)
-            assert running, \
-                "Proxy should start with unused bad plugin (never instantiated)"
+            assert running, "Proxy should start with unused bad plugin (never instantiated)"
         finally:
             if proc.poll() is None:
                 proc.terminate()
@@ -360,18 +358,20 @@ servers:
   service: direct
 """
         proxy_proc = subprocess.Popen(
-            [os.path.abspath(NEOPROXY_BINARY), "--config", "/dev/stdin"],
+            [
+                os.path.abspath(NEOPROXY_BINARY),
+                "--config",
+                "/dev/stdin",
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        proxy_proc.stdin.write(config)
-        proxy_proc.stdin.close()
+        write_and_close_stdin(proxy_proc, config)
         try:
             exit_code = proxy_proc.wait(timeout=5.0)
-            assert exit_code != 0, \
-                f"Expected non-zero exit code for missing addresses, got {exit_code}"
+            assert exit_code != 0, f"Expected non-zero exit code for missing addresses, got {exit_code}"
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
             proxy_proc.wait()
@@ -407,18 +407,20 @@ servers:
   service: direct
 """
         proxy_proc = subprocess.Popen(
-            [os.path.abspath(NEOPROXY_BINARY), "--config", "/dev/stdin"],
+            [
+                os.path.abspath(NEOPROXY_BINARY),
+                "--config",
+                "/dev/stdin",
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        proxy_proc.stdin.write(config)
-        proxy_proc.stdin.close()
+        write_and_close_stdin(proxy_proc, config)
         try:
             exit_code = proxy_proc.wait(timeout=5.0)
-            assert exit_code != 0, \
-                f"Expected non-zero exit code for empty addresses, got {exit_code}"
+            assert exit_code != 0, f"Expected non-zero exit code for empty addresses, got {exit_code}"
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
             proxy_proc.wait()
@@ -452,12 +454,9 @@ servers:
 """
         returncode, _, stderr = run_neoproxy_with_config(config)
 
-        assert returncode == 1, \
-            f"Expected exit code 1, got {returncode}"
+        assert returncode == 1, f"Expected exit code 1, got {returncode}"
 
-        assert "invalid address" in stderr, \
-            f"Expected 'invalid address' in error, got: {stderr}"
-
+        assert "invalid address" in stderr, f"Expected 'invalid address' in error, got: {stderr}"
 
     def test_unknown_field_in_socks5_args(self) -> None:
         """
@@ -494,18 +493,20 @@ servers:
   service: direct
 """
         proxy_proc = subprocess.Popen(
-            [os.path.abspath(NEOPROXY_BINARY), "--config", "/dev/stdin"],
+            [
+                os.path.abspath(NEOPROXY_BINARY),
+                "--config",
+                "/dev/stdin",
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        proxy_proc.stdin.write(config)
-        proxy_proc.stdin.close()
+        write_and_close_stdin(proxy_proc, config)
         try:
             exit_code = proxy_proc.wait(timeout=5.0)
-            assert exit_code != 0, \
-                f"Expected non-zero exit code for unknown field, got {exit_code}"
+            assert exit_code != 0, f"Expected non-zero exit code for unknown field, got {exit_code}"
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
             proxy_proc.wait()
@@ -543,18 +544,20 @@ servers:
   service: upstream
 """
         proxy_proc = subprocess.Popen(
-            [os.path.abspath(NEOPROXY_BINARY), "--config", "/dev/stdin"],
+            [
+                os.path.abspath(NEOPROXY_BINARY),
+                "--config",
+                "/dev/stdin",
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        proxy_proc.stdin.write(config)
-        proxy_proc.stdin.close()
+        write_and_close_stdin(proxy_proc, config)
         try:
             exit_code = proxy_proc.wait(timeout=5.0)
-            assert exit_code != 0, \
-                f"Expected non-zero exit code for unknown field ca_path, got {exit_code}"
+            assert exit_code != 0, f"Expected non-zero exit code for unknown field ca_path, got {exit_code}"
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
             proxy_proc.wait()
@@ -594,18 +597,20 @@ servers:
   service: direct
 """
         proxy_proc = subprocess.Popen(
-            [os.path.abspath(NEOPROXY_BINARY), "--config", "/dev/stdin"],
+            [
+                os.path.abspath(NEOPROXY_BINARY),
+                "--config",
+                "/dev/stdin",
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        proxy_proc.stdin.write(config)
-        proxy_proc.stdin.close()
+        write_and_close_stdin(proxy_proc, config)
         try:
             exit_code = proxy_proc.wait(timeout=5.0)
-            assert exit_code != 0, \
-                f"Expected non-zero exit code for invalid timeout format, got {exit_code}"
+            assert exit_code != 0, f"Expected non-zero exit code for invalid timeout format, got {exit_code}"
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
             proxy_proc.wait()
@@ -646,23 +651,24 @@ servers:
   service: direct
 """
         proxy_proc = subprocess.Popen(
-            [os.path.abspath(NEOPROXY_BINARY), "--config", "/dev/stdin"],
+            [
+                os.path.abspath(NEOPROXY_BINARY),
+                "--config",
+                "/dev/stdin",
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        proxy_proc.stdin.write(config)
-        proxy_proc.stdin.close()
+        write_and_close_stdin(proxy_proc, config)
         try:
             exit_code = proxy_proc.wait(timeout=5.0)
-            assert exit_code != 0, \
-                f"Expected non-zero exit code for client_ca_path in SOCKS5, got {exit_code}"
+            assert exit_code != 0, f"Expected non-zero exit code for client_ca_path in SOCKS5, got {exit_code}"
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
             proxy_proc.wait()
             raise AssertionError("Process should have exited")
-
 
 
 # ==============================================================================
@@ -675,9 +681,7 @@ class TestHostnameRouting:
 
     @staticmethod
     def _write_config(config_content: str) -> str:
-        temp_file = tempfile.NamedTemporaryFile(
-            mode='w', suffix='.yaml', delete=False
-        )
+        temp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
         temp_file.write(config_content)
         temp_file.close()
         return temp_file.name
@@ -711,11 +715,11 @@ servers:
 """
         returncode, _, stderr = run_neoproxy_with_config(config)
 
-        assert returncode == 1, \
-            f"Expected exit code 1, got {returncode}"
+        assert returncode == 1, f"Expected exit code 1, got {returncode}"
 
-        assert "does not support hostname routing" in stderr, \
+        assert "does not support hostname routing" in stderr, (
             f"Expected hostname routing compatibility error, got: {stderr}"
+        )
 
     def test_exact_hostname_duplicate(self) -> None:
         """
@@ -751,11 +755,11 @@ servers:
 """
         returncode, _, stderr = run_neoproxy_with_config(config)
 
-        assert returncode == 1, \
-            f"Expected exit code 1, got {returncode}"
+        assert returncode == 1, f"Expected exit code 1, got {returncode}"
 
-        assert "'api.example.com' defined in multiple servers" in stderr, \
+        assert "'api.example.com' defined in multiple servers" in stderr, (
             f"Expected hostname conflict error, got: {stderr}"
+        )
 
     def test_hostname_case_insensitive_conflict(self) -> None:
         """
@@ -794,11 +798,11 @@ servers:
 """
         returncode, _, stderr = run_neoproxy_with_config(config)
 
-        assert returncode == 1, \
-            f"Expected exit code 1, got {returncode}"
+        assert returncode == 1, f"Expected exit code 1, got {returncode}"
 
-        assert "'api.example.com' defined in multiple servers" in stderr, \
+        assert "'api.example.com' defined in multiple servers" in stderr, (
             f"Expected case-insensitive hostname conflict error, got: {stderr}"
+        )
 
     def test_wildcard_hostname_duplicate(self) -> None:
         """
@@ -834,11 +838,11 @@ servers:
 """
         returncode, _, stderr = run_neoproxy_with_config(config)
 
-        assert returncode == 1, \
-            f"Expected exit code 1, got {returncode}"
+        assert returncode == 1, f"Expected exit code 1, got {returncode}"
 
-        assert "'*.example.com' defined in multiple servers" in stderr, \
+        assert "'*.example.com' defined in multiple servers" in stderr, (
             f"Expected wildcard conflict error, got: {stderr}"
+        )
 
     def test_multiple_default_servers_same_address(self) -> None:
         """
@@ -881,11 +885,11 @@ servers:
 """
         returncode, _, stderr = run_neoproxy_with_config(config)
 
-        assert returncode == 1, \
-            f"Expected exit code 1, got {returncode}"
+        assert returncode == 1, f"Expected exit code 1, got {returncode}"
 
-        assert "without hostname routing support" in stderr, \
+        assert "without hostname routing support" in stderr, (
             f"Expected 'without hostname routing support' error, got: {stderr}"
+        )
 
     def test_socks5_without_hostnames_ok(self) -> None:
         """

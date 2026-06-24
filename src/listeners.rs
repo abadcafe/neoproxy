@@ -113,10 +113,12 @@ mod http_tests;
 #[cfg(test)]
 mod https_tests;
 #[cfg(test)]
+pub(crate) mod listener_args_fixture;
+#[cfg(test)]
+pub(crate) mod server_fixtures;
+#[cfg(test)]
 mod socks5_tests;
 #[cfg(test)]
 mod tcp_bind_tests;
 #[cfg(test)]
 mod tcp_listener_base_tests;
-#[cfg(test)]
-pub(crate) mod test_helpers;

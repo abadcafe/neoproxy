@@ -2,9 +2,8 @@
 
 use crate::config::{ListenerPropertiesProvider, TransportLayer};
 use crate::listeners::ListenerManager;
-use crate::listeners::test_helpers::{
-  empty_args, test_servers, tls_servers,
-};
+use crate::listeners::listener_args_fixture::empty_args;
+use crate::listeners::server_fixtures::{plain_servers, tls_servers};
 
 // ========== ListenerManager::new registration ==========
 
@@ -15,7 +14,7 @@ fn test_listener_manager_new_registers_http() {
     "http",
     vec!["127.0.0.1:0".to_string()],
     empty_args(),
-    test_servers(),
+    plain_servers(),
   );
   assert!(result.is_ok(), "http listener should be registered");
 }
@@ -27,7 +26,7 @@ fn test_listener_manager_new_registers_socks5() {
     "socks5",
     vec!["127.0.0.1:0".to_string()],
     empty_args(),
-    test_servers(),
+    plain_servers(),
   );
   assert!(result.is_ok(), "socks5 listener should be registered");
 }
@@ -65,7 +64,7 @@ fn test_listener_manager_build_unknown_kind_returns_error() {
     "unknown_kind",
     vec!["127.0.0.1:0".to_string()],
     empty_args(),
-    test_servers(),
+    plain_servers(),
   );
   assert!(result.is_err());
   assert!(

@@ -2,10 +2,9 @@
 //!
 //! module: access_log
 //! responsibilities: log proxy access entries to rotating files
-//! public operations: plugin_name, create_plugin, get_writer,
-//! init_writer_registry data entities: AccessLogPlugin, AccessLogLayer,
-//! AccessLogEntry, LogFormat, AccessLogWriter tests: access_log_tests.
-//! rs, layer_tests.rs, registry_tests.rs
+//! public operations: plugin_name, create_plugin
+//! data entities: AccessLogPlugin
+//! tests: access_log_tests.rs, layer_tests.rs, registry_tests.rs
 
 pub(crate) mod config;
 pub mod context;
@@ -23,7 +22,7 @@ mod layer_tests;
 #[cfg(test)]
 mod registry_tests;
 #[cfg(test)]
-pub(crate) mod test_utils;
+mod tracing_capture;
 #[cfg(test)]
 mod writer_tests;
 
@@ -59,12 +58,9 @@ impl AccessLogPlugin {
   ) -> Self {
     let file_layer_builder: Box<dyn BuildLayer> = Box::new(|args| {
       let config: AccessLogConfig = serde_yaml::from_value(args)?;
-      let tx = get_writer(&config.writer)?;
+      let tx = self::registry::get_writer(&config.writer)?;
 
-      Ok(Layer::new(AccessLogLayer {
-        tx,
-        context_fields: config.context_fields,
-      }))
+      Ok(Layer::new(AccessLogLayer::new(tx, config.context_fields)))
     });
 
     Self {
@@ -84,9 +80,11 @@ pub fn create_plugin(
   if let Some(config_value) = config {
     let plugin_config: AccessLogPluginConfig =
       serde_yaml::from_value(config_value.clone())?;
-    init_writer_registry(&plugin_config)?;
+    self::registry::init_writer_registry(&plugin_config)?;
   } else {
-    init_writer_registry(&AccessLogPluginConfig::default())?;
+    self::registry::init_writer_registry(
+      &AccessLogPluginConfig::default(),
+    )?;
   }
   Ok(Box::new(AccessLogPlugin::new(std::sync::Arc::new(
     std::sync::atomic::AtomicBool::new(false),
@@ -152,9 +150,3 @@ impl Plugin for AccessLogPlugin {
     })
   }
 }
-
-#[cfg(test)]
-pub use self::registry::LogEntry;
-#[cfg(test)]
-pub use self::registry::reset_writer_registry;
-pub use self::registry::{get_writer, init_writer_registry};

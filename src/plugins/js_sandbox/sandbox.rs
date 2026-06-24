@@ -202,7 +202,7 @@ impl Sandbox {
         .load_side_es_module_from_code(&specifier, code)
         .await?;
 
-      let _ = self.runtime.mod_evaluate(module_id);
+      std::mem::drop(self.runtime.mod_evaluate(module_id));
       self
         .runtime
         .run_event_loop(PollEventLoopOptions::default())

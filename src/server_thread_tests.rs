@@ -53,16 +53,18 @@ struct TestMarkerMiddleware {
   counter: Arc<AtomicUsize>,
 }
 
-impl tower::Service<crate::http_utils::Request>
+impl tower::Service<crate::http_message::Request>
   for TestMarkerMiddleware
 {
   type Error = anyhow::Error;
   type Future = Pin<
     Box<
-      dyn Future<Output = anyhow::Result<crate::http_utils::Response>>,
+      dyn Future<
+        Output = anyhow::Result<crate::http_message::Response>,
+      >,
     >,
   >;
-  type Response = crate::http_utils::Response;
+  type Response = crate::http_message::Response;
 
   fn poll_ready(
     &mut self,
@@ -73,7 +75,7 @@ impl tower::Service<crate::http_utils::Request>
 
   fn call(
     &mut self,
-    mut req: crate::http_utils::Request,
+    mut req: crate::http_message::Request,
   ) -> Self::Future {
     let name = self.name.clone();
     let counter = self.counter.clone();
@@ -120,15 +122,15 @@ impl TestAssemblyPlugin {
       "echo",
       Box::new(|_args| {
         Ok(crate::service::Service::new(tower::service_fn(
-          |_req: crate::http_utils::Request| {
+          |_req: crate::http_message::Request| {
             Box::pin(async {
-              let body: crate::http_utils::ResponseBody =
+              let body: crate::http_message::ResponseBody =
                 http_body_util::Empty::<bytes::Bytes>::new()
                   .map_err(|e: std::convert::Infallible| {
                     anyhow::anyhow!("{}", e)
                   })
                   .boxed_unsync();
-              let mut resp = crate::http_utils::Response::new(body);
+              let mut resp = crate::http_message::Response::new(body);
               *resp.status_mut() = http::StatusCode::OK;
               Ok::<_, anyhow::Error>(resp)
             })
@@ -136,7 +138,7 @@ impl TestAssemblyPlugin {
                 Box<
                   dyn Future<
                     Output = anyhow::Result<
-                      crate::http_utils::Response,
+                      crate::http_message::Response,
                     >,
                   >,
                 >,
@@ -339,7 +341,7 @@ fn test_build_service_with_layers_markers_in_reverse_order() {
   let service =
     build_service_with_layers(&pm, &config, "test_svc").unwrap();
 
-  let body: crate::http_utils::RequestBody =
+  let body: crate::http_message::RequestBody =
     http_body_util::Empty::<bytes::Bytes>::new()
       .map_err(|e: std::convert::Infallible| anyhow::anyhow!("{}", e))
       .boxed_unsync();

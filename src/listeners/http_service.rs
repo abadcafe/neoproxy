@@ -13,7 +13,7 @@ use hyper::{body as hyper_body, service as hyper_svc};
 use tower::util as tower_util;
 
 use crate::context::build_request_context;
-use crate::http_utils::{
+use crate::http_message::{
   BytesBufBodyWrapper, Request, RequestBody, Response,
 };
 use crate::listeners::error_response::build_403_forbidden;
@@ -107,7 +107,7 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
     let routing_entry =
       match validate_and_route(&req, &self.server_router) {
         Ok(entry) => entry,
-        Err(resp) => return Box::pin(async { Ok(resp) }),
+        Err(resp) => return Box::pin(async { Ok(*resp) }),
       };
 
     // Check client certificate requirement (HTTPS only)

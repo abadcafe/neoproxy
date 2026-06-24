@@ -6,7 +6,6 @@ used in integration testing.
 """
 
 import socket
-from typing import Optional
 
 
 def read_http_request(conn: socket.socket, timeout: float = 5.0) -> bytes:
@@ -79,13 +78,10 @@ def http_echo_handler(conn: socket.socket) -> None:
 
         # Send HTTP response with the body
         response = (
-            b"HTTP/1.1 200 OK\r\n"
-            b"Content-Type: text/plain\r\n"
-            b"Content-Length: " + str(len(body)).encode() + b"\r\n"
-            b"\r\n"
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n"
         ) + body
         conn.sendall(response)
-    except Exception:
+    except OSError:
         pass
     finally:
         conn.close()

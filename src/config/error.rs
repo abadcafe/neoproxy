@@ -75,22 +75,20 @@ impl ConfigErrorCollector {
     !self.errors.is_empty()
   }
 
-  /// Get all errors (test-only: production code uses
-  /// has_errors/report_and_exit)
-  #[cfg(test)]
+  /// Get collected errors for callers that need structured reporting.
   pub(crate) fn errors(&self) -> &[ConfigError] {
     &self.errors
   }
 
   /// Print error report and exit with code 1
   pub(crate) fn report_and_exit(&self) -> ! {
-    if self.errors.is_empty() {
+    if self.errors().is_empty() {
       eprintln!("No configuration errors found.");
       process::exit(0);
     }
 
     eprintln!("Configuration errors:");
-    for error in &self.errors {
+    for error in self.errors() {
       eprintln!("  {}", error);
     }
 

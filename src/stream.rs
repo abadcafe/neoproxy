@@ -70,12 +70,6 @@ impl OnUpgrade {
     req.extensions_mut().remove::<Self>()
   }
 
-  /// Check if an upgrade is available in the request (test only).
-  #[cfg(test)]
-  pub(crate) fn is_available(req: &http::Request<RequestBody>) -> bool {
-    req.extensions().get::<Self>().is_some()
-  }
-
   /// Create a linked (trigger, on_upgrade) pair.
   pub(crate) fn pair() -> (UpgradeTrigger, Self) {
     let (tx, rx) = oneshot::channel();

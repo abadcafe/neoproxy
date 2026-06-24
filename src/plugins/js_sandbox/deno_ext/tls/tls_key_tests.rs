@@ -4,17 +4,17 @@ use deno_core::unsync::spawn;
 
 use super::tls_key::*;
 
-fn tls_key_for_test(sni: &str) -> TlsKey {
-  let manifest_dir =
-    std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
-  let sni = sni.replace(".com", "");
-  let cert_file = manifest_dir.join(format!("testdata/{}_cert.der", sni));
-  let prikey_file = manifest_dir.join(format!("testdata/{}_prikey.der", sni));
-  let cert = std::fs::read(cert_file).unwrap();
-  let prikey = std::fs::read(prikey_file).unwrap();
-  let cert = CertificateDer::from(cert);
-  let prikey = PrivateKeyDer::try_from(prikey).unwrap();
-  TlsKey(vec![cert], prikey)
+fn tls_key_for_test(_sni: &str) -> TlsKey {
+  let mut cert_reader = std::io::BufReader::new(&include_bytes!(
+    "../../../../../conf/certs/server.crt"
+  )[..]);
+  let certs = crate::load_certs(&mut cert_reader).unwrap();
+  let mut keys = crate::load_private_keys(include_bytes!(
+    "../../../../../conf/certs/server.key"
+  ))
+  .unwrap();
+
+  TlsKey(certs, keys.remove(0))
 }
 
 #[tokio::test]

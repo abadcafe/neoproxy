@@ -197,7 +197,7 @@ fn make_test_plugin_manager_with_layers(
   let (mut pm, _errors) = PluginManager::new(HashMap::new());
   let mut plugin = TestAssemblyPlugin::new();
   for (name, counter) in names.iter().zip(counters.iter()) {
-    plugin = plugin.with_layer(*name, counter.clone());
+    plugin = plugin.with_layer(name, counter.clone());
   }
   pm.plugins.insert("test".to_string(), Box::new(plugin));
   pm
@@ -358,7 +358,7 @@ servers: []
 fn test_build_listeners_caches_service_across_servers() {
   let counter = Arc::new(AtomicUsize::new(0));
   let pm = make_test_plugin_manager_with_layers(
-    &[counter.clone()],
+    std::slice::from_ref(&counter),
     &["marker"],
   );
 

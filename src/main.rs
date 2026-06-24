@@ -50,7 +50,11 @@ mod config_tests;
 #[cfg(test)]
 mod context_tests;
 #[cfg(test)]
+mod h3_stream_tests;
+#[cfg(test)]
 mod http_message_tests;
+#[cfg(test)]
+mod main_tests;
 #[cfg(test)]
 mod server_tests;
 #[cfg(test)]

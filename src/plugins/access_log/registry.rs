@@ -30,11 +30,9 @@ pub(crate) struct LogEntry {
 
 /// Global writer registry (shared across all server threads).
 ///
-/// Uses `Mutex<Option<...>>` instead of `OnceLock` to allow test
-/// isolation: tests can call `reset_writer_registry()` between runs
-/// to clear the registry and re-initialize with different configs.
-/// In production, the registry is set once during plugin init and
-/// never reset.
+/// Uses `Mutex<Option<...>>` instead of `OnceLock` so a later
+/// initialization can replace the active writer set and join old
+/// writer threads before installing the new registry.
 pub(crate) static WRITER_REGISTRY: Mutex<
   Option<HashMap<String, WriterHandle>>,
 > = Mutex::new(None);
@@ -62,9 +60,7 @@ impl WriterHandle {
 /// path_prefixes, returns `Ok(())` (idempotent); each server thread
 /// calls this via `PluginManager::new()`, so the idempotent behavior
 /// is essential for correctness in production. If the registry is
-/// initialized with a different set of path_prefixes (e.g., after a
-/// test called `reset_writer_registry()` and another test's
-/// `PluginManager::new()` initialized with empty writers), the old
+/// initialized with a different set of path_prefixes, the old
 /// writers are shut down and the registry is reinitialized with the
 /// new config.
 ///
@@ -272,25 +268,6 @@ pub(crate) fn get_writer(
       path_prefix
     )
   })
-}
-
-/// Reset the writer registry (test only).
-///
-/// Takes the old registry out (under the lock), then joins each writer
-/// thread (outside the lock) to ensure it has fully exited and flushed
-/// before returning. This prevents test interference: without joining,
-/// detached writer threads from a previous test may still be running
-/// (holding file handles) when the next test starts.
-#[cfg(test)]
-pub(crate) fn reset_writer_registry() {
-  let old_registry = {
-    let mut guard = WRITER_REGISTRY.lock().unwrap();
-    guard.take()
-  };
-
-  if let Some(registry) = old_registry {
-    join_writer_handles(registry, "test cleanup");
-  }
 }
 
 /// Join writer threads with a timeout per thread.

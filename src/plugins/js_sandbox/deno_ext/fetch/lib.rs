@@ -5,6 +5,8 @@ mod proxy;
 
 #[cfg(test)]
 mod dns_tests;
+#[cfg(test)]
+mod lib_tests;
 
 use std::borrow::Cow;
 use std::cell::RefCell;

@@ -36,7 +36,7 @@ async fn test_on_upgrade_extracts_from_extensions() {
 }
 
 #[tokio::test]
-async fn test_on_upgrade_is_available() {
+async fn test_on_upgrade_on_absent_then_inserted() {
   let (_trigger, upgrade) = OnUpgrade::pair();
 
   let mut req = http::Request::builder()
@@ -47,15 +47,10 @@ async fn test_on_upgrade_is_available() {
     )))
     .unwrap();
 
-  assert!(
-    !OnUpgrade::is_available(&req),
-    "Should not be available before insert"
-  );
+  assert!(OnUpgrade::on(&mut req).is_none());
+
   req.extensions_mut().insert(upgrade);
-  assert!(
-    OnUpgrade::is_available(&req),
-    "Should be available after insert"
-  );
+  assert!(OnUpgrade::on(&mut req).is_some());
 }
 
 #[tokio::test]

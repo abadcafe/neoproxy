@@ -1,9 +1,19 @@
 pub(crate) mod config;
+#[cfg(test)]
+mod config_tests;
 mod cpu_sandbox;
+#[cfg(test)]
+mod cpu_sandbox_tests;
 mod inject_ops;
+#[cfg(test)]
+mod inject_ops_tests;
 mod mem_sandbox;
+#[cfg(test)]
+mod mem_sandbox_tests;
 mod pool;
 mod request;
+#[cfg(test)]
+mod request_tests;
 mod sandbox;
 mod service;
 
@@ -15,6 +25,8 @@ mod sandbox_tests;
 mod service_runtime_tests;
 #[cfg(test)]
 mod service_test_support;
+#[cfg(test)]
+mod service_test_support_tests;
 #[cfg(test)]
 mod service_tests;
 

@@ -42,7 +42,7 @@ pub enum StreamResourceError {
 }
 
 // How many buffers we'll allow in the channel before we stop allowing writes.
-const BUFFER_CHANNEL_SIZE: u16 = 1024;
+pub(crate) const BUFFER_CHANNEL_SIZE: u16 = 1024;
 
 // How much data is in the channel before we stop allowing writes.
 const BUFFER_BACKPRESSURE_LIMIT: usize = 64 * 1024;
@@ -52,7 +52,7 @@ const BUFFER_BACKPRESSURE_LIMIT: usize = 64 * 1024;
 // If the total size of the channel is less than this value and there is more than one buffer available
 // to read, we will allocate a buffer to store the entire contents of the channel and copy each value from
 // the channel rather than yielding them one at a time.
-const BUFFER_AGGREGATION_LIMIT: usize = 1024;
+pub(crate) const BUFFER_AGGREGATION_LIMIT: usize = 1024;
 
 struct BoundedBufferChannelInner {
   buffers: [MaybeUninit<V8Slice<u8>>; BUFFER_CHANNEL_SIZE as _],
@@ -314,7 +314,7 @@ impl BoundedBufferChannelInner {
 
 #[repr(transparent)]
 #[derive(Clone, Default)]
-struct BoundedBufferChannel {
+pub(crate) struct BoundedBufferChannel {
   inner: Rc<RefCell<BoundedBufferChannelInner>>,
 }
 
@@ -354,11 +354,6 @@ impl BoundedBufferChannel {
 
   pub fn closed(&self) -> bool {
     self.inner().closed
-  }
-
-  #[cfg(test)]
-  pub fn byte_size(&self) -> usize {
-    self.inner().current_size
   }
 
   pub fn close(&self) {

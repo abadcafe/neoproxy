@@ -20,11 +20,15 @@ mod auth_tests;
 #[cfg(test)]
 mod error_tests;
 #[cfg(test)]
+mod global_tests;
+#[cfg(test)]
 mod listener_tests;
 #[cfg(test)]
 mod listener_validation_conflict_tests;
 #[cfg(test)]
 mod listener_validation_test_support;
+#[cfg(test)]
+mod listener_validation_test_support_tests;
 #[cfg(test)]
 mod listener_validation_tests;
 #[cfg(test)]

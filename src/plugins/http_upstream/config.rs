@@ -1,8 +1,18 @@
 mod defaults;
+#[cfg(test)]
+mod defaults_tests;
 mod raw;
+#[cfg(test)]
+mod raw_tests;
 mod resolved;
+#[cfg(test)]
+mod resolved_tests;
 mod resolver;
+#[cfg(test)]
+mod resolver_tests;
 mod validation;
+#[cfg(test)]
+mod validation_tests;
 
 #[cfg(test)]
 pub(crate) use raw::UpstreamAddressConfig;

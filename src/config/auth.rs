@@ -13,11 +13,6 @@ pub(crate) struct UserCredential {
 }
 
 impl UserCredential {
-  #[cfg(test)]
-  pub(crate) fn new(username: String, password: String) -> Self {
-    Self { username, password }
-  }
-
   pub(crate) fn username(&self) -> &str {
     &self.username
   }

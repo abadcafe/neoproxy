@@ -32,6 +32,10 @@ pub use webpki_roots;
 mod keylog;
 mod tls_key;
 #[cfg(test)]
+mod keylog_tests;
+#[cfg(test)]
+mod lib_tests;
+#[cfg(test)]
 mod tls_key_tests;
 pub use keylog::get_ssl_key_log;
 pub use tls_key::*;

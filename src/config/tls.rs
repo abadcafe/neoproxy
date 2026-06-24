@@ -17,11 +17,6 @@ pub(crate) struct CertificateConfig {
 }
 
 impl CertificateConfig {
-  #[cfg(test)]
-  pub(crate) fn new(cert_path: String, key_path: String) -> Self {
-    Self { cert_path, key_path }
-  }
-
   pub(crate) fn cert_path(&self) -> &str {
     &self.cert_path
   }
@@ -43,14 +38,6 @@ pub(crate) struct ServerTlsConfig {
 }
 
 impl ServerTlsConfig {
-  #[cfg(test)]
-  pub(crate) fn new(
-    certificates: Vec<CertificateConfig>,
-    client_ca_certs: Option<Vec<String>>,
-  ) -> Self {
-    Self { certificates, client_ca_certs }
-  }
-
   pub(crate) fn certificates(&self) -> &[CertificateConfig] {
     &self.certificates
   }

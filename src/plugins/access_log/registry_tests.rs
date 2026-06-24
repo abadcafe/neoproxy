@@ -1,10 +1,13 @@
 use serial_test::serial;
 
-use super::registry::{
-  LogEntry, get_writer, init_writer_registry, reset_writer_registry,
-};
+use super::registry::{LogEntry, get_writer, init_writer_registry};
 use super::tracing_capture::TracingCapture;
 use super::{config, context, create_plugin};
+
+fn reset_writer_registry() {
+  let empty_config = config::AccessLogPluginConfig { writers: vec![] };
+  let _ = init_writer_registry(&empty_config);
+}
 
 #[test]
 #[serial]
@@ -91,10 +94,10 @@ fn test_writer_registry_duplicate_path_prefix_rejected() {
 
 #[test]
 #[serial]
-fn test_reset_writer_registry_joins_writer_threads() {
-  // CR-007: reset_writer_registry() must join writer threads before
-  // returning, so that file handles are released and the next test
-  // starts with a clean state.
+fn test_init_writer_registry_empty_config_joins_writer_threads() {
+  // CR-007: reinitializing with an empty config must join writer
+  // threads before returning, so file handles are released and the
+  // next test starts with a clean state.
   reset_writer_registry();
 
   let dir = tempfile::tempdir().unwrap();
@@ -138,13 +141,12 @@ fn test_reset_writer_registry_joins_writer_threads() {
     std::time::Instant::now() + std::time::Duration::from_secs(3);
   let mut content = String::new();
   loop {
-    if log_path.exists() {
-      if let Ok(c) = std::fs::read_to_string(&log_path) {
-        if !c.is_empty() {
-          content = c;
-          break;
-        }
-      }
+    if log_path.exists()
+      && let Ok(c) = std::fs::read_to_string(&log_path)
+      && !c.is_empty()
+    {
+      content = c;
+      break;
     }
     if std::time::Instant::now() > deadline {
       break;
@@ -222,13 +224,12 @@ fn test_writer_thread_buffers_entries_not_flushed_per_entry() {
     std::time::Instant::now() + std::time::Duration::from_secs(3);
   let mut content = String::new();
   loop {
-    if log_path.exists() {
-      if let Ok(c) = std::fs::read_to_string(&log_path) {
-        if !c.is_empty() {
-          content = c;
-          break;
-        }
-      }
+    if log_path.exists()
+      && let Ok(c) = std::fs::read_to_string(&log_path)
+      && !c.is_empty()
+    {
+      content = c;
+      break;
     }
     if std::time::Instant::now() > deadline {
       break;

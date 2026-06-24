@@ -24,9 +24,17 @@ mod address_resolution;
 #[cfg(test)]
 mod address_resolution_tests;
 mod connect_request;
+#[cfg(test)]
+mod connect_request_tests;
 mod http;
 mod http3;
+#[cfg(test)]
+mod http3_tests;
+#[cfg(test)]
+mod http_tests;
 mod proxy_auth;
+#[cfg(test)]
+mod proxy_auth_tests;
 mod scheduler;
 #[cfg(test)]
 mod scheduler_tests;

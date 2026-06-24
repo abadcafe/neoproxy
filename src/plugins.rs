@@ -26,8 +26,12 @@ pub(crate) mod echo;
 #[cfg(test)]
 mod echo_tests;
 pub(crate) mod http_upstream;
+#[cfg(test)]
+mod http_upstream_tests;
 #[cfg(feature = "js-sandbox")]
 pub(crate) mod js_sandbox;
+#[cfg(all(test, feature = "js-sandbox"))]
+mod js_sandbox_tests;
 
 type CreateFn =
   fn(Option<&SerializedArgs>) -> Result<Box<dyn plugin::Plugin>>;

@@ -85,10 +85,7 @@ fn test_classify_connect_error_connection_reset() {
 
 #[test]
 fn test_classify_connect_error_dns_resolve() {
-  let io_err = std::io::Error::new(
-    std::io::ErrorKind::Other,
-    "name lookup failed",
-  );
+  let io_err = std::io::Error::other("name lookup failed");
   let err: anyhow::Error = DnsResolveError(io_err).into();
   assert!(matches!(
     classify_connect_error(err),
@@ -127,10 +124,7 @@ fn test_classify_quic_connection_error_reset_is_terminated() {
 
 #[test]
 fn test_classify_quic_dns_resolve_error() {
-  let io_err = std::io::Error::new(
-    std::io::ErrorKind::Other,
-    "name lookup failed",
-  );
+  let io_err = std::io::Error::other("name lookup failed");
   let err: anyhow::Error = DnsResolveError(io_err).into();
   assert!(matches!(
     classify_quic_error(err),

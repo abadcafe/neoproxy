@@ -30,7 +30,7 @@ fn test_command_error_display_client_disconnected() {
 
 #[test]
 fn test_command_error_display_io_error() {
-  let io_err = io::Error::new(io::ErrorKind::Other, "cmd error");
+  let io_err = io::Error::other("cmd error");
   let err = CommandError::IoError(io_err);
   assert!(
     err.to_string().contains("IO error during command processing")
@@ -98,7 +98,7 @@ fn test_command_error_from_handshake_client_disconnected() {
 
 #[test]
 fn test_command_error_from_handshake_io_error() {
-  let io_err = io::Error::new(io::ErrorKind::Other, "original");
+  let io_err = io::Error::other("original");
   let err = CommandError::from(HandshakeError::IoError(io_err));
   assert!(matches!(err, CommandError::IoError(_)));
 }

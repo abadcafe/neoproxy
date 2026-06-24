@@ -189,10 +189,10 @@ fn user_credential(
   username: &str,
   password: &str,
 ) -> crate::config::UserCredential {
-  crate::config::UserCredential::new(
-    username.to_string(),
-    password.to_string(),
-  )
+  serde_yaml::from_str(&format!(
+    "username: {username:?}\npassword: {password:?}\n"
+  ))
+  .unwrap()
 }
 
 /// Create a middleware-wrapped service with configured users.

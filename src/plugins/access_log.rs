@@ -16,6 +16,8 @@ pub(crate) mod writer;
 #[cfg(test)]
 mod config_tests;
 #[cfg(test)]
+mod context_tests;
+#[cfg(test)]
 mod formatter_tests;
 #[cfg(test)]
 mod layer_tests;
@@ -23,6 +25,8 @@ mod layer_tests;
 mod registry_tests;
 #[cfg(test)]
 mod tracing_capture;
+#[cfg(test)]
+mod tracing_capture_tests;
 #[cfg(test)]
 mod writer_tests;
 

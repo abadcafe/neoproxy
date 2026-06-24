@@ -40,6 +40,8 @@ mod inherit_tests;
 mod service_tests;
 #[cfg(test)]
 mod target_parser_tests;
+#[cfg(test)]
+mod upstream_tests;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 

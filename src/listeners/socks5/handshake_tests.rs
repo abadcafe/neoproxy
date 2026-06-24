@@ -34,7 +34,7 @@ fn test_handshake_error_display_client_disconnected() {
 
 #[test]
 fn test_handshake_error_display_io_error() {
-  let io_err = io::Error::new(io::ErrorKind::Other, "test error");
+  let io_err = io::Error::other("test error");
   let err = HandshakeError::IoError(io_err);
   assert!(err.to_string().contains("IO error during handshake"));
   assert!(err.to_string().contains("test error"));

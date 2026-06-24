@@ -1,11 +1,16 @@
 use std::cell::OnceCell;
+use std::future::poll_fn;
+use std::rc::Rc;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
+use deno_core::serde_v8::V8Slice;
 use deno_core::v8;
 
-use super::stream_resource::*;
+use super::stream_resource::{
+  BUFFER_AGGREGATION_LIMIT, BUFFER_CHANNEL_SIZE, BoundedBufferChannel,
+};
 
 static V8_GLOBAL: OnceLock<()> = OnceLock::new();
 
@@ -107,10 +112,6 @@ async fn test_multi_task_small_reads() {
   let b = deno_core::unsync::spawn(async move {
     for _ in 0..BUFFER_CHANNEL_SIZE * 2 {
       poll_fn(|cx| channel.poll_read_ready(cx)).await;
-      // We want to make sure we're aggregating at least some packets
-      while channel.byte_size() <= 16 && !channel.closed() {
-        tokio::time::sleep(Duration::from_millis(1)).await;
-      }
       let len = channel
         .read(1024)
         .unwrap()

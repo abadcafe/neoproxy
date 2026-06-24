@@ -1,6 +1,7 @@
 use std::task::{Context, Poll};
 
 use futures::task::noop_waker;
+use http_body_util::BodyExt;
 use tempfile::TempDir;
 use tower::Service;
 

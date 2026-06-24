@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use crate::config::{CertificateConfig, ServerTlsConfig};
+use crate::config::ServerTlsConfig;
 use crate::server::Server;
 
 pub(crate) fn plain_servers() -> Vec<Server> {
@@ -40,6 +40,17 @@ fn generate_test_cert() -> (String, String) {
   (cert.pem(), key_pair.serialize_pem())
 }
 
+fn server_tls_config(
+  cert_path: &str,
+  key_path: &str,
+) -> ServerTlsConfig {
+  serde_yaml::from_str(&format!(
+    "certificates:\n- cert_path: {cert_path:?}\n  key_path: \
+     {key_path:?}\n"
+  ))
+  .unwrap()
+}
+
 pub(crate) fn tls_servers() -> Vec<Server> {
   ensure_crypto_provider();
   let (cert_pem, key_pem) = generate_test_cert();
@@ -54,12 +65,9 @@ pub(crate) fn tls_servers() -> Vec<Server> {
     hostnames: vec!["test.local".to_string()],
     service: crate::server::placeholder_service(),
     service_name: "test".to_string(),
-    tls: Some(ServerTlsConfig::new(
-      vec![CertificateConfig::new(
-        cert_path.to_str().unwrap().to_string(),
-        key_path.to_str().unwrap().to_string(),
-      )],
-      None,
+    tls: Some(server_tls_config(
+      cert_path.to_str().unwrap(),
+      key_path.to_str().unwrap(),
     )),
   }]
 }

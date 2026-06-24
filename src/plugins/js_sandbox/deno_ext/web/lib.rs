@@ -7,7 +7,17 @@ mod stream_resource;
 mod url;
 
 #[cfg(test)]
+mod blob_tests;
+#[cfg(test)]
+mod console_tests;
+#[cfg(test)]
+mod lib_tests;
+#[cfg(test)]
+mod message_port_tests;
+#[cfg(test)]
 mod stream_resource_tests;
+#[cfg(test)]
+mod url_tests;
 
 use std::borrow::Cow;
 use std::cell::RefCell;

@@ -56,6 +56,27 @@ fn generate_test_cert_with_san(
   )
 }
 
+fn certificate_config(
+  cert_path: String,
+  key_path: String,
+) -> CertificateConfig {
+  serde_yaml::from_str(&format!(
+    "cert_path: {cert_path:?}\nkey_path: {key_path:?}\n"
+  ))
+  .unwrap()
+}
+
+fn server_tls_config(
+  cert_path: String,
+  key_path: String,
+) -> ServerTlsConfig {
+  serde_yaml::from_str(&format!(
+    "certificates:\n- cert_path: {cert_path:?}\n  key_path: \
+     {key_path:?}\n"
+  ))
+  .unwrap()
+}
+
 #[test]
 fn test_extract_san_from_certificate() {
   ensure_crypto_provider();
@@ -93,7 +114,7 @@ fn test_extract_san_empty_cert() {
 fn test_load_cert_and_key_missing_file() {
   ensure_crypto_provider();
 
-  let config = CertificateConfig::new(
+  let config = certificate_config(
     "/nonexistent/path/cert.pem".to_string(),
     "/nonexistent/path/key.pem".to_string(),
   );
@@ -115,19 +136,13 @@ fn test_build_tls_server_config_with_multiple_servers() {
       hostnames: vec!["app1.example.com".to_string()],
       service: placeholder_service(),
       service_name: "server1".to_string(),
-      tls: Some(ServerTlsConfig::new(
-        vec![CertificateConfig::new(cert_path1, key_path1)],
-        None,
-      )),
+      tls: Some(server_tls_config(cert_path1, key_path1)),
     },
     Server {
       hostnames: vec!["app2.example.com".to_string()],
       service: placeholder_service(),
       service_name: "server2".to_string(),
-      tls: Some(ServerTlsConfig::new(
-        vec![CertificateConfig::new(cert_path2, key_path2)],
-        None,
-      )),
+      tls: Some(server_tls_config(cert_path2, key_path2)),
     },
   ];
 

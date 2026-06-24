@@ -1,4 +1,9 @@
+use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::Arc;
+
+use hyper_util::client::legacy::connect::dns::Name;
+use tower::Service;
 
 use super::dns::*;
 

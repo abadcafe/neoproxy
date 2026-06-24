@@ -117,7 +117,11 @@ mod https_tests;
 #[cfg(test)]
 pub(crate) mod listener_args_fixture;
 #[cfg(test)]
+mod listener_args_fixture_tests;
+#[cfg(test)]
 pub(crate) mod server_fixtures;
+#[cfg(test)]
+mod server_fixtures_tests;
 #[cfg(test)]
 mod socks5_tests;
 #[cfg(test)]

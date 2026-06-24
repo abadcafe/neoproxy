@@ -10,7 +10,7 @@ use super::listener::{
 use super::{Config, ConfigError, ConfigErrorCollector};
 
 /// Validate listener addresses.
-pub fn validate_listener_addresses(
+pub(super) fn validate_listener_addresses(
   addresses: &[String],
   location: &str,
   collector: &mut ConfigErrorCollector,
@@ -43,7 +43,7 @@ pub fn validate_listener_addresses(
 /// - Empty string
 /// - Wildcard without domain: "*"
 /// - Wildcard without dot: "*example.com"
-pub fn validate_hostname(
+pub(super) fn validate_hostname(
   hostname: &str,
   location: &str,
   collector: &mut ConfigErrorCollector,
@@ -79,21 +79,21 @@ pub fn validate_hostname(
 fn build_listener_map(
   config: &Config,
 ) -> HashMap<&str, &ListenerConfig> {
-  config.listeners.iter().map(|l| (l.name.as_str(), l)).collect()
+  config.listeners().iter().map(|l| (l.name(), l)).collect()
 }
 
 /// Validate that each server's listener references exist in
 /// config.listeners.
-pub fn validate_listener_references(
+pub(super) fn validate_listener_references(
   config: &Config,
   collector: &mut ConfigErrorCollector,
 ) {
   let listener_names: std::collections::HashSet<&str> =
-    config.listeners.iter().map(|l| l.name.as_str()).collect();
+    config.listeners().iter().map(|l| l.name()).collect();
 
-  for (server_idx, server) in config.servers.iter().enumerate() {
+  for (server_idx, server) in config.servers().iter().enumerate() {
     for (listener_idx, listener_name) in
-      server.listeners.iter().enumerate()
+      server.listeners().iter().enumerate()
     {
       if !listener_names.contains(listener_name.as_str()) {
         collector.add(ConfigError::NotFound {
@@ -113,7 +113,7 @@ pub fn validate_listener_references(
 ///
 /// If a listener doesn't support hostname routing (e.g., socks5),
 /// the server's hostnames field must be empty.
-pub fn validate_hostname_routing_compatibility(
+pub(super) fn validate_hostname_routing_compatibility(
   config: &Config,
   collector: &mut ConfigErrorCollector,
   listener_manager: &dyn ListenerPropertiesProvider,
@@ -123,25 +123,25 @@ pub fn validate_hostname_routing_compatibility(
   // Build a name -> ListenerConfig lookup map
   let listener_map = build_listener_map(config);
 
-  for (server_idx, server) in config.servers.iter().enumerate() {
-    if server.hostnames.is_empty() {
+  for (server_idx, server) in config.servers().iter().enumerate() {
+    if server.hostnames().is_empty() {
       continue;
     }
 
     for (listener_idx, listener_name) in
-      server.listeners.iter().enumerate()
+      server.listeners().iter().enumerate()
     {
       // Look up ListenerConfig by name to get the kind
       let listener_kind = match listener_map.get(listener_name.as_str())
       {
-        Some(lc) => lc.kind.as_str(),
+        Some(lc) => lc.kind(),
         None => continue, /* Unknown listener name -
                            * validate_listener_references handles
                            * this */
       };
 
       if let Some(props) = registry.listener_props(listener_kind)
-        && !props.supports_hostname_routing
+        && !props.supports_hostname_routing()
       {
         collector.add(ConfigError::InvalidFormat {
           location: format!(
@@ -151,7 +151,8 @@ pub fn validate_hostname_routing_compatibility(
           message: format!(
             "listener kind '{}' does not support hostname routing, \
              but server '{}' has hostnames configured",
-            listener_kind, server.name
+            listener_kind,
+            server.name()
           ),
         });
       }
@@ -168,7 +169,7 @@ pub fn validate_hostname_routing_compatibility(
 /// - Same kind, NO hostname routing support (socks5): CONFLICT
 /// - Multiple default servers (empty hostnames) on same address+kind:
 ///   CONFLICT
-pub fn validate_address_conflicts(
+pub(super) fn validate_address_conflicts(
   config: &Config,
   collector: &mut ConfigErrorCollector,
   listener_manager: &dyn ListenerPropertiesProvider,
@@ -183,8 +184,8 @@ pub fn validate_address_conflicts(
   let mut address_map: HashMap<SocketAddr, Vec<AddressUsage>> =
     HashMap::new();
 
-  for server in &config.servers {
-    for listener_name in &server.listeners {
+  for server in config.servers() {
+    for listener_name in server.listeners() {
       // Look up ListenerConfig by name
       let lc = match listener_map.get(listener_name.as_str()) {
         Some(lc) => lc,
@@ -193,16 +194,16 @@ pub fn validate_address_conflicts(
                            * this */
       };
 
-      if registry.listener_props(&lc.kind).is_none() {
+      if registry.listener_props(lc.kind()).is_none() {
         continue;
       }
 
-      for addr_str in &lc.addresses {
+      for addr_str in lc.addresses() {
         if let Ok(addr) = addr_str.parse::<SocketAddr>() {
           let usage = AddressUsage {
-            server_name: server.name.clone(),
-            listener_kind: lc.kind.clone(),
-            hostnames: server.hostnames.clone(),
+            server_name: server.name().to_string(),
+            listener_kind: lc.kind().to_string(),
+            hostnames: server.hostnames().to_vec(),
           };
           address_map.entry(addr).or_default().push(usage);
         }
@@ -226,7 +227,7 @@ pub fn validate_address_conflicts(
     for u in &usages {
       match registry
         .listener_props(&u.listener_kind)
-        .map(|p| p.transport_layer)
+        .map(|p| p.transport_layer())
       {
         Some(TL::Tcp) => tcp_usages.push(u),
         Some(TL::Udp) => udp_usages.push(u),
@@ -393,7 +394,7 @@ fn check_hostname_routing_conflicts(
   let kind = usages[0].listener_kind.as_str();
   let supports_hostname_routing = registry
     .listener_props(kind)
-    .map(|p| p.supports_hostname_routing)
+    .map(|p| p.supports_hostname_routing())
     .unwrap_or(false);
 
   if !supports_hostname_routing {
@@ -448,7 +449,7 @@ fn check_hostname_routing_conflicts(
 /// This overlap is intentional -- the two functions serve different
 /// primary purposes (address conflicts vs listener-level conflicts) and
 /// provide complementary error messages.
-pub fn validate_hostname_conflicts(
+pub(super) fn validate_hostname_conflicts(
   config: &Config,
   collector: &mut ConfigErrorCollector,
   listener_manager: &dyn ListenerPropertiesProvider,
@@ -463,8 +464,8 @@ pub fn validate_hostname_conflicts(
     &str,
     Vec<&super::Server>,
   > = std::collections::HashMap::new();
-  for server in &config.servers {
-    for listener_name in &server.listeners {
+  for server in config.servers() {
+    for listener_name in server.listeners() {
       listener_servers
         .entry(listener_name.as_str())
         .or_default()
@@ -480,8 +481,8 @@ pub fn validate_hostname_conflicts(
     // Get listener kind and check supports_hostname_routing
     let supports_hostname_routing = listener_map
       .get(listener_name)
-      .and_then(|l| registry.listener_props(&l.kind))
-      .map(|p| p.supports_hostname_routing)
+      .and_then(|l| registry.listener_props(l.kind()))
+      .map(|p| p.supports_hostname_routing())
       .unwrap_or(false);
 
     if !supports_hostname_routing {

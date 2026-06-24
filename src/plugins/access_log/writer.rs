@@ -10,7 +10,7 @@ use super::config::AccessLogWriterConfig;
 use super::context::{AccessLogEntry, LogFormat};
 use super::formatter;
 
-pub struct AccessLogWriter {
+pub(crate) struct AccessLogWriter {
   current_file: Option<File>,
   current_size: u64,
   current_date: String,
@@ -27,7 +27,7 @@ pub struct AccessLogWriter {
 }
 
 impl AccessLogWriter {
-  pub fn from_config(config: &AccessLogWriterConfig) -> Self {
+  pub(crate) fn from_config(config: &AccessLogWriterConfig) -> Self {
     Self {
       current_file: None,
       current_size: 0,
@@ -46,7 +46,7 @@ impl AccessLogWriter {
     }
   }
 
-  pub fn write(&mut self, entry: &AccessLogEntry) {
+  pub(crate) fn write(&mut self, entry: &AccessLogEntry) {
     let formatted = formatter::format_entry(entry, self.format);
     if self.buffer.len().saturating_add(formatted.len())
       > self.max_buffer_size
@@ -64,7 +64,7 @@ impl AccessLogWriter {
     }
   }
 
-  pub fn flush(&mut self) {
+  pub(crate) fn flush(&mut self) {
     self.do_flush();
   }
 
@@ -72,7 +72,7 @@ impl AccessLogWriter {
   ///
   /// Called by the writer thread's periodic timeout path to ensure
   /// buffered entries are written even when no new entries arrive.
-  pub fn flush_if_interval_elapsed(&mut self) {
+  pub(crate) fn flush_if_interval_elapsed(&mut self) {
     if self.last_flush.elapsed() >= self.flush_interval
       && !self.buffer.is_empty()
     {

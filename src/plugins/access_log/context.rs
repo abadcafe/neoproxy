@@ -6,19 +6,19 @@ use time::OffsetDateTime;
 
 /// A complete access log entry ready for formatting.
 #[derive(Debug, Clone)]
-pub struct AccessLogEntry {
-  pub time: OffsetDateTime,
-  pub client_ip: String,
-  pub client_port: u16,
-  pub server_ip: String,
-  pub server_port: u16,
-  pub method: String,
-  pub target: String,
-  pub status: u16,
-  pub duration_ms: u64,
-  pub service: String,
-  pub err: Option<String>,
-  pub extensions: HashMap<String, String>,
+pub(crate) struct AccessLogEntry {
+  pub(crate) time: OffsetDateTime,
+  pub(crate) client_ip: String,
+  pub(crate) client_port: u16,
+  pub(crate) server_ip: String,
+  pub(crate) server_port: u16,
+  pub(crate) method: String,
+  pub(crate) target: String,
+  pub(crate) status: u16,
+  pub(crate) duration_ms: u64,
+  pub(crate) service: String,
+  pub(crate) err: Option<String>,
+  pub(crate) extensions: HashMap<String, String>,
 }
 
 /// Log format type.
@@ -33,7 +33,7 @@ pub struct AccessLogEntry {
   serde::Serialize,
 )]
 #[serde(rename_all = "lowercase")]
-pub enum LogFormat {
+pub(crate) enum LogFormat {
   #[default]
   Text,
   Json,

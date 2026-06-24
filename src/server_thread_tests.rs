@@ -9,10 +9,7 @@ use std::task::{Context, Poll};
 
 use http_body_util::BodyExt;
 
-use crate::config::{
-  Config, Layer as LayerConfig, ListenerConfig, SerializedArgs,
-  Service as ServiceConfig,
-};
+use crate::config::{Config, SerializedArgs};
 use crate::listeners::ListenerManager;
 use crate::plugin::Plugin;
 use crate::plugins::PluginManager;
@@ -206,6 +203,10 @@ fn make_test_plugin_manager_with_layers(
   pm
 }
 
+fn parse_config(yaml: &str) -> Config {
+  Config::parse_str(yaml).unwrap()
+}
+
 // ========================================================================
 // CR-001: Existing tests (already present)
 // ========================================================================
@@ -241,17 +242,17 @@ fn test_build_listeners_empty_config() {
 #[test]
 fn test_build_listeners_unknown_listener_kind() {
   let pm = make_test_plugin_manager();
-  let config = Config {
-    listeners: vec![ListenerConfig {
-      name: "test_listener".to_string(),
-      kind: "nonexistent_kind".to_string(),
-      addresses: vec!["127.0.0.1:8080".to_string()],
-      args: SerializedArgs::Null,
-    }],
-    servers: vec![],
-    services: vec![],
-    ..Default::default()
-  };
+  let config = parse_config(
+    r#"
+listeners:
+- name: test_listener
+  kind: nonexistent_kind
+  addresses:
+  - "127.0.0.1:8080"
+services: []
+servers: []
+"#,
+  );
   let listener_manager = ListenerManager::new();
   let result = build_listeners(&pm, &config, &listener_manager);
   match result {
@@ -277,27 +278,20 @@ fn test_build_service_with_layers_reverse_order() {
     &["layer_a", "layer_b"],
   );
 
-  let config = Config {
-    services: vec![ServiceConfig {
-      name: "test_svc".to_string(),
-      plugin_name: "test".to_string(),
-      kind: "echo".to_string(),
-      args: SerializedArgs::Null,
-      layers: vec![
-        LayerConfig {
-          plugin_name: "test".to_string(),
-          kind: "layer_a".to_string(),
-          args: SerializedArgs::Null,
-        },
-        LayerConfig {
-          plugin_name: "test".to_string(),
-          kind: "layer_b".to_string(),
-          args: SerializedArgs::Null,
-        },
-      ],
-    }],
-    ..Default::default()
-  };
+  let config = parse_config(
+    r#"
+services:
+- name: test_svc
+  kind: test.echo
+  args: null
+  layers:
+  - kind: test.layer_a
+    args: null
+  - kind: test.layer_b
+    args: null
+servers: []
+"#,
+  );
 
   let result = build_service_with_layers(&pm, &config, "test_svc");
   assert!(result.is_ok());
@@ -316,27 +310,20 @@ fn test_build_service_with_layers_markers_in_reverse_order() {
     &["layer_a", "layer_b"],
   );
 
-  let config = Config {
-    services: vec![ServiceConfig {
-      name: "test_svc".to_string(),
-      plugin_name: "test".to_string(),
-      kind: "echo".to_string(),
-      args: SerializedArgs::Null,
-      layers: vec![
-        LayerConfig {
-          plugin_name: "test".to_string(),
-          kind: "layer_a".to_string(),
-          args: SerializedArgs::Null,
-        },
-        LayerConfig {
-          plugin_name: "test".to_string(),
-          kind: "layer_b".to_string(),
-          args: SerializedArgs::Null,
-        },
-      ],
-    }],
-    ..Default::default()
-  };
+  let config = parse_config(
+    r#"
+services:
+- name: test_svc
+  kind: test.echo
+  args: null
+  layers:
+  - kind: test.layer_a
+    args: null
+  - kind: test.layer_b
+    args: null
+servers: []
+"#,
+  );
 
   let service =
     build_service_with_layers(&pm, &config, "test_svc").unwrap();
@@ -375,40 +362,31 @@ fn test_build_listeners_caches_service_across_servers() {
     &["marker"],
   );
 
-  let config = Config {
-    services: vec![ServiceConfig {
-      name: "shared_svc".to_string(),
-      plugin_name: "test".to_string(),
-      kind: "echo".to_string(),
-      args: SerializedArgs::Null,
-      layers: vec![LayerConfig {
-        plugin_name: "test".to_string(),
-        kind: "marker".to_string(),
-        args: SerializedArgs::Null,
-      }],
-    }],
-    listeners: vec![ListenerConfig {
-      name: "main_listener".to_string(),
-      kind: "http".to_string(),
-      addresses: vec!["127.0.0.1:8080".to_string()],
-      args: SerializedArgs::Null,
-    }],
-    servers: vec![
-      crate::config::Server {
-        name: "server1".to_string(),
-        service: "shared_svc".to_string(),
-        listeners: vec!["main_listener".to_string()],
-        ..Default::default()
-      },
-      crate::config::Server {
-        name: "server2".to_string(),
-        service: "shared_svc".to_string(),
-        listeners: vec!["main_listener".to_string()],
-        ..Default::default()
-      },
-    ],
-    ..Default::default()
-  };
+  let config = parse_config(
+    r#"
+services:
+- name: shared_svc
+  kind: test.echo
+  args: null
+  layers:
+  - kind: test.marker
+    args: null
+listeners:
+- name: main_listener
+  kind: http
+  addresses:
+  - "127.0.0.1:8080"
+servers:
+- name: server1
+  service: shared_svc
+  listeners:
+  - main_listener
+- name: server2
+  service: shared_svc
+  listeners:
+  - main_listener
+"#,
+  );
 
   let listener_manager = ListenerManager::new();
   let result = build_listeners(&pm, &config, &listener_manager);
@@ -429,16 +407,16 @@ fn test_build_listeners_caches_service_across_servers() {
 #[test]
 fn test_build_service_with_layers_success() {
   let pm = make_test_plugin_manager();
-  let config = Config {
-    services: vec![ServiceConfig {
-      name: "my_echo".to_string(),
-      plugin_name: "echo".to_string(),
-      kind: "echo".to_string(),
-      args: SerializedArgs::Null,
-      layers: vec![],
-    }],
-    ..Default::default()
-  };
+  let config = parse_config(
+    r#"
+services:
+- name: my_echo
+  kind: echo.echo
+  args: null
+  layers: []
+servers: []
+"#,
+  );
 
   let result = build_service_with_layers(&pm, &config, "my_echo");
   assert!(result.is_ok());
@@ -447,16 +425,16 @@ fn test_build_service_with_layers_success() {
 #[test]
 fn test_build_service_with_layers_not_found_in_plugin() {
   let pm = make_test_plugin_manager();
-  let config = Config {
-    services: vec![ServiceConfig {
-      name: "bad_svc".to_string(),
-      plugin_name: "echo".to_string(),
-      kind: "nonexistent_service".to_string(),
-      args: SerializedArgs::Null,
-      layers: vec![],
-    }],
-    ..Default::default()
-  };
+  let config = parse_config(
+    r#"
+services:
+- name: bad_svc
+  kind: echo.nonexistent_service
+  args: null
+  layers: []
+servers: []
+"#,
+  );
 
   let result = build_service_with_layers(&pm, &config, "bad_svc");
   assert!(result.is_err());
@@ -468,16 +446,16 @@ fn test_build_service_with_layers_not_found_in_plugin() {
 #[test]
 fn test_build_service_with_layers_plugin_not_found() {
   let (pm, _errors) = PluginManager::new(HashMap::new());
-  let config = Config {
-    services: vec![ServiceConfig {
-      name: "svc".to_string(),
-      plugin_name: "nonexistent_plugin".to_string(),
-      kind: "echo".to_string(),
-      args: SerializedArgs::Null,
-      layers: vec![],
-    }],
-    ..Default::default()
-  };
+  let config = parse_config(
+    r#"
+services:
+- name: svc
+  kind: nonexistent_plugin.echo
+  args: null
+  layers: []
+servers: []
+"#,
+  );
 
   let result = build_service_with_layers(&pm, &config, "svc");
   assert!(result.is_err());
@@ -496,28 +474,25 @@ fn test_build_service_with_layers_plugin_not_found() {
 #[test]
 fn test_build_listeners_with_servers() {
   let pm = make_test_plugin_manager();
-  let config = Config {
-    services: vec![ServiceConfig {
-      name: "my_echo".to_string(),
-      plugin_name: "echo".to_string(),
-      kind: "echo".to_string(),
-      args: SerializedArgs::Null,
-      layers: vec![],
-    }],
-    listeners: vec![ListenerConfig {
-      name: "main".to_string(),
-      kind: "http".to_string(),
-      addresses: vec!["127.0.0.1:8080".to_string()],
-      args: SerializedArgs::Null,
-    }],
-    servers: vec![crate::config::Server {
-      name: "s1".to_string(),
-      service: "my_echo".to_string(),
-      listeners: vec!["main".to_string()],
-      ..Default::default()
-    }],
-    ..Default::default()
-  };
+  let config = parse_config(
+    r#"
+services:
+- name: my_echo
+  kind: echo.echo
+  args: null
+  layers: []
+listeners:
+- name: main
+  kind: http
+  addresses:
+  - "127.0.0.1:8080"
+servers:
+- name: s1
+  service: my_echo
+  listeners:
+  - main
+"#,
+  );
 
   let listener_manager = ListenerManager::new();
   let result = build_listeners(&pm, &config, &listener_manager);
@@ -529,17 +504,17 @@ fn test_build_listeners_with_servers() {
 #[test]
 fn test_build_listeners_no_servers_referencing_listener() {
   let pm = make_test_plugin_manager();
-  let config = Config {
-    listeners: vec![ListenerConfig {
-      name: "orphan".to_string(),
-      kind: "http".to_string(),
-      addresses: vec!["127.0.0.1:8080".to_string()],
-      args: SerializedArgs::Null,
-    }],
-    servers: vec![],
-    services: vec![],
-    ..Default::default()
-  };
+  let config = parse_config(
+    r#"
+listeners:
+- name: orphan
+  kind: http
+  addresses:
+  - "127.0.0.1:8080"
+services: []
+servers: []
+"#,
+  );
 
   let listener_manager = ListenerManager::new();
   let result = build_listeners(&pm, &config, &listener_manager);

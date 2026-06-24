@@ -93,10 +93,10 @@ fn test_extract_san_empty_cert() {
 fn test_load_cert_and_key_missing_file() {
   ensure_crypto_provider();
 
-  let config = CertificateConfig {
-    cert_path: "/nonexistent/path/cert.pem".to_string(),
-    key_path: "/nonexistent/path/key.pem".to_string(),
-  };
+  let config = CertificateConfig::new(
+    "/nonexistent/path/cert.pem".to_string(),
+    "/nonexistent/path/key.pem".to_string(),
+  );
   let result = load_cert_and_key(&config);
   assert!(result.is_err());
 }
@@ -115,25 +115,19 @@ fn test_build_tls_server_config_with_multiple_servers() {
       hostnames: vec!["app1.example.com".to_string()],
       service: placeholder_service(),
       service_name: "server1".to_string(),
-      tls: Some(ServerTlsConfig {
-        certificates: vec![CertificateConfig {
-          cert_path: cert_path1,
-          key_path: key_path1,
-        }],
-        client_ca_certs: None,
-      }),
+      tls: Some(ServerTlsConfig::new(
+        vec![CertificateConfig::new(cert_path1, key_path1)],
+        None,
+      )),
     },
     Server {
       hostnames: vec!["app2.example.com".to_string()],
       service: placeholder_service(),
       service_name: "server2".to_string(),
-      tls: Some(ServerTlsConfig {
-        certificates: vec![CertificateConfig {
-          cert_path: cert_path2,
-          key_path: key_path2,
-        }],
-        client_ca_certs: None,
-      }),
+      tls: Some(ServerTlsConfig::new(
+        vec![CertificateConfig::new(cert_path2, key_path2)],
+        None,
+      )),
     },
   ];
 

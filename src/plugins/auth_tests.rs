@@ -185,12 +185,19 @@ fn basic_auth_header(user: &str, pass: &str) -> String {
   format!("Basic {}", credentials)
 }
 
+fn user_credential(
+  username: &str,
+  password: &str,
+) -> crate::config::UserCredential {
+  crate::config::UserCredential::new(
+    username.to_string(),
+    password.to_string(),
+  )
+}
+
 /// Create a middleware-wrapped service with configured users.
 fn make_middleware_service() -> crate::service::Service {
-  let users = vec![crate::config::UserCredential {
-    username: "admin".to_string(),
-    password: "secret".to_string(),
-  }];
+  let users = vec![user_credential("admin", "secret")];
   let auth = crate::auth::UserPasswordAuth::from_users(&users);
   let layer = crate::service::Layer::new(AuthLayer { auth });
   let inner = crate::server::placeholder_service();
@@ -262,10 +269,7 @@ fn test_valid_credentials_sets_context() {
     let ctx = RequestContext::new();
     let ctx_clone = ctx.clone();
 
-    let users = vec![crate::config::UserCredential {
-      username: "admin".to_string(),
-      password: "secret".to_string(),
-    }];
+    let users = vec![user_credential("admin", "secret")];
     let auth = crate::auth::UserPasswordAuth::from_users(&users);
     let layer = crate::service::Layer::new(AuthLayer { auth });
     let inner = crate::server::placeholder_service();
@@ -344,10 +348,7 @@ fn test_valid_credentials_returns_inner_response() {
       },
     ));
 
-    let users = vec![crate::config::UserCredential {
-      username: "admin".to_string(),
-      password: "secret".to_string(),
-    }];
+    let users = vec![user_credential("admin", "secret")];
     let auth = crate::auth::UserPasswordAuth::from_users(&users);
     let layer = crate::service::Layer::new(AuthLayer { auth });
     let mut svc = layer.layer(inner);

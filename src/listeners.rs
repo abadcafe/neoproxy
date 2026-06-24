@@ -20,11 +20,11 @@ pub(crate) const LISTENER_SHUTDOWN_TIMEOUT: Duration =
 
 pub(crate) mod error_response;
 pub(crate) mod header_validation;
-pub mod http;
-pub mod http3;
+pub(crate) mod http;
+pub(crate) mod http3;
 pub(crate) mod http_service;
-pub mod https;
-pub mod socks5;
+pub(crate) mod https;
+pub(crate) mod socks5;
 pub(crate) mod tcp_bind;
 pub(crate) mod tcp_listener_base;
 
@@ -33,13 +33,13 @@ pub(crate) mod tcp_listener_base;
 /// Provides access to:
 /// - `BuildListener` functions for creating listener instances
 /// - `ListenerProps` for conflict detection
-pub struct ListenerManager {
+pub(crate) struct ListenerManager {
   builders: HashMap<&'static str, Box<dyn BuildListener>>,
   props: HashMap<&'static str, ListenerProps>,
 }
 
 impl ListenerManager {
-  pub fn new() -> Self {
+  pub(crate) fn new() -> Self {
     let builders = HashMap::from([
       (
         http::listener_name(),
@@ -72,7 +72,7 @@ impl ListenerManager {
   }
 
   /// Build a listener by kind.
-  pub fn build_listener(
+  pub(crate) fn build_listener(
     &self,
     kind: &str,
     addresses: Vec<String>,
@@ -91,9 +91,11 @@ impl ListenerPropertiesProvider for ListenerManager {
     &self,
     kind: &str,
   ) -> Option<ListenerPropertyValues> {
-    self.props.get(kind).map(|p| ListenerPropertyValues {
-      transport_layer: p.transport_layer(),
-      supports_hostname_routing: p.supports_hostname_routing(),
+    self.props.get(kind).map(|p| {
+      ListenerPropertyValues::new(
+        p.transport_layer(),
+        p.supports_hostname_routing(),
+      )
     })
   }
 }

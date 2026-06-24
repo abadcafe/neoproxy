@@ -46,31 +46,31 @@ fn default_rotate_daily() -> bool {
 /// `{path_prefix}` when `rotate_daily` is false.
 #[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
-pub struct AccessLogWriterConfig {
+pub(crate) struct AccessLogWriterConfig {
   /// Unique key and file path prefix.
   #[serde(default = "default_path_prefix")]
-  pub path_prefix: String,
+  pub(crate) path_prefix: String,
   /// Flush-triggering buffer size.
   #[serde(default = "default_buffer_capacity")]
-  pub buffer_capacity: Byte,
+  pub(crate) buffer_capacity: Byte,
   /// Max buffer; drops entries when full.
   #[serde(default = "default_max_buffer_size")]
-  pub max_buffer_size: Byte,
+  pub(crate) max_buffer_size: Byte,
   /// Max time between flushes.
   #[serde(
     with = "humantime_serde",
     default = "default_flush_interval"
   )]
-  pub flush_interval: Duration,
+  pub(crate) flush_interval: Duration,
   /// Max file size before rotation.
   #[serde(default = "default_max_file_size")]
-  pub max_file_size: Byte,
+  pub(crate) max_file_size: Byte,
   /// Rotate at date boundary.
   #[serde(default = "default_rotate_daily")]
-  pub rotate_daily: bool,
+  pub(crate) rotate_daily: bool,
   /// Log format (text / json).
   #[serde(default)]
-  pub format: LogFormat,
+  pub(crate) format: LogFormat,
 }
 
 impl Default for AccessLogWriterConfig {
@@ -91,18 +91,18 @@ impl Default for AccessLogWriterConfig {
 /// section).
 #[derive(Deserialize, Serialize, Clone, Debug, Default)]
 #[serde(default, deny_unknown_fields)]
-pub struct AccessLogPluginConfig {
+pub(crate) struct AccessLogPluginConfig {
   /// List of named writer configurations.
-  pub writers: Vec<AccessLogWriterConfig>,
+  pub(crate) writers: Vec<AccessLogWriterConfig>,
 }
 
 /// Configuration for the access_log.file layer.
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
-pub struct AccessLogConfig {
+pub(crate) struct AccessLogConfig {
   /// Writer path prefix to log to (matches `writers[].path_prefix`).
-  pub writer: String,
+  pub(crate) writer: String,
   /// Context fields to include in log entries.
   #[serde(default)]
-  pub context_fields: Vec<String>,
+  pub(crate) context_fields: Vec<String>,
 }

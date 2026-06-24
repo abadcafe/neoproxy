@@ -6,7 +6,7 @@ use clap::Parser;
 
 /// Command line options.
 #[derive(Parser, Debug)]
-pub struct CmdOpt {
+pub(crate) struct CmdOpt {
   /// Sets a custom config file
   #[arg(
     short,
@@ -14,16 +14,20 @@ pub struct CmdOpt {
     value_name = "CONFIG_FILE",
     default_value_t = String::from("conf/server.yaml")
   )]
-  pub config_file: String,
+  config_file: String,
 
   /// Gets version
   #[arg(short, long = "version")]
-  pub version: bool,
+  version: bool,
 }
 
 impl CmdOpt {
-  pub fn global() -> &'static LazyLock<CmdOpt> {
+  pub(crate) fn global() -> &'static LazyLock<CmdOpt> {
     static CMD_OPT: LazyLock<CmdOpt> = LazyLock::new(CmdOpt::parse);
     &CMD_OPT
+  }
+
+  pub(crate) fn config_file(&self) -> &str {
+    &self.config_file
   }
 }

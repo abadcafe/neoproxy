@@ -1,4 +1,4 @@
-pub mod config;
+pub(crate) mod config;
 mod cpu_sandbox;
 mod inject_ops;
 mod mem_sandbox;
@@ -76,11 +76,11 @@ impl Plugin for JsSandboxPlugin {
   }
 }
 
-pub fn plugin_name() -> &'static str {
+pub(crate) fn plugin_name() -> &'static str {
   "js_sandbox"
 }
 
-pub fn create_plugin(
+pub(crate) fn create_plugin(
   config: Option<&SerializedArgs>,
 ) -> Result<Box<dyn Plugin>> {
   Ok(Box::new(JsSandboxPlugin::new(config)?))

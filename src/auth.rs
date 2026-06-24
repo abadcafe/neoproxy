@@ -12,7 +12,7 @@ use subtle::ConstantTimeEq;
 
 /// Authentication error types.
 #[derive(Debug, Clone)]
-pub enum AuthError {
+pub(crate) enum AuthError {
   /// Invalid username or password.
   /// CR-009: All authentication failures return this variant to avoid
   /// leaking information about whether a username exists.
@@ -70,14 +70,14 @@ fn verify_password(
 /// username/password verification (for SOCKS5).
 /// When users are configured, authentication is REQUIRED.
 #[derive(Debug, Clone)]
-pub struct UserPasswordAuth {
+pub(crate) struct UserPasswordAuth {
   users: Option<HashMap<String, String>>,
 }
 
 impl UserPasswordAuth {
   /// Create a UserPasswordAuth with no verification (no password
   /// required).
-  pub fn none() -> Self {
+  pub(crate) fn none() -> Self {
     Self { users: None }
   }
 
@@ -85,13 +85,15 @@ impl UserPasswordAuth {
   ///
   /// Creates a verifier with the configured users.
   /// Pure memory operation, cannot fail.
-  pub fn from_users(users: &[crate::config::UserCredential]) -> Self {
+  pub(crate) fn from_users(
+    users: &[crate::config::UserCredential],
+  ) -> Self {
     if users.is_empty() {
       Self::none()
     } else {
       let map = users
         .iter()
-        .map(|u| (u.username.clone(), u.password.clone()))
+        .map(|u| (u.username().to_string(), u.password().to_string()))
         .collect();
       Self { users: Some(map) }
     }
@@ -101,7 +103,7 @@ impl UserPasswordAuth {
   ///
   /// Returns Ok(()) if authentication succeeds or no auth is
   /// configured.
-  pub fn verify_credentials(
+  pub(crate) fn verify_credentials(
     &self,
     username: &str,
     password: &str,

@@ -2,7 +2,7 @@ use std::fmt;
 
 /// CONNECT target address parse error
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConnectTargetError {
+pub(crate) enum ConnectTargetError {
   NotConnectMethod,
   NoAuthority,
   NoPort,
@@ -11,7 +11,7 @@ pub enum ConnectTargetError {
 
 /// Forward proxy target address parse error
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ForwardTargetError {
+pub(crate) enum ForwardTargetError {
   ConnectMethod,
   NotAbsoluteForm,
   UnsupportedScheme,
@@ -72,7 +72,7 @@ impl std::error::Error for ForwardTargetError {}
 /// # Returns
 /// - `Ok((host, port))`: Target hostname and port number
 /// - `Err(ConnectTargetError)`: Parse failed
-pub fn parse_connect_target(
+pub(crate) fn parse_connect_target(
   parts: &http::request::Parts,
 ) -> Result<(String, u16), ConnectTargetError> {
   if parts.method != http::Method::CONNECT {
@@ -103,7 +103,7 @@ pub fn parse_connect_target(
 /// - `Ok((host, port, origin_uri))`: Target hostname, port, and
 ///   origin-form URI
 /// - `Err(ForwardTargetError)`: Parse failed
-pub fn parse_forward_target(
+pub(crate) fn parse_forward_target(
   parts: &http::request::Parts,
 ) -> Result<(String, u16, http::Uri), ForwardTargetError> {
   if parts.method == http::Method::CONNECT {
@@ -145,7 +145,7 @@ pub fn parse_forward_target(
 /// - connection, keep-alive, proxy-authenticate, proxy-authorization
 /// - te, trailers, transfer-encoding, upgrade
 /// - Any header names listed in the Connection header value
-pub fn strip_hop_by_hop_headers(headers: &mut http::HeaderMap) {
+pub(crate) fn strip_hop_by_hop_headers(headers: &mut http::HeaderMap) {
   // Collect extra names listed in the Connection header value first,
   // before removing Connection itself.
   let connection_tokens: Vec<http::header::HeaderName> = headers

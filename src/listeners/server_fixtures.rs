@@ -54,13 +54,13 @@ pub(crate) fn tls_servers() -> Vec<Server> {
     hostnames: vec!["test.local".to_string()],
     service: crate::server::placeholder_service(),
     service_name: "test".to_string(),
-    tls: Some(ServerTlsConfig {
-      certificates: vec![CertificateConfig {
-        cert_path: cert_path.to_str().unwrap().to_string(),
-        key_path: key_path.to_str().unwrap().to_string(),
-      }],
-      client_ca_certs: None,
-    }),
+    tls: Some(ServerTlsConfig::new(
+      vec![CertificateConfig::new(
+        cert_path.to_str().unwrap().to_string(),
+        key_path.to_str().unwrap().to_string(),
+      )],
+      None,
+    )),
   }]
 }
 

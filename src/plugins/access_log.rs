@@ -7,8 +7,8 @@
 //! tests: access_log_tests.rs, layer_tests.rs, registry_tests.rs
 
 pub(crate) mod config;
-pub mod context;
-pub mod formatter;
+pub(crate) mod context;
+pub(crate) mod formatter;
 pub(crate) mod layer;
 pub(crate) mod registry;
 pub(crate) mod writer;
@@ -47,13 +47,13 @@ pub(crate) const WRITER_JOIN_TIMEOUT: std::time::Duration =
   std::time::Duration::from_secs(5);
 
 /// Access log plugin providing file layer.
-pub struct AccessLogPlugin {
+pub(crate) struct AccessLogPlugin {
   layer_builders: HashMap<&'static str, Box<dyn BuildLayer>>,
   is_uninstalled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AccessLogPlugin {
-  pub fn new(
+  pub(crate) fn new(
     is_uninstalled: std::sync::Arc<std::sync::atomic::AtomicBool>,
   ) -> Self {
     let file_layer_builder: Box<dyn BuildLayer> = Box::new(|args| {
@@ -70,11 +70,11 @@ impl AccessLogPlugin {
   }
 }
 
-pub fn plugin_name() -> &'static str {
+pub(crate) fn plugin_name() -> &'static str {
   "access_log"
 }
 
-pub fn create_plugin(
+pub(crate) fn create_plugin(
   config: Option<&SerializedArgs>,
 ) -> Result<Box<dyn Plugin>> {
   if let Some(config_value) = config {

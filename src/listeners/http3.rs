@@ -306,16 +306,16 @@ impl Listening for Http3Listener {
 // ============================================================================
 
 /// Get the listener name
-pub fn listener_name() -> &'static str {
+pub(crate) fn listener_name() -> &'static str {
   "http3"
 }
 
 /// Get listener properties for conflict detection.
-pub fn props() -> ListenerProps {
+pub(crate) fn props() -> ListenerProps {
   ListenerProps::new(TransportLayer::Udp, true)
 }
 
 /// Create a listener builder
-pub fn create_listener_builder() -> Box<dyn BuildListener> {
+pub(crate) fn create_listener_builder() -> Box<dyn BuildListener> {
   Box::new(Http3Listener::new)
 }

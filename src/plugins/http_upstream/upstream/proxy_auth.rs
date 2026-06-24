@@ -6,7 +6,7 @@ pub(crate) fn apply_proxy_auth(
 ) {
   if let Some(user) = user {
     let credentials = base64::engine::general_purpose::STANDARD
-      .encode(format!("{}:{}", user.username, user.password));
+      .encode(format!("{}:{}", user.username(), user.password()));
     req.headers_mut().insert(
       "Proxy-Authorization",
       http::HeaderValue::from_str(&format!("Basic {}", credentials))

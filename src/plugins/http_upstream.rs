@@ -123,11 +123,11 @@ impl Plugin for HttpUpstreamPlugin {
 // Plugin Factory
 // ============================================================================
 
-pub fn plugin_name() -> &'static str {
+pub(crate) fn plugin_name() -> &'static str {
   "http_upstream"
 }
 
-pub fn create_plugin(
+pub(crate) fn create_plugin(
   config: Option<&SerializedArgs>,
 ) -> Result<Box<dyn Plugin>> {
   let plugin_config: HttpUpstreamPluginConfig = match config {

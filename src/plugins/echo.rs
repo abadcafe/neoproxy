@@ -76,11 +76,11 @@ impl Plugin for EchoPlugin {
   }
 }
 
-pub fn plugin_name() -> &'static str {
+pub(crate) fn plugin_name() -> &'static str {
   "echo"
 }
 
-pub fn create_plugin(
+pub(crate) fn create_plugin(
   _config: Option<&SerializedArgs>,
 ) -> Result<Box<dyn Plugin>> {
   Ok(Box::new(EchoPlugin::new()))

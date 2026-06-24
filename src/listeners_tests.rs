@@ -79,32 +79,32 @@ fn test_listener_manager_build_unknown_kind_returns_error() {
 fn test_listener_manager_http_props_tcp_with_hostname_routing() {
   let lm = ListenerManager::new();
   let props = lm.listener_props("http").unwrap();
-  assert_eq!(props.transport_layer, TransportLayer::Tcp);
-  assert!(props.supports_hostname_routing);
+  assert_eq!(props.transport_layer(), TransportLayer::Tcp);
+  assert!(props.supports_hostname_routing());
 }
 
 #[test]
 fn test_listener_manager_https_props_tcp_with_hostname_routing() {
   let lm = ListenerManager::new();
   let props = lm.listener_props("https").unwrap();
-  assert_eq!(props.transport_layer, TransportLayer::Tcp);
-  assert!(props.supports_hostname_routing);
+  assert_eq!(props.transport_layer(), TransportLayer::Tcp);
+  assert!(props.supports_hostname_routing());
 }
 
 #[test]
 fn test_listener_manager_http3_props_udp_with_hostname_routing() {
   let lm = ListenerManager::new();
   let props = lm.listener_props("http3").unwrap();
-  assert_eq!(props.transport_layer, TransportLayer::Udp);
-  assert!(props.supports_hostname_routing);
+  assert_eq!(props.transport_layer(), TransportLayer::Udp);
+  assert!(props.supports_hostname_routing());
 }
 
 #[test]
 fn test_listener_manager_socks5_props_tcp_without_hostname_routing() {
   let lm = ListenerManager::new();
   let props = lm.listener_props("socks5").unwrap();
-  assert_eq!(props.transport_layer, TransportLayer::Tcp);
-  assert!(!props.supports_hostname_routing);
+  assert_eq!(props.transport_layer(), TransportLayer::Tcp);
+  assert!(!props.supports_hostname_routing());
 }
 
 #[test]

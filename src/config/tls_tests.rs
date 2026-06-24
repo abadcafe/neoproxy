@@ -8,8 +8,8 @@ cert_path: "/path/to/cert.pem"
 key_path: "/path/to/key.pem"
 "#;
   let cert: CertificateConfig = serde_yaml::from_str(yaml).unwrap();
-  assert_eq!(cert.cert_path, "/path/to/cert.pem");
-  assert_eq!(cert.key_path, "/path/to/key.pem");
+  assert_eq!(cert.cert_path(), "/path/to/cert.pem");
+  assert_eq!(cert.key_path(), "/path/to/key.pem");
 }
 
 #[test]
@@ -20,10 +20,10 @@ certificates:
   key_path: "/path/to/key.pem"
 "#;
   let tls: ServerTlsConfig = serde_yaml::from_str(yaml).unwrap();
-  assert_eq!(tls.certificates.len(), 1);
-  assert_eq!(tls.certificates[0].cert_path, "/path/to/cert.pem");
-  assert_eq!(tls.certificates[0].key_path, "/path/to/key.pem");
-  assert!(tls.client_ca_certs.is_none());
+  assert_eq!(tls.certificates().len(), 1);
+  assert_eq!(tls.certificates()[0].cert_path(), "/path/to/cert.pem");
+  assert_eq!(tls.certificates()[0].key_path(), "/path/to/key.pem");
+  assert!(tls.client_ca_certs().is_none());
 }
 
 #[test]
@@ -36,7 +36,7 @@ certificates:
   key_path: "/path/to/key2.pem"
 "#;
   let tls: ServerTlsConfig = serde_yaml::from_str(yaml).unwrap();
-  assert_eq!(tls.certificates.len(), 2);
+  assert_eq!(tls.certificates().len(), 2);
 }
 
 #[test]
@@ -50,9 +50,9 @@ client_ca_certs:
 - "/path/to/ca2.pem"
 "#;
   let tls: ServerTlsConfig = serde_yaml::from_str(yaml).unwrap();
-  assert_eq!(tls.certificates.len(), 1);
-  assert!(tls.client_ca_certs.is_some());
-  let client_cas = tls.client_ca_certs.unwrap();
+  assert_eq!(tls.certificates().len(), 1);
+  assert!(tls.client_ca_certs().is_some());
+  let client_cas = tls.client_ca_certs().unwrap();
   assert_eq!(client_cas.len(), 2);
   assert_eq!(client_cas[0], "/path/to/ca1.pem");
   assert_eq!(client_cas[1], "/path/to/ca2.pem");
@@ -81,8 +81,8 @@ fn test_certificate_config_missing_fields() {
 
 #[test]
 fn test_validate_server_tls_empty_certificates() {
-  let tls =
-    ServerTlsConfig { certificates: vec![], client_ca_certs: None };
+  let tls: ServerTlsConfig =
+    serde_yaml::from_str("certificates: []").unwrap();
   let mut collector = ConfigErrorCollector::new();
   validate_server_tls(&tls, "servers[0].tls", &mut collector);
   assert!(collector.has_errors());
@@ -95,13 +95,14 @@ fn test_validate_server_tls_empty_certificates() {
 
 #[test]
 fn test_validate_server_tls_cert_file_not_found() {
-  let tls = ServerTlsConfig {
-    certificates: vec![CertificateConfig {
-      cert_path: "/nonexistent/path/cert.pem".to_string(),
-      key_path: "/nonexistent/path/key.pem".to_string(),
-    }],
-    client_ca_certs: None,
-  };
+  let tls: ServerTlsConfig = serde_yaml::from_str(
+    r#"
+certificates:
+- cert_path: "/nonexistent/path/cert.pem"
+  key_path: "/nonexistent/path/key.pem"
+"#,
+  )
+  .unwrap();
   let mut collector = ConfigErrorCollector::new();
   validate_server_tls(&tls, "servers[0].tls", &mut collector);
   assert!(collector.has_errors());

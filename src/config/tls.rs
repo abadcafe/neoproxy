@@ -9,31 +9,64 @@ use super::{ConfigError, ConfigErrorCollector};
 /// Certificate configuration (cert + key pair)
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
-pub struct CertificateConfig {
+pub(crate) struct CertificateConfig {
   /// Path to certificate file (PEM format)
-  pub cert_path: String,
+  pub(in crate::config) cert_path: String,
   /// Path to private key file (PEM format)
-  pub key_path: String,
+  pub(in crate::config) key_path: String,
+}
+
+impl CertificateConfig {
+  #[cfg(test)]
+  pub(crate) fn new(cert_path: String, key_path: String) -> Self {
+    Self { cert_path, key_path }
+  }
+
+  pub(crate) fn cert_path(&self) -> &str {
+    &self.cert_path
+  }
+
+  pub(crate) fn key_path(&self) -> &str {
+    &self.key_path
+  }
 }
 
 /// Server-level TLS configuration
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
-pub struct ServerTlsConfig {
+pub(crate) struct ServerTlsConfig {
   /// List of certificates (cert_path + key_path pairs)
-  pub certificates: Vec<CertificateConfig>,
+  pub(in crate::config) certificates: Vec<CertificateConfig>,
   /// Optional client CA certificates for mTLS
   #[serde(default)]
-  pub client_ca_certs: Option<Vec<String>>,
+  pub(in crate::config) client_ca_certs: Option<Vec<String>>,
+}
+
+impl ServerTlsConfig {
+  #[cfg(test)]
+  pub(crate) fn new(
+    certificates: Vec<CertificateConfig>,
+    client_ca_certs: Option<Vec<String>>,
+  ) -> Self {
+    Self { certificates, client_ca_certs }
+  }
+
+  pub(crate) fn certificates(&self) -> &[CertificateConfig] {
+    &self.certificates
+  }
+
+  pub(crate) fn client_ca_certs(&self) -> Option<&[String]> {
+    self.client_ca_certs.as_deref()
+  }
 }
 
 /// Validate server-level TLS configuration.
-pub fn validate_server_tls(
+pub(super) fn validate_server_tls(
   tls: &ServerTlsConfig,
   location: &str,
   collector: &mut ConfigErrorCollector,
 ) {
-  if tls.certificates.is_empty() {
+  if tls.certificates().is_empty() {
     collector.add(ConfigError::InvalidFormat {
       location: format!("{}.certificates", location),
       message: "at least one certificate is required".into(),
@@ -41,10 +74,10 @@ pub fn validate_server_tls(
     return;
   }
 
-  for (idx, cert) in tls.certificates.iter().enumerate() {
+  for (idx, cert) in tls.certificates().iter().enumerate() {
     let cert_location = format!("{}.certificates[{}]", location, idx);
 
-    match fs::read_to_string(std::path::Path::new(&cert.cert_path)) {
+    match fs::read_to_string(std::path::Path::new(cert.cert_path())) {
       Ok(content) => {
         if !content.contains("-----BEGIN CERTIFICATE-----")
           && !content.contains("-----BEGIN TRUSTED CERTIFICATE-----")
@@ -53,7 +86,7 @@ pub fn validate_server_tls(
             location: format!("{}.cert_path", cert_location),
             message: format!(
               "certificate file '{}' is not in PEM format",
-              cert.cert_path
+              cert.cert_path()
             ),
           });
         }
@@ -63,13 +96,14 @@ pub fn validate_server_tls(
           location: format!("{}.cert_path", cert_location),
           message: format!(
             "certificate file '{}' cannot be read: {}",
-            cert.cert_path, e
+            cert.cert_path(),
+            e
           ),
         });
       }
     }
 
-    match fs::read_to_string(std::path::Path::new(&cert.key_path)) {
+    match fs::read_to_string(std::path::Path::new(cert.key_path())) {
       Ok(content) => {
         if !content.contains("-----BEGIN PRIVATE KEY-----")
           && !content.contains("-----BEGIN RSA PRIVATE KEY-----")
@@ -80,7 +114,7 @@ pub fn validate_server_tls(
             location: format!("{}.key_path", cert_location),
             message: format!(
               "private key file '{}' is not in PEM format",
-              cert.key_path
+              cert.key_path()
             ),
           });
         }
@@ -90,7 +124,8 @@ pub fn validate_server_tls(
           location: format!("{}.key_path", cert_location),
           message: format!(
             "private key file '{}' cannot be read: {}",
-            cert.key_path, e
+            cert.key_path(),
+            e
           ),
         });
       }

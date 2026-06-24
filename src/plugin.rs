@@ -15,7 +15,7 @@ use crate::service::{BuildLayer, BuildService};
 ///
 /// Plugins provide service builders for handling requests.
 /// Each plugin can provide multiple services by name.
-pub trait Plugin {
+pub(crate) trait Plugin {
   /// Get a service builder by name.
   ///
   /// Returns `None` if the plugin doesn't provide a service with that

@@ -7,7 +7,7 @@ use std::process;
 /// Each variant represents a distinct class of configuration error.
 /// Use pattern matching to inspect errors instead of string comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfigError {
+pub(crate) enum ConfigError {
   /// File read failed.
   FileRead { location: String, message: String },
   /// Invalid field format.
@@ -23,7 +23,7 @@ pub enum ConfigError {
 }
 
 impl ConfigError {
-  pub fn location(&self) -> &str {
+  pub(crate) fn location(&self) -> &str {
     match self {
       Self::FileRead { location, .. }
       | Self::InvalidFormat { location, .. }
@@ -34,7 +34,7 @@ impl ConfigError {
     }
   }
 
-  pub fn message(&self) -> &str {
+  pub(crate) fn message(&self) -> &str {
     match self {
       Self::FileRead { message, .. }
       | Self::InvalidFormat { message, .. }
@@ -55,35 +55,35 @@ impl std::fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 /// Error collector for configuration validation
-pub struct ConfigErrorCollector {
+pub(crate) struct ConfigErrorCollector {
   errors: Vec<ConfigError>,
 }
 
 impl ConfigErrorCollector {
   /// Create a new error collector
-  pub fn new() -> Self {
+  pub(crate) fn new() -> Self {
     Self { errors: Vec::new() }
   }
 
   /// Add an error
-  pub fn add(&mut self, error: ConfigError) {
+  pub(crate) fn add(&mut self, error: ConfigError) {
     self.errors.push(error);
   }
 
   /// Check if there are any errors
-  pub fn has_errors(&self) -> bool {
+  pub(crate) fn has_errors(&self) -> bool {
     !self.errors.is_empty()
   }
 
   /// Get all errors (test-only: production code uses
   /// has_errors/report_and_exit)
   #[cfg(test)]
-  pub fn errors(&self) -> &[ConfigError] {
+  pub(crate) fn errors(&self) -> &[ConfigError] {
     &self.errors
   }
 
   /// Print error report and exit with code 1
-  pub fn report_and_exit(&self) -> ! {
+  pub(crate) fn report_and_exit(&self) -> ! {
     if self.errors.is_empty() {
       eprintln!("No configuration errors found.");
       process::exit(0);

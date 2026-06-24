@@ -11,12 +11,12 @@ use http_body_util::combinators::UnsyncBoxBody;
 /// `Empty<Bytes>`, etc in crate `http_body_util`. Through this wrapper,
 /// different `Body` implements can be converted into `RequestBody` and
 /// `ResponseBody` handily.
-pub struct BytesBufBodyWrapper<B, E>(
+pub(crate) struct BytesBufBodyWrapper<B, E>(
   Pin<Box<dyn Body<Data = B, Error = E> + Send>>,
 );
 
 impl<B, E> BytesBufBodyWrapper<B, E> {
-  pub fn new<T>(b: T) -> Self
+  pub(crate) fn new<T>(b: T) -> Self
   where
     T: Body<Data = B, Error = E> + Send + 'static,
     B: Buf,
@@ -50,13 +50,13 @@ where
   }
 }
 
-pub type RequestBody = UnsyncBoxBody<Bytes, anyhow::Error>;
-pub type ResponseBody = UnsyncBoxBody<Bytes, anyhow::Error>;
-pub type Request = http::Request<RequestBody>;
-pub type Response = http::Response<ResponseBody>;
+pub(crate) type RequestBody = UnsyncBoxBody<Bytes, anyhow::Error>;
+pub(crate) type ResponseBody = UnsyncBoxBody<Bytes, anyhow::Error>;
+pub(crate) type Request = http::Request<RequestBody>;
+pub(crate) type Response = http::Response<ResponseBody>;
 
 /// Build a Proxy-Status header value with an error parameter.
-pub fn build_proxy_status_error(
+pub(crate) fn build_proxy_status_error(
   identifier: &str,
   error: &str,
 ) -> http::HeaderValue {
@@ -68,7 +68,7 @@ pub fn build_proxy_status_error(
 
 /// Build a Proxy-Status header value with received-status only (no
 /// error).
-pub fn build_proxy_status_with_status(
+pub(crate) fn build_proxy_status_with_status(
   identifier: &str,
   status: u16,
 ) -> http::HeaderValue {
@@ -85,7 +85,7 @@ pub fn build_proxy_status_with_status(
 /// chain.  This function combines the existing value (e.g. from the
 /// upstream proxy) with the current proxy's entry by comma-separating
 /// them as required by the Structured Fields List format.
-pub fn append_proxy_status(
+pub(crate) fn append_proxy_status(
   existing: Option<&http::HeaderValue>,
   new_entry: &http::HeaderValue,
 ) -> http::HeaderValue {
@@ -104,7 +104,9 @@ pub fn append_proxy_status(
 }
 
 /// Build an empty response with the given status code.
-pub fn build_empty_response(status: http::StatusCode) -> Response {
+pub(crate) fn build_empty_response(
+  status: http::StatusCode,
+) -> Response {
   let empty = http_body_util::Empty::new();
   let bytes_buf = BytesBufBodyWrapper::new(empty);
   let body = ResponseBody::new(bytes_buf);
@@ -114,7 +116,7 @@ pub fn build_empty_response(status: http::StatusCode) -> Response {
 }
 
 /// Build an error response with the given status code and message.
-pub fn build_error_response(
+pub(crate) fn build_error_response(
   status: http::StatusCode,
   message: &str,
 ) -> Response {

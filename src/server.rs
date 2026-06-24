@@ -48,7 +48,7 @@ fn matches_hostname(pattern: &str, hostname: &str) -> bool {
 /// Create a placeholder service for routing table initialization.
 /// The actual service is selected at request time from the routing
 /// table.
-pub fn placeholder_service() -> Service {
+pub(crate) fn placeholder_service() -> Service {
   Service::new(service_fn(|_req| {
     Box::pin(async {
       Err::<Response, _>(anyhow::anyhow!("placeholder"))
@@ -62,20 +62,20 @@ pub fn placeholder_service() -> Service {
 
 /// A server's routing info and its associated service.
 #[derive(Clone)]
-pub struct Server {
+pub(crate) struct Server {
   /// Hostnames this server responds to
-  pub hostnames: Vec<String>,
+  pub(crate) hostnames: Vec<String>,
   /// The service to route requests to
-  pub service: Service,
+  pub(crate) service: Service,
   /// Service name for logging
-  pub service_name: String,
+  pub(crate) service_name: String,
   /// Server-level TLS config (for https/http3)
-  pub tls: Option<crate::config::ServerTlsConfig>,
+  pub(crate) tls: Option<crate::config::ServerTlsConfig>,
 }
 
 impl Server {
   /// Get the service name for logging purposes.
-  pub fn service_name(&self) -> String {
+  pub(crate) fn service_name(&self) -> String {
     self.service_name.clone()
   }
 
@@ -84,8 +84,8 @@ impl Server {
   ///
   /// Returns true if the server has TLS config with client CA
   /// certificates configured, meaning mTLS is required.
-  pub fn requires_client_cert(&self) -> bool {
-    self.tls.as_ref().and_then(|t| t.client_ca_certs.as_ref()).is_some()
+  pub(crate) fn requires_client_cert(&self) -> bool {
+    self.tls.as_ref().and_then(|t| t.client_ca_certs()).is_some()
   }
 }
 
@@ -95,7 +95,7 @@ impl Server {
 /// by hostname, supporting exact matches, wildcard matches, and
 /// default fallback.
 #[derive(Clone)]
-pub struct ServerRouter {
+pub(crate) struct ServerRouter {
   servers: Vec<Rc<Server>>,
 }
 
@@ -103,7 +103,7 @@ impl ServerRouter {
   /// Build a router from a list of servers.
   ///
   /// Each server is wrapped in `Rc` for cheap cloning during routing.
-  pub fn build(servers: Vec<Server>) -> Self {
+  pub(crate) fn build(servers: Vec<Server>) -> Self {
     let servers: Vec<Rc<Server>> =
       servers.into_iter().map(Rc::new).collect();
     Self { servers }
@@ -113,7 +113,10 @@ impl ServerRouter {
   ///
   /// Priority: exact match > wildcard match > default server (no
   /// hostnames). Returns `None` if no match is found.
-  pub fn route(&self, hostname: Option<&str>) -> Option<Rc<Server>> {
+  pub(crate) fn route(
+    &self,
+    hostname: Option<&str>,
+  ) -> Option<Rc<Server>> {
     match hostname {
       Some(h) => {
         let mut wildcard_match: Option<Rc<Server>> = None;

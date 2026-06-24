@@ -13,7 +13,7 @@ use anyhow::Result;
 
 use crate::config::SerializedArgs;
 // Re-export TransportLayer from config (single source of truth).
-pub use crate::config::TransportLayer;
+pub(crate) use crate::config::TransportLayer;
 use crate::server::Server;
 
 /// Listener metadata for conflict detection.
@@ -22,7 +22,7 @@ use crate::server::Server;
 /// allowing the framework to detect configuration conflicts
 /// without hardcoding listener-specific logic.
 #[derive(Debug, Clone)]
-pub struct ListenerProps {
+pub(crate) struct ListenerProps {
   /// Transport layer (TCP or UDP)
   transport_layer: TransportLayer,
   /// Whether the listener supports hostname-based routing.
@@ -33,7 +33,7 @@ pub struct ListenerProps {
 
 impl ListenerProps {
   /// Create new listener properties.
-  pub fn new(
+  pub(crate) fn new(
     transport_layer: TransportLayer,
     supports_hostname_routing: bool,
   ) -> Self {
@@ -41,12 +41,12 @@ impl ListenerProps {
   }
 
   /// Get the transport layer protocol.
-  pub fn transport_layer(&self) -> TransportLayer {
+  pub(crate) fn transport_layer(&self) -> TransportLayer {
     self.transport_layer
   }
 
   /// Get whether the listener supports hostname-based routing.
-  pub fn supports_hostname_routing(&self) -> bool {
+  pub(crate) fn supports_hostname_routing(&self) -> bool {
     self.supports_hostname_routing
   }
 }
@@ -55,7 +55,7 @@ impl ListenerProps {
 ///
 /// Implementations provide `start()` for beginning to accept
 /// connections and `stop()` for graceful shutdown.
-pub trait Listening {
+pub(crate) trait Listening {
   /// Start the listener.
   ///
   /// Returns a future that completes when the listener stops
@@ -71,11 +71,11 @@ pub trait Listening {
 /// Wraps any type implementing `Listening` trait. Created by
 /// `BuildListener` functions and used by the server thread
 /// for lifecycle management.
-pub struct Listener(Box<dyn Listening>);
+pub(crate) struct Listener(Box<dyn Listening>);
 
 impl Listener {
   /// Create a new listener from an implementation.
-  pub fn new<L>(l: L) -> Self
+  pub(crate) fn new<L>(l: L) -> Self
   where
     L: Listening + 'static,
   {
@@ -83,12 +83,14 @@ impl Listener {
   }
 
   /// Start the listener.
-  pub fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+  pub(crate) fn start(
+    &self,
+  ) -> Pin<Box<dyn Future<Output = Result<()>>>> {
     self.0.start()
   }
 
   /// Stop the listener gracefully.
-  pub fn stop(&self) {
+  pub(crate) fn stop(&self) {
     self.0.stop()
   }
 }
@@ -107,7 +109,7 @@ impl std::fmt::Debug for Listener {
 /// - `servers` - List of servers for routing
 ///
 /// Returns a `Listener` instance.
-pub trait BuildListener:
+pub(crate) trait BuildListener:
   Fn(Vec<String>, SerializedArgs, Vec<Server>) -> Result<Listener>
 {
 }

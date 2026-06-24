@@ -9,14 +9,12 @@ impl ListenerPropertiesProvider for MockListenerProps {
     kind: &str,
   ) -> Option<ListenerPropertyValues> {
     match kind {
-      "http" | "https" | "http3" => Some(ListenerPropertyValues {
-        transport_layer: TransportLayer::Tcp,
-        supports_hostname_routing: true,
-      }),
-      "socks5" => Some(ListenerPropertyValues {
-        transport_layer: TransportLayer::Tcp,
-        supports_hostname_routing: false,
-      }),
+      "http" | "https" | "http3" => {
+        Some(ListenerPropertyValues::new(TransportLayer::Tcp, true))
+      }
+      "socks5" => {
+        Some(ListenerPropertyValues::new(TransportLayer::Tcp, false))
+      }
       _ => None,
     }
   }

@@ -9,7 +9,7 @@ use crate::plugins::js_sandbox::request::{
 /// script.
 #[op2]
 #[serde]
-pub fn op_sandbox_read_request(
+pub(crate) fn op_sandbox_read_request(
   state: &mut OpState,
 ) -> Result<SerdeIncomingRequest, JsErrorBox> {
   let req = state
@@ -25,7 +25,7 @@ pub fn op_sandbox_read_request(
 
 /// Write the response data into OpState. Called from JS bridge script.
 #[op2]
-pub fn op_sandbox_write_response(
+pub(crate) fn op_sandbox_write_response(
   state: &mut OpState,
   #[smi] status: u32,
   #[serde] headers: Vec<(String, String)>,

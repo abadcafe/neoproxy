@@ -37,7 +37,7 @@ enum SendState<S> {
 /// Works with both `h3::client::RequestStream` and
 /// `h3::server::RequestStream` since both have identical `send_data()`,
 /// `finish()`, and `poll_recv_data()` APIs.
-pub struct H3BidirectionalStream<S: 'static, R> {
+pub(crate) struct H3BidirectionalStream<S: 'static, R> {
   send: Option<S>,
   recv: R,
   recv_buf: Option<Bytes>,
@@ -45,7 +45,7 @@ pub struct H3BidirectionalStream<S: 'static, R> {
 }
 
 impl<S: 'static, R> H3BidirectionalStream<S, R> {
-  pub fn new(send: S, recv: R) -> Self {
+  pub(crate) fn new(send: S, recv: R) -> Self {
     Self {
       send: Some(send),
       recv,
@@ -254,7 +254,7 @@ impl_h3_async_read!(
 /// let mut h3_stream = H3ClientBidiStream::new(send_stream, recv_stream);
 /// tokio::io::copy_bidirectional(&mut client, &mut h3_stream).await?;
 /// ```
-pub type H3ClientBidiStream = H3BidirectionalStream<
+pub(crate) type H3ClientBidiStream = H3BidirectionalStream<
   h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
   h3::client::RequestStream<h3_quinn::RecvStream, Bytes>,
 >;
@@ -286,7 +286,7 @@ pub type H3ClientBidiStream = H3BidirectionalStream<
 /// // Send to Service via upgrade channel
 /// upgrade_tx.send(Ok(bidi_stream))?;
 /// ```
-pub type H3ServerBidiStream = H3BidirectionalStream<
+pub(crate) type H3ServerBidiStream = H3BidirectionalStream<
   h3::server::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
   h3::server::RequestStream<h3_quinn::RecvStream, Bytes>,
 >;

@@ -22,14 +22,14 @@ use crate::shutdown::ShutdownHandle;
 /// For listeners that only need single-layer tracking (hyper, socks5),
 /// use `register()` + `active_count()` only. The `connections` layer
 /// remains empty with zero overhead.
-pub struct StreamTracker {
+pub(crate) struct StreamTracker {
   streams: Rc<RefCell<JoinSet<()>>>,
   connections: Rc<RefCell<JoinSet<()>>>,
   shutdown_handle: ShutdownHandle,
 }
 
 impl StreamTracker {
-  pub fn new() -> Self {
+  pub(crate) fn new() -> Self {
     Self {
       streams: Rc::new(RefCell::new(JoinSet::new())),
       connections: Rc::new(RefCell::new(JoinSet::new())),
@@ -38,7 +38,7 @@ impl StreamTracker {
   }
 
   /// Register a stream task.
-  pub fn register(
+  pub(crate) fn register(
     &self,
     stream_future: impl Future<Output = ()> + 'static,
   ) {
@@ -47,7 +47,7 @@ impl StreamTracker {
 
   /// Register a connection task (for protocols like QUIC).
   /// Returns an AbortHandle for checking if the task is still running.
-  pub fn register_connection(
+  pub(crate) fn register_connection(
     &self,
     conn_future: impl Future<Output = ()> + 'static,
   ) -> tokio::task::AbortHandle {
@@ -55,12 +55,12 @@ impl StreamTracker {
   }
 
   /// Trigger shutdown notification.
-  pub fn shutdown(&self) {
+  pub(crate) fn shutdown(&self) {
     self.shutdown_handle.shutdown();
   }
 
   /// Abort all tracked tasks immediately.
-  pub fn abort_all(&self) {
+  pub(crate) fn abort_all(&self) {
     self.streams.borrow_mut().abort_all();
     self.connections.borrow_mut().abort_all();
   }
@@ -73,7 +73,7 @@ impl StreamTracker {
   ///
   /// A timeout is applied because aborted tasks may still be holding
   /// locks or in CPU-bound loops, preventing immediate cancellation.
-  pub async fn drain(&self) {
+  pub(crate) async fn drain(&self) {
     let _ = tokio::time::timeout(Duration::from_secs(2), async {
       drain_join_set(&self.streams).await;
       drain_join_set(&self.connections).await;
@@ -82,7 +82,7 @@ impl StreamTracker {
   }
 
   /// Wait for all tasks to complete.
-  pub async fn wait_shutdown(&self) {
+  pub(crate) async fn wait_shutdown(&self) {
     drain_join_set(&self.streams).await;
     drain_join_set(&self.connections).await;
   }
@@ -92,7 +92,7 @@ impl StreamTracker {
   /// Triggers shutdown, then waits for all active tasks to complete
   /// within the given timeout. If the timeout expires, forcefully
   /// aborts remaining tasks.
-  pub async fn graceful_shutdown(&self, timeout: Duration) {
+  pub(crate) async fn graceful_shutdown(&self, timeout: Duration) {
     self.shutdown();
     let result =
       tokio::time::timeout(timeout, self.wait_shutdown()).await;
@@ -108,7 +108,7 @@ impl StreamTracker {
   }
 
   /// Wait with timeout.
-  pub async fn wait_shutdown_with_timeout(
+  pub(crate) async fn wait_shutdown_with_timeout(
     &self,
     timeout: Duration,
   ) -> std::result::Result<(), ()> {
@@ -118,12 +118,12 @@ impl StreamTracker {
   }
 
   /// Get shutdown handle for listening in tasks.
-  pub fn shutdown_handle(&self) -> ShutdownHandle {
+  pub(crate) fn shutdown_handle(&self) -> ShutdownHandle {
     self.shutdown_handle.clone()
   }
 
   /// Count of active stream tasks.
-  pub fn active_count(&self) -> usize {
+  pub(crate) fn active_count(&self) -> usize {
     self.streams.borrow().len()
   }
 }

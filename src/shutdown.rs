@@ -9,13 +9,13 @@ use tokio::sync;
 ///
 /// Provides a simple shutdown notification mechanism using a boolean
 /// flag and async notification. Clones share the same underlying state.
-pub struct ShutdownHandle {
+pub(crate) struct ShutdownHandle {
   notify: Arc<sync::Notify>,
   is_shutdown: Arc<AtomicBool>,
 }
 
 impl ShutdownHandle {
-  pub fn new() -> Self {
+  pub(crate) fn new() -> Self {
     Self {
       notify: Arc::new(sync::Notify::new()),
       is_shutdown: Arc::new(AtomicBool::new(false)),
@@ -25,18 +25,18 @@ impl ShutdownHandle {
   /// Trigger shutdown notification.
   ///
   /// Sets the shutdown flag and notifies all waiters.
-  pub fn shutdown(&self) {
+  pub(crate) fn shutdown(&self) {
     self.is_shutdown.store(true, Ordering::SeqCst);
     self.notify.notify_waiters()
   }
 
   /// Wait for shutdown notification.
-  pub async fn notified(&self) {
+  pub(crate) async fn notified(&self) {
     self.notify.notified().await
   }
 
   /// Check if shutdown has been triggered.
-  pub fn is_shutdown(&self) -> bool {
+  pub(crate) fn is_shutdown(&self) -> bool {
     self.is_shutdown.load(Ordering::SeqCst)
   }
 }

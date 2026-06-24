@@ -549,17 +549,17 @@ fn extract_host_port(
 }
 
 /// Plugin listener name.
-pub fn listener_name() -> &'static str {
+pub(crate) fn listener_name() -> &'static str {
   "socks5"
 }
 
 /// Get listener properties for conflict detection.
-pub fn props() -> ListenerProps {
+pub(crate) fn props() -> ListenerProps {
   ListenerProps::new(TransportLayer::Tcp, false)
 }
 
 /// Creates a listener builder.
-pub fn create_listener_builder() -> Box<dyn BuildListener> {
+pub(crate) fn create_listener_builder() -> Box<dyn BuildListener> {
   Box::new(
     |addresses: Vec<String>,
      args: SerializedArgs,

@@ -25,7 +25,7 @@ use crate::shutdown::ShutdownHandle;
 
 type UpgradeReceiver =
   Arc<Mutex<oneshot::Receiver<Result<Box<dyn Io>>>>>;
-pub type UpgradeFuture =
+pub(crate) type UpgradeFuture =
   Pin<Box<dyn Future<Output = Result<Box<dyn Io>>>>>;
 
 // ============================================================================
@@ -33,7 +33,10 @@ pub type UpgradeFuture =
 // ============================================================================
 
 /// Trait combining AsyncRead + AsyncWrite for trait objects.
-pub trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+pub(crate) trait Io:
+  AsyncRead + AsyncWrite + Unpin + Send
+{
+}
 
 impl<T> Io for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 
@@ -47,7 +50,7 @@ impl<T> Io for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 /// Service extracts it via `OnUpgrade::on()` and awaits to receive
 /// the upgraded stream after the listener sends the protocol response.
 #[derive(Clone)]
-pub struct OnUpgrade {
+pub(crate) struct OnUpgrade {
   rx: Option<UpgradeReceiver>,
 }
 
@@ -61,13 +64,15 @@ impl OnUpgrade {
   /// Extract `OnUpgrade` from Request extensions.
   ///
   /// Returns `None` if no upgrade is available.
-  pub fn on(req: &mut http::Request<RequestBody>) -> Option<Self> {
+  pub(crate) fn on(
+    req: &mut http::Request<RequestBody>,
+  ) -> Option<Self> {
     req.extensions_mut().remove::<Self>()
   }
 
   /// Check if an upgrade is available in the request (test only).
   #[cfg(test)]
-  pub fn is_available(req: &http::Request<RequestBody>) -> bool {
+  pub(crate) fn is_available(req: &http::Request<RequestBody>) -> bool {
     req.extensions().get::<Self>().is_some()
   }
 
@@ -108,13 +113,13 @@ impl Future for OnUpgrade {
 /// Trigger for listeners to complete the upgrade.
 ///
 /// Used internally by `H3UpgradeTrigger` and `Socks5UpgradeTrigger`.
-pub struct UpgradeTrigger {
+pub(crate) struct UpgradeTrigger {
   sender: oneshot::Sender<Result<Box<dyn Io>>>,
 }
 
 impl UpgradeTrigger {
   /// Send the upgraded stream to the service.
-  pub fn send(self, result: Result<Box<dyn Io>>) -> Result<()> {
+  pub(crate) fn send(self, result: Result<Box<dyn Io>>) -> Result<()> {
     self.sender.send(result).map_err(|_| {
       anyhow::anyhow!("service dropped the upgrade receiver")
     })
@@ -131,7 +136,7 @@ impl UpgradeTrigger {
 /// the listener calls `send_success()` or `send_error()` to:
 /// 1. Send the H3 protocol response on the stream
 /// 2. Transfer stream ownership to the Service via the upgrade channel
-pub struct H3UpgradeTrigger {
+pub(crate) struct H3UpgradeTrigger {
   trigger: UpgradeTrigger,
   stream: Option<
     h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
@@ -146,7 +151,7 @@ impl std::fmt::Debug for H3UpgradeTrigger {
 
 impl H3UpgradeTrigger {
   /// Create a linked (trigger, on_upgrade) pair.
-  pub fn pair(
+  pub(crate) fn pair(
     stream: h3::server::RequestStream<
       h3_quinn::BidiStream<Bytes>,
       Bytes,
@@ -157,7 +162,7 @@ impl H3UpgradeTrigger {
   }
 
   /// Send H3 success (200 OK) and deliver the stream to the Service.
-  pub async fn send_success(
+  pub(crate) async fn send_success(
     mut self,
     resp_headers: Option<&http::HeaderMap>,
   ) -> Result<()> {
@@ -185,7 +190,7 @@ impl H3UpgradeTrigger {
   }
 
   /// Send H3 error response and deliver error to the Service.
-  pub async fn send_error(
+  pub(crate) async fn send_error(
     mut self,
     status: http::StatusCode,
   ) -> Result<()> {
@@ -205,7 +210,7 @@ impl H3UpgradeTrigger {
   }
 
   /// Send H3 error response with body and deliver error to the Service.
-  pub async fn send_error_with_body(
+  pub(crate) async fn send_error_with_body(
     mut self,
     status: http::StatusCode,
     body: Bytes,
@@ -247,7 +252,7 @@ impl H3UpgradeTrigger {
 ///
 /// The listener uses this to send the SOCKS5 reply and resolve
 /// the Service's `OnUpgrade` future.
-pub struct Socks5UpgradeTrigger {
+pub(crate) struct Socks5UpgradeTrigger {
   trigger: UpgradeTrigger,
   proto: Option<
     fast_socks5::server::Socks5ServerProtocol<
@@ -265,7 +270,7 @@ impl std::fmt::Debug for Socks5UpgradeTrigger {
 
 impl Socks5UpgradeTrigger {
   /// Create a linked (trigger, upgrade) pair.
-  pub fn pair(
+  pub(crate) fn pair(
     proto: fast_socks5::server::Socks5ServerProtocol<
       tokio::net::TcpStream,
       fast_socks5::server::states::CommandRead,
@@ -276,7 +281,7 @@ impl Socks5UpgradeTrigger {
   }
 
   /// Send SOCKS5 success reply and resolve the upgrade future.
-  pub async fn send_success(mut self) -> Result<()> {
+  pub(crate) async fn send_success(mut self) -> Result<()> {
     let proto = self.proto.take().expect("proto already consumed");
     let stream = proto
       .reply_success("0.0.0.0:0".parse()?)
@@ -287,7 +292,7 @@ impl Socks5UpgradeTrigger {
   }
 
   /// Send SOCKS5 error reply and resolve the upgrade future with error.
-  pub async fn send_error(
+  pub(crate) async fn send_error(
     mut self,
     error: fast_socks5::ReplyError,
   ) -> Result<()> {
@@ -305,7 +310,7 @@ impl Socks5UpgradeTrigger {
 ///
 /// Used by the SOCKS5 listener to translate Service response status
 /// into appropriate SOCKS5 error codes.
-pub fn http_status_to_socks5_error(
+pub(crate) fn http_status_to_socks5_error(
   status: http::StatusCode,
 ) -> fast_socks5::ReplyError {
   match status {
@@ -336,7 +341,7 @@ pub fn http_status_to_socks5_error(
 ///
 /// Prefers our custom `OnUpgrade` (SOCKS5/H3), falls back to hyper's
 /// HTTP upgrade. Returns `None` if no upgrade is available.
-pub fn extract_upgrade(
+pub(crate) fn extract_upgrade(
   req: &mut http::Request<crate::http_message::RequestBody>,
 ) -> Option<UpgradeFuture> {
   if let Some(u) = OnUpgrade::on(req) {
@@ -591,7 +596,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for TaggedIo<S> {
 /// Handles shutdown notification and idle timeout. Logs the outcome.
 /// Idle timeout is shared across both directions: if data flows in
 /// EITHER direction, the connection is considered active.
-pub async fn run_tunnel<C, T>(
+pub(crate) async fn run_tunnel<C, T>(
   client: C,
   target: T,
   shutdown_handle: ShutdownHandle,

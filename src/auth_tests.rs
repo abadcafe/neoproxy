@@ -2,24 +2,28 @@
 
 use crate::auth::{AuthError, UserPasswordAuth};
 
+fn user_credential(
+  username: &str,
+  password: &str,
+) -> crate::config::UserCredential {
+  crate::config::UserCredential::new(
+    username.to_string(),
+    password.to_string(),
+  )
+}
+
 // ============== verify_credentials tests (for SOCKS5) ==============
 
 #[test]
 fn test_verify_credentials_valid() {
-  let users = vec![crate::config::UserCredential {
-    username: "socks_user".to_string(),
-    password: "socks_pass".to_string(),
-  }];
+  let users = vec![user_credential("socks_user", "socks_pass")];
   let auth = UserPasswordAuth::from_users(&users);
   assert!(auth.verify_credentials("socks_user", "socks_pass").is_ok());
 }
 
 #[test]
 fn test_verify_credentials_invalid() {
-  let users = vec![crate::config::UserCredential {
-    username: "socks_user".to_string(),
-    password: "socks_pass".to_string(),
-  }];
+  let users = vec![user_credential("socks_user", "socks_pass")];
   let auth = UserPasswordAuth::from_users(&users);
   assert!(auth.verify_credentials("socks_user", "wrong").is_err());
 }
@@ -35,21 +39,19 @@ fn test_verify_credentials_no_users_configured() {
 
 #[test]
 fn test_verify_password_success() {
-  let auth =
-    UserPasswordAuth::from_users(&[crate::config::UserCredential {
-      username: "admin".to_string(),
-      password: "secret123".to_string(),
-    }]);
+  let auth = UserPasswordAuth::from_users(&[user_credential(
+    "admin",
+    "secret123",
+  )]);
   assert!(auth.verify_credentials("admin", "secret123").is_ok());
 }
 
 #[test]
 fn test_verify_password_wrong_password() {
-  let auth =
-    UserPasswordAuth::from_users(&[crate::config::UserCredential {
-      username: "admin".to_string(),
-      password: "secret123".to_string(),
-    }]);
+  let auth = UserPasswordAuth::from_users(&[user_credential(
+    "admin",
+    "secret123",
+  )]);
   let result = auth.verify_credentials("admin", "wrongpassword");
   assert!(result.is_err());
   assert!(matches!(result.unwrap_err(), AuthError::InvalidCredentials));
@@ -58,10 +60,7 @@ fn test_verify_password_wrong_password() {
 #[test]
 fn test_verify_password_unknown_user_returns_invalid_credentials() {
   let auth =
-    UserPasswordAuth::from_users(&[crate::config::UserCredential {
-      username: "admin".to_string(),
-      password: "secret".to_string(),
-    }]);
+    UserPasswordAuth::from_users(&[user_credential("admin", "secret")]);
   let result = auth.verify_credentials("unknown", "password");
   assert!(result.is_err());
   assert!(
@@ -73,10 +72,7 @@ fn test_verify_password_unknown_user_returns_invalid_credentials() {
 #[test]
 fn test_verify_password_empty_username_returns_invalid_credentials() {
   let auth =
-    UserPasswordAuth::from_users(&[crate::config::UserCredential {
-      username: "admin".to_string(),
-      password: "secret".to_string(),
-    }]);
+    UserPasswordAuth::from_users(&[user_credential("admin", "secret")]);
   let result = auth.verify_credentials("", "password");
   assert!(result.is_err());
   assert!(
@@ -88,10 +84,7 @@ fn test_verify_password_empty_username_returns_invalid_credentials() {
 #[test]
 fn test_verify_password_empty_password() {
   let auth =
-    UserPasswordAuth::from_users(&[crate::config::UserCredential {
-      username: "admin".to_string(),
-      password: "secret".to_string(),
-    }]);
+    UserPasswordAuth::from_users(&[user_credential("admin", "secret")]);
   let result = auth.verify_credentials("admin", "");
   assert!(result.is_err());
   assert!(matches!(result.unwrap_err(), AuthError::InvalidCredentials));

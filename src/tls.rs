@@ -32,7 +32,7 @@ use crate::server::Server;
 /// There is no default certificate - unknown SNI results in handshake
 /// failure.
 #[derive(Debug)]
-pub struct SniResolver {
+pub(crate) struct SniResolver {
   /// Exact domain -> certificate mapping
   exact_certs: HashMap<String, Arc<CertifiedKey>>,
   /// Wildcard patterns -> certificate (ordered by configuration)
@@ -41,17 +41,21 @@ pub struct SniResolver {
 
 impl SniResolver {
   /// Create a new empty resolver.
-  pub fn new() -> Self {
+  pub(crate) fn new() -> Self {
     Self { exact_certs: HashMap::new(), wildcard_certs: Vec::new() }
   }
 
   /// Add an exact domain mapping.
-  pub fn add_exact(&mut self, domain: String, cert: Arc<CertifiedKey>) {
+  pub(crate) fn add_exact(
+    &mut self,
+    domain: String,
+    cert: Arc<CertifiedKey>,
+  ) {
     self.exact_certs.insert(domain, cert);
   }
 
   /// Add a wildcard domain mapping.
-  pub fn add_wildcard(
+  pub(crate) fn add_wildcard(
     &mut self,
     pattern: String,
     cert: Arc<CertifiedKey>,
@@ -136,13 +140,14 @@ fn matches_wildcard(pattern: &str, hostname: &str) -> bool {
 ///
 /// This function also validates that the certificate and key match,
 /// catching configuration errors at startup time.
-pub fn load_cert_and_key(
+pub(crate) fn load_cert_and_key(
   config: &CertificateConfig,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
   // Load certificate file
-  let cert_file = File::open(&config.cert_path).with_context(|| {
-    format!("Failed to open certificate file: {}", config.cert_path)
-  })?;
+  let cert_file =
+    File::open(config.cert_path()).with_context(|| {
+      format!("Failed to open certificate file: {}", config.cert_path())
+    })?;
   let mut cert_reader = BufReader::new(cert_file);
   let certs: Vec<CertificateDer> =
     rustls_pemfile::certs(&mut cert_reader)
@@ -150,17 +155,17 @@ pub fn load_cert_and_key(
       .with_context(|| "Failed to parse certificates")?;
 
   if certs.is_empty() {
-    bail!("No certificates found in {}", config.cert_path);
+    bail!("No certificates found in {}", config.cert_path());
   }
 
   // Load private key
-  let key_file = File::open(&config.key_path).with_context(|| {
-    format!("Failed to open private key file: {}", config.key_path)
+  let key_file = File::open(config.key_path()).with_context(|| {
+    format!("Failed to open private key file: {}", config.key_path())
   })?;
   let mut key_reader = BufReader::new(key_file);
   let key =
     rustls_pemfile::private_key(&mut key_reader)?.ok_or_else(|| {
-      anyhow!("No private key found in {}", config.key_path)
+      anyhow!("No private key found in {}", config.key_path())
     })?;
 
   // Create signing key to verify it's valid
@@ -180,8 +185,8 @@ pub fn load_cert_and_key(
     )) => {
       bail!(
         "Certificate and private key do not match: {} and {}",
-        config.cert_path,
-        config.key_path
+        config.cert_path(),
+        config.key_path()
       );
     }
     Err(rustls::Error::NoCertificatesPresented) => {
@@ -199,7 +204,7 @@ pub fn load_cert_and_key(
 
 /// Load a signing key using the default crypto provider.
 /// Provider-agnostic: works with both ring and rustls-openssl.
-pub fn load_signing_key(
+pub(crate) fn load_signing_key(
   key: PrivateKeyDer<'static>,
 ) -> Result<Arc<dyn SigningKey>> {
   let provider = rustls::crypto::CryptoProvider::get_default()
@@ -215,7 +220,7 @@ pub fn load_signing_key(
 /// Note: This function uses a simple approach - it parses the
 /// certificate using x509-parser to extract SAN entries. For
 /// production, consider caching the parsed certificates.
-pub fn extract_san_dns_names(
+pub(crate) fn extract_san_dns_names(
   cert: &CertificateDer,
 ) -> Result<Vec<String>> {
   // Use x509-parser to extract SAN
@@ -249,7 +254,7 @@ pub fn extract_san_dns_names(
 ///
 /// No default certificate is used - unknown SNI will cause TLS
 /// handshake failure.
-pub fn build_sni_resolver(
+pub(crate) fn build_sni_resolver(
   servers: &[Server],
 ) -> Result<Arc<SniResolver>> {
   let mut resolver = SniResolver::new();
@@ -259,7 +264,7 @@ pub fn build_sni_resolver(
       continue;
     };
 
-    if tls.certificates.is_empty() {
+    if tls.certificates().is_empty() {
       warn!(
         "Server '{}' has TLS config but no certificates",
         server.service_name
@@ -267,7 +272,7 @@ pub fn build_sni_resolver(
       continue;
     }
 
-    for cert_config in &tls.certificates {
+    for cert_config in tls.certificates() {
       let (certs, key) = load_cert_and_key(cert_config)?;
 
       // Build certified key
@@ -287,13 +292,15 @@ pub fn build_sni_resolver(
               if name.starts_with("*.") {
                 info!(
                   "Adding wildcard SNI mapping: {} -> {}",
-                  name, cert_config.cert_path
+                  name,
+                  cert_config.cert_path()
                 );
                 resolver.add_wildcard(name, certified_key.clone());
               } else {
                 info!(
                   "Adding exact SNI mapping: {} -> {}",
-                  name, cert_config.cert_path
+                  name,
+                  cert_config.cert_path()
                 );
                 resolver.add_exact(name, certified_key.clone());
               }
@@ -323,7 +330,7 @@ pub fn build_sni_resolver(
 /// Note: This takes the full routing table to support multi-server
 /// certificate selection. Client CA certificates from all servers
 /// are merged into a single verifier.
-pub fn build_tls_server_config(
+pub(crate) fn build_tls_server_config(
   servers: &[Server],
   alpn_protocols: Vec<Vec<u8>>,
 ) -> Result<Arc<rustls::ServerConfig>> {
@@ -335,7 +342,7 @@ pub fn build_tls_server_config(
 
   for server in servers {
     if let Some(tls) = &server.tls
-      && let Some(client_ca_certs) = &tls.client_ca_certs
+      && let Some(client_ca_certs) = tls.client_ca_certs()
     {
       has_client_ca = true;
       for ca_path in client_ca_certs {

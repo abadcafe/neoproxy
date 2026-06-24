@@ -16,36 +16,36 @@ use crate::config::SerializedArgs;
 use crate::plugin;
 use crate::service::{Layer, Service};
 
-pub mod access_log;
+pub(crate) mod access_log;
 #[cfg(test)]
 mod access_log_tests;
-pub mod auth;
+pub(crate) mod auth;
 #[cfg(test)]
 mod auth_tests;
-pub mod echo;
+pub(crate) mod echo;
 #[cfg(test)]
 mod echo_tests;
-pub mod http_upstream;
+pub(crate) mod http_upstream;
 #[cfg(feature = "js-sandbox")]
-pub mod js_sandbox;
+pub(crate) mod js_sandbox;
 
 type CreateFn =
   fn(Option<&SerializedArgs>) -> Result<Box<dyn plugin::Plugin>>;
 
 /// Error from a single plugin failing to load.
-pub struct PluginLoadError {
-  pub name: String,
-  pub source: anyhow::Error,
+pub(crate) struct PluginLoadError {
+  pub(crate) name: String,
+  pub(crate) source: anyhow::Error,
 }
 
 /// Manages plugin lifecycle: only loads plugins listed in config,
 /// builds services/layers on demand.
-pub struct PluginManager {
+pub(crate) struct PluginManager {
   pub(crate) plugins: HashMap<String, Box<dyn plugin::Plugin>>,
 }
 
 impl PluginManager {
-  pub fn new(
+  pub(crate) fn new(
     plugins_config: HashMap<String, SerializedArgs>,
   ) -> (Self, Vec<PluginLoadError>) {
     let known_plugins: &[(&str, CreateFn)] = &[
@@ -81,13 +81,13 @@ impl PluginManager {
     (Self { plugins }, errors)
   }
 
-  pub async fn uninstall_all(&mut self) {
+  pub(crate) async fn uninstall_all(&mut self) {
     for (_, plugin) in self.plugins.drain() {
       plugin.uninstall().await;
     }
   }
 
-  pub fn build_service(
+  pub(crate) fn build_service(
     &self,
     plugin_name: &str,
     service_name: &str,
@@ -107,7 +107,7 @@ impl PluginManager {
     builder(args)
   }
 
-  pub fn build_layer(
+  pub(crate) fn build_layer(
     &self,
     plugin_name: &str,
     layer_name: &str,

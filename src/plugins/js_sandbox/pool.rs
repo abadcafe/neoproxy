@@ -17,13 +17,13 @@ struct SandboxRequest {
   response_tx: oneshot::Sender<anyhow::Result<OutgoingResponse>>,
 }
 
-pub struct SandboxPool {
+pub(crate) struct SandboxPool {
   senders: Mutex<Vec<Sender<SandboxRequest>>>,
   next: AtomicUsize,
 }
 
 impl SandboxPool {
-  pub fn new(worker_threads: usize) -> Self {
+  pub(crate) fn new(worker_threads: usize) -> Self {
     cpu_sandbox::ensure_watchdog_started();
 
     let mut senders = Vec::with_capacity(worker_threads);
@@ -41,7 +41,7 @@ impl SandboxPool {
     Self { senders: Mutex::new(senders), next: AtomicUsize::new(0) }
   }
 
-  pub fn execute(
+  pub(crate) fn execute(
     &self,
     config: SandboxConfig,
     request: IncomingRequest,
@@ -63,7 +63,7 @@ impl SandboxPool {
     rx
   }
 
-  pub fn shutdown(&self) {
+  pub(crate) fn shutdown(&self) {
     let mut senders = self.senders.lock().unwrap();
     senders.clear();
   }

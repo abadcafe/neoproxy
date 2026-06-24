@@ -11,11 +11,11 @@ use tokio::signal::unix as signal;
 use tokio::{runtime, sync, task};
 use tracing::{debug, error, info, warn};
 
-use crate::config::{
-  CmdOpt, Config, ConfigErrorCollector, validate_config,
-};
+use crate::cli::CmdOpt;
+use crate::config::{Config, ConfigErrorCollector};
 
 mod auth;
+mod cli;
 mod config;
 mod context;
 mod h3_stream;
@@ -43,6 +43,8 @@ mod listeners_tests;
 
 #[cfg(test)]
 mod auth_tests;
+#[cfg(test)]
+mod cli_tests;
 #[cfg(test)]
 mod config_tests;
 #[cfg(test)]
@@ -392,7 +394,7 @@ fn check_server_threads(
 
 /// Install the rustls crypto provider based on configuration.
 fn install_tls_provider(config: &Config) -> Result<()> {
-  let provider_name = config.tls_provider.as_deref().unwrap_or("ring");
+  let provider_name = config.tls_provider().unwrap_or("ring");
   match provider_name {
     #[cfg(feature = "tls-openssl")]
     "openssl" => {
@@ -430,7 +432,7 @@ fn install_tls_provider(config: &Config) -> Result<()> {
 
 fn main() -> Result<()> {
   // Load config
-  let config = Config::load(&CmdOpt::global().config_file)?;
+  let config = Config::load(CmdOpt::global().config_file())?;
 
   // Install rustls crypto provider based on config
   install_tls_provider(&config)?;
@@ -438,7 +440,7 @@ fn main() -> Result<()> {
   // Validate config
   let mut collector = ConfigErrorCollector::new();
   let listener_manager = listeners::ListenerManager::new();
-  validate_config(&config, &mut collector, &listener_manager);
+  config.validate(&mut collector, &listener_manager);
   if collector.has_errors() {
     collector.report_and_exit();
   }
@@ -458,7 +460,7 @@ fn main() -> Result<()> {
   // Spawn server threads (each builds its own PluginManager and
   // listeners)
   let handles: Vec<thread::JoinHandle<Result<()>>> = (0
-    ..Config::global().server_threads)
+    ..Config::global().server_threads())
     .map(|i| {
       let shutdown = shutdown_notify.clone();
       thread::Builder::new()

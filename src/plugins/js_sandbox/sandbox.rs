@@ -116,14 +116,14 @@ const BOOT_SCRIPT: &str = r#"
 "#;
 
 /// A per-request V8 sandbox.
-pub struct Sandbox {
+pub(crate) struct Sandbox {
   runtime: JsRuntime,
   config: SandboxConfig,
 }
 
 impl Sandbox {
   /// Create a new sandbox with the given configuration.
-  pub fn new(config: SandboxConfig) -> anyhow::Result<Self> {
+  pub(crate) fn new(config: SandboxConfig) -> anyhow::Result<Self> {
     // Ensure rustls CryptoProvider is installed (needed for outbound
     // fetch TLS)
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -162,7 +162,7 @@ impl Sandbox {
 
   /// Execute the sandbox: inject request, run JS handler, extract
   /// response.
-  pub fn execute(
+  pub(crate) fn execute(
     mut self,
     request: IncomingRequest,
   ) -> anyhow::Result<OutgoingResponse> {

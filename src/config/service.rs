@@ -9,21 +9,43 @@ use super::{
 /// Service configuration (raw, before kind parsing).
 #[derive(Deserialize, Default, Clone, Debug)]
 #[serde(default, deny_unknown_fields)]
-pub struct ServiceRaw {
-  pub name: String,
-  pub kind: String,
-  pub args: SerializedArgs,
-  pub layers: Vec<LayerRaw>,
+pub(super) struct ServiceRaw {
+  name: String,
+  kind: String,
+  args: SerializedArgs,
+  layers: Vec<LayerRaw>,
 }
 
 /// Service configuration (after kind parsing).
 #[derive(Default, Clone, Debug)]
-pub struct Service {
-  pub name: String,
-  pub plugin_name: String,
-  pub kind: String,
-  pub args: SerializedArgs,
-  pub layers: Vec<Layer>,
+pub(crate) struct Service {
+  pub(in crate::config) name: String,
+  pub(in crate::config) plugin_name: String,
+  pub(in crate::config) kind: String,
+  pub(in crate::config) args: SerializedArgs,
+  pub(in crate::config) layers: Vec<Layer>,
+}
+
+impl Service {
+  pub(crate) fn name(&self) -> &str {
+    &self.name
+  }
+
+  pub(crate) fn plugin_name(&self) -> &str {
+    &self.plugin_name
+  }
+
+  pub(crate) fn kind(&self) -> &str {
+    &self.kind
+  }
+
+  pub(crate) fn args(&self) -> &SerializedArgs {
+    &self.args
+  }
+
+  pub(crate) fn layers(&self) -> &[Layer] {
+    &self.layers
+  }
 }
 
 /// Parse a `plugin_name.entity_name` kind string into (plugin_name,
@@ -66,14 +88,14 @@ fn parse_plugin_kind(
 }
 
 impl LayerRaw {
-  pub fn parse(self) -> anyhow::Result<Layer> {
+  pub(super) fn parse(self) -> anyhow::Result<Layer> {
     let (plugin_name, kind) = parse_plugin_kind(&self.kind, "layer")?;
     Ok(Layer { plugin_name, kind, args: self.args })
   }
 }
 
 impl ServiceRaw {
-  pub fn parse(self) -> anyhow::Result<Service> {
+  pub(super) fn parse(self) -> anyhow::Result<Service> {
     let (plugin_name, kind) = parse_plugin_kind(&self.kind, "service")?;
     let layers = self
       .layers
@@ -100,7 +122,7 @@ impl ServiceRaw {
 /// not the service configuration itself. Service configuration
 /// validation (kind format, plugin existence) is handled at parse time
 /// and runtime.
-pub fn validate_service(
+pub(super) fn validate_service(
   service_names: &std::collections::HashSet<&str>,
   server_idx: usize,
   service: &str,

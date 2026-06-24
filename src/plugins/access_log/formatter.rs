@@ -5,7 +5,7 @@ use serde_json::json;
 use super::context::{AccessLogEntry, LogFormat};
 
 /// Format an access log entry.
-pub fn format_entry(
+pub(crate) fn format_entry(
   entry: &AccessLogEntry,
   format: LogFormat,
 ) -> Vec<u8> {

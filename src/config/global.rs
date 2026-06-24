@@ -10,11 +10,11 @@ static GLOBAL_CONFIG: OnceLock<Config> = OnceLock::new();
 impl Config {
   /// Initialize the global config. Must be called before
   /// `Config::global()`.
-  pub fn init_global(config: Config) {
+  pub(crate) fn init_global(config: Config) {
     GLOBAL_CONFIG.set(config).ok();
   }
 
-  pub fn global() -> &'static Config {
+  pub(crate) fn global() -> &'static Config {
     GLOBAL_CONFIG.get().expect(
       "Config not initialized - call Config::init_global() first",
     )

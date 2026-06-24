@@ -35,31 +35,31 @@ fn validate_server_threads(
 /// - Hostname routing compatibility
 /// - Address conflicts across servers
 /// - Hostname conflicts across servers
-pub fn validate_config(
+pub(super) fn validate_config(
   config: &Config,
   collector: &mut ConfigErrorCollector,
   listener_manager: &dyn ListenerPropertiesProvider,
 ) {
   // Validate global settings
-  validate_server_threads(config.server_threads, collector);
+  validate_server_threads(config.server_threads(), collector);
 
   // Collect all service names for reference validation
   let service_names: std::collections::HashSet<&str> =
-    config.services.iter().map(|s| s.name.as_str()).collect();
+    config.services().iter().map(|s| s.name()).collect();
 
   // Validate servers
-  for (server_idx, server) in config.servers.iter().enumerate() {
+  for (server_idx, server) in config.servers().iter().enumerate() {
     let server_location = format!("servers[{}]", server_idx);
 
     // Validate hostnames
-    for (idx, hostname) in server.hostnames.iter().enumerate() {
+    for (idx, hostname) in server.hostnames().iter().enumerate() {
       let hostname_location =
         format!("{}.hostnames[{}]", server_location, idx);
       validate_hostname(hostname, &hostname_location, collector);
     }
 
     // Validate TLS if present
-    if let Some(ref tls) = server.tls {
+    if let Some(tls) = server.tls() {
       validate_server_tls(
         tls,
         &format!("{}.tls", server_location),
@@ -71,16 +71,16 @@ pub fn validate_config(
     validate_service(
       &service_names,
       server_idx,
-      &server.service,
+      server.service(),
       collector,
     );
   }
 
   // Validate listener addresses
-  for (idx, listener) in config.listeners.iter().enumerate() {
+  for (idx, listener) in config.listeners().iter().enumerate() {
     let location = format!("listeners[{}]", idx);
     validate_listener_addresses(
-      &listener.addresses,
+      listener.addresses(),
       &location,
       collector,
     );

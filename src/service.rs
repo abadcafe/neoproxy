@@ -53,11 +53,11 @@ where
 ///
 /// **Note:** This is the *runtime* service type, not to be confused
 /// with `config::Service` which represents configuration data.
-pub struct Service(Box<dyn CloneService>);
+pub(crate) struct Service(Box<dyn CloneService>);
 
 impl Service {
   /// Create a new service from a tower::Service implementation.
-  pub fn new<S>(inner: S) -> Self
+  pub(crate) fn new<S>(inner: S) -> Self
   where
     S: tower::Service<
         Request,
@@ -101,29 +101,35 @@ impl std::fmt::Debug for Service {
 ///
 /// A `BuildService` is a function that takes configuration arguments
 /// and returns a `Service`.
-pub trait BuildService: Fn(SerializedArgs) -> Result<Service> {}
+pub(crate) trait BuildService:
+  Fn(SerializedArgs) -> Result<Service>
+{
+}
 
 impl<F> BuildService for F where F: Fn(SerializedArgs) -> Result<Service>
 {}
 
 /// A layer that wraps a Service to produce another Service.
-pub struct Layer(
+pub(crate) struct Layer(
   Box<dyn tower::Layer<Service, Service = Service> + 'static>,
 );
 
 impl Layer {
-  pub fn new<L>(layer: L) -> Self
+  pub(crate) fn new<L>(layer: L) -> Self
   where
     L: tower::Layer<Service, Service = Service> + 'static,
   {
     Self(Box::new(layer))
   }
 
-  pub fn layer(&self, inner: Service) -> Service {
+  pub(crate) fn layer(&self, inner: Service) -> Service {
     self.0.layer(inner)
   }
 }
 
 /// Factory trait for building layers.
-pub trait BuildLayer: Fn(SerializedArgs) -> Result<Layer> {}
+pub(crate) trait BuildLayer:
+  Fn(SerializedArgs) -> Result<Layer>
+{
+}
 impl<F> BuildLayer for F where F: Fn(SerializedArgs) -> Result<Layer> {}

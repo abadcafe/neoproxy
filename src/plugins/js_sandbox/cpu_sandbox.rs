@@ -191,7 +191,7 @@ impl Drop for CPUTimer {
 // CPUTimerScope — RAII wrapper: arms timer on create, disarms on drop
 // ---------------------------------------------------------------------------
 
-pub struct CPUTimerScope {
+pub(crate) struct CPUTimerScope {
   _cpu_timer: CPUTimer,
 }
 
@@ -200,7 +200,7 @@ impl CPUTimerScope {
   /// thread consumes more than `cpu_limit_us` microseconds of CPU
   /// time, sending a termination request to the V8 isolate via the
   /// watchdog thread.
-  pub fn new(
+  pub(crate) fn new(
     cpu_limit_us: u32,
     request_id: String,
     isolate_handle: v8::IsolateHandle,
@@ -259,12 +259,12 @@ fn start_watchdog() -> bool {
 }
 
 /// Ensure the watchdog is initialized. Call once at plugin startup.
-pub fn ensure_watchdog_started() {
+pub(crate) fn ensure_watchdog_started() {
   start_watchdog();
 }
 
 /// Stop the watchdog. Call at plugin shutdown.
-pub fn stop_watchdog() {
+pub(crate) fn stop_watchdog() {
   if let Some(tx) = DISPATCH_TASK_TX.get() {
     let _ = tx.send(DispatchTask { timer_entry: None, quit: true });
   }

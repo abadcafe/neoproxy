@@ -18,13 +18,13 @@ use crate::plugins::js_sandbox::request::{
 };
 
 #[derive(Clone)]
-pub struct SandboxService {
+pub(crate) struct SandboxService {
   pool: Option<Arc<SandboxPool>>,
   config: Arc<PluginConfig>,
 }
 
 impl SandboxService {
-  pub fn new(
+  pub(crate) fn new(
     pool: Arc<SandboxPool>,
     config: Arc<PluginConfig>,
   ) -> Self {

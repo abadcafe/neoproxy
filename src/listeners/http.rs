@@ -155,15 +155,15 @@ impl Listening for HttpListener {
   }
 }
 
-pub fn listener_name() -> &'static str {
+pub(crate) fn listener_name() -> &'static str {
   "http"
 }
 
 /// Get listener properties for conflict detection.
-pub fn props() -> ListenerProps {
+pub(crate) fn props() -> ListenerProps {
   ListenerProps::new(TransportLayer::Tcp, true)
 }
 
-pub fn create_listener_builder() -> Box<dyn BuildListener> {
+pub(crate) fn create_listener_builder() -> Box<dyn BuildListener> {
   Box::new(HttpListener::new)
 }

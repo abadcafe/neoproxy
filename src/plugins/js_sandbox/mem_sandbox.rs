@@ -45,14 +45,14 @@ unsafe extern "C" fn vtable_drop(alloc: *const TrackingAllocator) {
 /// Custom V8 ArrayBuffer allocator that tracks outstanding memory and
 /// enforces a total limit. Returns NULL when limits are exceeded so V8
 /// handles OOM.
-pub struct TrackingAllocator {
+pub(crate) struct TrackingAllocator {
   outstanding_size: AtomicUsize,
   null_return_count: AtomicUsize,
   total_max: usize,
 }
 
 impl TrackingAllocator {
-  pub fn new(total_max: usize) -> Arc<Self> {
+  pub(crate) fn new(total_max: usize) -> Arc<Self> {
     Arc::new(Self {
       outstanding_size: AtomicUsize::new(0),
       null_return_count: AtomicUsize::new(0),
@@ -60,7 +60,7 @@ impl TrackingAllocator {
     })
   }
 
-  pub fn get_allocator(
+  pub(crate) fn get_allocator(
     self: Arc<Self>,
   ) -> v8::UniqueRef<v8::Allocator> {
     unsafe {
@@ -71,7 +71,7 @@ impl TrackingAllocator {
     }
   }
 
-  pub fn get_outstanding_size(&self) -> usize {
+  pub(crate) fn get_outstanding_size(&self) -> usize {
     self.outstanding_size.load(Ordering::Acquire)
   }
 
@@ -145,7 +145,7 @@ impl Drop for TrackingAllocator {
 /// Install a near-heap-limit callback on the JsRuntime that terminates
 /// execution when heap exceeds `heap_limit_bytes`, and always returns
 /// `current * 2` to prevent a V8 process crash.
-pub fn install_heap_limit_callback(
+pub(crate) fn install_heap_limit_callback(
   runtime: &mut deno_core::JsRuntime,
   heap_limit_bytes: usize,
 ) {

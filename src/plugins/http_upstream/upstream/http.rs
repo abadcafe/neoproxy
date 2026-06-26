@@ -1,13 +1,12 @@
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use http::Uri;
-use http_body_util::BodyExt;
 use hyper::client::conn::http1;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::Connected;
@@ -16,7 +15,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tower::Service;
 use tracing::warn;
 
-use super::address_resolution::resolve_address;
+use super::address_resolution::resolve_addresses;
 use super::connect_request::build_connect_request;
 use super::proxy_auth::apply_proxy_auth;
 use super::{ClientProtocol, ConnectResult};
@@ -27,9 +26,12 @@ use crate::http_message::{
   build_proxy_status_with_status,
 };
 use crate::plugins::http_upstream::error::{
-  UpstreamError, classify_connect_error, classify_tls_handshake_error,
+  UpstreamError, classify_connect_error, classify_http_client_error,
+  classify_tls_handshake_error,
 };
-use crate::plugins::http_upstream::target_parser;
+use crate::plugins::http_upstream::target_parser::{
+  self, ForwardTarget,
+};
 use crate::tracker::StreamTracker;
 
 // ============================================================================
@@ -142,6 +144,61 @@ impl hyper_util::client::legacy::connect::Connection for TlsConn {
   }
 }
 
+async fn connect_to_resolved_addresses(
+  addresses: Vec<SocketAddr>,
+  connect_timeout: Duration,
+) -> std::io::Result<tokio::net::TcpStream> {
+  let deadline = tokio::time::Instant::now() + connect_timeout;
+  let mut last_error: Option<std::io::Error> = None;
+
+  for addr in addresses {
+    let now = tokio::time::Instant::now();
+    if now >= deadline {
+      return Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "connect timed out",
+      ));
+    }
+
+    match tokio::time::timeout(
+      deadline - now,
+      tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    {
+      Ok(Ok(stream)) => return Ok(stream),
+      Ok(Err(e)) => {
+        last_error = Some(e);
+      }
+      Err(_) => {
+        return Err(std::io::Error::new(
+          std::io::ErrorKind::TimedOut,
+          "connect timed out",
+        ));
+      }
+    }
+  }
+
+  Err(last_error.unwrap_or_else(|| {
+    std::io::Error::new(
+      std::io::ErrorKind::InvalidInput,
+      "no resolved addresses",
+    )
+  }))
+}
+
+fn classify_tcp_connect_error(
+  address: &str,
+  e: std::io::Error,
+) -> UpstreamError {
+  if e.kind() == std::io::ErrorKind::TimedOut {
+    return UpstreamError::ConnectionTimeout(format!(
+      "TCP connect to {address} timed out"
+    ));
+  }
+  classify_connect_error(e.into())
+}
+
 // ============================================================================
 // Custom Connectors for Chain Mode
 // ============================================================================
@@ -187,27 +244,20 @@ impl Service<Uri> for ProxyConnector {
     let timeout = self.connect_timeout;
     let dns_timeout = self.dns_resolve_timeout;
     Box::pin(async move {
-      let addr =
-        tokio::time::timeout(dns_timeout, resolve_address(&proxy_addr))
-          .await
-          .map_err(|_| {
-            std::io::Error::new(
-              std::io::ErrorKind::TimedOut,
-              format!("DNS resolve for '{proxy_addr}' timed out"),
-            )
-          })?
-          .map_err(std::io::Error::other)?;
-      let stream = tokio::time::timeout(
-        timeout,
-        tokio::net::TcpStream::connect(addr),
+      let addresses = tokio::time::timeout(
+        dns_timeout,
+        resolve_addresses(&proxy_addr),
       )
       .await
       .map_err(|_| {
         std::io::Error::new(
           std::io::ErrorKind::TimedOut,
-          "connect timed out",
+          format!("DNS resolve for '{proxy_addr}' timed out"),
         )
-      })??;
+      })?
+      .map_err(std::io::Error::other)?;
+      let stream =
+        connect_to_resolved_addresses(addresses, timeout).await?;
       Ok(Proxied(TokioIo::new(stream)))
     })
   }
@@ -282,69 +332,6 @@ impl Service<Uri> for TlsProxyConnector {
 }
 
 // ============================================================================
-// Rewind Wrapper
-// ============================================================================
-
-pub(super) struct Rewind<T> {
-  inner: T,
-  prefix: Option<Bytes>,
-}
-
-impl<T> Rewind<T> {
-  pub(crate) fn new(inner: T, prefix: Option<Bytes>) -> Self {
-    Self { inner, prefix }
-  }
-}
-
-impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for Rewind<T> {
-  fn poll_read(
-    mut self: std::pin::Pin<&mut Self>,
-    cx: &mut std::task::Context<'_>,
-    buf: &mut tokio::io::ReadBuf<'_>,
-  ) -> std::task::Poll<std::io::Result<()>> {
-    if let Some(ref mut prefix) = self.prefix
-      && !prefix.is_empty()
-    {
-      let n = std::cmp::min(buf.remaining(), prefix.len());
-      if n > 0 {
-        buf.put_slice(&prefix[..n]);
-        *prefix = prefix.slice(n..);
-        if prefix.is_empty() {
-          self.prefix = None;
-        }
-        return std::task::Poll::Ready(Ok(()));
-      }
-      self.prefix = None;
-    }
-    std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
-  }
-}
-
-impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Rewind<T> {
-  fn poll_write(
-    mut self: std::pin::Pin<&mut Self>,
-    cx: &mut std::task::Context<'_>,
-    buf: &[u8],
-  ) -> std::task::Poll<std::io::Result<usize>> {
-    std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
-  }
-
-  fn poll_flush(
-    mut self: std::pin::Pin<&mut Self>,
-    cx: &mut std::task::Context<'_>,
-  ) -> std::task::Poll<std::io::Result<()>> {
-    std::pin::Pin::new(&mut self.inner).poll_flush(cx)
-  }
-
-  fn poll_shutdown(
-    mut self: std::pin::Pin<&mut Self>,
-    cx: &mut std::task::Context<'_>,
-  ) -> std::task::Poll<std::io::Result<()>> {
-    std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
-  }
-}
-
-// ============================================================================
 // HTTP/HTTPS Forward
 // ============================================================================
 
@@ -354,6 +341,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Rewind<T> {
 pub(super) async fn chain_forward_http<C>(
   client: Client<C, RequestBody>,
   user: Option<crate::config::UserCredential>,
+  target: &ForwardTarget,
   req_headers: http::request::Parts,
   req_body: RequestBody,
   ctx: &RequestContext,
@@ -366,23 +354,23 @@ where
     + Unpin
     + 'static,
 {
-  let body_bytes = match req_body.collect().await {
-    Ok(collected) => collected.to_bytes(),
+  let mut headers = req_headers.headers.clone();
+  target_parser::strip_hop_by_hop_headers(&mut headers);
+  let host_header = match target.host_header_value() {
+    Ok(value) => value,
     Err(e) => {
-      warn!("http_upstream: failed to collect request body: {e}");
+      warn!("http_upstream: invalid forward target authority: {e}");
       return build_error_response(
         http::StatusCode::BAD_REQUEST,
-        "Failed to read request body",
+        "Invalid target address",
       );
     }
   };
-
-  let mut headers = req_headers.headers.clone();
-  target_parser::strip_hop_by_hop_headers(&mut headers);
+  headers.insert(http::header::HOST, host_header);
 
   let mut temp_req = http::Request::builder()
     .method(req_headers.method.clone())
-    .uri(req_headers.uri.clone())
+    .uri(target.absolute_uri().clone())
     .body(())
     .unwrap();
   apply_proxy_auth(&user, &mut temp_req);
@@ -392,22 +380,19 @@ where
 
   let mut fwd_req_builder = http::Request::builder()
     .method(req_headers.method)
-    .uri(req_headers.uri);
+    .uri(target.absolute_uri().clone());
   for (name, value) in headers.iter() {
     fwd_req_builder = fwd_req_builder.header(name, value);
   }
 
-  let body = http_body_util::Full::new(body_bytes);
-  let boxed_body = RequestBody::new(BytesBufBodyWrapper::new(body));
-  let fwd_req = fwd_req_builder.body(boxed_body).unwrap();
+  let fwd_req = fwd_req_builder.body(req_body).unwrap();
 
   let forward_start = Instant::now();
   let upstream_resp = match client.request(fwd_req).await {
     Ok(resp) => resp,
     Err(e) => {
       warn!("http_upstream: forward request failed: {e}");
-      return UpstreamError::ConnectionTerminated(e.to_string())
-        .to_response(ctx);
+      return classify_http_client_error(e.into()).to_response(ctx);
     }
   };
   let forward_ms = forward_start.elapsed().as_millis() as u64;
@@ -489,6 +474,7 @@ where
     &'a self,
     _tls_config: &'a Option<Arc<rustls::ClientConfig>>,
     _tracker: &'a Rc<StreamTracker>,
+    target: &'a ForwardTarget,
     req_headers: ::http::request::Parts,
     req_body: RequestBody,
     ctx: &'a RequestContext,
@@ -498,8 +484,15 @@ where
     let user = self.user.clone();
     Box::pin(async move {
       Ok(
-        chain_forward_http(client, user, req_headers, req_body, ctx)
-          .await,
+        chain_forward_http(
+          client,
+          user,
+          target,
+          req_headers,
+          req_body,
+          ctx,
+        )
+        .await,
       )
     })
   }
@@ -508,7 +501,7 @@ where
     &'a self,
     target: &'a str,
     _tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    _tracker: &'a Rc<StreamTracker>,
+    tracker: &'a Rc<StreamTracker>,
   ) -> Pin<
     Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
   > {
@@ -520,18 +513,24 @@ where
     Box::pin(async move {
       match proxy_addr {
         None => {
-          // Direct mode: raw TCP connect to target
-          let stream = tokio::time::timeout(
-            connect_timeout,
-            tokio::net::TcpStream::connect(&target),
+          let dns_timeout = self.dns_resolve_timeout;
+          let resolved = tokio::time::timeout(
+            dns_timeout,
+            resolve_addresses(&target),
           )
           .await
           .map_err(|_| {
-            UpstreamError::ConnectionTimeout(format!(
-              "direct connect to {target} timed out"
+            UpstreamError::DnsError(format!(
+              "DNS resolve for '{target}' timed out"
             ))
           })?
-          .map_err(|e| classify_connect_error(e.into()))?;
+          .map_err(classify_connect_error)?;
+
+          // Direct mode: raw TCP connect to target
+          let stream =
+            connect_to_resolved_addresses(resolved, connect_timeout)
+              .await
+              .map_err(|e| classify_tcp_connect_error(&target, e))?;
 
           let upstream_addr = stream.peer_addr().ok();
 
@@ -547,7 +546,7 @@ where
           // CONNECT
           let dns_timeout = self.dns_resolve_timeout;
           let resolved =
-            tokio::time::timeout(dns_timeout, resolve_address(addr))
+            tokio::time::timeout(dns_timeout, resolve_addresses(addr))
               .await
               .map_err(|_| {
                 UpstreamError::DnsError(format!(
@@ -555,17 +554,10 @@ where
                 ))
               })?
               .map_err(classify_connect_error)?;
-          let stream = tokio::time::timeout(
-            connect_timeout,
-            tokio::net::TcpStream::connect(resolved),
-          )
-          .await
-          .map_err(|_| {
-            UpstreamError::ConnectionTimeout(format!(
-              "TCP connect to {addr} timed out"
-            ))
-          })?
-          .map_err(|e| classify_connect_error(e.into()))?;
+          let stream =
+            connect_to_resolved_addresses(resolved, connect_timeout)
+              .await
+              .map_err(|e| classify_tcp_connect_error(addr, e))?;
 
           let upstream_addr = stream.peer_addr().ok();
           let io = TokioIo::new(stream);
@@ -577,7 +569,17 @@ where
             })?;
 
           let req = build_connect_request(&target, &user);
-          let resp = sr.send_request(req).await.map_err(|e| {
+          let resp_fut = sr.send_request(req);
+          tracker.register_connection(async move {
+            if let Err(e) = conn.with_upgrades().await {
+              warn!(
+                "http_upstream: HTTP CONNECT connection ended before \
+                 upgrade: {e}"
+              );
+            }
+          });
+
+          let mut resp = resp_fut.await.map_err(|e| {
             UpstreamError::ConnectionTerminated(e.to_string())
           })?;
 
@@ -595,15 +597,13 @@ where
             });
           }
 
-          let parts = conn.without_shutdown().await.map_err(|e| {
+          let upgrade = hyper::upgrade::on(&mut resp);
+          let upgraded = upgrade.await.map_err(|e| {
             UpstreamError::ConnectionTerminated(e.to_string())
           })?;
 
           Ok(ConnectResult {
-            transport: Box::new(Rewind::new(
-              parts.io.into_inner(),
-              Some(parts.read_buf),
-            )),
+            transport: Box::new(TokioIo::new(upgraded)),
             upstream_addr,
             upstream_proxy_status,
             tunnel_idle_timeout,
@@ -634,6 +634,7 @@ impl ClientProtocol for HttpsClient {
     &'a self,
     _tls_config: &'a Option<Arc<rustls::ClientConfig>>,
     _tracker: &'a Rc<StreamTracker>,
+    target: &'a ForwardTarget,
     req_headers: ::http::request::Parts,
     req_body: RequestBody,
     ctx: &'a RequestContext,
@@ -643,8 +644,15 @@ impl ClientProtocol for HttpsClient {
     let user = self.user.clone();
     Box::pin(async move {
       Ok(
-        chain_forward_http(client, user, req_headers, req_body, ctx)
-          .await,
+        chain_forward_http(
+          client,
+          user,
+          target,
+          req_headers,
+          req_body,
+          ctx,
+        )
+        .await,
       )
     })
   }
@@ -675,7 +683,7 @@ impl ClientProtocol for HttpsClient {
 
       let dns_timeout = self.dns_resolve_timeout;
       let resolved =
-        tokio::time::timeout(dns_timeout, resolve_address(&addr))
+        tokio::time::timeout(dns_timeout, resolve_addresses(&addr))
           .await
           .map_err(|_| {
             UpstreamError::DnsError(format!(
@@ -683,17 +691,10 @@ impl ClientProtocol for HttpsClient {
             ))
           })?
           .map_err(classify_connect_error)?;
-      let stream = tokio::time::timeout(
-        connect_timeout,
-        tokio::net::TcpStream::connect(resolved),
-      )
-      .await
-      .map_err(|_| {
-        UpstreamError::ConnectionTimeout(format!(
-          "TCP connect to {addr} timed out"
-        ))
-      })?
-      .map_err(|e| classify_connect_error(e.into()))?;
+      let stream =
+        connect_to_resolved_addresses(resolved, connect_timeout)
+          .await
+          .map_err(|e| classify_tcp_connect_error(&addr, e))?;
 
       let upstream_addr = stream.peer_addr().ok();
 
@@ -727,13 +728,16 @@ impl ClientProtocol for HttpsClient {
 
       // Drive the connection via tracker (spawn_local + graceful
       // shutdown support) while waiting for the CONNECT response.
-      let (tx, rx) = tokio::sync::oneshot::channel();
       tracker.register_connection(async move {
-        let parts = conn.without_shutdown().await;
-        let _ = tx.send(parts);
+        if let Err(e) = conn.with_upgrades().await {
+          warn!(
+            "http_upstream: HTTPS CONNECT connection ended before \
+             upgrade: {e}"
+          );
+        }
       });
 
-      let resp = resp_fut.await.map_err(|e| {
+      let mut resp = resp_fut.await.map_err(|e| {
         UpstreamError::ConnectionTerminated(e.to_string())
       })?;
 
@@ -749,22 +753,13 @@ impl ClientProtocol for HttpsClient {
         });
       }
 
-      let parts = rx
-        .await
-        .map_err(|e| {
-          UpstreamError::ProxyInternalError(format!(
-            "connection task cancelled: {e}"
-          ))
-        })?
-        .map_err(|e| {
-          UpstreamError::ConnectionTerminated(e.to_string())
-        })?;
+      let upgrade = hyper::upgrade::on(&mut resp);
+      let upgraded = upgrade.await.map_err(|e| {
+        UpstreamError::ConnectionTerminated(e.to_string())
+      })?;
 
       Ok(ConnectResult {
-        transport: Box::new(Rewind::new(
-          parts.io.into_inner(),
-          Some(parts.read_buf),
-        )),
+        transport: Box::new(TokioIo::new(upgraded)),
         upstream_addr,
         upstream_proxy_status,
         tunnel_idle_timeout,

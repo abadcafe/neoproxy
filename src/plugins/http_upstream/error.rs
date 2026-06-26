@@ -167,11 +167,16 @@ impl std::error::Error for DnsResolveError {
 pub(crate) fn classify_connect_error(
   e: anyhow::Error,
 ) -> UpstreamError {
-  if e.downcast_ref::<DnsResolveError>().is_some() {
+  if e.downcast_ref::<DnsResolveError>().is_some()
+    || error_chain_contains::<DnsResolveError>(&e)
+  {
     return UpstreamError::DnsError(e.to_string());
   }
 
-  if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
+  if let Some(io_err) = e
+    .downcast_ref::<std::io::Error>()
+    .or_else(|| find_error_in_chain::<std::io::Error>(&e))
+  {
     return match io_err.kind() {
       std::io::ErrorKind::ConnectionRefused => {
         UpstreamError::ConnectionRefused(e.to_string())
@@ -194,12 +199,52 @@ pub(crate) fn classify_connect_error(
   UpstreamError::ProxyInternalError(e.to_string())
 }
 
+/// Classify an HTTP client request error into an `UpstreamError`.
+pub(crate) fn classify_http_client_error(
+  e: anyhow::Error,
+) -> UpstreamError {
+  if e.downcast_ref::<DnsResolveError>().is_some()
+    || error_chain_contains::<DnsResolveError>(&e)
+  {
+    return UpstreamError::DnsError(e.to_string());
+  }
+
+  if let Some(io_err) = e
+    .downcast_ref::<std::io::Error>()
+    .or_else(|| find_error_in_chain::<std::io::Error>(&e))
+  {
+    return match io_err.kind() {
+      std::io::ErrorKind::ConnectionRefused => {
+        UpstreamError::ConnectionRefused(e.to_string())
+      }
+      std::io::ErrorKind::TimedOut => {
+        UpstreamError::ConnectionTimeout(e.to_string())
+      }
+      std::io::ErrorKind::ConnectionReset
+      | std::io::ErrorKind::BrokenPipe
+      | std::io::ErrorKind::UnexpectedEof => {
+        UpstreamError::ConnectionTerminated(e.to_string())
+      }
+      std::io::ErrorKind::HostUnreachable
+      | std::io::ErrorKind::NetworkUnreachable
+      | std::io::ErrorKind::AddrNotAvailable => {
+        UpstreamError::DestinationUnavailable(e.to_string())
+      }
+      _ => UpstreamError::ProxyInternalError(e.to_string()),
+    };
+  }
+
+  UpstreamError::ConnectionTerminated(e.to_string())
+}
+
 /// Classify an anyhow error from QUIC connection establishment into an
 /// `UpstreamError`. With RFC 9209
 /// variants: ConnectionReset → ConnectionTerminated (not
 /// ConnectionRefused), plus TLS error classification.
 pub(crate) fn classify_quic_error(e: anyhow::Error) -> UpstreamError {
-  if e.downcast_ref::<DnsResolveError>().is_some() {
+  if e.downcast_ref::<DnsResolveError>().is_some()
+    || error_chain_contains::<DnsResolveError>(&e)
+  {
     return UpstreamError::DnsError(e.to_string());
   }
 
@@ -228,7 +273,10 @@ pub(crate) fn classify_quic_error(e: anyhow::Error) -> UpstreamError {
     };
   }
 
-  if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
+  if let Some(io_err) = e
+    .downcast_ref::<std::io::Error>()
+    .or_else(|| find_error_in_chain::<std::io::Error>(&e))
+  {
     return match io_err.kind() {
       std::io::ErrorKind::ConnectionRefused => {
         UpstreamError::ConnectionRefused(e.to_string())
@@ -248,6 +296,20 @@ pub(crate) fn classify_quic_error(e: anyhow::Error) -> UpstreamError {
   }
 
   UpstreamError::DestinationUnavailable(e.to_string())
+}
+
+fn find_error_in_chain<T>(e: &anyhow::Error) -> Option<&T>
+where
+  T: std::error::Error + 'static,
+{
+  e.chain().find_map(|err| err.downcast_ref::<T>())
+}
+
+fn error_chain_contains<T>(e: &anyhow::Error) -> bool
+where
+  T: std::error::Error + 'static,
+{
+  find_error_in_chain::<T>(e).is_some()
 }
 
 /// Classify an anyhow error from TLS handshake (tokio-rustls) into an

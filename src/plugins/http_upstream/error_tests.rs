@@ -105,6 +105,19 @@ fn test_classify_connect_error_host_unreachable() {
 }
 
 #[test]
+fn test_classify_http_client_error_finds_io_source() {
+  let err = anyhow::Error::from(std::io::Error::from(
+    std::io::ErrorKind::TimedOut,
+  ))
+  .context("hyper request failed");
+
+  assert!(matches!(
+    classify_http_client_error(err),
+    UpstreamError::ConnectionTimeout(_)
+  ));
+}
+
+#[test]
 fn test_classify_quic_connection_error_timed_out() {
   let err: anyhow::Error = quinn::ConnectionError::TimedOut.into();
   assert!(matches!(

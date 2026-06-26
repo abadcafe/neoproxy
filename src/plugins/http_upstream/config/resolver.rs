@@ -14,7 +14,7 @@ use super::raw::{HttpUpstreamPluginConfig, QuicConfig};
 use super::resolved::{
   Address, Protocol, ProtocolKind, QuicResolved, Upstream,
 };
-use super::validation::validate_address_format;
+use super::validation::validate_plugin_config;
 use crate::config::UserCredential;
 
 /// Merge QUIC config at field level through three levels.
@@ -62,6 +62,8 @@ fn merge_quic_field_level(
 pub(crate) fn merge_chain_config(
   plugin: &HttpUpstreamPluginConfig,
 ) -> Result<HashMap<String, Upstream>> {
+  validate_plugin_config(plugin)?;
+
   let mut upstreams: HashMap<String, Upstream> = HashMap::new();
 
   for upstream in &plugin.upstreams {
@@ -136,8 +138,6 @@ pub(crate) fn merge_chain_config(
           }
         }
       };
-
-      validate_address_format(&addr.address)?;
 
       addresses.push(Address {
         address: addr.address.clone(),

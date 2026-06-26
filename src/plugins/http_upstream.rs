@@ -57,8 +57,10 @@ struct HttpUpstreamPlugin {
 }
 
 impl HttpUpstreamPlugin {
-  fn new(registry: UpstreamRegistry) -> Self {
-    let stream_tracker = Rc::new(StreamTracker::new());
+  fn new(
+    registry: UpstreamRegistry,
+    stream_tracker: Rc<StreamTracker>,
+  ) -> Self {
     let registry = Rc::new(RefCell::new(registry));
 
     let upstream_st = stream_tracker.clone();
@@ -102,9 +104,12 @@ impl Plugin for HttpUpstreamPlugin {
     Box::pin(async move {
       info!("http_upstream: starting graceful shutdown");
       st.shutdown();
+      registry.borrow_mut().close_all();
 
       match st.wait_shutdown_with_timeout(SHUTDOWN_TIMEOUT).await {
-        Ok(()) => info!("http_upstream: all tunnels closed gracefully"),
+        Ok(()) => {
+          info!("http_upstream: all streams closed gracefully")
+        }
         Err(_) => {
           warn!(
             "http_upstream: shutdown timed out after \
@@ -115,7 +120,6 @@ impl Plugin for HttpUpstreamPlugin {
         }
       }
 
-      registry.borrow_mut().close_all();
       info!("http_upstream: shutdown complete");
     })
   }
@@ -147,7 +151,7 @@ pub(crate) fn create_plugin(
   let registry = UpstreamRegistry::new(
     upstreams,
     plugin_config.certificates.as_ref(),
-    tracker,
+    tracker.clone(),
   )?;
 
   info!(
@@ -155,5 +159,5 @@ pub(crate) fn create_plugin(
     registry.len()
   );
 
-  Ok(Box::new(HttpUpstreamPlugin::new(registry)))
+  Ok(Box::new(HttpUpstreamPlugin::new(registry, tracker)))
 }

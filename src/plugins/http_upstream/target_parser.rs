@@ -16,7 +16,27 @@ pub(crate) enum ForwardTargetError {
   NotAbsoluteForm,
   UnsupportedScheme,
   NoAuthority,
+  InvalidAuthority,
   PortZero,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ForwardTarget {
+  authority: http::uri::Authority,
+  absolute_uri: http::Uri,
+}
+
+impl ForwardTarget {
+  pub(crate) fn absolute_uri(&self) -> &http::Uri {
+    &self.absolute_uri
+  }
+
+  pub(crate) fn host_header_value(
+    &self,
+  ) -> Result<http::HeaderValue, ForwardTargetError> {
+    http::HeaderValue::from_str(self.authority.as_str())
+      .map_err(|_| ForwardTargetError::InvalidAuthority)
+  }
 }
 
 impl fmt::Display for ConnectTargetError {
@@ -54,6 +74,9 @@ impl fmt::Display for ForwardTargetError {
       }
       ForwardTargetError::NoAuthority => {
         write!(f, "no authority in URI")
+      }
+      ForwardTargetError::InvalidAuthority => {
+        write!(f, "invalid authority in URI")
       }
       ForwardTargetError::PortZero => {
         write!(f, "port is zero")
@@ -105,7 +128,7 @@ pub(crate) fn parse_connect_target(
 /// - `Err(ForwardTargetError)`: Parse failed
 pub(crate) fn parse_forward_target(
   parts: &http::request::Parts,
-) -> Result<(String, u16, http::Uri), ForwardTargetError> {
+) -> Result<ForwardTarget, ForwardTargetError> {
   if parts.method == http::Method::CONNECT {
     return Err(ForwardTargetError::ConnectMethod);
   }
@@ -120,6 +143,9 @@ pub(crate) fn parse_forward_target(
 
   let authority =
     uri.authority().ok_or(ForwardTargetError::NoAuthority)?;
+  if authority.as_str().contains('@') {
+    return Err(ForwardTargetError::InvalidAuthority);
+  }
 
   let port = authority.port_u16().unwrap_or(80);
 
@@ -127,16 +153,10 @@ pub(crate) fn parse_forward_target(
     return Err(ForwardTargetError::PortZero);
   }
 
-  let host = authority.host().to_string();
-
-  let origin_uri = http::Uri::builder()
-    .path_and_query(
-      uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/"),
-    )
-    .build()
-    .map_err(|_| ForwardTargetError::NotAbsoluteForm)?;
-
-  Ok((host, port, origin_uri))
+  Ok(ForwardTarget {
+    authority: authority.clone(),
+    absolute_uri: uri.clone(),
+  })
 }
 
 /// Strip hop-by-hop headers from a request/response

@@ -283,8 +283,8 @@ async fn chain_forward(
   ctx: &RequestContext,
 ) -> Result<Response> {
   // Validate forward target
-  match target_parser::parse_forward_target(&req_headers) {
-    Ok(_) => {}
+  let target = match target_parser::parse_forward_target(&req_headers) {
+    Ok(target) => target,
     Err(ForwardTargetError::ConnectMethod) => {
       return Ok(build_error_response(
         http::StatusCode::METHOD_NOT_ALLOWED,
@@ -318,7 +318,7 @@ async fn chain_forward(
     }
   };
   match upstream
-    .forward(&tls_config, &tracker, req_headers, req_body, ctx)
+    .forward(&tls_config, &tracker, &target, req_headers, req_body, ctx)
     .await
   {
     Ok(resp) => Ok(resp),

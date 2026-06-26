@@ -15,6 +15,7 @@ use rustls::pki_types::CertificateDer;
 
 use super::config::{CertificateConfig, ClientCertCredential};
 use super::error::UpstreamError;
+use super::target_parser::ForwardTarget;
 use crate::context::RequestContext;
 use crate::http_message::{RequestBody, Response};
 use crate::tracker::StreamTracker;
@@ -39,6 +40,7 @@ mod scheduler;
 #[cfg(test)]
 mod scheduler_tests;
 
+use self::address_resolution::TimeoutResolver;
 use self::http::{HttpClient, HttpsClient, ProxyConnector};
 use self::http3::{Http3AddressState, Http3Client};
 use self::scheduler::WeightedItem;
@@ -70,6 +72,7 @@ pub(crate) trait ClientProtocol {
     &'a self,
     tls_config: &'a Option<Arc<rustls::ClientConfig>>,
     tracker: &'a Rc<StreamTracker>,
+    target: &'a ForwardTarget,
     req_headers: ::http::request::Parts,
     req_body: RequestBody,
     ctx: &'a RequestContext,
@@ -117,13 +120,14 @@ impl Upstream {
     &self,
     tls_config: &Option<Arc<rustls::ClientConfig>>,
     tracker: &Rc<StreamTracker>,
+    target: &ForwardTarget,
     req_headers: ::http::request::Parts,
     req_body: RequestBody,
     ctx: &RequestContext,
   ) -> Result<Response, UpstreamError> {
     self
       .client()?
-      .forward(tls_config, tracker, req_headers, req_body, ctx)
+      .forward(tls_config, tracker, target, req_headers, req_body, ctx)
       .await
   }
 
@@ -258,7 +262,10 @@ impl UpstreamRegistry {
       if upstream.addresses.is_empty() {
         // Direct mode: no proxy addresses, HttpClient connects to
         // origin directly
-        let connector = HttpConnector::new();
+        let mut connector = HttpConnector::new_with_resolver(
+          TimeoutResolver::new(upstream.dns_resolve_timeout),
+        );
+        connector.set_connect_timeout(Some(upstream.connect_timeout));
         let mut builder =
           Client::builder(hyper_util::rt::TokioExecutor::new());
         builder.pool_max_idle_per_host(
@@ -271,16 +278,14 @@ impl UpstreamRegistry {
           upstream_name,
           Rc::new(Upstream {
             addresses: vec![],
-            direct_client: Some(Box::new(
-              HttpClient::<HttpConnector> {
-                client,
-                proxy_addr: None,
-                connect_timeout: upstream.connect_timeout,
-                tunnel_idle_timeout: upstream.tunnel_idle_timeout,
-                dns_resolve_timeout: upstream.dns_resolve_timeout,
-                user: None,
-              },
-            )),
+            direct_client: Some(Box::new(HttpClient {
+              client,
+              proxy_addr: None,
+              connect_timeout: upstream.connect_timeout,
+              tunnel_idle_timeout: upstream.tunnel_idle_timeout,
+              dns_resolve_timeout: upstream.dns_resolve_timeout,
+              user: None,
+            })),
           }),
         );
         continue;

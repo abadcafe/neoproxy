@@ -100,10 +100,15 @@ fn test_parse_forward_target_valid_http() {
     make_request_parts(http::Method::GET, "http://example.com/path");
   let result = parse_forward_target(&parts);
   assert!(result.is_ok());
-  let (host, port, uri) = result.unwrap();
-  assert_eq!(host, "example.com");
-  assert_eq!(port, 80);
-  assert_eq!(uri.path_and_query().unwrap().as_str(), "/path");
+  let target = result.unwrap();
+  assert_eq!(
+    target.absolute_uri().to_string().as_str(),
+    "http://example.com/path"
+  );
+  assert_eq!(
+    target.host_header_value().unwrap().to_str().unwrap(),
+    "example.com"
+  );
 }
 
 #[test]
@@ -114,10 +119,15 @@ fn test_parse_forward_target_http_with_port() {
   );
   let result = parse_forward_target(&parts);
   assert!(result.is_ok());
-  let (host, port, uri) = result.unwrap();
-  assert_eq!(host, "example.com");
-  assert_eq!(port, 8080);
-  assert_eq!(uri.path_and_query().unwrap().as_str(), "/api");
+  let target = result.unwrap();
+  assert_eq!(
+    target.absolute_uri().to_string().as_str(),
+    "http://example.com:8080/api"
+  );
+  assert_eq!(
+    target.host_header_value().unwrap().to_str().unwrap(),
+    "example.com:8080"
+  );
 }
 
 #[test]
@@ -157,8 +167,19 @@ fn test_parse_forward_target_default_port() {
     make_request_parts(http::Method::GET, "http://example.com/");
   let result = parse_forward_target(&parts);
   assert!(result.is_ok());
-  let (_host, port, _uri) = result.unwrap();
-  assert_eq!(port, 80);
+  let target = result.unwrap();
+  assert_eq!(
+    target.host_header_value().unwrap().to_str().unwrap(),
+    "example.com"
+  );
+}
+
+#[test]
+fn test_parse_forward_target_rejects_userinfo() {
+  let parts =
+    make_request_parts(http::Method::GET, "http://user@example.com/");
+  let result = parse_forward_target(&parts);
+  assert_eq!(result, Err(ForwardTargetError::InvalidAuthority));
 }
 
 #[test]

@@ -1,11 +1,11 @@
 """
-Integration tests for the HTTP/3 Chain global upstream pool.
+Integration tests for the HTTP/3 Chain worker-local upstream pool.
 
 Tests:
 - Connection reuse within a single service
 - Multiple services sharing the same upstream
 - Three-level config inheritance (Plugin -> Upstream -> Address)
-- WRR load balancing with global pool
+- WRR load balancing with worker-local pool
 - Config validation for new upstream format
 """
 
@@ -68,13 +68,13 @@ def _proxy_get(proxy_port: int, target_host: str, target_port: int, timeout: flo
 class TestConnectionReuseWithinService:
     """
     Verify that multiple requests through the same service reuse the
-    QUIC connection (global pool behavior).
+    QUIC connection within a worker-local pool.
     """
 
     def test_multiple_requests_reuse_connection(self):
         """
         Send 5 requests through the same upstream — all should succeed.
-        The global pool ensures connection reuse across requests.
+        The worker-local pool ensures connection reuse across requests.
         """
         temp_dir = tempfile.mkdtemp()
         http_port = get_unique_port()
@@ -142,7 +142,7 @@ class TestConnectionReuseWithinService:
 class TestMultipleServicesShareUpstream:
     """
     Verify that multiple HTTP/3 chain services can share the same
-    upstream via the global pool.
+    upstream via the worker-local pool.
     """
 
     def test_two_services_same_upstream(self):
@@ -562,7 +562,7 @@ servers:
 
 class TestWRRLoadBalancingWithPool:
     """
-    Verify WRR load balancing works correctly with the global pool.
+    Verify WRR load balancing works correctly with the worker-local pool.
     """
 
     def test_two_addresses_wrr_distribution(self):

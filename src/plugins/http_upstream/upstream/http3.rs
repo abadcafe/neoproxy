@@ -3,10 +3,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 
 use bytes::{Buf, Bytes};
 use h3::client as h3_cli;
+use http_body::{Body, Frame, SizeHint};
 use http_body_util::BodyExt;
 use tracing::{info, warn};
 
@@ -19,7 +21,9 @@ use crate::http_message::{
 use crate::plugins::http_upstream::error::{
   UpstreamError, classify_quic_error,
 };
-use crate::plugins::http_upstream::target_parser;
+use crate::plugins::http_upstream::target_parser::{
+  self, ForwardTarget,
+};
 use crate::tracker::StreamTracker;
 
 // ============================================================================
@@ -214,29 +218,30 @@ pub(super) async fn chain_forward_http3(
     Bytes,
   >,
   user: Option<crate::config::UserCredential>,
+  target: &ForwardTarget,
   req_headers: http::request::Parts,
-  req_body: RequestBody,
+  mut req_body: RequestBody,
   ctx: &RequestContext,
 ) -> Response {
-  let body_bytes = match req_body.collect().await {
-    Ok(collected) => collected.to_bytes(),
-    Err(e) => {
-      warn!("http_upstream: failed to collect request body: {e}");
-      return build_error_response(
-        http::StatusCode::BAD_REQUEST,
-        "Failed to read request body",
-      );
-    }
-  };
-
   let mut fwd_req = http::Request::builder()
     .method(req_headers.method.clone())
-    .uri(req_headers.uri.clone())
+    .uri(target.absolute_uri().clone())
     .body(())
     .unwrap();
 
   let mut headers = req_headers.headers.clone();
   target_parser::strip_hop_by_hop_headers(&mut headers);
+  let host_header = match target.host_header_value() {
+    Ok(value) => value,
+    Err(e) => {
+      warn!("http_upstream: invalid H3 forward target authority: {e}");
+      return build_error_response(
+        http::StatusCode::BAD_REQUEST,
+        "Invalid target address",
+      );
+    }
+  };
+  headers.insert(http::header::HOST, host_header);
   apply_proxy_auth(&user, &mut fwd_req);
 
   for (name, value) in headers.iter() {
@@ -253,17 +258,48 @@ pub(super) async fn chain_forward_http3(
     }
   };
 
-  if !body_bytes.is_empty()
-    && let Err(e) = stream.send_data(body_bytes).await
-  {
-    warn!("http_upstream: H3 failed to send body: {e}");
-    return UpstreamError::ProxyInternalError(format!(
-      "Failed to send request body: {e}"
-    ))
-    .to_response(ctx);
+  let mut finished_by_trailers = false;
+  while let Some(frame) = req_body.frame().await {
+    let frame = match frame {
+      Ok(frame) => frame,
+      Err(e) => {
+        warn!("http_upstream: failed to read request body: {e}");
+        return build_error_response(
+          http::StatusCode::BAD_REQUEST,
+          "Failed to read request body",
+        );
+      }
+    };
+
+    match frame.into_data() {
+      Ok(data) => {
+        if !data.is_empty()
+          && let Err(e) = stream.send_data(data).await
+        {
+          warn!("http_upstream: H3 failed to send body: {e}");
+          return UpstreamError::ProxyInternalError(format!(
+            "Failed to send request body: {e}"
+          ))
+          .to_response(ctx);
+        }
+      }
+      Err(frame) => {
+        if let Ok(trailers) = frame.into_trailers() {
+          if let Err(e) = stream.send_trailers(trailers).await {
+            warn!("http_upstream: H3 failed to send trailers: {e}");
+            return UpstreamError::ProxyInternalError(format!(
+              "Failed to send request trailers: {e}"
+            ))
+            .to_response(ctx);
+          }
+          finished_by_trailers = true;
+          break;
+        }
+      }
+    }
   }
 
-  if let Err(e) = stream.finish().await {
+  if !finished_by_trailers && let Err(e) = stream.finish().await {
     warn!("http_upstream: H3 failed to finish request: {e}");
     return UpstreamError::ProxyInternalError(format!(
       "Failed to finish request: {e}"
@@ -297,22 +333,6 @@ pub(super) async fn chain_forward_http3(
   resp_headers
     .remove(http::header::HeaderName::from_static("proxy-status"));
 
-  let mut body_buf = bytes::BytesMut::new();
-  loop {
-    match stream.recv_data().await {
-      Ok(Some(mut chunk)) => {
-        let b = chunk.copy_to_bytes(chunk.remaining());
-        body_buf.extend_from_slice(&b);
-      }
-      Ok(None) => break,
-      Err(e) => {
-        warn!("http_upstream: H3 failed to receive response body: {e}");
-        break;
-      }
-    }
-  }
-  let body_bytes = body_buf.freeze();
-
   let mut resp = http::Response::builder().status(resp_parts.status);
   for (name, value) in resp_headers.iter() {
     resp = resp.header(name, value);
@@ -332,10 +352,7 @@ pub(super) async fn chain_forward_http3(
     );
   }
 
-  let resp_body_wrapped = crate::http_message::BytesBufBodyWrapper::new(
-    http_body_util::Full::new(body_bytes),
-  );
-  let resp_body = ResponseBody::new(resp_body_wrapped);
+  let resp_body = ResponseBody::new(H3ResponseBody::new(stream));
 
   match resp.body(resp_body) {
     Ok(r) => r,
@@ -346,6 +363,91 @@ pub(super) async fn chain_forward_http3(
         "Failed to build response",
       )
     }
+  }
+}
+
+type H3ClientRequestStream =
+  h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
+
+enum H3ResponseBodyState {
+  Data,
+  Trailers,
+  Done,
+}
+
+struct H3ResponseBody {
+  stream: H3ClientRequestStream,
+  state: H3ResponseBodyState,
+}
+
+impl H3ResponseBody {
+  fn new(stream: H3ClientRequestStream) -> Self {
+    Self { stream, state: H3ResponseBodyState::Data }
+  }
+}
+
+impl Unpin for H3ResponseBody {}
+
+impl Body for H3ResponseBody {
+  type Data = Bytes;
+  type Error = anyhow::Error;
+
+  fn poll_frame(
+    self: Pin<&mut Self>,
+    cx: &mut TaskContext<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    let this = self.get_mut();
+
+    loop {
+      match this.state {
+        H3ResponseBodyState::Data => {
+          match this.stream.poll_recv_data(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Ok(Some(mut chunk))) => {
+              let bytes = chunk.copy_to_bytes(chunk.remaining());
+              return Poll::Ready(Some(Ok(Frame::data(bytes))));
+            }
+            Poll::Ready(Ok(None)) => {
+              this.state = H3ResponseBodyState::Trailers;
+            }
+            Poll::Ready(Err(e)) => {
+              this.state = H3ResponseBodyState::Done;
+              return Poll::Ready(Some(Err(anyhow::anyhow!(
+                "H3 response body failed: {e}"
+              ))));
+            }
+          }
+        }
+        H3ResponseBodyState::Trailers => {
+          match this.stream.poll_recv_trailers(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Ok(Some(trailers))) => {
+              this.state = H3ResponseBodyState::Done;
+              return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
+            }
+            Poll::Ready(Ok(None)) => {
+              this.state = H3ResponseBodyState::Done;
+              return Poll::Ready(None);
+            }
+            Poll::Ready(Err(e)) => {
+              this.state = H3ResponseBodyState::Done;
+              return Poll::Ready(Some(Err(anyhow::anyhow!(
+                "H3 response trailers failed: {e}"
+              ))));
+            }
+          }
+        }
+        H3ResponseBodyState::Done => return Poll::Ready(None),
+      }
+    }
+  }
+
+  fn is_end_stream(&self) -> bool {
+    matches!(self.state, H3ResponseBodyState::Done)
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    SizeHint::default()
   }
 }
 
@@ -369,6 +471,7 @@ impl ClientProtocol for Http3Client {
     &'a self,
     tls_config: &'a Option<Arc<rustls::ClientConfig>>,
     tracker: &'a Rc<StreamTracker>,
+    target: &'a ForwardTarget,
     req_headers: ::http::request::Parts,
     req_body: RequestBody,
     ctx: &'a RequestContext,
@@ -413,6 +516,7 @@ impl ClientProtocol for Http3Client {
         chain_forward_http3(
           send_request,
           user,
+          target,
           req_headers,
           req_body,
           ctx,

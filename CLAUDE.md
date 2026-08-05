@@ -12,19 +12,17 @@ cargo +nightly fmt # 全量格式化
 cargo clippy       # 0 警告和错误
 cargo build        # 0 警告和错误
 cargo test         # 单测全部通过, 禁止跳过
-uv run --frozen python -m pytest -q tests/unit        # 单测全部通过, 禁止跳过
-uv run --frozen python -m pytest -q tests/integration # 集测全部通过, 禁止跳过
+uv run --frozen python -m pytest # 集测全部通过, 禁止跳过
 ```
 
 ### 2. Python：100% 类型注解，0 编译警告和错误
 
 - **所有 Python 代码**（包括 `*_tests.py`）必须有完整的类型注解
 - 必须使用 `type` 类型别名语法和泛型函数语法
-- 禁止 `Any`、禁止裸 `list` / `dict` / `tuple`（必须写泛型参数如 `list[str]`）
-- 禁止使用 `# pyright: ignore` 和 `# type: ignore` 掩盖错误
+- 禁止使用 `# pyright: ignore` 和 `# type: ignore` 等方式掩盖错误
 - 优先使用 `Pydantic` 而不是 `cast`
-- 必须通过 `pyright` **strict 模式**，**0 errors, 0 warnings**
-- 必须通过 `ruff check` 和 `ruff format --check`，**0 errors, 0 warnings**
+- 必须通过 `ruff format --check` 和 `ruff check`，**0 errors, 0 warnings**
+- 必须通过 `basedpyright`，**0 errors, 0 warnings**
 
 ### 3. Python 错误处理
 

@@ -22,15 +22,16 @@ python_functions = ["test_*"]
 addopts = "-v --tb=short --timeout=60 --timeout-method=thread"
 
 [tool.ruff]
-line-length = 120
+line-length = 72
 target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 
-[tool.pyright]
+[tool.basedpyright]
 pythonVersion = "3.14"
-typeCheckingMode = "strict"
+pythonPlatform = "All"
+typeCheckingMode = "all"
 include = ["tests"]
 stubPath = "typings"
 venvPath = "."

@@ -1,8 +1,7 @@
 /target/
 /logs/
-/*.sublime-*
 /tmp/
 /working/
-**/__pycache__/
 /archived/
-/.claude/worktrees/
+/*.sublime-*
+__pycache__/

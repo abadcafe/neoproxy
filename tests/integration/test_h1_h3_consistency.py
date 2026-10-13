@@ -226,7 +226,9 @@ def h1_h3_test_env() -> Generator[tuple[str, int, int, int, int], None, None]:
     http3_port = get_unique_port()
     default_port = get_unique_port()
 
-    config_path = write_h1_h3_config(temp_dir, http_port, https_port, http3_port, default_port)
+    config_path = write_h1_h3_config(
+        temp_dir, http_port, https_port, http3_port, default_port
+    )
 
     yield config_path, http_port, https_port, http3_port, default_port
 
@@ -279,7 +281,9 @@ def proxy_with_capture(
         http_ready = wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=proc)
 
         # Wait for HTTP3 listener to be ready using polling
-        h3_ready = wait_for_udp_port_bound("127.0.0.1", http3_port, timeout=5.0, proc=proc)
+        h3_ready = wait_for_udp_port_bound(
+            "127.0.0.1", http3_port, timeout=5.0, proc=proc
+        )
 
         # If process exited or listeners not ready, capture stderr
         if proc.poll() is not None or not http_ready or not h3_ready:
@@ -320,9 +324,13 @@ class TestListenerKinds:
         if proc is None:
             # Process exited - show error for debugging
             stderr_text = stderr_data.decode("utf-8", errors="replace")
-            pytest.fail(f"Process failed to start with 'http' listener kind.\nstderr: {stderr_text}")
+            pytest.fail(
+                f"Process failed to start with 'http' listener kind.\nstderr: {stderr_text}"
+            )
 
-        assert proc.poll() is None, "Process should be running with 'http' listener kind"
+        assert proc.poll() is None, (
+            "Process should be running with 'http' listener kind"
+        )
 
     def test_https_listener_kind_accepted(
         self,
@@ -337,9 +345,13 @@ class TestListenerKinds:
 
         if proc is None:
             stderr_text = stderr_data.decode("utf-8", errors="replace")
-            pytest.fail(f"Process failed to start with 'https' listener kind.\nstderr: {stderr_text}")
+            pytest.fail(
+                f"Process failed to start with 'https' listener kind.\nstderr: {stderr_text}"
+            )
 
-        assert proc.poll() is None, "Process should be running with 'https' listener kind"
+        assert proc.poll() is None, (
+            "Process should be running with 'https' listener kind"
+        )
 
     def test_http3_listener_kind_accepted(
         self,
@@ -354,9 +366,13 @@ class TestListenerKinds:
 
         if proc is None:
             stderr_text = stderr_data.decode("utf-8", errors="replace")
-            pytest.fail(f"Process failed to start with 'http3' listener kind.\nstderr: {stderr_text}")
+            pytest.fail(
+                f"Process failed to start with 'http3' listener kind.\nstderr: {stderr_text}"
+            )
 
-        assert proc.poll() is None, "Process should be running with 'http3' listener kind"
+        assert proc.poll() is None, (
+            "Process should be running with 'http3' listener kind"
+        )
 
 
 class TestServerLevelConfig:
@@ -376,9 +392,13 @@ class TestServerLevelConfig:
         if proc is None:
             stderr_text = stderr_data.decode("utf-8", errors="replace")
             if "tls" in stderr_text.lower():
-                pytest.fail(f"Server-level 'tls' field not accepted.\nstderr: {stderr_text}")
+                pytest.fail(
+                    f"Server-level 'tls' field not accepted.\nstderr: {stderr_text}"
+                )
             else:
-                pytest.fail(f"Process failed to start (possibly due to server-level tls).\nstderr: {stderr_text}")
+                pytest.fail(
+                    f"Process failed to start (possibly due to server-level tls).\nstderr: {stderr_text}"
+                )
 
         assert proc.poll() is None, "Process should be running with server-level tls"
 
@@ -396,13 +416,21 @@ class TestServerLevelConfig:
         if proc is None:
             stderr_text = stderr_data.decode("utf-8", errors="replace")
             if "hostnames" in stderr_text.lower():
-                pytest.fail(f"Server-level 'hostnames' field not accepted.\nstderr: {stderr_text}")
+                pytest.fail(
+                    f"Server-level 'hostnames' field not accepted.\nstderr: {stderr_text}"
+                )
             else:
-                pytest.fail(f"Process failed to start (possibly due to server-level hostnames).\nstderr: {stderr_text}")
+                pytest.fail(
+                    f"Process failed to start (possibly due to server-level hostnames).\nstderr: {stderr_text}"
+                )
 
-        assert proc.poll() is None, "Process should be running with server-level hostnames"
+        assert proc.poll() is None, (
+            "Process should be running with server-level hostnames"
+        )
 
-    def test_http_listener_ignores_server_level_tls(self, shared_test_certs: StringMap) -> None:
+    def test_http_listener_ignores_server_level_tls(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """
         Test that HTTP listener ignores server-level TLS config.
 
@@ -487,13 +515,21 @@ class TestHTTP3MultiAddress:
         if proc is None:
             stderr_text = stderr_data.decode("utf-8", errors="replace")
             if "addresses" in stderr_text.lower():
-                pytest.fail(f"http3 listener does not accept 'addresses' field.\nstderr: {stderr_text}")
+                pytest.fail(
+                    f"http3 listener does not accept 'addresses' field.\nstderr: {stderr_text}"
+                )
             else:
-                pytest.fail(f"Process failed to start (possibly due to http3 addresses field).\nstderr: {stderr_text}")
+                pytest.fail(
+                    f"Process failed to start (possibly due to http3 addresses field).\nstderr: {stderr_text}"
+                )
 
-        assert proc.poll() is None, "Process should be running with http3 'addresses' field"
+        assert proc.poll() is None, (
+            "Process should be running with http3 'addresses' field"
+        )
 
-    def test_http3_listens_on_multiple_addresses(self, shared_test_certs: StringMap) -> None:
+    def test_http3_listens_on_multiple_addresses(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """
         Test that http3 listener can listen on multiple addresses.
 
@@ -554,12 +590,12 @@ class TestHTTP3MultiAddress:
             proxy_proc = start_proxy(config_path)
 
             # Wait for both UDP ports to be bound
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port1, timeout=5.0, proc=proxy_proc), (
-                f"HTTP/3 listener failed to start on port {proxy_port1}"
-            )
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port2, timeout=5.0, proc=proxy_proc), (
-                f"HTTP/3 listener failed to start on port {proxy_port2}"
-            )
+            assert wait_for_udp_port_bound(
+                "127.0.0.1", proxy_port1, timeout=5.0, proc=proxy_proc
+            ), f"HTTP/3 listener failed to start on port {proxy_port1}"
+            assert wait_for_udp_port_bound(
+                "127.0.0.1", proxy_port2, timeout=5.0, proc=proxy_proc
+            ), f"HTTP/3 listener failed to start on port {proxy_port2}"
 
             # Verify process is still running
             assert proxy_proc.poll() is None, "Proxy process should be running"
@@ -573,7 +609,9 @@ class TestHTTP3MultiAddress:
 class TestHTTP3ConnectOnlyUpgrade:
     """Test that HTTP/3 listener only creates upgrade pair for CONNECT."""
 
-    def test_get_request_no_upgrade_error(self, h1_h3_test_env: tuple[str, int, int, int, int]) -> None:
+    def test_get_request_no_upgrade_error(
+        self, h1_h3_test_env: tuple[str, int, int, int, int]
+    ) -> None:
         """
         Test that GET request to echo service doesn't cause upgrade error.
 
@@ -608,9 +646,13 @@ class TestHTTP3ConnectOnlyUpgrade:
                     f"http://127.0.0.1:{default_port}/test",
                     timeout=5.0,
                 )
-                assert response.status_code == 200, f"Expected 200, got {response.status_code}"
+                assert response.status_code == 200, (
+                    f"Expected 200, got {response.status_code}"
+                )
             except requests.exceptions.ConnectionError:
-                pytest.fail(f"Could not connect to server on port {default_port}. Server may not be listening.")
+                pytest.fail(
+                    f"Could not connect to server on port {default_port}. Server may not be listening."
+                )
             except requests.exceptions.Timeout:
                 pytest.fail(f"Request to server on port {default_port} timed out")
 
@@ -669,10 +711,14 @@ class TestHTTP10Support:
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, echo_handler
+            )
 
             proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
+                "Proxy server failed to start"
+            )
 
             # Send CONNECT with HTTP/1.0 (as Python 3.8 does)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -692,7 +738,9 @@ class TestHTTP10Support:
                         break
                     response += chunk
 
-                assert b"200" in response, f"Expected 200 for HTTP/1.0 CONNECT, got: {response.decode(errors='ignore')}"
+                assert b"200" in response, (
+                    f"Expected 200 for HTTP/1.0 CONNECT, got: {response.decode(errors='ignore')}"
+                )
 
                 # Verify bidirectional data transfer through tunnel
                 test_data = b"HELLO_HTTP10"
@@ -711,7 +759,9 @@ class TestHTTP10Support:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_http10_get_with_host_routed(self, h1_h3_test_env: tuple[str, int, int, int, int]) -> None:
+    def test_http10_get_with_host_routed(
+        self, h1_h3_test_env: tuple[str, int, int, int, int]
+    ) -> None:
         """
         HTTP/1.0 GET with Host header should route to the echo service.
 
@@ -762,7 +812,9 @@ class TestHTTP10Support:
             if proc is not None:
                 terminate_process(proc)
 
-    def test_http10_get_without_host_returns_400(self, h1_h3_test_env: tuple[str, int, int, int, int]) -> None:
+    def test_http10_get_without_host_returns_400(
+        self, h1_h3_test_env: tuple[str, int, int, int, int]
+    ) -> None:
         """
         HTTP/1.0 GET without Host header should return 400 Bad Request.
 
@@ -812,7 +864,9 @@ class TestHTTP3AuthorityHostMismatch:
     they MUST contain the same value.
     """
 
-    def test_h3_authority_host_match_returns_200(self, shared_test_certs: StringMap) -> None:
+    def test_h3_authority_host_match_returns_200(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """
         Test that matching :authority and Host in HTTP/3 returns 200 OK.
 
@@ -880,7 +934,9 @@ class TestHTTP3AuthorityHostMismatch:
             )
 
             # Wait for HTTP/3 listener
-            if not wait_for_udp_port_bound("127.0.0.1", http3_port, timeout=5.0, proc=proc):
+            if not wait_for_udp_port_bound(
+                "127.0.0.1", http3_port, timeout=5.0, proc=proc
+            ):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -910,7 +966,9 @@ class TestHTTP3AuthorityHostMismatch:
                 terminate_process(proc)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_h3_authority_host_mismatch_returns_400(self, shared_test_certs: StringMap) -> None:
+    def test_h3_authority_host_mismatch_returns_400(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """
         Test that :authority and Host mismatch in HTTP/3 returns 400 Bad Request.
 
@@ -985,7 +1043,9 @@ class TestHTTP3AuthorityHostMismatch:
             )
 
             # Wait for HTTP/3 listener
-            if not wait_for_udp_port_bound("127.0.0.1", http3_port, timeout=5.0, proc=proc):
+            if not wait_for_udp_port_bound(
+                "127.0.0.1", http3_port, timeout=5.0, proc=proc
+            ):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -1113,14 +1173,18 @@ class TestHTTPSClientCert:
             response = ssl_sock.recv(4096).decode()
             ssl_sock.close()
 
-            assert "403" in response, f"Expected 403 Forbidden for missing client certificate, got: {response}"
+            assert "403" in response, (
+                f"Expected 403 Forbidden for missing client certificate, got: {response}"
+            )
 
         finally:
             if proc and proc.poll() is None:
                 terminate_process(proc)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_https_with_cert_returns_200(self, shared_test_certs: StringMap, shared_client_cert: StringMap) -> None:
+    def test_https_with_cert_returns_200(
+        self, shared_test_certs: StringMap, shared_client_cert: StringMap
+    ) -> None:
         """
         Test that HTTPS server with client_ca_certs returns 200 when
         client presents a valid certificate.
@@ -1312,7 +1376,9 @@ class TestHTTP3ClientCert:
             )
 
             # Plan B: TLS handshake succeeds, HTTP layer returns 403
-            assert success, f"TLS handshake should succeed without client cert. Message: {message}"
+            assert success, (
+                f"TLS handshake should succeed without client cert. Message: {message}"
+            )
             assert status_code == 403, (
                 f"Expected 403 Forbidden for missing client certificate, got {status_code}. Message: {message}"
             )

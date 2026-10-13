@@ -78,7 +78,9 @@ def http_echo_handler(conn: socket.socket) -> None:
 
         # Send HTTP response with the body
         response = (
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n"
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: "
+            + str(len(body)).encode()
+            + b"\r\n\r\n"
         ) + body
         conn.sendall(response)
     except OSError:

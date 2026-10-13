@@ -111,7 +111,9 @@ def chain_service_context(
             temp_dir=temp_dir,
         )
         proxy_proc = start_proxy(config_path)
-        assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), "HTTP listener failed to start"
+        assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
+            "HTTP listener failed to start"
+        )
 
         yield temp_dir, proxy_proc
 
@@ -129,7 +131,9 @@ class TestHTTP3ChainConnectValidation:
     HTTP listener port and verify the error responses.
     """
 
-    def test_non_connect_origin_form_returns_400(self, shared_test_certs: StringMap) -> None:
+    def test_non_connect_origin_form_returns_400(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """
         TC-CHAIN-VALIDATE-001: Origin-form GET request returns 400.
 
@@ -140,7 +144,10 @@ class TestHTTP3ChainConnectValidation:
         http_port = get_unique_port()
         h3_port = get_unique_port()
 
-        with chain_service_context(http_port, h3_port, shared_test_certs) as (_temp_dir, _proxy_proc):
+        with chain_service_context(http_port, h3_port, shared_test_certs) as (
+            _temp_dir,
+            _proxy_proc,
+        ):
             # Send GET request with origin-form URI (not absolute-form)
             request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
             response = send_raw_request("127.0.0.1", http_port, request)
@@ -151,12 +158,16 @@ class TestHTTP3ChainConnectValidation:
                 f"Expected 400 for origin-form GET, got {status_code}. Response: {response.decode(errors='ignore')}"
             )
 
-            assert "content-type" in headers, "Expected Content-Type header in error response"
+            assert "content-type" in headers, (
+                "Expected Content-Type header in error response"
+            )
             assert "text/plain" in headers.get("content-type", ""), (
                 f"Expected text/plain Content-Type, got: {headers.get('content-type')}"
             )
 
-    def test_connect_missing_port_returns_400(self, shared_test_certs: StringMap) -> None:
+    def test_connect_missing_port_returns_400(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """
         TC-CHAIN-VALIDATE-003: CONNECT with missing port returns 400.
 
@@ -166,7 +177,10 @@ class TestHTTP3ChainConnectValidation:
         http_port = get_unique_port()
         h3_port = get_unique_port()
 
-        with chain_service_context(http_port, h3_port, shared_test_certs) as (_temp_dir, _proxy_proc):
+        with chain_service_context(http_port, h3_port, shared_test_certs) as (
+            _temp_dir,
+            _proxy_proc,
+        ):
             # CONNECT with no port
             request = b"CONNECT example.com HTTP/1.1\r\nHost: example.com\r\n\r\n"
             response = send_raw_request("127.0.0.1", http_port, request)
@@ -187,7 +201,10 @@ class TestHTTP3ChainConnectValidation:
         http_port = get_unique_port()
         h3_port = get_unique_port()
 
-        with chain_service_context(http_port, h3_port, shared_test_certs) as (_temp_dir, _proxy_proc):
+        with chain_service_context(http_port, h3_port, shared_test_certs) as (
+            _temp_dir,
+            _proxy_proc,
+        ):
             # CONNECT with port 0
             request = b"CONNECT example.com:0 HTTP/1.1\r\nHost: example.com:0\r\n\r\n"
             response = send_raw_request("127.0.0.1", http_port, request)
@@ -198,7 +215,9 @@ class TestHTTP3ChainConnectValidation:
                 f"Expected 400 for port zero, got {status_code}. Response: {response.decode(errors='ignore')}"
             )
 
-    def test_connect_no_authority_returns_400(self, shared_test_certs: StringMap) -> None:
+    def test_connect_no_authority_returns_400(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """
         TC-CHAIN-VALIDATE-005: CONNECT with no authority returns 400.
 
@@ -208,7 +227,10 @@ class TestHTTP3ChainConnectValidation:
         http_port = get_unique_port()
         h3_port = get_unique_port()
 
-        with chain_service_context(http_port, h3_port, shared_test_certs) as (_temp_dir, _proxy_proc):
+        with chain_service_context(http_port, h3_port, shared_test_certs) as (
+            _temp_dir,
+            _proxy_proc,
+        ):
             # CONNECT with no authority (empty URI path instead of host:port)
             request = b"CONNECT / HTTP/1.1\r\nHost: localhost\r\n\r\n"
             response = send_raw_request("127.0.0.1", http_port, request)
@@ -229,7 +251,9 @@ class TestHTTP3ChainAddressResolution:
     - Unresolvable hostnames cause startup failure (not silent drop / runtime panic)
     """
 
-    def test_hostname_address_starts_successfully(self, shared_test_certs: StringMap) -> None:
+    def test_hostname_address_starts_successfully(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """
         TC-CHAIN-ADDR-001: Hostname address in proxy_group starts successfully.
 
@@ -255,16 +279,18 @@ class TestHTTP3ChainAddressResolution:
             proxy_proc = start_proxy(config_path)
 
             # Should start successfully with hostname address
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=proxy_proc), (
-                "HTTP listener should start with hostname address in proxy_group"
-            )
+            assert wait_for_proxy(
+                "127.0.0.1", http_port, timeout=5.0, proc=proxy_proc
+            ), "HTTP listener should start with hostname address in proxy_group"
 
         finally:
             if proxy_proc:
                 terminate_process(proxy_proc, timeout=10)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_unresolvable_address_starts_but_connect_fails(self, shared_test_certs: StringMap) -> None:
+    def test_unresolvable_address_starts_but_connect_fails(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """
         TC-CHAIN-ADDR-002: Unresolvable hostname in proxy_group starts but
         connections fail gracefully (no panic).
@@ -317,9 +343,9 @@ servers:
             proxy_proc = start_proxy(config_path)
 
             # Should start successfully (DNS resolved at connect time)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=proxy_proc), (
-                "Service should start even with unresolvable proxy address"
-            )
+            assert wait_for_proxy(
+                "127.0.0.1", http_port, timeout=5.0, proc=proxy_proc
+            ), "Service should start even with unresolvable proxy address"
 
             # But requests should fail gracefully (502, not connection reset)
             result = subprocess.run(
@@ -338,12 +364,16 @@ servers:
             )
 
             # Should get 502 Bad Gateway (not a crash/panic)
-            assert "502" in result.stdout or "502" in result.stderr or result.returncode != 0, (
-                "Request should fail gracefully with unresolvable proxy address"
-            )
+            assert (
+                "502" in result.stdout
+                or "502" in result.stderr
+                or result.returncode != 0
+            ), "Request should fail gracefully with unresolvable proxy address"
 
             # Process should still be running (no panic)
-            assert proxy_proc.poll() is None, "Service should not crash/panic with unresolvable proxy address"
+            assert proxy_proc.poll() is None, (
+                "Service should not crash/panic with unresolvable proxy address"
+            )
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:

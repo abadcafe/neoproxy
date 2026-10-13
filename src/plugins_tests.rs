@@ -3,17 +3,12 @@ use std::collections::HashMap;
 use crate::config::SerializedArgs;
 use crate::plugins::{PluginManager, auth};
 
-#[cfg(feature = "js-sandbox")]
 fn all_plugins_config() -> HashMap<String, SerializedArgs> {
   const ALL_PLUGINS: &[&str] =
-    &["echo", "auth", "access_log", "http_upstream", "js_sandbox"];
+    &["echo", "auth", "access_log", "http_upstream"];
   let mut m = HashMap::new();
   for &name in ALL_PLUGINS {
-    let cfg = if name == "js_sandbox" {
-      serde_yaml::from_str(r#"source_dir: "/tmp/js_sandbox""#).unwrap()
-    } else {
-      serde_yaml::Value::Null
-    };
+    let cfg = serde_yaml::Value::Null;
     m.insert(name.to_string(), cfg);
   }
   m
@@ -32,12 +27,12 @@ fn test_plugin_manager_empty_config_loads_nothing() {
   assert!(pm.plugins.is_empty());
 }
 
-#[cfg(feature = "js-sandbox")]
 #[test]
 fn test_plugin_manager_all_plugins_config() {
   const ALL_PLUGINS: &[&str] =
-    &["echo", "auth", "access_log", "http_upstream", "js_sandbox"];
-  let (pm, _errors) = PluginManager::new(all_plugins_config());
+    &["echo", "auth", "access_log", "http_upstream"];
+  let (pm, errors) = PluginManager::new(all_plugins_config());
+  assert!(errors.is_empty());
   for &name in ALL_PLUGINS {
     assert!(pm.plugins.contains_key(name), "missing plugin '{}'", name);
   }
@@ -53,7 +48,6 @@ fn test_plugin_manager_partial_config() {
   assert!(pm.plugins.contains_key("auth"));
   assert!(!pm.plugins.contains_key("access_log"));
   assert!(!pm.plugins.contains_key("http_upstream"));
-  assert!(!pm.plugins.contains_key("js_sandbox"));
 }
 
 #[test]

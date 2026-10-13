@@ -28,10 +28,6 @@ mod echo_tests;
 pub(crate) mod http_upstream;
 #[cfg(test)]
 mod http_upstream_tests;
-#[cfg(feature = "js-sandbox")]
-pub(crate) mod js_sandbox;
-#[cfg(all(test, feature = "js-sandbox"))]
-mod js_sandbox_tests;
 
 type CreateFn =
   fn(Option<&SerializedArgs>) -> Result<Box<dyn plugin::Plugin>>;
@@ -57,8 +53,6 @@ impl PluginManager {
       (auth::plugin_name(), auth::create_plugin),
       (access_log::plugin_name(), access_log::create_plugin),
       (http_upstream::plugin_name(), http_upstream::create_plugin),
-      #[cfg(feature = "js-sandbox")]
-      (js_sandbox::plugin_name(), js_sandbox::create_plugin),
     ];
 
     let mut plugins: HashMap<String, Box<dyn plugin::Plugin>> =

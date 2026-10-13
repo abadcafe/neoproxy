@@ -36,7 +36,9 @@ class ServerCertificateConfig:
     hostnames: list[str]
 
 
-def create_multi_server_config(proxy_port: int, temp_dir: str, servers: list[ServerCertificateConfig]) -> str:
+def create_multi_server_config(
+    proxy_port: int, temp_dir: str, servers: list[ServerCertificateConfig]
+) -> str:
     """
     Create a config with multiple servers sharing the same address.
 
@@ -329,15 +331,25 @@ class TestSniCertificateSelection:
 
             # Start proxy
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy failed to start"
 
             # Test SNI=api.test.local -> should get server A's cert
-            cn_a = get_certificate_cn("127.0.0.1", proxy_port, "api.test.local", ca_cert_path)
-            assert cn_a == "api.test.local", f"Expected CN 'api.test.local' for SNI=api.test.local, got '{cn_a}'"
+            cn_a = get_certificate_cn(
+                "127.0.0.1", proxy_port, "api.test.local", ca_cert_path
+            )
+            assert cn_a == "api.test.local", (
+                f"Expected CN 'api.test.local' for SNI=api.test.local, got '{cn_a}'"
+            )
 
             # Test SNI=web.test.local -> should get server B's cert
-            cn_b = get_certificate_cn("127.0.0.1", proxy_port, "web.test.local", ca_cert_path)
-            assert cn_b == "web.test.local", f"Expected CN 'web.test.local' for SNI=web.test.local, got '{cn_b}'"
+            cn_b = get_certificate_cn(
+                "127.0.0.1", proxy_port, "web.test.local", ca_cert_path
+            )
+            assert cn_b == "web.test.local", (
+                f"Expected CN 'web.test.local' for SNI=web.test.local, got '{cn_b}'"
+            )
 
         finally:
             if proxy_proc:
@@ -367,14 +379,22 @@ class TestSniCertificateSelection:
                 cert_name="wildcard",
             )
 
-            config_path = create_single_server_config(proxy_port, temp_dir, cert_path, key_path)
+            config_path = create_single_server_config(
+                proxy_port, temp_dir, cert_path, key_path
+            )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy failed to start"
 
             # Test SNI=foo.test.local -> should succeed
-            success, error = try_tls_connection_with_sni("127.0.0.1", proxy_port, "foo.test.local", ca_cert_path)
-            assert success, f"Expected TLS connection to succeed for foo.test.local: {error}"
+            success, error = try_tls_connection_with_sni(
+                "127.0.0.1", proxy_port, "foo.test.local", ca_cert_path
+            )
+            assert success, (
+                f"Expected TLS connection to succeed for foo.test.local: {error}"
+            )
 
         finally:
             if proxy_proc:
@@ -403,16 +423,24 @@ class TestSniCertificateSelection:
                 cert_name="wildcard",
             )
 
-            config_path = create_single_server_config(proxy_port, temp_dir, cert_path, key_path)
+            config_path = create_single_server_config(
+                proxy_port, temp_dir, cert_path, key_path
+            )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy failed to start"
 
             # Test SNI=test.local -> should succeed (bare domain match via wildcard)
             # Note: We add test.local to SAN because OpenSSL client verification
             # doesn't recognize bare domain matching wildcard patterns
-            success, error = try_tls_connection_with_sni("127.0.0.1", proxy_port, "test.local", ca_cert_path)
-            assert success, f"Expected TLS connection to succeed for test.local: {error}"
+            success, error = try_tls_connection_with_sni(
+                "127.0.0.1", proxy_port, "test.local", ca_cert_path
+            )
+            assert success, (
+                f"Expected TLS connection to succeed for test.local: {error}"
+            )
 
         finally:
             if proxy_proc:
@@ -440,10 +468,14 @@ class TestSniCertificateSelection:
                 cert_name="wildcard",
             )
 
-            config_path = create_single_server_config(proxy_port, temp_dir, cert_path, key_path)
+            config_path = create_single_server_config(
+                proxy_port, temp_dir, cert_path, key_path
+            )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy failed to start"
 
             # Test SNI=bar.foo.test.local -> should FAIL (multi-level)
             # Since we have no default certificate, TLS handshake should fail
@@ -453,7 +485,9 @@ class TestSniCertificateSelection:
                 "bar.foo.test.local",
                 ca_cert_path,
             )
-            assert not success, "Expected TLS connection to FAIL for bar.foo.test.local (multi-level subdomain)"
+            assert not success, (
+                "Expected TLS connection to FAIL for bar.foo.test.local (multi-level subdomain)"
+            )
 
         finally:
             if proxy_proc:
@@ -491,7 +525,9 @@ class TestSniCertificateSelection:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy failed to start"
 
             # Test SNI=unknown.test.local -> should FAIL
             success, _ = try_tls_connection_with_sni(
@@ -500,7 +536,9 @@ class TestSniCertificateSelection:
                 "unknown.test.local",
                 ca_cert_path,
             )
-            assert not success, "Expected TLS connection to FAIL for unknown.test.local (no matching cert)"
+            assert not success, (
+                "Expected TLS connection to FAIL for unknown.test.local (no matching cert)"
+            )
 
         finally:
             if proxy_proc:
@@ -563,15 +601,25 @@ class TestSniCertificateSelection:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy failed to start"
 
             # Test SNI=api.test.local -> should get exact cert (not wildcard)
-            cn = get_certificate_cn("127.0.0.1", proxy_port, "api.test.local", ca_cert_path)
-            assert cn == "api.test.local", f"Expected exact match cert 'api.test.local', got '{cn}'"
+            cn = get_certificate_cn(
+                "127.0.0.1", proxy_port, "api.test.local", ca_cert_path
+            )
+            assert cn == "api.test.local", (
+                f"Expected exact match cert 'api.test.local', got '{cn}'"
+            )
 
             # Test SNI=foo.test.local -> should get wildcard cert
-            cn = get_certificate_cn("127.0.0.1", proxy_port, "foo.test.local", ca_cert_path)
-            assert cn == "*.test.local", f"Expected wildcard cert '*.test.local', got '{cn}'"
+            cn = get_certificate_cn(
+                "127.0.0.1", proxy_port, "foo.test.local", ca_cert_path
+            )
+            assert cn == "*.test.local", (
+                f"Expected wildcard cert '*.test.local', got '{cn}'"
+            )
 
         finally:
             if proxy_proc:

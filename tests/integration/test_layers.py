@@ -101,7 +101,9 @@ def _access_log_plugins(writer: str = "logs/access") -> ConfigDict:
 class TestAuthLayer:
     """Verify auth.basic_auth layer works."""
 
-    def test_auth_rejects_without_credentials(self, proxy_with_config: ProxyWithConfig) -> None:
+    def test_auth_rejects_without_credentials(
+        self, proxy_with_config: ProxyWithConfig
+    ) -> None:
         """Request without Proxy-Authorization should get 407."""
         config: ConfigDict = {
             "plugins": {"echo": None, "auth": None},
@@ -149,7 +151,9 @@ class TestAuthLayer:
             assert status == 407
             assert "proxy-authenticate" in headers
 
-    def test_auth_accepts_valid_credentials(self, proxy_with_config: ProxyWithConfig) -> None:
+    def test_auth_accepts_valid_credentials(
+        self, proxy_with_config: ProxyWithConfig
+    ) -> None:
         """Request with valid credentials should succeed."""
         config: ConfigDict = {
             "plugins": {"echo": None, "auth": None},
@@ -198,7 +202,9 @@ class TestAuthLayer:
             )
             assert status == 200
 
-    def test_auth_rejects_wrong_password(self, proxy_with_config: ProxyWithConfig) -> None:
+    def test_auth_rejects_wrong_password(
+        self, proxy_with_config: ProxyWithConfig
+    ) -> None:
         """Request with wrong password should get 407."""
         config: ConfigDict = {
             "plugins": {"echo": None, "auth": None},
@@ -247,7 +253,9 @@ class TestAuthLayer:
             )
             assert status == 407
 
-    def test_auth_rejects_non_basic_scheme(self, proxy_with_config: ProxyWithConfig) -> None:
+    def test_auth_rejects_non_basic_scheme(
+        self, proxy_with_config: ProxyWithConfig
+    ) -> None:
         """Request with non-Basic Proxy-Authorization should get 407."""
         config: ConfigDict = {
             "plugins": {"echo": None, "auth": None},
@@ -295,7 +303,9 @@ class TestAuthLayer:
             )
             assert status == 407
 
-    def test_auth_rejects_malformed_basic_header(self, proxy_with_config: ProxyWithConfig) -> None:
+    def test_auth_rejects_malformed_basic_header(
+        self, proxy_with_config: ProxyWithConfig
+    ) -> None:
         """Request with malformed Basic header should get 407."""
         config: ConfigDict = {
             "plugins": {"echo": None, "auth": None},
@@ -390,7 +400,9 @@ class TestAccessLogLayer:
             log_dir = os.path.join(proxy.working_dir, "logs")
             assert wait_for_log_file(log_dir), f"Log file should exist in {log_dir}"
 
-    def test_access_log_without_context_fields(self, proxy_with_config: ProxyWithConfig) -> None:
+    def test_access_log_without_context_fields(
+        self, proxy_with_config: ProxyWithConfig
+    ) -> None:
         """Access log layer with empty context_fields should still log base fields."""
         config: ConfigDict = {
             "listeners": [
@@ -500,15 +512,17 @@ class TestCombinedLayers:
             # Wait for log file to contain entries
             log_dir = os.path.join(proxy.working_dir, "logs")
             # Wait for either 407 or 200 to appear in log
-            assert wait_for_log_file(log_dir, contains="407") or wait_for_log_file(log_dir, contains="200"), (
-                "Log should contain request entries"
-            )
+            assert wait_for_log_file(log_dir, contains="407") or wait_for_log_file(
+                log_dir, contains="200"
+            ), "Log should contain request entries"
 
 
 class TestAccessLogErrorHandling:
     """Verify access_log layer handles service errors correctly."""
 
-    def test_access_log_converts_err_to_500(self, proxy_with_config: ProxyWithConfig) -> None:
+    def test_access_log_converts_err_to_500(
+        self, proxy_with_config: ProxyWithConfig
+    ) -> None:
         """When inner service returns Err, access_log should convert to 5xx response.
 
         Uses connect_tcp service targeting an unreachable address (127.0.0.1:1).
@@ -582,13 +596,17 @@ class TestAccessLogErrorHandling:
 
             # Wait for log file to contain error entry
             log_dir = os.path.join(proxy.working_dir, "logs")
-            assert wait_for_log_file(log_dir, contains=str(status)), f"Log should contain status {status}"
+            assert wait_for_log_file(log_dir, contains=str(status)), (
+                f"Log should contain status {status}"
+            )
 
 
 class TestLayerOrdering:
     """Verify layers are applied in correct order (outer first, inner last)."""
 
-    def test_outer_layer_sees_request_first(self, proxy_with_config: ProxyWithConfig) -> None:
+    def test_outer_layer_sees_request_first(
+        self, proxy_with_config: ProxyWithConfig
+    ) -> None:
         """Outer layer (access_log) should see request before inner layer (auth).
 
         Config lists [access_log, auth] (outer to inner).
@@ -643,13 +661,17 @@ class TestLayerOrdering:
 
             # Access log should still record this (outer layer)
             log_dir = os.path.join(proxy.working_dir, "logs")
-            assert wait_for_log_file(log_dir, contains="407"), "Log should contain 407 status"
+            assert wait_for_log_file(log_dir, contains="407"), (
+                "Log should contain 407 status"
+            )
 
 
 class TestMultiThreadedAccessLog:
     """Verify access log entries are not interleaved under concurrent load."""
 
-    def test_concurrent_requests_log_integrity(self, proxy_with_config: ProxyWithConfig) -> None:
+    def test_concurrent_requests_log_integrity(
+        self, proxy_with_config: ProxyWithConfig
+    ) -> None:
         """Send multiple concurrent requests and verify each log line is complete.
 
         The LogService uses a single writer thread with a channel, which inherently
@@ -693,7 +715,10 @@ class TestMultiThreadedAccessLog:
             def make_request(idx: int) -> None:
                 results[idx] = curl_request("http://example.com/", proxy.port)
 
-            threads = [threading.Thread(target=make_request, args=(i,)) for i in range(num_requests)]
+            threads = [
+                threading.Thread(target=make_request, args=(i,))
+                for i in range(num_requests)
+            ]
             for t in threads:
                 t.start()
             for t in threads:
@@ -712,7 +737,11 @@ class TestMultiThreadedAccessLog:
                 if log_path is not None and os.path.exists(log_path):
                     with open(log_path) as f:
                         log_content = f.read()
-                    lines = [line.strip() for line in log_content.strip().split("\n") if line.strip()]
+                    lines = [
+                        line.strip()
+                        for line in log_content.strip().split("\n")
+                        if line.strip()
+                    ]
                     if len(lines) >= num_requests:
                         break
                 time.sleep(0.1)
@@ -720,9 +749,13 @@ class TestMultiThreadedAccessLog:
             # Each line should contain all expected fields (not interleaved)
             for i, line in enumerate(lines):
                 # A complete log line should contain method, status, and duration
-                assert "GET" in line or "CONNECT" in line, f"Line {i} missing method: {line}"
+                assert "GET" in line or "CONNECT" in line, (
+                    f"Line {i} missing method: {line}"
+                )
                 assert "200" in line, f"Line {i} missing status: {line}"
                 assert "ms" in line, f"Line {i} missing duration: {line}"
 
             # Should have at least num_requests lines
-            assert len(lines) >= num_requests, f"Expected at least {num_requests} log lines, got {len(lines)}"
+            assert len(lines) >= num_requests, (
+                f"Expected at least {num_requests} log lines, got {len(lines)}"
+            )

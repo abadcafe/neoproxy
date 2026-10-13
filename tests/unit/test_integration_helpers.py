@@ -24,7 +24,7 @@ from tests.integration.utils.helpers import (
 class TestBuildNeoproxyBinary:
     """Tests for integration-test binary build selection."""
 
-    def test_build_uses_js_sandbox_feature_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_build_uses_default_features(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("NEOPROXY_BINARY", raising=False)
         monkeypatch.delenv("NEOPROXY_CARGO_FEATURES", raising=False)
 
@@ -32,17 +32,19 @@ class TestBuildNeoproxyBinary:
             helpers.build_neoproxy_binary()
 
         cmd = mock_run.call_args[0][0]
-        assert cmd == ["cargo", "build", "--features", "js-sandbox"]
+        assert cmd == ["cargo", "build"]
 
-    def test_build_allows_features_to_be_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_build_allows_explicit_features(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.delenv("NEOPROXY_BINARY", raising=False)
-        monkeypatch.setenv("NEOPROXY_CARGO_FEATURES", "")
+        monkeypatch.setenv("NEOPROXY_CARGO_FEATURES", "tls-openssl")
 
         with patch.object(helpers.subprocess, "run") as mock_run:
             helpers.build_neoproxy_binary()
 
         cmd = mock_run.call_args[0][0]
-        assert cmd == ["cargo", "build"]
+        assert cmd == ["cargo", "build", "--features", "tls-openssl"]
 
 
 class TestWaitForUdpPortBound:
@@ -116,9 +118,13 @@ class TestWaitForUdpPortBound:
             mock_socket.socket.return_value = mock_sock
 
             # Simulate address not available error
-            mock_sock.bind.side_effect = OSError(errno.EADDRNOTAVAIL, "Cannot assign requested address")
+            mock_sock.bind.side_effect = OSError(
+                errno.EADDRNOTAVAIL, "Cannot assign requested address"
+            )
 
-            result = wait_for_udp_port_bound("invalid.host.that.does.not.exist", 12345, timeout=0.5)
+            result = wait_for_udp_port_bound(
+                "invalid.host.that.does.not.exist", 12345, timeout=0.5
+            )
             # Should return False (timeout), not True (incorrectly treating as "port in use")
             assert result is False
 
@@ -177,7 +183,9 @@ class TestWaitForLogContains:
 
     def test_returns_false_when_file_does_not_exist(self) -> None:
         """Should return False when log file does not exist."""
-        result = wait_for_log_contains("/nonexistent/path/to/log.txt", "anything", timeout=0.5)
+        result = wait_for_log_contains(
+            "/nonexistent/path/to/log.txt", "anything", timeout=0.5
+        )
         assert result is False
 
 
@@ -303,10 +311,14 @@ class TestCurlRequestWithHeaders:
 
     def test_returns_status_code_and_headers(self) -> None:
         """Should parse status code, headers, and body from curl output."""
-        output = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nOK"
+        output = (
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nOK"
+        )
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout=output, stderr="", returncode=0)
-            status, headers, body = curl_request_with_headers("http://example.com/", 8080)
+            status, headers, body = curl_request_with_headers(
+                "http://example.com/", 8080
+            )
             assert status == 200
             assert "content-type" in headers
             assert headers["content-type"] == "text/plain"
@@ -316,7 +328,9 @@ class TestCurlRequestWithHeaders:
         """Should return 0 status when curl returns empty output."""
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
-            status, headers, _body = curl_request_with_headers("http://example.com/", 8080)
+            status, headers, _body = curl_request_with_headers(
+                "http://example.com/", 8080
+            )
             assert status == 0
             assert headers == {}
 
@@ -331,7 +345,9 @@ class TestCurlRequestWithHeaders:
         )
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout=output, stderr="", returncode=0)
-            status, headers, _body = curl_request_with_headers("http://example.com/", 8080)
+            status, headers, _body = curl_request_with_headers(
+                "http://example.com/", 8080
+            )
             assert status == 407
             assert "proxy-authenticate" in headers
             assert "connection" in headers

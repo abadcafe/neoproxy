@@ -87,7 +87,9 @@ class TestBoundaryConditions:
             proxy_proc = start_proxy(config_path)
 
             # Wait for process to start and confirm it's running
-            assert wait_for_process_running(proxy_proc, timeout=1.0), "Process should be running with no worker threads"
+            assert wait_for_process_running(proxy_proc, timeout=1.0), (
+                "Process should be running with no worker threads"
+            )
 
             # Record start time
             start_time = time.time()
@@ -102,13 +104,17 @@ class TestBoundaryConditions:
             except subprocess.TimeoutExpired:
                 proxy_proc.kill()
                 proxy_proc.wait()
-                assert False, "Process did not exit within expected time (no worker threads)"
+                assert False, (
+                    "Process did not exit within expected time (no worker threads)"
+                )
 
             # Verify exit code is 0
             assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
             # Verify exit was fast (should be almost immediate)
-            assert elapsed < 1.0, f"Process should exit immediately, took {elapsed:.2f}s"
+            assert elapsed < 1.0, (
+                f"Process should exit immediately, took {elapsed:.2f}s"
+            )
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:
@@ -131,7 +137,9 @@ class TestBoundaryConditions:
             proxy_proc = start_proxy(config_path)
 
             # Wait for process to start and confirm it's running
-            assert wait_for_process_running(proxy_proc, timeout=1.0), "Process should be running before sending SIGINT"
+            assert wait_for_process_running(proxy_proc, timeout=1.0), (
+                "Process should be running before sending SIGINT"
+            )
 
             # Send SIGINT
             proxy_proc.send_signal(signal.SIGINT)
@@ -177,7 +185,9 @@ class TestShutdownTiming:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
+                "Proxy server failed to start"
+            )
 
             start_time = time.time()
             proxy_proc.send_signal(signal.SIGTERM)
@@ -219,7 +229,9 @@ class TestLogVerification:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
+                "Proxy server failed to start"
+            )
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -254,9 +266,9 @@ class TestLogVerification:
 
             # Verify log contains expected keywords
             # The log should contain server start info
-            assert "server" in log_content.lower() or "started" in log_content.lower(), (
-                "Log should contain server start information"
-            )
+            assert (
+                "server" in log_content.lower() or "started" in log_content.lower()
+            ), "Log should contain server start information"
 
         finally:
             if proxy_proc and proxy_proc.poll() is None:

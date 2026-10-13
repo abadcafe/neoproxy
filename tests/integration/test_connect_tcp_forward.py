@@ -124,7 +124,9 @@ class TestConnectTcpForwardProxy:
         try:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
+                "Proxy failed to start"
+            )
 
             request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
             response = send_raw_request("127.0.0.1", proxy_port, request)
@@ -151,7 +153,9 @@ class TestConnectTcpForwardProxy:
         try:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
+                "Proxy failed to start"
+            )
 
             request = b"GET https://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n"
             response = send_raw_request("127.0.0.1", proxy_port, request)
@@ -178,11 +182,15 @@ class TestConnectTcpForwardProxy:
         target_socket: socket.socket | None = None
 
         try:
-            _, target_socket = make_http_target_server("127.0.0.1", target_port, status=200, body=b"forward-ok")
+            _, target_socket = make_http_target_server(
+                "127.0.0.1", target_port, status=200, body=b"forward-ok"
+            )
 
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
+                "Proxy failed to start"
+            )
 
             status_code, _resp_headers, body = curl_request_with_headers(
                 url=f"http://127.0.0.1:{target_port}/",
@@ -190,7 +198,9 @@ class TestConnectTcpForwardProxy:
                 timeout=5,
             )
 
-            assert status_code == 200, f"Expected 200 from forwarded GET, got {status_code}"
+            assert status_code == 200, (
+                f"Expected 200 from forwarded GET, got {status_code}"
+            )
             assert "forward-ok" in body, f"Expected body 'forward-ok', got: {body!r}"
         finally:
             if proxy_proc:
@@ -242,9 +252,7 @@ class TestConnectTcpForwardProxy:
                 except socket.timeout:
                     pass
                 received_bodies.append(body_bytes)
-                resp = (
-                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
-                )
+                resp = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
                 conn.sendall(resp)
             except OSError:
                 pass
@@ -252,11 +260,15 @@ class TestConnectTcpForwardProxy:
                 conn.close()
 
         try:
-            _, target_socket = create_target_server("127.0.0.1", target_port, capturing_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, capturing_handler
+            )
 
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
+                "Proxy failed to start"
+            )
 
             post_body = b"key=value&foo=bar"
             cmd = [
@@ -279,10 +291,16 @@ class TestConnectTcpForwardProxy:
                 f"http://127.0.0.1:{target_port}/submit",
             ]
             env = get_curl_env_without_no_proxy()
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, env=env)
-            status_code = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=10, env=env
+            )
+            status_code = (
+                int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
+            )
 
-            assert status_code == 200, f"Expected 200 from forwarded POST, got {status_code}"
+            assert status_code == 200, (
+                f"Expected 200 from forwarded POST, got {status_code}"
+            )
             assert any(post_body in b for b in received_bodies), (
                 f"Target did not receive POST body. Got: {received_bodies}"
             )
@@ -313,9 +331,13 @@ class TestConnectTcpForwardProxy:
 
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
+                "Proxy failed to start"
+            )
 
-            request = (f"GET http://127.0.0.1:{dead_port}/ HTTP/1.1\r\nHost: 127.0.0.1:{dead_port}\r\n\r\n").encode()
+            request = (
+                f"GET http://127.0.0.1:{dead_port}/ HTTP/1.1\r\nHost: 127.0.0.1:{dead_port}\r\n\r\n"
+            ).encode()
             response = send_raw_request("127.0.0.1", proxy_port, request, timeout=8.0)
 
             status = parse_http_status(response)
@@ -340,11 +362,15 @@ class TestConnectTcpForwardProxy:
         target_socket: socket.socket | None = None
 
         try:
-            _, target_socket = make_http_target_server("127.0.0.1", target_port, status=200, body=b"ok")
+            _, target_socket = make_http_target_server(
+                "127.0.0.1", target_port, status=200, body=b"ok"
+            )
 
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
+                "Proxy failed to start"
+            )
 
             status_code, resp_headers, _ = curl_request_with_headers(
                 url=f"http://127.0.0.1:{target_port}/",
@@ -353,7 +379,9 @@ class TestConnectTcpForwardProxy:
             )
 
             assert status_code == 200, f"Expected 200, got {status_code}"
-            assert "proxy-status" in resp_headers, f"Expected Proxy-Status header, got headers: {resp_headers}"
+            assert "proxy-status" in resp_headers, (
+                f"Expected Proxy-Status header, got headers: {resp_headers}"
+            )
         finally:
             if proxy_proc:
                 terminate_process(proxy_proc)
@@ -384,11 +412,15 @@ class TestConnectTcpForwardProxy:
                 conn.close()
 
         try:
-            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, echo_handler
+            )
 
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
+                "Proxy failed to start"
+            )
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5.0)
@@ -406,7 +438,9 @@ class TestConnectTcpForwardProxy:
                         break
                     resp += chunk
 
-                assert b"200" in resp, f"Expected 200 CONNECT response, got: {resp.decode(errors='ignore')}"
+                assert b"200" in resp, (
+                    f"Expected 200 CONNECT response, got: {resp.decode(errors='ignore')}"
+                )
 
                 sock.sendall(b"HELLO")
                 echo = sock.recv(1024)

@@ -45,7 +45,9 @@ class TestPortAllocation:
             # If we got here, the port is available
             assert True
         except OSError as e:
-            pytest.fail(f"Port {port} returned by get_unique_port() is not available: {e}")
+            pytest.fail(
+                f"Port {port} returned by get_unique_port() is not available: {e}"
+            )
         finally:
             sock.close()
 
@@ -69,7 +71,9 @@ class TestPortAllocation:
             proxy_proc = start_proxy(config_path)
 
             # Wait for proxy to be ready
-            assert wait_for_proxy("127.0.0.1", port, timeout=5.0), f"Proxy failed to start on port {port}"
+            assert wait_for_proxy("127.0.0.1", port, timeout=5.0), (
+                f"Proxy failed to start on port {port}"
+            )
 
         finally:
             if proxy_proc:

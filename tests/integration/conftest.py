@@ -125,7 +125,9 @@ def proxy_with_config(temp_dir: str) -> Generator[ProxyWithConfig, None, None]:
             addrs = listener.get("addresses", [])
             assert isinstance(addrs, list)
             listener["addresses"] = [
-                addr.replace("AUTO_PORT", str(port)) if isinstance(addr, str) and "AUTO_PORT" in addr else addr
+                addr.replace("AUTO_PORT", str(port))
+                if isinstance(addr, str) and "AUTO_PORT" in addr
+                else addr
                 for addr in addrs
             ]
             # If no addresses were specified or all were empty, default to 127.0.0.1:port
@@ -175,7 +177,9 @@ def dict_to_yaml(config: ConfigDict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _yaml_dict(d: dict[str, JsonValue], indent: int, key: str | None = None) -> list[str]:
+def _yaml_dict(
+    d: dict[str, JsonValue], indent: int, key: str | None = None
+) -> list[str]:
     """Render a dict as YAML key-value lines with proper indentation.
 
     Args:
@@ -261,7 +265,9 @@ def _yaml_value(key: str, value: JsonValue, indent: int = 0) -> list[str]:
 
 
 @pytest.fixture
-def target_http_server(available_port: PortFactory) -> Generator[TargetHttpServerFactory, None, None]:
+def target_http_server(
+    available_port: PortFactory,
+) -> Generator[TargetHttpServerFactory, None, None]:
     """Start a simple HTTP echo server, yield the server info.
 
     Usage:
@@ -276,7 +282,9 @@ def target_http_server(available_port: PortFactory) -> Generator[TargetHttpServe
         from .utils.helpers import http_echo_handler
 
         _thread, sock = create_target_server("127.0.0.1", port, http_echo_handler)
-        assert wait_for_proxy("127.0.0.1", port, timeout=2.0), f"Target HTTP server failed to start on port {port}"
+        assert wait_for_proxy("127.0.0.1", port, timeout=2.0), (
+            f"Target HTTP server failed to start on port {port}"
+        )
         info = HttpServerInfo(port, sock)
         try:
             yield info
@@ -541,7 +549,9 @@ def shared_test_certs(shared_certs_dir: str) -> StringMap:
     """
     from .utils.certs import generate_test_certificates
 
-    cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(shared_certs_dir)
+    cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(
+        shared_certs_dir
+    )
     return {
         "cert_path": cert_path,
         "key_path": key_path,
@@ -551,7 +561,9 @@ def shared_test_certs(shared_certs_dir: str) -> StringMap:
 
 
 @pytest.fixture(scope="session")
-def shared_client_cert(shared_certs_dir: str, shared_test_certs: StringMap) -> StringMap:
+def shared_client_cert(
+    shared_certs_dir: str, shared_test_certs: StringMap
+) -> StringMap:
     """
     Session-scoped client certificate for mTLS tests.
 
@@ -594,7 +606,9 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "slow: mark test as slow running")
 
 
-def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
     """Add default markers to integration tests."""
     for item in items:
         # Mark all tests in integration directory as integration tests

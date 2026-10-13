@@ -64,11 +64,15 @@ class TestPerformance:
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, echo_handler
+            )
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy server failed to start"
 
             # Establish tunnel
             client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -139,11 +143,15 @@ class TestPerformance:
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, receive_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, receive_handler
+            )
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy server failed to start"
 
             # Establish tunnel
             client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -223,11 +231,15 @@ class TestPerformance:
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, quick_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, quick_handler
+            )
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy server failed to start"
 
             # Rapid connection cycle
             num_cycles = 50
@@ -305,17 +317,23 @@ class TestPerformance:
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, counting_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, counting_handler
+            )
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy server failed to start"
 
             # Create 1000 concurrent connections via asyncio
             num_connections = 1000
             concurrency = 200
 
-            async def make_connection(conn_id: int, sem: asyncio.Semaphore) -> tuple[int, bool]:
+            async def make_connection(
+                conn_id: int, sem: asyncio.Semaphore
+            ) -> tuple[int, bool]:
                 async with sem:
                     try:
                         reader, writer = await asyncio.wait_for(
@@ -340,7 +358,9 @@ class TestPerformance:
                             # Send and receive data
                             writer.write(b"TEST")
                             await writer.drain()
-                            echo = await asyncio.wait_for(reader.read(1024), timeout=10.0)
+                            echo = await asyncio.wait_for(
+                                reader.read(1024), timeout=10.0
+                            )
                             success = b"ECHO:TEST" in echo
                         else:
                             success = False
@@ -351,14 +371,18 @@ class TestPerformance:
                         return (conn_id, False)
 
             sem = asyncio.Semaphore(concurrency)
-            results = await asyncio.gather(*(make_connection(i, sem) for i in range(num_connections)))
+            results = await asyncio.gather(
+                *(make_connection(i, sem) for i in range(num_connections))
+            )
 
             # Verify results
             successful = [r for r in results if r[1]]
             success_rate = len(successful) / num_connections
 
             # All connections should succeed
-            assert success_rate >= 0.99, f"Success rate {success_rate:.2%} is below 99% for 1000 concurrent connections"
+            assert success_rate >= 0.99, (
+                f"Success rate {success_rate:.2%} is below 99% for 1000 concurrent connections"
+            )
 
         finally:
             if proxy_proc:

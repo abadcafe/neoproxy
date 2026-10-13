@@ -40,7 +40,9 @@ def _write_cert(path: str, cert: x509.Certificate) -> None:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
 
 
-def _load_ca(ca_cert_path: str, ca_key_path: str) -> tuple[x509.Certificate, RSAPrivateKey]:
+def _load_ca(
+    ca_cert_path: str, ca_key_path: str
+) -> tuple[x509.Certificate, RSAPrivateKey]:
     with open(ca_cert_path, "rb") as f:
         ca_cert = x509.load_pem_x509_certificate(f.read())
     with open(ca_key_path, "rb") as f:

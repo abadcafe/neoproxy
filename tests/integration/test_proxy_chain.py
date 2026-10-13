@@ -40,7 +40,9 @@ from .utils.http_echo import http_echo_handler
 # ==============================================================================
 
 
-def create_upstream_password_config(h3_port: int, cert_path: str, key_path: str, temp_dir: str) -> str:
+def create_upstream_password_config(
+    h3_port: int, cert_path: str, key_path: str, temp_dir: str
+) -> str:
     """Create upstream HTTP/3 config with password auth."""
     config_content = f"""server_threads: 1
 
@@ -125,7 +127,9 @@ servers:
     return config_path
 
 
-def create_entry_http_password_config(http_port: int, h3_port: int, ca_path: str, temp_dir: str) -> str:
+def create_entry_http_password_config(
+    http_port: int, h3_port: int, ca_path: str, temp_dir: str
+) -> str:
     """Create entry HTTP config with password auth, connecting to password upstream."""
     config_content = f"""server_threads: 1
 
@@ -227,7 +231,9 @@ servers:
     return config_path
 
 
-def create_entry_socks5_password_config(socks5_port: int, h3_port: int, ca_path: str, temp_dir: str) -> str:
+def create_entry_socks5_password_config(
+    socks5_port: int, h3_port: int, ca_path: str, temp_dir: str
+) -> str:
     """Create entry SOCKS5 config with password auth, connecting to password upstream."""
     config_content = f"""server_threads: 1
 
@@ -335,7 +341,9 @@ servers:
 # ==============================================================================
 
 
-def create_echo_target_server(host: str, port: int) -> tuple[threading.Thread, socket.socket]:
+def create_echo_target_server(
+    host: str, port: int
+) -> tuple[threading.Thread, socket.socket]:
     """
     Create an HTTP echo target server for testing.
 
@@ -398,7 +406,9 @@ def run_proxy_chain_test(
             ca_path = shared_test_certs["ca_path"]
             ca_key_path = shared_test_certs["ca_key_path"]
         else:
-            cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(temp_dir1)
+            cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(
+                temp_dir1
+            )
 
         # Get client certificate for TLS cert auth
         client_cert_path = None
@@ -408,21 +418,31 @@ def run_proxy_chain_test(
                 client_cert_path = shared_client_cert["client_cert_path"]
                 client_key_path = shared_client_cert["client_key_path"]
             else:
-                client_cert_path, client_key_path = generate_client_cert(temp_dir1, ca_path, ca_key_path)
+                client_cert_path, client_key_path = generate_client_cert(
+                    temp_dir1, ca_path, ca_key_path
+                )
 
         # Create upstream config
         if upstream_auth == "password":
-            upstream_config = create_upstream_password_config(h3_port, cert_path, key_path, temp_dir1)
+            upstream_config = create_upstream_password_config(
+                h3_port, cert_path, key_path, temp_dir1
+            )
         else:
-            upstream_config = create_upstream_tls_cert_config(h3_port, cert_path, key_path, ca_path, temp_dir1)
+            upstream_config = create_upstream_tls_cert_config(
+                h3_port, cert_path, key_path, ca_path, temp_dir1
+            )
 
         upstream_proc = start_proxy(upstream_config)
-        assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), "Upstream HTTP/3 listener failed to start"
+        assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
+            "Upstream HTTP/3 listener failed to start"
+        )
 
         # Create entry config
         if entry_type == "http":
             if upstream_auth == "password":
-                entry_config = create_entry_http_password_config(http_port, h3_port, ca_path, temp_dir2)
+                entry_config = create_entry_http_password_config(
+                    http_port, h3_port, ca_path, temp_dir2
+                )
             else:
                 assert client_cert_path is not None and client_key_path is not None
                 entry_config = create_entry_http_tls_cert_config(
@@ -435,7 +455,9 @@ def run_proxy_chain_test(
                 )
         else:  # socks5
             if upstream_auth == "password":
-                entry_config = create_entry_socks5_password_config(http_port, h3_port, ca_path, temp_dir2)
+                entry_config = create_entry_socks5_password_config(
+                    http_port, h3_port, ca_path, temp_dir2
+                )
             else:
                 assert client_cert_path is not None and client_key_path is not None
                 entry_config = create_entry_socks5_tls_cert_config(
@@ -448,7 +470,9 @@ def run_proxy_chain_test(
                 )
 
         entry_proc = start_proxy(entry_config)
-        assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), "Entry listener failed to start"
+        assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
+            "Entry listener failed to start"
+        )
 
         # Create target server for mock tests
         if target_type == "mock" and target_port:
@@ -482,7 +506,9 @@ def run_proxy_chain_test(
                 ]
             )
             result = subprocess.run(curl_cmd, capture_output=True, text=True)
-            assert result.stdout == "200", f"Expected 200, got {result.stdout}. stderr: {result.stderr}"
+            assert result.stdout == "200", (
+                f"Expected 200, got {result.stdout}. stderr: {result.stderr}"
+            )
         else:  # mock
             curl_cmd.extend(
                 [
@@ -556,7 +582,9 @@ class TestProxyChainHTTPToHTTP3Password:
 class TestProxyChainHTTPToHTTP3TlsCert:
     """HTTP(Password) -> HTTP/3(TLS Cert) -> Target"""
 
-    def test_to_baidu(self, shared_test_certs: StringMap, shared_client_cert: StringMap) -> None:
+    def test_to_baidu(
+        self, shared_test_certs: StringMap, shared_client_cert: StringMap
+    ) -> None:
         """TC-CHAIN-TLS-001: HTTP(password)->HTTP/3(TLS cert)->baidu.com."""
         run_proxy_chain_test(
             entry_type="http",
@@ -571,7 +599,9 @@ class TestProxyChainHTTPToHTTP3TlsCert:
             shared_client_cert=shared_client_cert,
         )
 
-    def test_to_mock(self, shared_test_certs: StringMap, shared_client_cert: StringMap) -> None:
+    def test_to_mock(
+        self, shared_test_certs: StringMap, shared_client_cert: StringMap
+    ) -> None:
         """TC-CHAIN-TLS-002: HTTP(password)->HTTP/3(TLS cert)->mock echo."""
         run_proxy_chain_test(
             entry_type="http",
@@ -638,7 +668,9 @@ class TestProxyChainSocks5ToHTTP3Password:
 class TestProxyChainSocks5ToHTTP3TlsCert:
     """SOCKS5(Password) -> HTTP/3(TLS Cert) -> Target"""
 
-    def test_to_baidu(self, shared_test_certs: StringMap, shared_client_cert: StringMap) -> None:
+    def test_to_baidu(
+        self, shared_test_certs: StringMap, shared_client_cert: StringMap
+    ) -> None:
         """TC-CHAIN-S5-TLS-001: SOCKS5(password)->HTTP/3(TLS cert)->baidu.com."""
         run_proxy_chain_test(
             entry_type="socks5",
@@ -653,7 +685,9 @@ class TestProxyChainSocks5ToHTTP3TlsCert:
             shared_client_cert=shared_client_cert,
         )
 
-    def test_to_mock(self, shared_test_certs: StringMap, shared_client_cert: StringMap) -> None:
+    def test_to_mock(
+        self, shared_test_certs: StringMap, shared_client_cert: StringMap
+    ) -> None:
         """TC-CHAIN-S5-TLS-002: SOCKS5(password)->HTTP/3(TLS cert)->mock echo."""
         run_proxy_chain_test(
             entry_type="socks5",
@@ -674,7 +708,9 @@ class TestProxyChainSocks5ToHTTP3TlsCert:
 # ==============================================================================
 
 
-def create_entry_http_no_upstream_auth_config(http_port: int, h3_port: int, ca_path: str, temp_dir: str) -> str:
+def create_entry_http_no_upstream_auth_config(
+    http_port: int, h3_port: int, ca_path: str, temp_dir: str
+) -> str:
     """Create entry HTTP config with password auth, no upstream auth."""
     config_content = f"""server_threads: 1
 
@@ -719,7 +755,9 @@ servers:
     return config_path
 
 
-def create_entry_socks5_no_upstream_auth_config(socks5_port: int, h3_port: int, ca_path: str, temp_dir: str) -> str:
+def create_entry_socks5_no_upstream_auth_config(
+    socks5_port: int, h3_port: int, ca_path: str, temp_dir: str
+) -> str:
     """Create entry SOCKS5 config with password auth, no upstream auth."""
     config_content = f"""server_threads: 1
 
@@ -765,7 +803,9 @@ servers:
     return config_path
 
 
-def create_entry_http_wrong_upstream_auth_config(http_port: int, h3_port: int, ca_path: str, temp_dir: str) -> str:
+def create_entry_http_wrong_upstream_auth_config(
+    http_port: int, h3_port: int, ca_path: str, temp_dir: str
+) -> str:
     """Create entry HTTP config with password auth, wrong upstream credentials."""
     config_content = f"""server_threads: 1
 
@@ -813,7 +853,9 @@ servers:
     return config_path
 
 
-def create_upstream_no_auth_config(h3_port: int, cert_path: str, key_path: str, temp_dir: str) -> str:
+def create_upstream_no_auth_config(
+    h3_port: int, cert_path: str, key_path: str, temp_dir: str
+) -> str:
     """Create upstream HTTP/3 config without auth."""
     config_content = f"""server_threads: 1
 
@@ -877,7 +919,9 @@ def _is_407_response(result: subprocess.CompletedProcess[str]) -> bool:
 class TestNegativeAuthHTTPEntry:
     """Negative tests for HTTP entry proxy authentication."""
 
-    def test_http_entry_missing_auth_returns_407(self, shared_test_certs: StringMap) -> None:
+    def test_http_entry_missing_auth_returns_407(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """TC-NEG-AUTH-001: HTTP entry without Proxy-Authorization returns 407.
 
         When a proxy requires password authentication and the client sends
@@ -902,16 +946,22 @@ class TestNegativeAuthHTTPEntry:
             ca_path = shared_test_certs["ca_path"]
 
             # Start upstream HTTP/3 without auth (entry auth is what we test)
-            upstream_config = create_upstream_no_auth_config(h3_port, cert_path, key_path, temp_dir1)
+            upstream_config = create_upstream_no_auth_config(
+                h3_port, cert_path, key_path, temp_dir1
+            )
             upstream_proc = start_proxy(upstream_config)
             assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
                 "Upstream HTTP/3 listener failed to start"
             )
 
             # Start entry HTTP with password auth
-            entry_config = create_entry_http_no_upstream_auth_config(http_port, h3_port, ca_path, temp_dir2)
+            entry_config = create_entry_http_no_upstream_auth_config(
+                http_port, h3_port, ca_path, temp_dir2
+            )
             entry_proc = start_proxy(entry_config)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), "Entry HTTP listener failed to start"
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
+                "Entry HTTP listener failed to start"
+            )
 
             # Send CONNECT request without Proxy-Authorization.
             # For HTTPS through HTTP proxy (CONNECT tunnel), curl reports
@@ -950,7 +1000,9 @@ class TestNegativeAuthHTTPEntry:
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
-    def test_http_entry_wrong_credentials_returns_407(self, shared_test_certs: StringMap) -> None:
+    def test_http_entry_wrong_credentials_returns_407(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """TC-NEG-AUTH-002: HTTP entry with wrong credentials returns 407.
 
         When a proxy requires password authentication and the client sends
@@ -975,16 +1027,22 @@ class TestNegativeAuthHTTPEntry:
             ca_path = shared_test_certs["ca_path"]
 
             # Start upstream HTTP/3 without auth (entry auth is what we test)
-            upstream_config = create_upstream_no_auth_config(h3_port, cert_path, key_path, temp_dir1)
+            upstream_config = create_upstream_no_auth_config(
+                h3_port, cert_path, key_path, temp_dir1
+            )
             upstream_proc = start_proxy(upstream_config)
             assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
                 "Upstream HTTP/3 listener failed to start"
             )
 
             # Start entry HTTP with password auth
-            entry_config = create_entry_http_no_upstream_auth_config(http_port, h3_port, ca_path, temp_dir2)
+            entry_config = create_entry_http_no_upstream_auth_config(
+                http_port, h3_port, ca_path, temp_dir2
+            )
             entry_proc = start_proxy(entry_config)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), "Entry HTTP listener failed to start"
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
+                "Entry HTTP listener failed to start"
+            )
 
             # Send request with wrong credentials.
             # For CONNECT tunnels, curl reports exit code 56 + "response 407".
@@ -1026,7 +1084,9 @@ class TestNegativeAuthHTTPEntry:
 class TestNegativeAuthSOCKS5Entry:
     """Negative tests for SOCKS5 entry proxy authentication."""
 
-    def test_socks5_entry_wrong_credentials_fails(self, shared_test_certs: StringMap) -> None:
+    def test_socks5_entry_wrong_credentials_fails(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """TC-NEG-AUTH-003: SOCKS5 entry with wrong credentials fails.
 
         When a SOCKS5 proxy has auth middleware and the client
@@ -1048,16 +1108,22 @@ class TestNegativeAuthSOCKS5Entry:
             ca_path = shared_test_certs["ca_path"]
 
             # Start upstream HTTP/3 without auth (entry auth is what we test)
-            upstream_config = create_upstream_no_auth_config(h3_port, cert_path, key_path, temp_dir1)
+            upstream_config = create_upstream_no_auth_config(
+                h3_port, cert_path, key_path, temp_dir1
+            )
             upstream_proc = start_proxy(upstream_config)
             assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
                 "Upstream HTTP/3 listener failed to start"
             )
 
             # Start entry SOCKS5 with password auth
-            entry_config = create_entry_socks5_no_upstream_auth_config(socks5_port, h3_port, ca_path, temp_dir2)
+            entry_config = create_entry_socks5_no_upstream_auth_config(
+                socks5_port, h3_port, ca_path, temp_dir2
+            )
             entry_proc = start_proxy(entry_config)
-            assert wait_for_proxy("127.0.0.1", socks5_port, timeout=5.0), "Entry SOCKS5 listener failed to start"
+            assert wait_for_proxy("127.0.0.1", socks5_port, timeout=5.0), (
+                "Entry SOCKS5 listener failed to start"
+            )
 
             # Send request with wrong SOCKS5 credentials
             result = subprocess.run(
@@ -1103,7 +1169,9 @@ class TestNegativeAuthSOCKS5Entry:
 class TestNegativeAuthUpstream:
     """Negative tests for upstream proxy authentication."""
 
-    def test_wrong_upstream_credentials_connection_fails(self, shared_test_certs: StringMap) -> None:
+    def test_wrong_upstream_credentials_connection_fails(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """TC-NEG-AUTH-004: Wrong upstream credentials cause connection failure.
 
         When the http3_chain service is configured with wrong credentials for
@@ -1125,16 +1193,22 @@ class TestNegativeAuthUpstream:
             ca_path = shared_test_certs["ca_path"]
 
             # Start upstream HTTP/3 WITH password auth (user1:pass1)
-            upstream_config = create_upstream_password_config(h3_port, cert_path, key_path, temp_dir1)
+            upstream_config = create_upstream_password_config(
+                h3_port, cert_path, key_path, temp_dir1
+            )
             upstream_proc = start_proxy(upstream_config)
             assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
                 "Upstream HTTP/3 listener failed to start"
             )
 
             # Start entry HTTP with WRONG upstream credentials (wrong_user:wrong_pass)
-            entry_config = create_entry_http_wrong_upstream_auth_config(http_port, h3_port, ca_path, temp_dir2)
+            entry_config = create_entry_http_wrong_upstream_auth_config(
+                http_port, h3_port, ca_path, temp_dir2
+            )
             entry_proc = start_proxy(entry_config)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), "Entry HTTP listener failed to start"
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
+                "Entry HTTP listener failed to start"
+            )
 
             # Send request with correct entry credentials but wrong upstream creds.
             # The upstream should reject the CONNECT request with 407,

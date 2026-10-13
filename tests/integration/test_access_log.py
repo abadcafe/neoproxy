@@ -237,7 +237,9 @@ def test_env() -> Generator[AccessLogTestEnv, None, None]:
 class TestAccessLogTextFormat:
     """Tests for access log in text format (default format)."""
 
-    def test_access_log_file_created_after_request(self, test_env: AccessLogTestEnv) -> None:
+    def test_access_log_file_created_after_request(
+        self, test_env: AccessLogTestEnv
+    ) -> None:
         """Access log file should be created after processing a request."""
         config_path = write_config(
             test_env.temp_dir,
@@ -285,7 +287,9 @@ class TestAccessLogTextFormat:
         assert re.search(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]", line), (
             f"Should contain timestamp in brackets, got: {line}"
         )
-        assert re.search(r"\d+\.\d+\.\d+\.\d+:\d+", line), f"Should contain client IP:port, got: {line}"
+        assert re.search(r"\d+\.\d+\.\d+\.\d+:\d+", line), (
+            f"Should contain client IP:port, got: {line}"
+        )
         assert "GET" in line, f"Should contain GET method, got: {line}"
         assert re.search(r"\d{3}", line), f"Should contain status code, got: {line}"
         assert re.search(r"\d+ms", line), f"Should contain duration in ms, got: {line}"
@@ -308,7 +312,9 @@ class TestAccessLogTextFormat:
         # After shutdown, logs should be flushed
         lines = wait_for_access_log(test_env.log_dir, min_lines=1, timeout=5.0)
         assert len(lines) >= 1, "Should have at least one log line"
-        assert "svc=echo_svc" in lines[0], f"Should contain service name, got: {lines[0]}"
+        assert "svc=echo_svc" in lines[0], (
+            f"Should contain service name, got: {lines[0]}"
+        )
 
 
 # ==============================================================================
@@ -437,7 +443,9 @@ class TestAccessLogDisabled:
         # No access log files should be created (proxy already terminated,
         # no more log entries can appear)
         lines = read_access_log_lines(test_env.log_dir)
-        assert len(lines) == 0, "Without access_log layer, no log lines should be produced"
+        assert len(lines) == 0, (
+            "Without access_log layer, no log lines should be produced"
+        )
 
 
 # ==============================================================================
@@ -571,7 +579,9 @@ class TestAccessLogNamedWriters:
         assert len(default_lines) >= 1, "Default writer should have log entries"
         assert len(audit_lines) >= 1, "Audit writer should have log entries"
 
-    def test_writer_unknown_path_prefix_fails_to_build(self, test_env: AccessLogTestEnv) -> None:
+    def test_writer_unknown_path_prefix_fails_to_build(
+        self, test_env: AccessLogTestEnv
+    ) -> None:
         """Layer referencing unknown writer path_prefix should fail."""
 
         config: ConfigDict = {
@@ -621,7 +631,9 @@ class TestAccessLogNamedWriters:
             # Proxy should fail to start or exit with error because
             # the writer reference is invalid
             exit_code, _ = wait_for_process_exit(proc, timeout=5.0)
-            assert exit_code != 0, "Proxy should exit with error for unknown writer path_prefix"
+            assert exit_code != 0, (
+                "Proxy should exit with error for unknown writer path_prefix"
+            )
         finally:
             terminate_process(proc)
 
@@ -656,7 +668,9 @@ class TestAccessLogNamedWriters:
         assert "status" in parsed, "JSON log entry should have status field"
         assert "method" in parsed, "JSON log entry should have method field"
 
-    def test_writer_missing_field_fails_to_build(self, test_env: AccessLogTestEnv) -> None:
+    def test_writer_missing_field_fails_to_build(
+        self, test_env: AccessLogTestEnv
+    ) -> None:
         """Layer with missing writer field should fail to start.
 
         Per spec: 'Missing writer field in layer args -> build error'.
@@ -718,11 +732,15 @@ class TestAccessLogNamedWriters:
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
             exit_code, _ = wait_for_process_exit(proc, timeout=5.0)
-            assert exit_code != 0, "Proxy should exit with error for missing writer field"
+            assert exit_code != 0, (
+                "Proxy should exit with error for missing writer field"
+            )
         finally:
             terminate_process(proc)
 
-    def test_writer_rotate_daily_false_no_date_suffix(self, test_env: AccessLogTestEnv) -> None:
+    def test_writer_rotate_daily_false_no_date_suffix(
+        self, test_env: AccessLogTestEnv
+    ) -> None:
         """Writer with rotate_daily=false writes to path_prefix without date suffix.
 
         Per spec: 'The actual log file is {path_prefix}.{date} when
@@ -752,7 +770,9 @@ class TestAccessLogNamedWriters:
             timeout=5.0,
             prefix="no_rotate",
         )
-        assert len(lines) >= 1, "Access log should be written to path_prefix without date suffix"
+        assert len(lines) >= 1, (
+            "Access log should be written to path_prefix without date suffix"
+        )
 
         # Verify no date-suffixed file exists when rotate_daily=false
         log_files = find_access_log_files(test_env.log_dir, prefix="no_rotate")
@@ -764,7 +784,9 @@ class TestAccessLogNamedWriters:
                 f"File {basename} should not have date suffix when rotate_daily=false"
             )
 
-    def test_writer_rotate_daily_true_has_date_suffix(self, test_env: AccessLogTestEnv) -> None:
+    def test_writer_rotate_daily_true_has_date_suffix(
+        self, test_env: AccessLogTestEnv
+    ) -> None:
         """Writer with rotate_daily=true (default) produces date-suffixed filenames.
 
         Per spec: 'The actual log file is {path_prefix}.{date} when
@@ -827,7 +849,9 @@ class TestAccessLogContextFieldValues:
     actually appear in the written log lines.
     """
 
-    def test_text_log_contains_auth_context_field(self, test_env: AccessLogTestEnv) -> None:
+    def test_text_log_contains_auth_context_field(
+        self, test_env: AccessLogTestEnv
+    ) -> None:
         """Auth context field should appear in text format log output.
 
         Configures auth.basic_auth layer before access_log.file layer with
@@ -921,9 +945,13 @@ class TestAccessLogContextFieldValues:
         # context field key=value pair (CR-002 fix: full key preserved,
         # not stripped to "basic_auth.user")
         auth_lines = [line for line in lines if "basic_auth.user=admin" in line]
-        assert len(auth_lines) >= 1, f"Log should contain 'basic_auth.user=admin', got: {lines}"
+        assert len(auth_lines) >= 1, (
+            f"Log should contain 'basic_auth.user=admin', got: {lines}"
+        )
 
-    def test_json_log_extensions_nested_under_extensions_key(self, test_env: AccessLogTestEnv) -> None:
+    def test_json_log_extensions_nested_under_extensions_key(
+        self, test_env: AccessLogTestEnv
+    ) -> None:
         """JSON format should nest context field extensions under "extensions" key.
 
         CR-004: Verifies the CR-001 fix end-to-end. When a JSON writer is
@@ -1028,7 +1056,9 @@ class TestAccessLogContextFieldValues:
             if parsed.get("status") == 200 and "extensions" in parsed:
                 # CR-001 fix: extensions must be nested under "extensions" key
                 ext = parsed["extensions"]
-                assert "basic_auth.user" in ext, f"Extension 'basic_auth.user' should be under 'extensions', got: {ext}"
+                assert "basic_auth.user" in ext, (
+                    f"Extension 'basic_auth.user' should be under 'extensions', got: {ext}"
+                )
                 assert ext["basic_auth.user"] == "admin", (
                     f"Extension value should be 'admin', got: {ext['basic_auth.user']}"
                 )
@@ -1036,14 +1066,22 @@ class TestAccessLogContextFieldValues:
                     f"Extension 'basic_auth.auth_type' should be under 'extensions', got: {ext}"
                 )
                 # Built-in keys must remain at the top level
-                assert parsed.get("method") == "GET", "Built-in 'method' must be at top level"
-                assert isinstance(parsed.get("status"), int), "Built-in 'status' must be an integer at top level"
+                assert parsed.get("method") == "GET", (
+                    "Built-in 'method' must be at top level"
+                )
+                assert isinstance(parsed.get("status"), int), (
+                    "Built-in 'status' must be an integer at top level"
+                )
                 # Extension keys must NOT be at the top level
-                assert "basic_auth.user" not in parsed, "Extension key must not appear at top level"
+                assert "basic_auth.user" not in parsed, (
+                    "Extension key must not appear at top level"
+                )
                 found_extension = True
                 break
 
-        assert found_extension, f"No JSON log line with status 200 and 'extensions' key found. Lines: {lines}"
+        assert found_extension, (
+            f"No JSON log line with status 200 and 'extensions' key found. Lines: {lines}"
+        )
 
 
 # ==============================================================================
@@ -1064,7 +1102,9 @@ class TestWriteConfigHelper:
         )
         with open(config_path, "r") as f:
             content = f.read()
-        assert "rotate_daily: true" in content, f"Expected 'rotate_daily: true' in config, got:\n{content}"
+        assert "rotate_daily: true" in content, (
+            f"Expected 'rotate_daily: true' in config, got:\n{content}"
+        )
 
     def test_rotate_daily_false_in_output(self, test_env: AccessLogTestEnv) -> None:
         """write_config with rotate_daily=False should produce YAML with rotate_daily: false."""
@@ -1076,7 +1116,9 @@ class TestWriteConfigHelper:
         )
         with open(config_path, "r") as f:
             content = f.read()
-        assert "rotate_daily: false" in content, f"Expected 'rotate_daily: false' in config, got:\n{content}"
+        assert "rotate_daily: false" in content, (
+            f"Expected 'rotate_daily: false' in config, got:\n{content}"
+        )
 
     def test_rotate_daily_default_omitted(self, test_env: AccessLogTestEnv) -> None:
         """write_config without rotate_daily should omit the key from writer config."""
@@ -1086,7 +1128,9 @@ class TestWriteConfigHelper:
         )
         with open(config_path, "r") as f:
             content = f.read()
-        assert "rotate_daily" not in content, f"rotate_daily should be omitted when not specified, got:\n{content}"
+        assert "rotate_daily" not in content, (
+            f"rotate_daily should be omitted when not specified, got:\n{content}"
+        )
 
     def test_log_format_default_omitted(self, test_env: AccessLogTestEnv) -> None:
         """write_config with default log_format='text' should omit format key from YAML.
@@ -1114,4 +1158,6 @@ class TestWriteConfigHelper:
         )
         with open(config_path, "r") as f:
             content = f.read()
-        assert 'format: "json"' in content, f"Expected 'format: \"json\"' in config, got:\n{content}"
+        assert 'format: "json"' in content, (
+            f"Expected 'format: \"json\"' in config, got:\n{content}"
+        )

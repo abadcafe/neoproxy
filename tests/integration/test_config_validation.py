@@ -94,7 +94,9 @@ class TestYamlFormat:
 
         assert result.returncode == 1, f"Expected exit code 1, got {result.returncode}"
 
-        assert "read config file" in result.stderr, f"Expected 'read config file' in error, got: {result.stderr}"
+        assert "read config file" in result.stderr, (
+            f"Expected 'read config file' in error, got: {result.stderr}"
+        )
 
     def test_invalid_yaml_syntax(self) -> None:
         """
@@ -112,9 +114,11 @@ services: []
         assert returncode == 1, f"Expected exit code 1, got {returncode}"
 
         error_output = stderr.lower()
-        assert "error" in error_output or "parse" in error_output or "expected" in error_output, (
-            f"Expected YAML parse error in output, got: {stderr}"
-        )
+        assert (
+            "error" in error_output
+            or "parse" in error_output
+            or "expected" in error_output
+        ), f"Expected YAML parse error in output, got: {stderr}"
 
 
 # ==============================================================================
@@ -143,9 +147,10 @@ servers: []
 
         assert returncode == 1, f"Expected exit code 1, got {returncode}"
 
-        assert "invalid service kind" in stderr or "expected 'plugin_name.service_name'" in stderr, (
-            f"Expected invalid kind format error, got: {stderr}"
-        )
+        assert (
+            "invalid service kind" in stderr
+            or "expected 'plugin_name.service_name'" in stderr
+        ), f"Expected invalid kind format error, got: {stderr}"
 
     def test_plugin_not_found(self) -> None:
         """
@@ -268,9 +273,10 @@ servers:
 
         assert returncode == 1, f"Expected exit code 1, got {returncode}"
 
-        assert "invalid service kind" in stderr or "expected 'plugin_name.service_name'" in stderr, (
-            f"Expected kind format error, got: {stderr}"
-        )
+        assert (
+            "invalid service kind" in stderr
+            or "expected 'plugin_name.service_name'" in stderr
+        ), f"Expected kind format error, got: {stderr}"
 
     def test_unused_bad_plugin_accepted(self) -> None:
         """
@@ -313,7 +319,9 @@ servers:
         )
         try:
             running = wait_for_process_running(proc, timeout=1.0)
-            assert running, "Proxy should start with unused bad plugin (never instantiated)"
+            assert running, (
+                "Proxy should start with unused bad plugin (never instantiated)"
+            )
         finally:
             if proc.poll() is None:
                 proc.terminate()
@@ -371,7 +379,9 @@ servers:
         write_and_close_stdin(proxy_proc, config)
         try:
             exit_code = proxy_proc.wait(timeout=5.0)
-            assert exit_code != 0, f"Expected non-zero exit code for missing addresses, got {exit_code}"
+            assert exit_code != 0, (
+                f"Expected non-zero exit code for missing addresses, got {exit_code}"
+            )
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
             proxy_proc.wait()
@@ -420,7 +430,9 @@ servers:
         write_and_close_stdin(proxy_proc, config)
         try:
             exit_code = proxy_proc.wait(timeout=5.0)
-            assert exit_code != 0, f"Expected non-zero exit code for empty addresses, got {exit_code}"
+            assert exit_code != 0, (
+                f"Expected non-zero exit code for empty addresses, got {exit_code}"
+            )
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
             proxy_proc.wait()
@@ -456,7 +468,9 @@ servers:
 
         assert returncode == 1, f"Expected exit code 1, got {returncode}"
 
-        assert "invalid address" in stderr, f"Expected 'invalid address' in error, got: {stderr}"
+        assert "invalid address" in stderr, (
+            f"Expected 'invalid address' in error, got: {stderr}"
+        )
 
     def test_unknown_field_in_socks5_args(self) -> None:
         """
@@ -506,7 +520,9 @@ servers:
         write_and_close_stdin(proxy_proc, config)
         try:
             exit_code = proxy_proc.wait(timeout=5.0)
-            assert exit_code != 0, f"Expected non-zero exit code for unknown field, got {exit_code}"
+            assert exit_code != 0, (
+                f"Expected non-zero exit code for unknown field, got {exit_code}"
+            )
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
             proxy_proc.wait()
@@ -557,7 +573,9 @@ servers:
         write_and_close_stdin(proxy_proc, config)
         try:
             exit_code = proxy_proc.wait(timeout=5.0)
-            assert exit_code != 0, f"Expected non-zero exit code for unknown field ca_path, got {exit_code}"
+            assert exit_code != 0, (
+                f"Expected non-zero exit code for unknown field ca_path, got {exit_code}"
+            )
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
             proxy_proc.wait()
@@ -610,7 +628,9 @@ servers:
         write_and_close_stdin(proxy_proc, config)
         try:
             exit_code = proxy_proc.wait(timeout=5.0)
-            assert exit_code != 0, f"Expected non-zero exit code for invalid timeout format, got {exit_code}"
+            assert exit_code != 0, (
+                f"Expected non-zero exit code for invalid timeout format, got {exit_code}"
+            )
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
             proxy_proc.wait()
@@ -664,7 +684,9 @@ servers:
         write_and_close_stdin(proxy_proc, config)
         try:
             exit_code = proxy_proc.wait(timeout=5.0)
-            assert exit_code != 0, f"Expected non-zero exit code for client_ca_path in SOCKS5, got {exit_code}"
+            assert exit_code != 0, (
+                f"Expected non-zero exit code for client_ca_path in SOCKS5, got {exit_code}"
+            )
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
             proxy_proc.wait()

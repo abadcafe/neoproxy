@@ -76,16 +76,22 @@ class TestProxyStatus:
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, echo_handler
+            )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
+                "Proxy failed to start"
+            )
 
             # Send CONNECT via raw socket to read response headers
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10)
             sock.connect(("127.0.0.1", proxy_port))
-            sock.sendall(f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode())
+            sock.sendall(
+                f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
+            )
 
             # Read response headers
             response = b""
@@ -98,7 +104,9 @@ class TestProxyStatus:
             sock.close()
 
             status = _parse_status_code(response)
-            assert status == 200, f"Expected 200, got {status}. Response: {response.decode(errors='ignore')[:200]}"
+            assert status == 200, (
+                f"Expected 200, got {status}. Response: {response.decode(errors='ignore')[:200]}"
+            )
 
             # Verify Proxy-Status header is present
             ps = _get_header(response, "proxy-status")
@@ -107,7 +115,9 @@ class TestProxyStatus:
             )
 
             # Should not contain error= on success
-            assert "error=" not in ps, f"Proxy-Status should not have error= on success: {ps}"
+            assert "error=" not in ps, (
+                f"Proxy-Status should not have error= on success: {ps}"
+            )
 
         finally:
             if proxy_proc:
@@ -132,7 +142,9 @@ class TestProxyStatus:
             config_path = create_test_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy failed to start"
 
             # Send CONNECT to an unbound port (will get connection refused)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -153,14 +165,20 @@ class TestProxyStatus:
             sock.close()
 
             status = _parse_status_code(response)
-            assert status == 502, f"Expected 502, got {status}. Response: {response.decode(errors='ignore')[:200]}"
+            assert status == 502, (
+                f"Expected 502, got {status}. Response: {response.decode(errors='ignore')[:200]}"
+            )
 
             # Verify Proxy-Status header
             ps = _get_header(response, "proxy-status")
-            assert ps is not None, f"Proxy-Status not found: {response.decode(errors='ignore')[:200]}"
+            assert ps is not None, (
+                f"Proxy-Status not found: {response.decode(errors='ignore')[:200]}"
+            )
 
             # Should contain error=connection_refused
-            assert "error=connection_refused" in ps, f"Expected error=connection_refused in Proxy-Status: {ps}"
+            assert "error=connection_refused" in ps, (
+                f"Expected error=connection_refused in Proxy-Status: {ps}"
+            )
 
         finally:
             if proxy_proc:
@@ -212,14 +230,18 @@ servers:
                 f.write(config_content)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy failed to start"
 
             # Send CONNECT to a black-hole address (no route, will timeout)
             # 10.255.255.1 is in TEST-NET-1 reserved range, unlikely to respond
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(15)
             sock.connect(("127.0.0.1", proxy_port))
-            sock.sendall(b"CONNECT 10.255.255.1:80 HTTP/1.1\r\nHost: 10.255.255.1:80\r\n\r\n")
+            sock.sendall(
+                b"CONNECT 10.255.255.1:80 HTTP/1.1\r\nHost: 10.255.255.1:80\r\n\r\n"
+            )
 
             response = b""
             try:
@@ -240,7 +262,9 @@ servers:
 
             # Verify Proxy-Status header has error
             ps = _get_header(response, "proxy-status")
-            assert ps is not None, f"Proxy-Status not found: {response.decode(errors='ignore')[:200]}"
+            assert ps is not None, (
+                f"Proxy-Status not found: {response.decode(errors='ignore')[:200]}"
+            )
 
             assert "error=" in ps, f"Expected error= in Proxy-Status: {ps}"
 
@@ -268,7 +292,9 @@ servers:
             config_path = create_test_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy failed to start"
 
             # Send origin-form GET request (locally rejected → 400, no Proxy-Status)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -290,7 +316,9 @@ servers:
 
             # Should NOT have Proxy-Status (locally generated error per RFC)
             ps = _get_header(response, "proxy-status")
-            assert ps is None, f"Proxy-Status should NOT be present on locally-generated 400: {ps}"
+            assert ps is None, (
+                f"Proxy-Status should NOT be present on locally-generated 400: {ps}"
+            )
 
         finally:
             if proxy_proc:

@@ -31,7 +31,9 @@ class TestH3CustomAuthority:
         assert "custom_authority" in params
 
     @pytest.mark.asyncio
-    async def test_custom_authority_function_returns_h3response(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_custom_authority_function_returns_h3response(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Should return H3Response even when connection fails."""
         monkeypatch.setattr(http3_client, "connect", failing_h3_connect)
 
@@ -46,7 +48,9 @@ class TestH3CustomAuthority:
         assert b"connection refused" in response.body.lower()
 
     @pytest.mark.asyncio
-    async def test_custom_authority_with_additional_headers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_custom_authority_with_additional_headers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Should accept additional headers parameter."""
         monkeypatch.setattr(http3_client, "connect", failing_h3_connect)
 

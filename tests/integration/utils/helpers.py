@@ -27,7 +27,7 @@ NEOPROXY_BINARY = os.environ.get(
     "NEOPROXY_BINARY",
     str(PROJECT_ROOT / "target" / "debug" / "neoproxy"),
 )
-DEFAULT_CARGO_FEATURES = "js-sandbox"
+DEFAULT_CARGO_FEATURES = ""
 
 
 def neoproxy_cargo_features() -> str:
@@ -266,7 +266,9 @@ def wait_for_proxy(
     return False
 
 
-def wait_for_process_exit(proc: BytesProcess, timeout: float = 10.0) -> tuple[int, float]:
+def wait_for_process_exit(
+    proc: BytesProcess, timeout: float = 10.0
+) -> tuple[int, float]:
     """
     Wait for process to exit and return exit code and elapsed time.
 
@@ -288,11 +290,15 @@ def wait_for_process_exit(proc: BytesProcess, timeout: float = 10.0) -> tuple[in
         proc.kill()
         proc.wait()
         elapsed = time.time() - start_time
-        raise AssertionError(f"Process did not exit within expected time (elapsed: {elapsed:.1f}s)")
+        raise AssertionError(
+            f"Process did not exit within expected time (elapsed: {elapsed:.1f}s)"
+        )
     return return_code, elapsed
 
 
-def wait_for_process_running(proc: BytesProcess, timeout: float = 1.0, interval: float = 0.05) -> bool:
+def wait_for_process_running(
+    proc: BytesProcess, timeout: float = 1.0, interval: float = 0.05
+) -> bool:
     """
     Wait for a process to be running (not exited).
 
@@ -316,7 +322,9 @@ def wait_for_process_running(proc: BytesProcess, timeout: float = 1.0, interval:
     return proc.poll() is None
 
 
-def wait_for_port_released(host: str, port: int, timeout: float = 2.0, interval: float = 0.05) -> bool:
+def wait_for_port_released(
+    host: str, port: int, timeout: float = 2.0, interval: float = 0.05
+) -> bool:
     """
     Wait for a port to be released (no longer accepting connections).
 
@@ -342,7 +350,9 @@ def wait_for_port_released(host: str, port: int, timeout: float = 2.0, interval:
     return False
 
 
-def terminate_process(proc: BytesProcess, timeout: float = 5.0, force: bool = False) -> None:
+def terminate_process(
+    proc: BytesProcess, timeout: float = 5.0, force: bool = False
+) -> None:
     """
     Terminate a process gracefully, then kill if needed.
 
@@ -368,7 +378,9 @@ def terminate_process(proc: BytesProcess, timeout: float = 5.0, force: bool = Fa
 # ==============================================================================
 
 
-def create_target_server(host: str, port: int, handler: TargetHandler) -> tuple[threading.Thread, socket.socket]:
+def create_target_server(
+    host: str, port: int, handler: TargetHandler
+) -> tuple[threading.Thread, socket.socket]:
     """
     Create a mock target server for testing.
 
@@ -450,7 +462,9 @@ def establish_connect_tunnel(
         return None
 
 
-def send_raw_request(host: str, port: int, request: bytes, timeout: float = 5.0) -> bytes:
+def send_raw_request(
+    host: str, port: int, request: bytes, timeout: float = 5.0
+) -> bytes:
     """
     Send raw HTTP request and read response.
 
@@ -579,7 +593,9 @@ def assert_process_exits_within(
         proc.kill()
         proc.wait()
         elapsed = time.time() - start_time
-        raise AssertionError(f"Process did not exit within {max_time}s (elapsed: {elapsed:.1f}s)")
+        raise AssertionError(
+            f"Process did not exit within {max_time}s (elapsed: {elapsed:.1f}s)"
+        )
     elapsed = time.time() - start_time
 
     if expected_exit_code is not None:

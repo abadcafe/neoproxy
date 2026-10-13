@@ -96,7 +96,9 @@ def chain_service_context(
             temp_dir=temp_dir,
         )
         proxy_proc = start_proxy(config_path)
-        assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), "HTTP listener failed to start"
+        assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
+            "HTTP listener failed to start"
+        )
 
         yield temp_dir, proxy_proc
 
@@ -153,7 +155,9 @@ class TestHTTP3ChainForwardProxy:
                 f"Expected 400 for https:// scheme, got {status_code}. Response: {response.decode(errors='ignore')}"
             )
 
-    def test_absolute_form_with_unreachable_upstream_fails_gracefully(self, shared_test_certs: StringMap) -> None:
+    def test_absolute_form_with_unreachable_upstream_fails_gracefully(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """
         TC-CHAIN-FWD-003: Valid absolute-form URI with unreachable upstream fails gracefully.
 
@@ -186,12 +190,20 @@ class TestHTTP3ChainForwardProxy:
                 timeout=10,
             )
             # Proxy must still be running (no crash/panic)
-            assert proc.poll() is None, "Proxy crashed while handling forward request to unreachable upstream"
+            assert proc.poll() is None, (
+                "Proxy crashed while handling forward request to unreachable upstream"
+            )
             # curl must exit cleanly (not hang); non-200 or curl error both acceptable
-            status = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
-            assert status != 200, f"Expected non-200 for unreachable upstream, got {status}"
+            status = (
+                int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
+            )
+            assert status != 200, (
+                f"Expected non-200 for unreachable upstream, got {status}"
+            )
 
-    def test_proxy_stays_alive_after_forward_and_connect_requests(self, shared_test_certs: StringMap) -> None:
+    def test_proxy_stays_alive_after_forward_and_connect_requests(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """
         TC-CHAIN-FWD-004: Proxy stays alive after receiving both forward and CONNECT requests.
 
@@ -209,10 +221,16 @@ class TestHTTP3ChainForwardProxy:
             ]:
                 response = send_raw_request("127.0.0.1", http_port, request)
                 status_code, _, _, _ = parse_http_response(response)
-                assert status_code == 400, f"Expected 400, got {status_code}: {response.decode(errors='ignore')}"
-                assert proc.poll() is None, "Proxy crashed after receiving a validation-error request"
+                assert status_code == 400, (
+                    f"Expected 400, got {status_code}: {response.decode(errors='ignore')}"
+                )
+                assert proc.poll() is None, (
+                    "Proxy crashed after receiving a validation-error request"
+                )
 
-    def test_connect_dispatch_unaffected_by_forward_proxy(self, shared_test_certs: StringMap) -> None:
+    def test_connect_dispatch_unaffected_by_forward_proxy(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """
         TC-CHAIN-FWD-005: CONNECT requests are dispatched via CONNECT path, not forward path.
 
@@ -241,12 +259,16 @@ class TestHTTP3ChainForwardProxy:
                 timeout=10,
             )
             # Proxy must still be running (no crash/panic)
-            assert proc.poll() is None, "Proxy crashed while handling CONNECT to unreachable upstream"
+            assert proc.poll() is None, (
+                "Proxy crashed while handling CONNECT to unreachable upstream"
+            )
             # curl must exit (not hang); any non-zero or non-200 is acceptable
             # The key invariant: this did NOT return 400 (which would mean the
             # request was wrongly routed to the forward proxy validation path)
 
-    def test_post_absolute_form_with_unreachable_upstream_fails_gracefully(self, shared_test_certs: StringMap) -> None:
+    def test_post_absolute_form_with_unreachable_upstream_fails_gracefully(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """
         TC-CHAIN-FWD-006: POST with absolute-form URI and unreachable upstream fails gracefully.
 
@@ -280,6 +302,12 @@ class TestHTTP3ChainForwardProxy:
                 timeout=10,
             )
             # Proxy must still be running (no crash/panic)
-            assert proc.poll() is None, "Proxy crashed while handling POST forward request to unreachable upstream"
-            status = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
-            assert status != 200, f"Expected non-200 for unreachable upstream, got {status}"
+            assert proc.poll() is None, (
+                "Proxy crashed while handling POST forward request to unreachable upstream"
+            )
+            status = (
+                int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
+            )
+            assert status != 200, (
+                f"Expected non-200 for unreachable upstream, got {status}"
+            )

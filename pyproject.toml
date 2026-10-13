@@ -22,7 +22,6 @@ python_functions = ["test_*"]
 addopts = "-v --tb=short --timeout=60 --timeout-method=thread"
 
 [tool.ruff]
-line-length = 72
 target-version = "py314"
 
 [tool.ruff.lint]

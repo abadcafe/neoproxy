@@ -40,7 +40,9 @@ def create_http3_listener_config(
     quic_section = ""
     if quic_config:
         # Indent each line of quic_config so it nests under 'quic:'
-        indented = "\n".join("      " + line.strip() for line in quic_config.strip().splitlines())
+        indented = "\n".join(
+            "      " + line.strip() for line in quic_config.strip().splitlines()
+        )
         quic_section = f"""
   args:
     quic:

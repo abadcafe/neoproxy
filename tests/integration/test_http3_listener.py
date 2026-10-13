@@ -103,7 +103,9 @@ def run_curl_http3_connect(
 class TestHTTP3BasicConnection:
     """Test 7.1: Basic HTTP/3 connection scenarios."""
 
-    def test_http3_listener_starts_successfully(self, shared_test_certs: StringMap) -> None:
+    def test_http3_listener_starts_successfully(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """
         TC-H3-001: HTTP/3 Listener starts and binds to port.
 
@@ -116,12 +118,16 @@ class TestHTTP3BasicConnection:
         try:
             cert_path = shared_test_certs["cert_path"]
             key_path = shared_test_certs["key_path"]
-            config_path = create_http3_listener_config(proxy_port, cert_path, key_path, temp_dir)
+            config_path = create_http3_listener_config(
+                proxy_port, cert_path, key_path, temp_dir
+            )
 
             proxy_proc = start_proxy(config_path)
 
             # Wait for UDP port to be bound
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), "HTTP/3 listener failed to start"
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), (
+                "HTTP/3 listener failed to start"
+            )
 
             # Verify process is still running
             assert proxy_proc.poll() is None, "HTTP/3 listener process crashed"
@@ -132,7 +138,9 @@ class TestHTTP3BasicConnection:
                 proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_http3_listener_graceful_shutdown(self, shared_test_certs: StringMap) -> None:
+    def test_http3_listener_graceful_shutdown(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """
         TC-H3-002: HTTP/3 Listener graceful shutdown.
 
@@ -145,11 +153,15 @@ class TestHTTP3BasicConnection:
         try:
             cert_path = shared_test_certs["cert_path"]
             key_path = shared_test_certs["key_path"]
-            config_path = create_http3_listener_config(proxy_port, cert_path, key_path, temp_dir)
+            config_path = create_http3_listener_config(
+                proxy_port, cert_path, key_path, temp_dir
+            )
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), "HTTP/3 listener failed to start"
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), (
+                "HTTP/3 listener failed to start"
+            )
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -194,11 +206,15 @@ class TestHTTP3Authentication:
             cert_path = shared_test_certs["cert_path"]
             key_path = shared_test_certs["key_path"]
             # No auth config means no authentication
-            config_path = create_http3_listener_config(proxy_port, cert_path, key_path, temp_dir)
+            config_path = create_http3_listener_config(
+                proxy_port, cert_path, key_path, temp_dir
+            )
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), "HTTP/3 listener failed to start"
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), (
+                "HTTP/3 listener failed to start"
+            )
 
             # Verify process is running
             assert proxy_proc.poll() is None, "HTTP/3 listener should be running"
@@ -444,7 +460,9 @@ class TestHTTP3ConfigValidation:
     - addresses (plural) field
     """
 
-    def test_invalid_quic_param_uses_default(self, shared_test_certs: StringMap) -> None:
+    def test_invalid_quic_param_uses_default(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """
         TC-H3-CFG-001: Invalid QUIC parameter uses default value.
 
@@ -475,7 +493,9 @@ class TestHTTP3ConfigValidation:
 
             # Invalid value is rejected at startup (bail!)
             proxy_proc.wait(timeout=5)
-            assert proxy_proc.returncode != 0, "HTTP/3 listener should reject invalid max_concurrent_bidi_streams"
+            assert proxy_proc.returncode != 0, (
+                "HTTP/3 listener should reject invalid max_concurrent_bidi_streams"
+            )
 
         finally:
             if proxy_proc:
@@ -626,11 +646,15 @@ class TestHTTP3GracefulShutdown:
         try:
             cert_path = shared_test_certs["cert_path"]
             key_path = shared_test_certs["key_path"]
-            config_path = create_http3_listener_config(proxy_port, cert_path, key_path, temp_dir)
+            config_path = create_http3_listener_config(
+                proxy_port, cert_path, key_path, temp_dir
+            )
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), "HTTP/3 listener failed to start"
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), (
+                "HTTP/3 listener failed to start"
+            )
 
             start_time = time.time()
             proxy_proc.send_signal(signal.SIGTERM)
@@ -672,7 +696,9 @@ class TestHTTP3GracefulShutdown:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), "HTTP/3 listener failed to start"
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), (
+                "HTTP/3 listener failed to start"
+            )
 
             proxy_proc.send_signal(signal.SIGTERM)
 
@@ -700,7 +726,9 @@ class TestHTTP3GracefulShutdown:
 class TestHTTP3EchoService:
     """Test HTTP/3 listener with echo service for non-CONNECT requests."""
 
-    def test_h3_get_to_echo_service_no_upgrade_error(self, shared_test_certs: StringMap) -> None:
+    def test_h3_get_to_echo_service_no_upgrade_error(
+        self, shared_test_certs: StringMap
+    ) -> None:
         """
         TC-H3-ECHO-001: GET request to echo service should not cause upgrade error.
 
@@ -767,7 +795,9 @@ servers:
                 stderr=subprocess.PIPE,
             )
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), "HTTP/3 listener failed to start"
+            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), (
+                "HTTP/3 listener failed to start"
+            )
 
             # Send a GET request using HTTP/3 client
             async def do_get_request():
@@ -792,7 +822,9 @@ servers:
 
             # KEY ASSERTION: Request should succeed with 200
             assert success, "HTTP/3 connection should succeed"
-            assert status_code == 200, f"Echo service should return 200, got {status_code}"
+            assert status_code == 200, (
+                f"Echo service should return 200, got {status_code}"
+            )
 
         finally:
             if proxy_proc:

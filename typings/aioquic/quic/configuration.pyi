@@ -13,5 +13,8 @@ class QuicConfiguration:
     ) -> None: ...
     def load_verify_locations(self, cafile: str) -> None: ...
     def load_cert_chain(
-        self, certfile: str, keyfile: str | None = None, password: bytes | str | None = None
+        self,
+        certfile: str,
+        keyfile: str | None = None,
+        password: bytes | str | None = None,
     ) -> None: ...

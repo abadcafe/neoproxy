@@ -63,7 +63,9 @@ class TestNormalShutdown:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy server failed to start"
 
             # Send SIGINT
             proxy_proc.send_signal(signal.SIGINT)
@@ -99,7 +101,9 @@ class TestNormalShutdown:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy server failed to start"
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -144,7 +148,9 @@ class TestRepeatedSignal:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy server failed to start"
 
             # Send multiple SIGINT signals rapidly
             proxy_proc.send_signal(signal.SIGINT)
@@ -211,14 +217,20 @@ class TestShutdownTimeout:
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, blocking_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, blocking_handler
+            )
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy server failed to start"
 
             # Establish CONNECT tunnel
-            client_sock = establish_connect_tunnel("127.0.0.1", proxy_port, "127.0.0.1", target_port)
+            client_sock = establish_connect_tunnel(
+                "127.0.0.1", proxy_port, "127.0.0.1", target_port
+            )
             assert client_sock is not None, "Failed to establish tunnel"
 
             # Send SIGTERM while tunnel is active
@@ -233,7 +245,9 @@ class TestShutdownTimeout:
                 proxy_proc.kill()
                 proxy_proc.wait()
                 elapsed = time.time() - start_time
-                assert False, f"Process did not exit within expected time (elapsed: {elapsed:.1f}s)"
+                assert False, (
+                    f"Process did not exit within expected time (elapsed: {elapsed:.1f}s)"
+                )
 
             # Verify shutdown completed within timeout
             # Should be approximately MAX_SHUTDOWN_TIME (8s) + some buffer
@@ -289,9 +303,9 @@ class TestErrorExit:
             config_path1 = create_test_config(proxy_port, temp_dir1)
             first_proc = start_proxy(config_path1)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=first_proc), (
-                "First proxy server failed to start"
-            )
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=2.0, proc=first_proc
+            ), "First proxy server failed to start"
 
             # Try to start second process with same port
             config_path2 = create_test_config(proxy_port, temp_dir2)
@@ -308,7 +322,9 @@ class TestErrorExit:
             if poll_result is not None:
                 # Process exited - verify error code
                 # Expected: exit code 2 or 3
-                assert poll_result in [2, 3], f"Expected exit code 2 or 3, got {poll_result}"
+                assert poll_result in [2, 3], (
+                    f"Expected exit code 2 or 3, got {poll_result}"
+                )
             else:
                 # Process is still running - send SIGTERM and verify clean exit
                 # This is the current observed behavior
@@ -323,7 +339,9 @@ class TestErrorExit:
 
                 # Current behavior: exits with 0 after SIGTERM
                 # This is potentially a bug - should exit with 2 or 3
-                assert return_code == 0, f"Expected exit code 0 after SIGTERM, got {return_code}"
+                assert return_code == 0, (
+                    f"Expected exit code 0 after SIGTERM, got {return_code}"
+                )
 
         finally:
             if first_proc and first_proc.poll() is None:
@@ -376,20 +394,28 @@ class TestConnectTunnel:
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, echo_handler
+            )
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy server failed to start"
 
             # Establish CONNECT tunnel
-            client_sock = establish_connect_tunnel("127.0.0.1", proxy_port, "127.0.0.1", target_port)
+            client_sock = establish_connect_tunnel(
+                "127.0.0.1", proxy_port, "127.0.0.1", target_port
+            )
             assert client_sock is not None, "Failed to establish tunnel"
 
             # Send data through tunnel
             client_sock.sendall(b"TEST_DATA")
             response = client_sock.recv(1024)
-            assert b"ECHO:TEST_DATA" in response, f"Expected ECHO response, got: {response}"
+            assert b"ECHO:TEST_DATA" in response, (
+                f"Expected ECHO response, got: {response}"
+            )
 
             # Send SIGTERM while tunnel is active
             proxy_proc.send_signal(signal.SIGTERM)
@@ -438,7 +464,9 @@ class TestResourceCleanup:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy server failed to start"
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -480,7 +508,9 @@ class TestResourceCleanup:
             config_path = create_echo_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), "Proxy server failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc
+            ), "Proxy server failed to start"
 
             # Create multiple idle connections
             num_connections = 5
@@ -644,7 +674,9 @@ class TestMultipleWorkerThreads:
             config_path = create_test_config(proxy_port, temp_dir, server_threads=4)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy server failed to start"
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -697,15 +729,21 @@ class TestMultipleWorkerThreads:
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, echo_handler
+            )
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc), "Proxy server failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
+            ), "Proxy server failed to start"
 
             # Establish multiple tunnels
             for _ in range(5):
-                sock = establish_connect_tunnel("127.0.0.1", proxy_port, "127.0.0.1", target_port)
+                sock = establish_connect_tunnel(
+                    "127.0.0.1", proxy_port, "127.0.0.1", target_port
+                )
                 if sock:
                     client_socks.append(sock)
 

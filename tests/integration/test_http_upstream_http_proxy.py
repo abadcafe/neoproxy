@@ -46,7 +46,9 @@ def _read_http_response(conn: socket.socket) -> bytes:
     return data
 
 
-def _write_http_upstream_config(entry_port: int, upstream_port: int, temp_dir: str) -> str:
+def _write_http_upstream_config(
+    entry_port: int, upstream_port: int, temp_dir: str
+) -> str:
     config_content = f"""server_threads: 1
 
 plugins:
@@ -79,7 +81,9 @@ servers:
     return config_path
 
 
-def _write_https_upstream_config(entry_port: int, upstream_port: int, ca_path: str, temp_dir: str) -> str:
+def _write_https_upstream_config(
+    entry_port: int, upstream_port: int, ca_path: str, temp_dir: str
+) -> str:
     config_content = f"""server_threads: 1
 
 plugins:
@@ -115,7 +119,9 @@ servers:
     return config_path
 
 
-def _tls_server_handler(cert_path: str, key_path: str, handler: TargetHandler) -> TargetHandler:
+def _tls_server_handler(
+    cert_path: str, key_path: str, handler: TargetHandler
+) -> TargetHandler:
     def wrapped(conn: socket.socket) -> None:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(cert_path, key_path)
@@ -174,7 +180,9 @@ def test_http_upstream_http_proxy_forward_request() -> None:
 
         assert result.returncode == 0, result.stderr
         assert result.stdout == "via-http-upstream-forward"
-        assert request_lines.get(timeout=1).startswith("GET http://example.test/resource ")
+        assert request_lines.get(timeout=1).startswith(
+            "GET http://example.test/resource "
+        )
     finally:
         if proxy_proc is not None:
             terminate_process(proxy_proc, timeout=5, force=True)
@@ -212,7 +220,9 @@ def test_http_upstream_https_proxy_forward_request() -> None:
             upstream_port,
             _tls_server_handler(cert_path, key_path, upstream_handler),
         )
-        config_path = _write_https_upstream_config(entry_port, upstream_port, ca_path, temp_dir)
+        config_path = _write_https_upstream_config(
+            entry_port, upstream_port, ca_path, temp_dir
+        )
         proxy_proc = start_proxy(config_path)
         assert wait_for_proxy("127.0.0.1", entry_port, timeout=5.0, proc=proxy_proc)
 
@@ -233,7 +243,9 @@ def test_http_upstream_https_proxy_forward_request() -> None:
 
         assert result.returncode == 0, result.stderr
         assert result.stdout == "via-https-upstream-forward"
-        assert request_lines.get(timeout=1).startswith("GET http://example.test/secure-resource ")
+        assert request_lines.get(timeout=1).startswith(
+            "GET http://example.test/secure-resource "
+        )
     finally:
         if proxy_proc is not None:
             terminate_process(proxy_proc, timeout=5, force=True)
@@ -279,14 +291,20 @@ def test_http_upstream_http_proxy_connect_tunnel() -> None:
         assert wait_for_proxy("127.0.0.1", entry_port, timeout=5.0, proc=proxy_proc)
 
         with socket.create_connection(("127.0.0.1", entry_port), timeout=5.0) as sock:
-            sock.sendall(f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode())
+            sock.sendall(
+                f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
+            )
             connect_response = _read_headers(sock)
             assert b" 200 " in connect_response
-            sock.sendall(b"GET / HTTP/1.1\r\nHost: tunnel-target\r\nConnection: close\r\n\r\n")
+            sock.sendall(
+                b"GET / HTTP/1.1\r\nHost: tunnel-target\r\nConnection: close\r\n\r\n"
+            )
             tunneled_response = _read_http_response(sock)
 
         assert b"via-http-upstream-connect" in tunneled_response
-        assert request_lines.get(timeout=1).startswith(f"CONNECT 127.0.0.1:{target_port} ")
+        assert request_lines.get(timeout=1).startswith(
+            f"CONNECT 127.0.0.1:{target_port} "
+        )
         assert request_lines.get(timeout=1).startswith("GET / ")
     finally:
         if proxy_proc is not None:
@@ -329,19 +347,27 @@ def test_http_upstream_https_proxy_connect_tunnel() -> None:
             upstream_port,
             _tls_server_handler(cert_path, key_path, upstream_handler),
         )
-        config_path = _write_https_upstream_config(entry_port, upstream_port, ca_path, temp_dir)
+        config_path = _write_https_upstream_config(
+            entry_port, upstream_port, ca_path, temp_dir
+        )
         proxy_proc = start_proxy(config_path)
         assert wait_for_proxy("127.0.0.1", entry_port, timeout=5.0, proc=proxy_proc)
 
         with socket.create_connection(("127.0.0.1", entry_port), timeout=5.0) as sock:
-            sock.sendall(f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode())
+            sock.sendall(
+                f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
+            )
             connect_response = _read_headers(sock)
             assert b" 200 " in connect_response
-            sock.sendall(b"GET / HTTP/1.1\r\nHost: tunnel-target\r\nConnection: close\r\n\r\n")
+            sock.sendall(
+                b"GET / HTTP/1.1\r\nHost: tunnel-target\r\nConnection: close\r\n\r\n"
+            )
             tunneled_response = _read_http_response(sock)
 
         assert b"via-https-upstream-connect" in tunneled_response
-        assert request_lines.get(timeout=1).startswith(f"CONNECT 127.0.0.1:{target_port} ")
+        assert request_lines.get(timeout=1).startswith(
+            f"CONNECT 127.0.0.1:{target_port} "
+        )
         assert request_lines.get(timeout=1).startswith("GET / ")
     finally:
         if proxy_proc is not None:

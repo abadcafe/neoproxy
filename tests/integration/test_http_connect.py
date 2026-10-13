@@ -109,13 +109,17 @@ class TestHTTPConnect:
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, http_echo_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, http_echo_handler
+            )
 
             # 3. 启动代理服务器
             proxy_proc = start_proxy(config_path)
 
             # 4. 等待代理服务器就绪
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
+                "Proxy server failed to start"
+            )
 
             # 5. 使用 curl 发送 CONNECT 请求并验证隧道
             returncode, _stdout, stderr = run_curl_connect(
@@ -127,7 +131,9 @@ class TestHTTPConnect:
             )
 
             # 6. 验证 curl 成功执行
-            assert returncode == 0, f"curl failed with return code {returncode}, stderr: {stderr}"
+            assert returncode == 0, (
+                f"curl failed with return code {returncode}, stderr: {stderr}"
+            )
 
             # 7. 验证目标服务器收到数据并返回响应
             assert len(received_messages) > 0, "Target server did not receive any data"
@@ -161,7 +167,9 @@ class TestHTTPConnect:
             proxy_proc = start_proxy(config_path)
 
             # 3. 等待代理服务器就绪
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
+                "Proxy server failed to start"
+            )
 
             # 4. 发送 origin-form GET 请求（非代理请求格式）
             request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
@@ -197,7 +205,9 @@ class TestHTTPConnect:
             proxy_proc = start_proxy(config_path)
 
             # 3. 等待代理服务器就绪
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
+                "Proxy server failed to start"
+            )
 
             # 4. 发送缺少端口号的 CONNECT 请求
             request = b"CONNECT example.com HTTP/1.1\r\nHost: example.com\r\n\r\n"
@@ -242,7 +252,9 @@ class TestHTTPConnect:
             proxy_proc = start_proxy(config_path)
 
             # 3. 等待代理服务器就绪
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc), "Proxy server failed to start"
+            assert wait_for_proxy(
+                "127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc
+            ), "Proxy server failed to start"
 
             # 4. 发送 CONNECT 请求到不可达地址
             # 使用本地不存在的端口，会立即收到 connection refused
@@ -281,7 +293,9 @@ class TestHTTPConnect:
                 or b"Gateway Timeout" in response
                 or len(response) == 0
             )
-            assert is_valid_response, f"Unexpected response for unreachable target: {response.decode(errors='ignore')}"
+            assert is_valid_response, (
+                f"Unexpected response for unreachable target: {response.decode(errors='ignore')}"
+            )
 
         finally:
             # 6. 清理资源
@@ -322,13 +336,17 @@ class TestHTTPConnect:
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, echo_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, echo_handler
+            )
 
             # 3. 启动代理服务器
             proxy_proc = start_proxy(config_path)
 
             # 4. 等待代理服务器就绪
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
+                "Proxy server failed to start"
+            )
 
             # 5. 建立 CONNECT 隧道并发送数据
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -337,9 +355,7 @@ class TestHTTPConnect:
                 sock.connect(("127.0.0.1", proxy_port))
 
                 # 发送 CONNECT 请求
-                connect_request = (
-                    f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
-                )
+                connect_request = f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
                 sock.sendall(connect_request)
 
                 # 读取 200 响应
@@ -349,7 +365,9 @@ class TestHTTPConnect:
                     if not chunk:
                         break
                     response += chunk
-                assert b"200" in response, f"Expected 200 response, got: {response.decode(errors='ignore')}"
+                assert b"200" in response, (
+                    f"Expected 200 response, got: {response.decode(errors='ignore')}"
+                )
 
                 # 发送测试数据
                 test_data = b"HELLO_WORLD_TEST_DATA"
@@ -416,13 +434,17 @@ class TestHTTPConnect:
                 finally:
                     conn.close()
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, close_detect_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, close_detect_handler
+            )
 
             # 3. 启动代理服务器
             proxy_proc = start_proxy(config_path)
 
             # 4. 等待代理服务器就绪
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), "Proxy server failed to start"
+            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
+                "Proxy server failed to start"
+            )
 
             # 5. 建立 CONNECT 隧道
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -431,9 +453,7 @@ class TestHTTPConnect:
                 sock.connect(("127.0.0.1", proxy_port))
 
                 # 发送 CONNECT 请求
-                connect_request = (
-                    f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
-                )
+                connect_request = f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
                 sock.sendall(connect_request)
 
                 # 读取 200 响应
@@ -443,19 +463,25 @@ class TestHTTPConnect:
                     if not chunk:
                         break
                     response += chunk
-                assert b"200" in response, f"Expected 200 response, got: {response.decode(errors='ignore')}"
+                assert b"200" in response, (
+                    f"Expected 200 response, got: {response.decode(errors='ignore')}"
+                )
 
                 # 6. 发送数据并关闭客户端连接
                 sock.sendall(b"TEST_DATA")
                 response = sock.recv(1024)
-                assert b"RESPONSE" in response, f"Expected RESPONSE, got: {response.decode(errors='ignore')}"
+                assert b"RESPONSE" in response, (
+                    f"Expected RESPONSE, got: {response.decode(errors='ignore')}"
+                )
 
             finally:
                 # 关闭客户端连接
                 sock.close()
 
             # 7. 等待目标服务器感知关闭
-            assert target_socket_closed.wait(timeout=10.0), "Target server did not detect client close"
+            assert target_socket_closed.wait(timeout=10.0), (
+                "Target server did not detect client close"
+            )
 
         finally:
             # 8. 清理资源

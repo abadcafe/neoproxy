@@ -163,7 +163,9 @@ class H3Client:
         self._protocol: H3ProtocolBase | None = None
         self._h3_connection: H3Connection | None = None
         self._configuration: QuicConfiguration | None = None
-        self._connection_context: AbstractAsyncContextManager[QuicConnectionProtocol] | None = None
+        self._connection_context: (
+            AbstractAsyncContextManager[QuicConnectionProtocol] | None
+        ) = None
         self._h3_events: dict[int, list[H3Event]] = defaultdict(list)
         self._h3_events_received: dict[int, asyncio.Event] = defaultdict(asyncio.Event)
 
@@ -198,7 +200,9 @@ class H3Client:
 
         # Set server_name for SNI (required for certificate resolution)
         # Use server_hostname if provided, otherwise use host
-        self._configuration.server_name = _resolve_sni_hostname(self.host, self.server_hostname)
+        self._configuration.server_name = _resolve_sni_hostname(
+            self.host, self.server_hostname
+        )
 
         # Create a custom protocol class for this connection
         h3_events_store = self._h3_events
@@ -327,7 +331,11 @@ class H3Client:
             H3Response: The response
         """
         configuration = self._configuration
-        if self._h3_connection is None or self._protocol is None or configuration is None:
+        if (
+            self._h3_connection is None
+            or self._protocol is None
+            or configuration is None
+        ):
             raise RuntimeError("Not connected")
 
         # Build headers
@@ -369,7 +377,9 @@ class H3Client:
         response = await self._receive_response(stream_id)
         return response
 
-    async def _receive_response(self, stream_id: int, *, wait_for_body: bool = True) -> H3Response:
+    async def _receive_response(
+        self, stream_id: int, *, wait_for_body: bool = True
+    ) -> H3Response:
         """
         Receive response for a stream using proper event handling.
 
@@ -772,7 +782,9 @@ async def perform_h3_connect_test_full(
 
                 # Add proxy authorization if credentials provided
                 if username and password:
-                    credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
+                    credentials = base64.b64encode(
+                        f"{username}:{password}".encode()
+                    ).decode()
                     headers.append(
                         (
                             b"proxy-authorization",
@@ -1359,7 +1371,9 @@ async def perform_h3_tls_client_cert_test(
 
         def quic_event_received(self, event: QuicEvent) -> None:
             if isinstance(event, ConnectionTerminated):
-                self.termination_reason = event.reason_phrase or f"error_code={event.error_code}"
+                self.termination_reason = (
+                    event.reason_phrase or f"error_code={event.error_code}"
+                )
                 self.terminated.set()
 
             if isinstance(event, StreamDataReceived):
@@ -1539,7 +1553,9 @@ async def perform_h3_request_with_custom_authority(
                 h3_events_received[event.stream_id].set()
             elif isinstance(event, ConnectionTerminated):
                 nonlocal connection_terminated
-                connection_terminated = event.reason_phrase or f"error_code={event.error_code}"
+                connection_terminated = (
+                    event.reason_phrase or f"error_code={event.error_code}"
+                )
             elif isinstance(event, StreamDataReceived):
                 reader = self._stream_readers.get(event.stream_id, None)
                 if reader is not None:
@@ -1645,7 +1661,9 @@ async def perform_h3_request_with_custom_authority(
                     # Response is complete if:
                     # 1. stream_ended was set, OR
                     # 2. We have status code and received both headers and data
-                    if response_received or (status_code > 0 and headers_received and data_received):
+                    if response_received or (
+                        status_code > 0 and headers_received and data_received
+                    ):
                         break
 
                     # GREASE workaround: if headers received but stream_ended

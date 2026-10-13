@@ -170,7 +170,9 @@ class TestSocks5UpgradeConnectTcp:
         config = create_socks5_connect_tcp_config(port, self.temp_dir)
         proc = start_proxy(config)
         self.processes.append(proc)
-        assert wait_for_proxy("127.0.0.1", port, timeout=10.0), "Proxy did not start in time"
+        assert wait_for_proxy("127.0.0.1", port, timeout=10.0), (
+            "Proxy did not start in time"
+        )
 
     def _create_echo_target(self, port: int) -> None:
         """Create a TCP echo server on the given port."""
@@ -259,7 +261,9 @@ class TestSocks5UpgradeConnectTcp:
         socks5_handshake_no_auth(sock)
         rep = socks5_connect_ipv4(sock, "127.0.0.1", closed_port)
         # Should get a non-zero error reply (connection refused or general failure)
-        assert rep != SOCKS5_REP_SUCCESS, f"Expected error reply for refused connection, got REP={rep}"
+        assert rep != SOCKS5_REP_SUCCESS, (
+            f"Expected error reply for refused connection, got REP={rep}"
+        )
 
     def test_socks5_connect_refused_error_code(self) -> None:
         """SOCKS5 CONNECT to refused port returns REP=0x05 (Connection Refused).
@@ -279,7 +283,9 @@ class TestSocks5UpgradeConnectTcp:
 
         socks5_handshake_no_auth(sock)
         rep = socks5_connect_ipv4(sock, "127.0.0.1", closed_port)
-        assert rep == SOCKS5_REP_CONNECTION_REFUSED, f"Expected REP=0x05 (Connection Refused), got REP={rep}"
+        assert rep == SOCKS5_REP_CONNECTION_REFUSED, (
+            f"Expected REP=0x05 (Connection Refused), got REP={rep}"
+        )
 
     def test_socks5_concurrent_connections(self) -> None:
         """Multiple concurrent SOCKS5 connections work independently."""
@@ -334,4 +340,6 @@ class TestSocks5UpgradeConnectTcp:
             if not chunk:
                 break
             received += chunk
-        assert received == test_data, f"Large transfer mismatch: got {len(received)} bytes"
+        assert received == test_data, (
+            f"Large transfer mismatch: got {len(received)} bytes"
+        )

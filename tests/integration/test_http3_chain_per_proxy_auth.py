@@ -70,7 +70,9 @@ class TestHTTP3ChainPerProxyPasswordAuth:
             key_path = shared_test_certs["key_path"]
             ca_path = shared_test_certs["ca_path"]
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, one_shot_echo_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, one_shot_echo_handler
+            )
 
             # Start HTTP/3 listener with password auth
             h3_config = create_http3_listener_config_with_password_auth(
@@ -146,7 +148,9 @@ class TestHTTP3ChainPerProxyPasswordAuth:
 class TestHTTP3ChainPerProxyTlsCertAuth:
     """Test per-proxy TLS client certificate authentication scenarios."""
 
-    def test_chain_with_tls_cert_auth_only(self, shared_test_certs: StringMap, shared_client_cert: StringMap) -> None:
+    def test_chain_with_tls_cert_auth_only(
+        self, shared_test_certs: StringMap, shared_client_cert: StringMap
+    ) -> None:
         """
         TC-CHAIN-AUTH-002: HTTP/3 chain with TLS client cert auth succeeds.
 
@@ -171,7 +175,9 @@ class TestHTTP3ChainPerProxyTlsCertAuth:
             client_cert_path = shared_client_cert["client_cert_path"]
             client_key_path = shared_client_cert["client_key_path"]
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, one_shot_echo_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, one_shot_echo_handler
+            )
 
             # Start HTTP/3 listener with TLS client cert auth (mTLS)
             h3_config = create_http3_listener_config_with_tls_client_cert(
@@ -269,7 +275,9 @@ class TestHTTP3ChainAuthInheritance:
             key_path = shared_test_certs["key_path"]
             ca_path = shared_test_certs["ca_path"]
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, one_shot_echo_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, one_shot_echo_handler
+            )
 
             h3_config = create_http3_listener_config_with_password_auth(
                 proxy_port=h3_port,
@@ -284,7 +292,9 @@ class TestHTTP3ChainAuthInheritance:
             # Proxy has NO user field - should inherit from default_user
             chain_config = create_http3_chain_config_with_per_proxy_auth(
                 http_port=http_port,
-                proxy_group=[("127.0.0.1", h3_port, 1, None, None)],  # No user specified
+                proxy_group=[
+                    ("127.0.0.1", h3_port, 1, None, None)
+                ],  # No user specified
                 ca_path=ca_path,
                 temp_dir=temp_dir2,
                 default_user=(
@@ -459,7 +469,9 @@ class TestTlsDeepMerge:
             key_path = shared_test_certs["key_path"]
             ca_path = shared_test_certs["ca_path"]
 
-            _, target_socket = create_target_server("127.0.0.1", target_port, one_shot_echo_handler)
+            _, target_socket = create_target_server(
+                "127.0.0.1", target_port, one_shot_echo_handler
+            )
 
             h3_config = create_http3_listener_config(
                 proxy_port=h3_port,

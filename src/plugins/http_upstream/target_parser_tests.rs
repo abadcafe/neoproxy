@@ -17,8 +17,9 @@ fn make_request_parts(
 fn test_parse_connect_target_valid() {
   let parts =
     make_request_parts(http::Method::CONNECT, "example.com:443");
-  let result = parse_connect_target(&parts);
-  assert_eq!(result, Ok(("example.com".to_string(), 443)));
+  let target = parse_connect_target(&parts).unwrap();
+  assert_eq!(target.authority(), "example.com:443");
+  assert_eq!(target.uri(), "example.com:443");
 }
 
 #[test]
@@ -54,16 +55,17 @@ fn test_parse_connect_target_port_zero() {
 #[test]
 fn test_parse_connect_target_ipv6_address() {
   let parts = make_request_parts(http::Method::CONNECT, "[::1]:8080");
-  let result = parse_connect_target(&parts);
-  assert_eq!(result, Ok(("[::1]".to_string(), 8080)));
+  let target = parse_connect_target(&parts).unwrap();
+  assert_eq!(target.authority(), "[::1]:8080");
+  assert_eq!(target.uri(), "[::1]:8080");
 }
 
 #[test]
 fn test_parse_connect_target_ipv4_address() {
   let parts =
     make_request_parts(http::Method::CONNECT, "192.168.1.1:80");
-  let result = parse_connect_target(&parts);
-  assert_eq!(result, Ok(("192.168.1.1".to_string(), 80)));
+  let target = parse_connect_target(&parts).unwrap();
+  assert_eq!(target.authority(), "192.168.1.1:80");
 }
 
 #[test]
@@ -183,59 +185,6 @@ fn test_parse_forward_target_rejects_userinfo() {
 }
 
 #[test]
-fn test_strip_hop_by_hop_headers() {
-  let mut headers = http::HeaderMap::new();
-  headers.insert(http::header::CONNECTION, "close".parse().unwrap());
-  headers.insert(
-    http::header::HeaderName::from_static("keep-alive"),
-    "timeout=5".parse().unwrap(),
-  );
-  headers.insert(
-    http::header::PROXY_AUTHORIZATION,
-    "Basic abc123".parse().unwrap(),
-  );
-  headers
-    .insert(http::header::CONTENT_TYPE, "text/plain".parse().unwrap());
-
-  strip_hop_by_hop_headers(&mut headers);
-
-  assert!(headers.get(http::header::CONNECTION).is_none());
-  assert!(
-    headers
-      .get(http::header::HeaderName::from_static("keep-alive"))
-      .is_none()
-  );
-  assert!(headers.get(http::header::PROXY_AUTHORIZATION).is_none());
-  assert!(headers.get(http::header::CONTENT_TYPE).is_some());
-}
-
-#[test]
-fn test_strip_hop_by_hop_headers_connection_tokens() {
-  // RFC 7230: headers named in Connection value must also be stripped
-  let mut headers = http::HeaderMap::new();
-  headers.insert(
-    http::header::CONNECTION,
-    "keep-alive, x-custom-hop".parse().unwrap(),
-  );
-  headers.insert(
-    http::header::HeaderName::from_static("x-custom-hop"),
-    "value".parse().unwrap(),
-  );
-  headers
-    .insert(http::header::CONTENT_TYPE, "text/plain".parse().unwrap());
-
-  strip_hop_by_hop_headers(&mut headers);
-
-  assert!(headers.get(http::header::CONNECTION).is_none());
-  assert!(
-    headers
-      .get(http::header::HeaderName::from_static("x-custom-hop"))
-      .is_none()
-  );
-  assert!(headers.get(http::header::CONTENT_TYPE).is_some());
-}
-
-#[test]
 fn test_forward_target_error_display() {
   assert_eq!(
     format!("{}", ForwardTargetError::ConnectMethod),
@@ -249,4 +198,96 @@ fn test_forward_target_error_display() {
     format!("{}", ForwardTargetError::UnsupportedScheme),
     "only http:// scheme supported for forward proxy"
   );
+}
+
+#[test]
+fn test_parse_connect_target_rejects_non_authority_form_and_userinfo() {
+  for uri in ["http://example.com:443/", "user@example.com:443"] {
+    let parts = make_request_parts(http::Method::CONNECT, uri);
+    assert!(parse_connect_target(&parts).is_err());
+  }
+}
+
+#[test]
+fn test_parse_forward_target_rejects_invalid_port() {
+  for uri in ["http://example.com:65536/", "http://example.com:abc/"] {
+    let parts = make_request_parts(http::Method::GET, uri);
+    assert!(parse_forward_target(&parts).is_err());
+  }
+}
+
+#[test]
+fn test_parse_forward_target_normalizes_empty_port() {
+  for (uri, normalized, host) in [
+    (
+      "http://example.com:/path?q=a:b",
+      "http://example.com/path?q=a:b",
+      "example.com",
+    ),
+    ("http://127.0.0.1:/", "http://127.0.0.1/", "127.0.0.1"),
+    ("http://[::1]:/path", "http://[::1]/path", "[::1]"),
+  ] {
+    let parts = make_request_parts(http::Method::GET, uri);
+    let target = parse_forward_target(&parts).unwrap();
+    assert_eq!(target.absolute_uri().to_string(), normalized);
+    assert_eq!(target.host_header_value().unwrap(), host);
+  }
+}
+
+#[test]
+fn test_parse_connect_target_rejects_empty_or_invalid_port() {
+  for uri in
+    ["example.com:", "[::1]:", "example.com:abc", "example.com:65536"]
+  {
+    let parts = make_request_parts(http::Method::CONNECT, uri);
+    assert!(parse_connect_target(&parts).is_err(), "{uri}");
+  }
+}
+
+#[test]
+fn test_parse_connect_target_accepts_port_boundaries() {
+  for port in [1, u16::MAX] {
+    let parts = make_request_parts(
+      http::Method::CONNECT,
+      &format!("example.com:{port}"),
+    );
+    let target = parse_connect_target(&parts).unwrap();
+    assert_eq!(target.uri().port_u16(), Some(port));
+  }
+}
+
+#[test]
+fn test_parse_connect_target_http3_uses_authority_from_decoded_request()
+{
+  // h3 0.0.8 synthesizes a default path when decoding CONNECT. Its
+  // Request URI is an HTTP representation, not an HTTP/1 request line.
+  let request = http::Request::builder()
+    .method(http::Method::CONNECT)
+    .version(http::Version::HTTP_3)
+    .uri(
+      http::Uri::builder()
+        .authority("example.com:443")
+        .build()
+        .unwrap(),
+    )
+    .body(())
+    .unwrap();
+  let target = parse_connect_target(&request.into_parts().0).unwrap();
+  assert_eq!(target.authority(), "example.com:443");
+  assert_eq!(target.uri().scheme(), None);
+  assert_eq!(target.uri().path_and_query(), None);
+}
+
+#[test]
+fn test_parse_connect_target_preserves_validated_authority() {
+  for authority in
+    ["127.0.0.1:1", "[2001:db8::1]:65535", "EXAMPLE.COM:00443"]
+  {
+    let parts = make_request_parts(http::Method::CONNECT, authority);
+    let target = parse_connect_target(&parts).unwrap();
+    assert_eq!(target.authority(), authority);
+    assert_eq!(target.uri().to_string(), authority);
+    assert_eq!(target.to_string(), authority);
+    assert_eq!(target.clone(), target);
+  }
 }

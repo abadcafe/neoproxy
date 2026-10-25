@@ -11,17 +11,11 @@ import subprocess
 import tempfile
 import threading
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-)
-from .utils.helpers import (
-    create_target_server,
-    create_test_config,
-    send_raw_request,
-    start_proxy,
-    wait_for_proxy,
-)
+from tests.fixtures.http_configuration import create_test_config
+from tests.fixtures.http_request import send_raw_request
+from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.proxy_process import BytesProcess, start_proxy
+from tests.fixtures.tcp_peer import create_target_server
 
 # ==============================================================================
 # 测试辅助函数（本模块特有）
@@ -101,8 +95,11 @@ class TestHTTPConnect:
                             break
                         received_messages.append(data)
                         # 返回有效的 HTTP 响应
-                        http_response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nOK"
-                        conn.send(http_response)
+                        http_response = (
+                            b"HTTP/1.1 200 OK\r\nContent-Type:"
+                            + b" text/plain\r\nContent-Length: 2\r\n\r\nOK"
+                        )
+                        conn.sendall(http_response)
                         break  # 发送响应后关闭连接
                 except OSError:
                     pass
@@ -142,7 +139,7 @@ class TestHTTPConnect:
             # 8. 清理资源
             if proxy_proc:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -177,14 +174,15 @@ class TestHTTPConnect:
 
             # 5. 验证响应状态码为 400
             assert b"400" in response or b"Bad Request" in response, (
-                f"Expected 400 Bad Request for origin-form GET, got: {response.decode(errors='ignore')}"
+                "Expected 400 Bad Request for origin-form GET, got:"
+                + f" {response.decode(errors='ignore')}"
             )
 
         finally:
             # 6. 清理资源
             if proxy_proc:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_tc003_invalid_target_returns_400(self) -> None:
@@ -231,7 +229,7 @@ class TestHTTPConnect:
             # 8. 清理资源
             if proxy_proc:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_tc004_target_unreachable(self) -> None:
@@ -284,7 +282,7 @@ class TestHTTPConnect:
 
             # 5. 验证行为
             # 代理服务器应返回错误响应或关闭连接
-            # 允许 200（先返回200后连接失败）、502（连接失败）、504（网关超时）、或空响应
+            # 接受成功、连接失败、超时或关闭连接。
             is_valid_response = (
                 b"200" in response
                 or b"502" in response
@@ -294,14 +292,15 @@ class TestHTTPConnect:
                 or len(response) == 0
             )
             assert is_valid_response, (
-                f"Unexpected response for unreachable target: {response.decode(errors='ignore')}"
+                "Unexpected response for unreachable target:"
+                + f" {response.decode(errors='ignore')}"
             )
 
         finally:
             # 6. 清理资源
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=2)
+                _ = proxy_proc.wait(timeout=2)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_tc006_bidirectional_data_transfer(self) -> None:
@@ -330,7 +329,7 @@ class TestHTTPConnect:
                         if not data:
                             break
                         received_data.append(data)
-                        conn.send(b"ECHO:" + data)
+                        conn.sendall(b"ECHO:" + data)
                 except OSError:
                     pass
                 finally:
@@ -355,7 +354,10 @@ class TestHTTPConnect:
                 sock.connect(("127.0.0.1", proxy_port))
 
                 # 发送 CONNECT 请求
-                connect_request = f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
+                connect_request = (
+                    f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost:"
+                    + f" 127.0.0.1:{target_port}\r\n\r\n"
+                ).encode()
                 sock.sendall(connect_request)
 
                 # 读取 200 响应
@@ -376,7 +378,8 @@ class TestHTTPConnect:
                 # 接收回显数据
                 echo_response = sock.recv(1024)
                 assert echo_response == b"ECHO:" + test_data, (
-                    f"Expected 'ECHO:{test_data.decode()}', got: {echo_response.decode(errors='ignore')}"
+                    f"Expected 'ECHO:{test_data.decode()}', got:"
+                    + f" {echo_response.decode(errors='ignore')}"
                 )
 
             finally:
@@ -392,7 +395,7 @@ class TestHTTPConnect:
             # 7. 清理资源
             if proxy_proc:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -422,7 +425,7 @@ class TestHTTPConnect:
                     data = conn.recv(1024)
                     # 发送响应
                     if data:
-                        conn.send(b"RESPONSE")
+                        conn.sendall(b"RESPONSE")
                     # 等待客户端关闭
                     while True:
                         data = conn.recv(1024)
@@ -453,7 +456,10 @@ class TestHTTPConnect:
                 sock.connect(("127.0.0.1", proxy_port))
 
                 # 发送 CONNECT 请求
-                connect_request = f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
+                connect_request = (
+                    f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost:"
+                    + f" 127.0.0.1:{target_port}\r\n\r\n"
+                ).encode()
                 sock.sendall(connect_request)
 
                 # 读取 200 响应
@@ -487,7 +493,7 @@ class TestHTTPConnect:
             # 8. 清理资源
             if proxy_proc:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)

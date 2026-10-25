@@ -1,4 +1,15 @@
+//! module: target_parser
+//! responsibilities: validate upstream request targets
+//! public operations: parse_connect_target, parse_forward_target,
+//! ConnectTarget::{authority, uri},
+//! ForwardTarget::{absolute_uri, host_header_value}
+//! data entities: ConnectTargetError, ForwardTargetError,
+//! ConnectTarget, ForwardTarget
+//! tests: target_parser_tests.rs
+
 use std::fmt;
+
+use crate::http_authority::{self, AuthorityError};
 
 /// CONNECT target address parse error
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6,6 +17,7 @@ pub(crate) enum ConnectTargetError {
   NotConnectMethod,
   NoAuthority,
   NoPort,
+  InvalidAuthority,
   PortZero,
 }
 
@@ -18,6 +30,36 @@ pub(crate) enum ForwardTargetError {
   NoAuthority,
   InvalidAuthority,
   PortZero,
+}
+
+/// A validated CONNECT authority with an explicit nonzero u16 port.
+/// Only parse_connect_target can construct this value; transports
+/// cannot substitute an unchecked string after request validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConnectTarget {
+  authority: http::uri::Authority,
+}
+
+impl ConnectTarget {
+  pub(crate) fn authority(&self) -> &str {
+    self.authority.as_str()
+  }
+
+  pub(crate) fn uri(&self) -> http::Uri {
+    // A validated Authority always forms an authority-only URI.
+    // Failure means this module broke its invariant, so intentionally
+    // panic rather than disguise a programming error as an HTTP error.
+    http::Uri::builder()
+      .authority(self.authority.clone())
+      .build()
+      .expect("validated CONNECT authority must form a URI")
+  }
+}
+
+impl fmt::Display for ConnectTarget {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str(self.authority())
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +89,9 @@ impl fmt::Display for ConnectTargetError {
       }
       ConnectTargetError::NoAuthority => {
         write!(f, "no authority in URI")
+      }
+      ConnectTargetError::InvalidAuthority => {
+        write!(f, "invalid CONNECT authority")
       }
       ConnectTargetError::NoPort => {
         write!(f, "no port in authority")
@@ -93,11 +138,11 @@ impl std::error::Error for ForwardTargetError {}
 /// - `parts`: HTTP request Parts
 ///
 /// # Returns
-/// - `Ok((host, port))`: Target hostname and port number
+/// - `Ok(ConnectTarget)`: Validated authority for transport operations
 /// - `Err(ConnectTargetError)`: Parse failed
 pub(crate) fn parse_connect_target(
   parts: &http::request::Parts,
-) -> Result<(String, u16), ConnectTargetError> {
+) -> Result<ConnectTarget, ConnectTargetError> {
   if parts.method != http::Method::CONNECT {
     return Err(ConnectTargetError::NotConnectMethod);
   }
@@ -105,26 +150,35 @@ pub(crate) fn parse_connect_target(
   let authority =
     parts.uri.authority().ok_or(ConnectTargetError::NoAuthority)?;
 
-  let port = authority.port_u16().ok_or(ConnectTargetError::NoPort)?;
-
-  if port == 0 {
-    return Err(ConnectTargetError::PortZero);
+  if parts.version != http::Version::HTTP_3
+    && (parts.uri.scheme().is_some()
+      || parts.uri.path_and_query().is_some())
+  {
+    return Err(ConnectTargetError::InvalidAuthority);
   }
+  let authority = http_authority::normalize(authority).map_err(
+    |error| match error {
+      AuthorityError::InvalidAuthority => {
+        ConnectTargetError::InvalidAuthority
+      }
+      AuthorityError::PortZero => ConnectTargetError::PortZero,
+    },
+  )?;
+  authority.port_u16().ok_or(ConnectTargetError::NoPort)?;
 
-  Ok((authority.host().to_string(), port))
+  Ok(ConnectTarget { authority })
 }
 
 /// Parse forward proxy request target address
 ///
-/// Extracts host, port, and origin-form URI from an absolute-form HTTP
-/// request. Only supports http:// scheme (https:// requires CONNECT per RFC).
+/// Validate an absolute-form request and normalize its authority.
+/// This service supports http:// forwarding; HTTPS targets use CONNECT.
 ///
 /// # Parameters
 /// - `parts`: HTTP request Parts
 ///
 /// # Returns
-/// - `Ok((host, port, origin_uri))`: Target hostname, port, and
-///   origin-form URI
+/// - `Ok(ForwardTarget)`: Normalized absolute URI and Host field source
 /// - `Err(ForwardTargetError)`: Parse failed
 pub(crate) fn parse_forward_target(
   parts: &http::request::Parts,
@@ -143,54 +197,18 @@ pub(crate) fn parse_forward_target(
 
   let authority =
     uri.authority().ok_or(ForwardTargetError::NoAuthority)?;
-  if authority.as_str().contains('@') {
-    return Err(ForwardTargetError::InvalidAuthority);
-  }
+  let authority = http_authority::normalize(authority).map_err(
+    |error| match error {
+      AuthorityError::InvalidAuthority => {
+        ForwardTargetError::InvalidAuthority
+      }
+      AuthorityError::PortZero => ForwardTargetError::PortZero,
+    },
+  )?;
+  let mut uri_parts = uri.clone().into_parts();
+  uri_parts.authority = Some(authority.clone());
+  let absolute_uri = http::Uri::from_parts(uri_parts)
+    .map_err(|_| ForwardTargetError::InvalidAuthority)?;
 
-  let port = authority.port_u16().unwrap_or(80);
-
-  if port == 0 {
-    return Err(ForwardTargetError::PortZero);
-  }
-
-  Ok(ForwardTarget {
-    authority: authority.clone(),
-    absolute_uri: uri.clone(),
-  })
-}
-
-/// Strip hop-by-hop headers from a request/response
-///
-/// Per RFC 7230, these headers must not be forwarded to the next hop:
-/// - connection, keep-alive, proxy-authenticate, proxy-authorization
-/// - te, trailers, transfer-encoding, upgrade
-/// - Any header names listed in the Connection header value
-pub(crate) fn strip_hop_by_hop_headers(headers: &mut http::HeaderMap) {
-  // Collect extra names listed in the Connection header value first,
-  // before removing Connection itself.
-  let connection_tokens: Vec<http::header::HeaderName> = headers
-    .get(http::header::CONNECTION)
-    .and_then(|v| v.to_str().ok())
-    .map(|s| {
-      s.split(',').filter_map(|t| t.trim().parse().ok()).collect()
-    })
-    .unwrap_or_default();
-
-  let hop_by_hop: &[http::header::HeaderName] = &[
-    http::header::CONNECTION,
-    http::header::TE,
-    http::header::TRAILER,
-    http::header::TRANSFER_ENCODING,
-    http::header::UPGRADE,
-    http::header::PROXY_AUTHENTICATE,
-    http::header::PROXY_AUTHORIZATION,
-    http::header::HeaderName::from_static("keep-alive"),
-  ];
-
-  for name in hop_by_hop {
-    headers.remove(name);
-  }
-  for name in &connection_tokens {
-    headers.remove(name);
-  }
+  Ok(ForwardTarget { authority, absolute_uri })
 }

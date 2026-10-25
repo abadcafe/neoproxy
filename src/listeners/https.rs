@@ -3,8 +3,6 @@
 //! This listener handles HTTPS (HTTP/1.1 over TLS) connections.
 //! TLS configuration is provided at the server level via routing table.
 
-#![allow(clippy::await_holding_refcell_ref)]
-
 use std::future;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -14,32 +12,19 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use hyper_util::rt as rt_util;
-use hyper_util::server::conn::auto as conn_util;
 use serde::Deserialize;
 use tokio::time::timeout;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::config::SerializedArgs;
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };
 use crate::listeners::http_service::HttpServiceAdaptor;
+use crate::listeners::tcp_accept::{self, AcceptRetryDelay};
 use crate::listeners::tcp_listener_base::TcpListenerBase;
 use crate::server::Server;
 use crate::tls::build_tls_server_config;
-
-/// Executor for spawning tasks on the current tokio LocalSet.
-#[derive(Clone)]
-struct TokioLocalExecutor;
-
-impl<F> hyper::rt::Executor<F> for TokioLocalExecutor
-where
-  F: Future + 'static,
-{
-  fn execute(&self, fut: F) {
-    tokio::task::spawn_local(fut);
-  }
-}
 
 /// Default TLS handshake timeout.
 const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -56,11 +41,19 @@ struct HttpsListenerArgs {
     default = "default_tls_handshake_timeout"
   )]
   tls_handshake_timeout: Duration,
+  #[serde(default)]
+  header_read_timeout: super::http_connection::HeaderDeadline,
+  #[serde(default)]
+  accept_retry_delay: AcceptRetryDelay,
 }
 
 impl Default for HttpsListenerArgs {
   fn default() -> Self {
-    Self { tls_handshake_timeout: DEFAULT_TLS_HANDSHAKE_TIMEOUT }
+    Self {
+      tls_handshake_timeout: DEFAULT_TLS_HANDSHAKE_TIMEOUT,
+      header_read_timeout: Default::default(),
+      accept_retry_delay: Default::default(),
+    }
   }
 }
 
@@ -80,15 +73,6 @@ fn load_tls_config_from_servers(
   build_tls_server_config(servers, vec![b"http/1.1".to_vec()])
 }
 
-/// Check whether the client presented a certificate during TLS
-/// handshake.
-fn get_client_cert_presented(
-  conn: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
-) -> bool {
-  let (_, session) = conn.get_ref();
-  session.peer_certificates().is_some()
-}
-
 /// HTTPS Listener with shared-address routing support.
 struct HttpsListener {
   /// Listening addresses
@@ -99,13 +83,14 @@ struct HttpsListener {
   server_routing_table: Vec<Server>,
   /// TLS handshake timeout
   tls_handshake_timeout: Duration,
+  header_deadline: super::http_connection::HeaderDeadline,
+  accept_retry_delay: AcceptRetryDelay,
   /// Shared TCP listener base for lifecycle management
   base: TcpListenerBase,
 }
 
 impl HttpsListener {
-  #[allow(clippy::new_ret_no_self)]
-  fn new(
+  fn build(
     addresses: Vec<String>,
     sargs: SerializedArgs,
     server_routing_table: Vec<Server>,
@@ -113,6 +98,13 @@ impl HttpsListener {
     let _args: HttpsListenerArgs = serde_yaml::from_value(sargs)?;
 
     let tls_handshake_timeout = _args.tls_handshake_timeout;
+    anyhow::ensure!(
+      !tls_handshake_timeout.is_zero()
+        && std::time::Instant::now()
+          .checked_add(tls_handshake_timeout)
+          .is_some(),
+      "tls_handshake_timeout must be positive and representable"
+    );
 
     // TLS config is required for https listener
     // Check that at least one server has TLS configured
@@ -141,6 +133,8 @@ impl HttpsListener {
       tls_config,
       server_routing_table,
       tls_handshake_timeout,
+      header_deadline: _args.header_read_timeout,
+      accept_retry_delay: _args.accept_retry_delay,
       base: TcpListenerBase::new(),
     }))
   }
@@ -156,72 +150,90 @@ impl HttpsListener {
     let shutdown_handle = self.base.shutdown_handle();
     let server_routing_table = self.server_routing_table.clone();
     let tls_handshake_timeout = self.tls_handshake_timeout;
+    let header_deadline = self.header_deadline;
+    let accept_retry_delay = self.accept_retry_delay;
 
     let accepting_fut = async move {
       info!("HTTPS listener started on {}", addr);
 
-      let shutdown = async move || shutdown_handle.notified().await;
+      let shutdown = || shutdown_handle.notified();
       let accepting = || async {
-        match listener.accept().await {
-          Err(e) => {
-            error!("accepting new connection failed: {}", e);
-          }
+        match tcp_accept::accept(addr, accept_retry_delay, || {
+          listener.accept()
+        })
+        .await
+        {
+          Err(error) => return Err(error),
           Ok((stream, raddr)) => {
             let local_addr = match stream.local_addr() {
               Ok(addr) => addr,
               Err(e) => {
                 warn!("failed to get local addr from {}: {}", raddr, e);
-                return;
+                return Ok(());
               }
             };
             let tls_acceptor =
               tokio_rustls::TlsAcceptor::from(tls_config.clone());
             let io = rt_util::TokioIo::new(stream);
 
-            match timeout(
-              tls_handshake_timeout,
-              tls_acceptor.accept(io.into_inner()),
-            )
-            .await
-            {
-              Ok(Ok(tls_stream)) => {
-                // Extract client cert info from TLS connection
-                let client_cert_presented =
-                  get_client_cert_presented(&tls_stream);
+            let server_routing_table = server_routing_table.clone();
+            let connection_shutdown = shutdown_handle.clone();
+            stream_tracker.register(async move {
+              match timeout(
+                tls_handshake_timeout,
+                tls_acceptor.accept(io.into_inner()),
+              )
+              .await
+              {
+                Ok(Ok(tls_stream)) => {
+                  // Successful TLS authentication already verified
+                  // any client certificate against this listener's
+                  // combined CA roots. Requests only need the presence
+                  // bit to enforce a routed server's mTLS requirement.
+                  let client_cert_presented = tls_stream
+                    .get_ref()
+                    .1
+                    .peer_certificates()
+                    .is_some_and(|certificates| {
+                      !certificates.is_empty()
+                    });
 
-                let io = rt_util::TokioIo::new(tls_stream);
-                let svc = HttpServiceAdaptor::new_https(
-                  server_routing_table.clone(),
-                  Some(raddr),
-                  Some(local_addr),
-                  client_cert_presented,
-                );
-                let builder =
-                  conn_util::Builder::new(TokioLocalExecutor);
-                stream_tracker.register(async move {
-                  let conn =
-                    builder.serve_connection_with_upgrades(io, svc);
-                  if let Err(e) = conn.await {
+                  let svc = HttpServiceAdaptor::new_https(
+                    server_routing_table.clone(),
+                    Some(raddr),
+                    Some(local_addr),
+                    client_cert_presented,
+                  );
+                  if let Err(error) = super::http_connection::serve(
+                    tls_stream,
+                    svc,
+                    header_deadline,
+                    connection_shutdown,
+                  )
+                  .await
+                  {
                     warn!(
-                      "connection from {raddr} on {local_addr}: {e}"
+                      "connection from {raddr} on {local_addr}: \
+                       {error}"
                     );
                   }
-                });
+                }
+                Ok(Err(e)) => {
+                  warn!("TLS handshake failed from {}: {}", raddr, e);
+                }
+                Err(_elapsed) => {
+                  warn!("TLS handshake timeout from {}", raddr);
+                }
               }
-              Ok(Err(e)) => {
-                warn!("TLS handshake failed from {}: {}", raddr, e);
-              }
-              Err(_elapsed) => {
-                warn!("TLS handshake timeout from {}", raddr);
-              }
-            }
+            });
           }
         }
+        Ok::<(), std::io::Error>(())
       };
 
       loop {
         tokio::select! {
-            _ = accepting() => {},
+            result = accepting() => result.with_context(|| format!("HTTPS accept failed on {addr}"))?,
             _ = shutdown() => {
                 info!("HTTPS listener on {} shutting down", addr);
                 break;
@@ -266,5 +278,5 @@ pub(crate) fn props() -> ListenerProps {
 
 /// Create a listener builder
 pub(crate) fn create_listener_builder() -> Box<dyn BuildListener> {
-  Box::new(HttpsListener::new)
+  Box::new(HttpsListener::build)
 }

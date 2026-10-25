@@ -14,25 +14,25 @@ import socket
 import subprocess
 import tempfile
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-)
-from .utils.certs import generate_test_certificates
-from .utils.config_builders import (
+from tests.fixtures.binary import NEOPROXY_BINARY
+from tests.fixtures.certificates import generate_test_certificates
+from tests.fixtures.h3_configuration import (
     create_http3_chain_config,
     create_http3_listener_config,
 )
-from .utils.helpers import (
-    NEOPROXY_BINARY,
-    create_target_server,
-    establish_connect_tunnel,
-    terminate_process,
-    wait_for_process_exit,
+from tests.fixtures.http_echo import http_echo_handler
+from tests.fixtures.http_request import establish_connect_tunnel
+from tests.fixtures.ports import (
+    get_unique_port,
     wait_for_proxy,
     wait_for_udp_port_bound,
 )
-from .utils.http_echo import http_echo_handler
+from tests.fixtures.proxy_process import (
+    BytesProcess,
+    terminate_process,
+    wait_for_process_exit,
+)
+from tests.fixtures.tcp_peer import create_target_server
 
 
 def _proxy_get(
@@ -44,7 +44,8 @@ def _proxy_get(
         return 0
     try:
         request = (
-            f"GET / HTTP/1.1\r\nHost: {target_host}:{target_port}\r\nConnection: close\r\n\r\n"
+            f"GET / HTTP/1.1\r\nHost: {target_host}:{target_port}\r\nConnection:"
+            + " close\r\n\r\n"
         ).encode()
         tunnel.settimeout(timeout)
         tunnel.sendall(request)
@@ -75,7 +76,7 @@ class TestConnectionReuseWithinService:
     QUIC connection within a worker-local pool.
     """
 
-    def test_multiple_requests_reuse_connection(self):
+    def test_multiple_requests_reuse_connection(self) -> None:
         """
         Send 5 requests through the same upstream — all should succeed.
         The worker-local pool ensures connection reuse across requests.
@@ -121,7 +122,7 @@ class TestConnectionReuseWithinService:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            wait_for_proxy("127.0.0.1", http_port, timeout=10)
+            _ = wait_for_proxy("127.0.0.1", http_port, timeout=10)
 
             # Use local echo target to avoid external network
             _, target_socket = create_target_server(
@@ -133,7 +134,7 @@ class TestConnectionReuseWithinService:
                 assert status == 200, f"Request {i} failed with status {status}"
 
             terminate_process(entry_proc, timeout=10)
-            wait_for_process_exit(entry_proc, timeout=5)
+            _ = wait_for_process_exit(entry_proc, timeout=5)
 
         finally:
             if target_socket:
@@ -155,7 +156,7 @@ class TestMultipleServicesShareUpstream:
     upstream via the worker-local pool.
     """
 
-    def test_two_services_same_upstream(self):
+    def test_two_services_same_upstream(self) -> None:
         """
         Create two services (different listener ports) both referencing
         the same upstream. Both should work correctly.
@@ -230,7 +231,7 @@ servers:
 """
             config_path = os.path.join(temp_dir, "shared_upstream.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             entry_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
@@ -238,8 +239,8 @@ servers:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            wait_for_proxy("127.0.0.1", http_port_1, timeout=10)
-            wait_for_proxy("127.0.0.1", http_port_2, timeout=5)
+            _ = wait_for_proxy("127.0.0.1", http_port_1, timeout=10)
+            _ = wait_for_proxy("127.0.0.1", http_port_2, timeout=5)
 
             # Both services should work
             _, target_socket = create_target_server(
@@ -252,7 +253,7 @@ servers:
             assert r2 == 200, f"Service 2 failed with status {r2}"
 
             terminate_process(entry_proc, timeout=10)
-            wait_for_process_exit(entry_proc, timeout=5)
+            _ = wait_for_process_exit(entry_proc, timeout=5)
 
         finally:
             if target_socket:
@@ -273,7 +274,7 @@ class TestThreeLevelConfigInheritance:
     Verify three-level config inheritance (Plugin -> Upstream -> Address).
     """
 
-    def test_address_level_auth_overrides_plugin(self):
+    def test_address_level_auth_overrides_plugin(self) -> None:
         """
         Address-level user credentials should override plugin-level user.
         """
@@ -287,7 +288,7 @@ class TestThreeLevelConfigInheritance:
         target_socket: socket.socket | None = None
 
         try:
-            from .utils.config_builders import (
+            from tests.fixtures.h3_configuration import (
                 create_http3_listener_config_with_password_auth,
             )
 
@@ -349,7 +350,7 @@ servers:
 """
             config_path = os.path.join(temp_dir, "addr_override.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             entry_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
@@ -357,7 +358,7 @@ servers:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            wait_for_proxy("127.0.0.1", http_port, timeout=10)
+            _ = wait_for_proxy("127.0.0.1", http_port, timeout=10)
 
             _, target_socket = create_target_server(
                 "127.0.0.1", target_port, http_echo_handler
@@ -369,7 +370,7 @@ servers:
             )
 
             terminate_process(entry_proc, timeout=10)
-            wait_for_process_exit(entry_proc, timeout=5)
+            _ = wait_for_process_exit(entry_proc, timeout=5)
 
         finally:
             if target_socket:
@@ -379,7 +380,7 @@ servers:
             if upstream_proc:
                 terminate_process(upstream_proc, timeout=5, force=True)
 
-    def test_plugin_level_auth_inherited_by_address(self):
+    def test_plugin_level_auth_inherited_by_address(self) -> None:
         """
         Address without user should inherit plugin-level user.
         """
@@ -393,7 +394,7 @@ servers:
         target_socket: socket.socket | None = None
 
         try:
-            from .utils.config_builders import (
+            from tests.fixtures.h3_configuration import (
                 create_http3_listener_config_with_password_auth,
             )
 
@@ -451,7 +452,7 @@ servers:
 """
             config_path = os.path.join(temp_dir, "plugin_inherit.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             entry_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
@@ -459,7 +460,7 @@ servers:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            wait_for_proxy("127.0.0.1", http_port, timeout=10)
+            _ = wait_for_proxy("127.0.0.1", http_port, timeout=10)
 
             _, target_socket = create_target_server(
                 "127.0.0.1", target_port, http_echo_handler
@@ -469,7 +470,7 @@ servers:
             assert status == 200, f"Plugin-level auth should be inherited, got {status}"
 
             terminate_process(entry_proc, timeout=10)
-            wait_for_process_exit(entry_proc, timeout=5)
+            _ = wait_for_process_exit(entry_proc, timeout=5)
 
         finally:
             if target_socket:
@@ -479,7 +480,7 @@ servers:
             if upstream_proc:
                 terminate_process(upstream_proc, timeout=5, force=True)
 
-    def test_upstream_level_auth_overrides_plugin(self):
+    def test_upstream_level_auth_overrides_plugin(self) -> None:
         """
         Upstream-level user should override plugin-level user,
         and address inherits from upstream.
@@ -494,7 +495,7 @@ servers:
         target_socket: socket.socket | None = None
 
         try:
-            from .utils.config_builders import (
+            from tests.fixtures.h3_configuration import (
                 create_http3_listener_config_with_password_auth,
             )
 
@@ -556,7 +557,7 @@ servers:
 """
             config_path = os.path.join(temp_dir, "upstream_override.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             entry_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
@@ -564,7 +565,7 @@ servers:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            wait_for_proxy("127.0.0.1", http_port, timeout=10)
+            _ = wait_for_proxy("127.0.0.1", http_port, timeout=10)
 
             _, target_socket = create_target_server(
                 "127.0.0.1", target_port, http_echo_handler
@@ -576,7 +577,7 @@ servers:
             )
 
             terminate_process(entry_proc, timeout=10)
-            wait_for_process_exit(entry_proc, timeout=5)
+            _ = wait_for_process_exit(entry_proc, timeout=5)
 
         finally:
             if target_socket:
@@ -597,7 +598,7 @@ class TestWRRLoadBalancingWithPool:
     Verify WRR load balancing works correctly with the worker-local pool.
     """
 
-    def test_two_addresses_wrr_distribution(self):
+    def test_two_addresses_wrr_distribution(self) -> None:
         """
         With two upstream addresses (weights 2:1), verify both receive
         traffic with proper distribution.
@@ -678,7 +679,7 @@ servers:
 """
             config_path = os.path.join(temp_dir, "wrr_pool.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             entry_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
@@ -686,7 +687,7 @@ servers:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            wait_for_proxy("127.0.0.1", http_port, timeout=10)
+            _ = wait_for_proxy("127.0.0.1", http_port, timeout=10)
 
             # Send 6 requests to local echo target
             _, target_socket = create_target_server(
@@ -709,7 +710,7 @@ servers:
             assert upstream_proc_2.poll() is None, "Upstream 2 should be alive"
 
             terminate_process(entry_proc, timeout=10)
-            wait_for_process_exit(entry_proc, timeout=5)
+            _ = wait_for_process_exit(entry_proc, timeout=5)
 
         finally:
             if target_socket:
@@ -732,7 +733,7 @@ class TestUpstreamPoolConfigValidation:
     Verify config validation for the new upstream format.
     """
 
-    def test_missing_upstream_reference_fails_at_startup(self):
+    def test_missing_upstream_reference_fails_at_startup(self) -> None:
         """
         Service referencing a non-existent upstream should fail at startup
         (validated at service construction time).
@@ -764,7 +765,7 @@ servers:
 """
         config_path = os.path.join(temp_dir, "missing_upstream.yaml")
         with open(config_path, "w") as f:
-            f.write(config_content)
+            _ = f.write(config_content)
 
         proc = subprocess.Popen(
             [NEOPROXY_BINARY, "--config", config_path],
@@ -780,7 +781,7 @@ servers:
         finally:
             terminate_process(proc, timeout=5, force=True)
 
-    def test_empty_upstream_name_in_service_fails(self):
+    def test_empty_upstream_name_in_service_fails(self) -> None:
         """
         Service with empty upstream name should fail at startup.
         The empty name is validated in Http3ChainServiceArgs::validate().
@@ -813,7 +814,7 @@ servers:
 """
         config_path = os.path.join(temp_dir, "empty_upstream.yaml")
         with open(config_path, "w") as f:
-            f.write(config_content)
+            _ = f.write(config_content)
 
         proc = subprocess.Popen(
             [NEOPROXY_BINARY, "--config", config_path],
@@ -837,7 +838,7 @@ servers:
 class TestQuicAndMaxIdleTimeoutConfig:
     """Verify quic: sub-block and max_idle_timeout rename."""
 
-    def test_quic_sub_block_parses(self):
+    def test_quic_sub_block_parses(self) -> None:
         """http3_chain with quic: sub-block starts successfully."""
         temp_dir = tempfile.mkdtemp()
         port = get_unique_port()
@@ -873,7 +874,7 @@ servers:
 """
         path = os.path.join(temp_dir, "quic.yaml")
         with open(path, "w") as f:
-            f.write(config)
+            _ = f.write(config)
         proc = subprocess.Popen(
             [NEOPROXY_BINARY, "--config", path],
             stdout=subprocess.PIPE,
@@ -887,7 +888,7 @@ servers:
         finally:
             terminate_process(proc, timeout=5, force=True)
 
-    def test_service_args_rejects_unknown_field(self):
+    def test_service_args_rejects_unknown_field(self) -> None:
         """Service args with unknown field rejected (deny_unknown_fields)."""
         temp_dir = tempfile.mkdtemp()
         port = get_unique_port()
@@ -918,7 +919,7 @@ servers:
 """
         path = os.path.join(temp_dir, "unknown_field.yaml")
         with open(path, "w") as f:
-            f.write(config)
+            _ = f.write(config)
         proc = subprocess.Popen(
             [NEOPROXY_BINARY, "--config", path],
             stdout=subprocess.PIPE,
@@ -928,7 +929,7 @@ servers:
         rc, _ = wait_for_process_exit(proc, timeout=5)
         assert rc != 0, "Should reject unknown field in service args"
 
-    def test_connect_tcp_max_idle_timeout_starts(self):
+    def test_connect_tcp_max_idle_timeout_starts(self) -> None:
         """direct service with tunnel_idle_timeout starts successfully."""
         temp_dir = tempfile.mkdtemp()
         port = get_unique_port()
@@ -954,7 +955,7 @@ servers:
 """
         path = os.path.join(temp_dir, "tcp_idle.yaml")
         with open(path, "w") as f:
-            f.write(config)
+            _ = f.write(config)
         proc = subprocess.Popen(
             [NEOPROXY_BINARY, "--config", path],
             stdout=subprocess.PIPE,
@@ -968,7 +969,7 @@ servers:
         finally:
             terminate_process(proc, timeout=5, force=True)
 
-    def test_connect_tcp_rejects_unknown_field(self):
+    def test_connect_tcp_rejects_unknown_field(self) -> None:
         """upstream service args with unknown field rejected."""
         temp_dir = tempfile.mkdtemp()
         port = get_unique_port()
@@ -994,7 +995,7 @@ servers:
 """
         path = os.path.join(temp_dir, "tcp_unknown.yaml")
         with open(path, "w") as f:
-            f.write(config)
+            _ = f.write(config)
         proc = subprocess.Popen(
             [NEOPROXY_BINARY, "--config", path],
             stdout=subprocess.PIPE,
@@ -1004,7 +1005,7 @@ servers:
         rc, _ = wait_for_process_exit(proc, timeout=5)
         assert rc != 0, "Should reject unknown field in connect_tcp"
 
-    def test_plugin_config_rejects_unknown_field(self):
+    def test_plugin_config_rejects_unknown_field(self) -> None:
         """Plugin config with unknown field rejected."""
         temp_dir = tempfile.mkdtemp()
         port = get_unique_port()
@@ -1035,7 +1036,7 @@ servers:
 """
         path = os.path.join(temp_dir, "unknown_plugin_field.yaml")
         with open(path, "w") as f:
-            f.write(config)
+            _ = f.write(config)
         proc = subprocess.Popen(
             [NEOPROXY_BINARY, "--config", path],
             stdout=subprocess.PIPE,

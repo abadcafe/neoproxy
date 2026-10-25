@@ -8,10 +8,12 @@ pub(super) const DEFAULT_HANDSHAKE_TIMEOUT: Duration =
 
 /// Result of a successful SOCKS5 handshake.
 ///
-/// Contains the authenticated protocol state and optional username
-/// if password authentication was used.
+/// Contains the completed subnegotiation and optional credentials.
+/// Credential validity is decided by the converted CONNECT's service.
 pub(super) struct HandshakeResult {
-  /// The authenticated SOCKS5 protocol state.
+  /// The library's Authenticated state means subnegotiation is
+  /// complete; it does not mean our HTTP service has validated the
+  /// credentials.
   pub(super) proto: fast_socks5::server::Socks5ServerProtocol<
     tokio::net::TcpStream,
     fast_socks5::server::states::Authenticated,
@@ -26,6 +28,7 @@ impl std::fmt::Debug for HandshakeResult {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("HandshakeResult")
       .field("username", &self.username)
+      .field("password", &"*")
       .finish_non_exhaustive()
   }
 }
@@ -105,7 +108,7 @@ impl From<fast_socks5::server::SocksServerError> for HandshakeError {
 /// Executes the complete SOCKS5 handshake process:
 /// 1. Version negotiation
 /// 2. Authentication method selection
-/// 3. Authentication (if required)
+/// 3. Credential collection and subnegotiation acknowledgement
 pub(super) async fn perform_handshake(
   stream: tokio::net::TcpStream,
   timeout_duration: Duration,
@@ -142,6 +145,18 @@ pub(super) async fn perform_handshake(
         let (username, password, auth_impl) =
           auth_state.read_username_password().await?;
 
+        // SOCKS5 sends its target only AFTER this authentication reply.
+        // Our HTTP Service needs that target to receive one complete
+        // CONNECT request containing the credentials. Waiting for Service
+        // here would deadlock with a client waiting for this reply.
+        // Intentionally acknowledge subnegotiation without verifying
+        // credentials here; auth.basic_auth checks the converted CONNECT.
+        // Invalid/missing credentials then yield HTTP 407, mapped to
+        // SOCKS5 CONNECT REP=0x02 and connection closure, never a tunnel.
+        // This deliberately differs from RFC 1929 section 2, which
+        // verifies credentials before reporting authentication success.
+        // Preserve the single HTTP request/response middleware pipeline
+        // instead of extracting an extra authentication API from Service.
         let finished = auth_impl.accept().await?;
         let authenticated =
           fast_socks5::server::Socks5ServerProtocol::finish_auth(
@@ -149,7 +164,8 @@ pub(super) async fn perform_handshake(
           );
 
         tracing::info!(
-          "SOCKS5 password auth received for user '{}'",
+          "SOCKS5 credentials received for user {:?}; verification \
+           deferred to CONNECT",
           username
         );
 

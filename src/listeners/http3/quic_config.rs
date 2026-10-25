@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use byte_unit::Byte;
 use serde::Deserialize;
 
@@ -100,7 +100,11 @@ impl QuicConfigArgs {
       );
     }
 
-    let max_idle_timeout_ms = self.max_idle_timeout.as_millis() as u64;
+    let max_idle_timeout_ms =
+      u64::try_from(self.max_idle_timeout.as_millis())
+        .context("Invalid max_idle_timeout: milliseconds overflow")?;
+    quinn::VarInt::try_from(max_idle_timeout_ms)
+      .context("Invalid max_idle_timeout: exceeds QUIC range")?;
     if max_idle_timeout_ms == 0 {
       bail!("Invalid max_idle_timeout: must be > 0ms");
     }
@@ -121,6 +125,9 @@ impl QuicConfigArgs {
     if receive_window == 0 {
       bail!("Invalid receive_window: must be > 0");
     }
+
+    quinn::VarInt::try_from(receive_window)
+      .context("Invalid receive_window: exceeds QUIC range")?;
 
     Ok(QuicConfig {
       max_concurrent_bidi_streams: self.max_concurrent_bidi_streams,

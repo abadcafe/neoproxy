@@ -1,10 +1,9 @@
 use std::future::Future;
-use std::net::SocketAddr;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use http::Uri;
 use hyper::client::conn::http1;
@@ -17,20 +16,15 @@ use tracing::warn;
 
 use super::address_resolution::resolve_addresses;
 use super::connect_request::build_connect_request;
-use super::proxy_auth::apply_proxy_auth;
-use super::{ClientProtocol, ConnectResult};
-use crate::context::{RequestContext, get_server_id};
-use crate::http_message::{
-  BytesBufBodyWrapper, RequestBody, Response, ResponseBody,
-  append_proxy_status, build_error_response,
-  build_proxy_status_with_status,
-};
+use super::forward::chain_forward_http;
+use super::protocol::{ClientProtocol, ConnectResult};
+use crate::context::RequestContext;
+use crate::http_message::{RequestBody, Response};
 use crate::plugins::http_upstream::error::{
-  UpstreamError, classify_connect_error, classify_http_client_error,
-  classify_tls_handshake_error,
+  UpstreamError, classify_connect_error, classify_tls_handshake_error,
 };
 use crate::plugins::http_upstream::target_parser::{
-  self, ForwardTarget,
+  ConnectTarget, ForwardTarget,
 };
 use crate::tracker::StreamTracker;
 
@@ -144,49 +138,6 @@ impl hyper_util::client::legacy::connect::Connection for TlsConn {
   }
 }
 
-async fn connect_to_resolved_addresses(
-  addresses: Vec<SocketAddr>,
-  connect_timeout: Duration,
-) -> std::io::Result<tokio::net::TcpStream> {
-  let deadline = tokio::time::Instant::now() + connect_timeout;
-  let mut last_error: Option<std::io::Error> = None;
-
-  for addr in addresses {
-    let now = tokio::time::Instant::now();
-    if now >= deadline {
-      return Err(std::io::Error::new(
-        std::io::ErrorKind::TimedOut,
-        "connect timed out",
-      ));
-    }
-
-    match tokio::time::timeout(
-      deadline - now,
-      tokio::net::TcpStream::connect(addr),
-    )
-    .await
-    {
-      Ok(Ok(stream)) => return Ok(stream),
-      Ok(Err(e)) => {
-        last_error = Some(e);
-      }
-      Err(_) => {
-        return Err(std::io::Error::new(
-          std::io::ErrorKind::TimedOut,
-          "connect timed out",
-        ));
-      }
-    }
-  }
-
-  Err(last_error.unwrap_or_else(|| {
-    std::io::Error::new(
-      std::io::ErrorKind::InvalidInput,
-      "no resolved addresses",
-    )
-  }))
-}
-
 fn classify_tcp_connect_error(
   address: &str,
   e: std::io::Error,
@@ -257,7 +208,7 @@ impl Service<Uri> for ProxyConnector {
       })?
       .map_err(std::io::Error::other)?;
       let stream =
-        connect_to_resolved_addresses(addresses, timeout).await?;
+        super::tcp_connect::connect(addresses, timeout).await?;
       Ok(Proxied(TokioIo::new(stream)))
     })
   }
@@ -335,133 +286,20 @@ impl Service<Uri> for TlsProxyConnector {
 // HTTP/HTTPS Forward
 // ============================================================================
 
-/// Forward an HTTP request over HTTP/1.1 or HTTPS/1.1 to the upstream
-/// proxy. Uses hyper::Client which handles connection pooling
-/// internally.
-pub(super) async fn chain_forward_http<C>(
-  client: Client<C, RequestBody>,
-  user: Option<crate::config::UserCredential>,
-  target: &ForwardTarget,
-  req_headers: http::request::Parts,
-  req_body: RequestBody,
-  ctx: &RequestContext,
-) -> Response
-where
-  C: hyper_util::client::legacy::connect::Connect
-    + Clone
-    + Send
-    + Sync
-    + Unpin
-    + 'static,
-{
-  let mut headers = req_headers.headers.clone();
-  target_parser::strip_hop_by_hop_headers(&mut headers);
-  let host_header = match target.host_header_value() {
-    Ok(value) => value,
-    Err(e) => {
-      warn!("http_upstream: invalid forward target authority: {e}");
-      return build_error_response(
-        http::StatusCode::BAD_REQUEST,
-        "Invalid target address",
-      );
-    }
-  };
-  headers.insert(http::header::HOST, host_header);
-
-  let mut temp_req = http::Request::builder()
-    .method(req_headers.method.clone())
-    .uri(target.absolute_uri().clone())
-    .body(())
-    .unwrap();
-  apply_proxy_auth(&user, &mut temp_req);
-  for (name, value) in temp_req.headers().iter() {
-    headers.insert(name.clone(), value.clone());
-  }
-
-  let mut fwd_req_builder = http::Request::builder()
-    .method(req_headers.method)
-    .uri(target.absolute_uri().clone());
-  for (name, value) in headers.iter() {
-    fwd_req_builder = fwd_req_builder.header(name, value);
-  }
-
-  let fwd_req = fwd_req_builder.body(req_body).unwrap();
-
-  let forward_start = Instant::now();
-  let upstream_resp = match client.request(fwd_req).await {
-    Ok(resp) => resp,
-    Err(e) => {
-      warn!("http_upstream: forward request failed: {e}");
-      return classify_http_client_error(e.into()).to_response(ctx);
-    }
-  };
-  let forward_ms = forward_start.elapsed().as_millis() as u64;
-
-  ctx.insert("upstream.forward_ms", forward_ms.to_string());
-  ctx.insert(
-    "upstream.forward_status",
-    upstream_resp.status().as_str().to_string(),
-  );
-
-  let (resp_parts, resp_body) = upstream_resp.into_parts();
-  let mut resp_headers = resp_parts.headers;
-  target_parser::strip_hop_by_hop_headers(&mut resp_headers);
-
-  let upstream_ps = resp_headers
-    .get(http::header::HeaderName::from_static("proxy-status"))
-    .cloned();
-  resp_headers
-    .remove(http::header::HeaderName::from_static("proxy-status"));
-
-  let mut resp = http::Response::builder().status(resp_parts.status);
-  for (name, value) in resp_headers.iter() {
-    resp = resp.header(name, value);
-  }
-
-  if let Some(ref id) = get_server_id(ctx) {
-    let our_entry =
-      build_proxy_status_with_status(id, resp_parts.status.as_u16());
-    resp = resp.header(
-      http::header::HeaderName::from_static("proxy-status"),
-      append_proxy_status(upstream_ps.as_ref(), &our_entry),
-    );
-  } else if let Some(ps) = upstream_ps {
-    resp = resp.header(
-      http::header::HeaderName::from_static("proxy-status"),
-      ps,
-    );
-  }
-
-  let wrapped_body = BytesBufBodyWrapper::new(resp_body);
-  let boxed_resp_body = ResponseBody::new(wrapped_body);
-
-  match resp.body(boxed_resp_body) {
-    Ok(r) => r,
-    Err(e) => {
-      warn!("http_upstream: failed to build response: {e}");
-      build_error_response(
-        http::StatusCode::BAD_GATEWAY,
-        "Failed to build response",
-      )
-    }
-  }
-}
-
 // ============================================================================
 // HTTP Client (cleartext proxy or direct-to-origin)
 // ============================================================================
 
-pub(crate) struct HttpClient<C> {
+pub(crate) struct HttpProxyClient<C> {
   pub(crate) client: Client<C, RequestBody>,
-  pub(crate) proxy_addr: Option<String>, /* None = direct-to-origin,
-                                          * Some = proxy mode */
+  pub(crate) proxy_addr: String,
   pub(crate) connect_timeout: Duration,
   pub(crate) tunnel_idle_timeout: Duration,
   pub(crate) dns_resolve_timeout: Duration,
   pub(crate) user: Option<crate::config::UserCredential>,
 }
 
-impl<C> ClientProtocol for HttpClient<C>
+impl<C> ClientProtocol for HttpProxyClient<C>
 where
   C: hyper_util::client::legacy::connect::Connect
     + Clone
@@ -499,117 +337,47 @@ where
 
   fn connect_for_tunnel<'a>(
     &'a self,
-    target: &'a str,
+    target: &'a ConnectTarget,
     _tls_config: &'a Option<Arc<rustls::ClientConfig>>,
     tracker: &'a Rc<StreamTracker>,
   ) -> Pin<
     Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
   > {
-    let target = target.to_string();
     let proxy_addr = self.proxy_addr.clone();
     let connect_timeout = self.connect_timeout;
     let tunnel_idle_timeout = self.tunnel_idle_timeout;
     let user = self.user.clone();
     Box::pin(async move {
-      match proxy_addr {
-        None => {
-          let dns_timeout = self.dns_resolve_timeout;
-          let resolved = tokio::time::timeout(
-            dns_timeout,
-            resolve_addresses(&target),
-          )
+      let addr = &proxy_addr;
+
+      // Http proxy mode: TCP to proxy + HTTP/1.1 handshake +
+      // CONNECT
+      let dns_timeout = self.dns_resolve_timeout;
+      let resolved =
+        tokio::time::timeout(dns_timeout, resolve_addresses(addr))
           .await
           .map_err(|_| {
             UpstreamError::DnsError(format!(
-              "DNS resolve for '{target}' timed out"
+              "DNS resolve for '{addr}' timed out"
             ))
           })?
           .map_err(classify_connect_error)?;
+      let stream =
+        super::tcp_connect::connect(resolved, connect_timeout)
+          .await
+          .map_err(|e| classify_tcp_connect_error(addr, e))?;
 
-          // Direct mode: raw TCP connect to target
-          let stream =
-            connect_to_resolved_addresses(resolved, connect_timeout)
-              .await
-              .map_err(|e| classify_tcp_connect_error(&target, e))?;
-
-          let upstream_addr = stream.peer_addr().ok();
-
-          Ok(ConnectResult {
-            transport: Box::new(stream),
-            upstream_addr,
-            upstream_proxy_status: None,
-            tunnel_idle_timeout,
-          })
-        }
-        Some(ref addr) => {
-          // Http proxy mode: TCP to proxy + HTTP/1.1 handshake +
-          // CONNECT
-          let dns_timeout = self.dns_resolve_timeout;
-          let resolved =
-            tokio::time::timeout(dns_timeout, resolve_addresses(addr))
-              .await
-              .map_err(|_| {
-                UpstreamError::DnsError(format!(
-                  "DNS resolve for '{addr}' timed out"
-                ))
-              })?
-              .map_err(classify_connect_error)?;
-          let stream =
-            connect_to_resolved_addresses(resolved, connect_timeout)
-              .await
-              .map_err(|e| classify_tcp_connect_error(addr, e))?;
-
-          let upstream_addr = stream.peer_addr().ok();
-          let io = TokioIo::new(stream);
-          let (mut sr, conn) =
-            http1::handshake(io).await.map_err(|e| {
-              UpstreamError::ProxyInternalError(format!(
-                "HTTP/1.1 handshake failed: {e}"
-              ))
-            })?;
-
-          let req = build_connect_request(&target, &user);
-          let resp_fut = sr.send_request(req);
-          tracker.register_connection(async move {
-            if let Err(e) = conn.with_upgrades().await {
-              warn!(
-                "http_upstream: HTTP CONNECT connection ended before \
-                 upgrade: {e}"
-              );
-            }
-          });
-
-          let mut resp = resp_fut.await.map_err(|e| {
-            UpstreamError::ConnectionTerminated(e.to_string())
-          })?;
-
-          let upstream_proxy_status = resp
-            .headers()
-            .get(::http::header::HeaderName::from_static(
-              "proxy-status",
-            ))
-            .cloned();
-
-          if resp.status() != ::http::StatusCode::OK {
-            return Err(UpstreamError::UpstreamConnectError {
-              status: resp.status(),
-              upstream_proxy_status,
-            });
-          }
-
-          let upgrade = hyper::upgrade::on(&mut resp);
-          let upgraded = upgrade.await.map_err(|e| {
-            UpstreamError::ConnectionTerminated(e.to_string())
-          })?;
-
-          Ok(ConnectResult {
-            transport: Box::new(TokioIo::new(upgraded)),
-            upstream_addr,
-            upstream_proxy_status,
-            tunnel_idle_timeout,
-          })
-        }
-      }
+      let upstream_addr = stream.peer_addr().ok();
+      let io = TokioIo::new(stream);
+      negotiate_tunnel(
+        io,
+        target,
+        &user,
+        tracker,
+        upstream_addr,
+        tunnel_idle_timeout,
+      )
+      .await
     })
   }
 }
@@ -659,13 +427,12 @@ impl ClientProtocol for HttpsClient {
 
   fn connect_for_tunnel<'a>(
     &'a self,
-    target: &'a str,
+    target: &'a ConnectTarget,
     tls_config: &'a Option<Arc<rustls::ClientConfig>>,
     tracker: &'a Rc<StreamTracker>,
   ) -> Pin<
     Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
   > {
-    let target = target.to_string();
     let addr = self.proxy_addr.clone();
     let hostname = self.hostname.clone();
     let connect_timeout = self.connect_timeout;
@@ -692,7 +459,7 @@ impl ClientProtocol for HttpsClient {
           })?
           .map_err(classify_connect_error)?;
       let stream =
-        connect_to_resolved_addresses(resolved, connect_timeout)
+        super::tcp_connect::connect(resolved, connect_timeout)
           .await
           .map_err(|e| classify_tcp_connect_error(&addr, e))?;
 
@@ -717,53 +484,79 @@ impl ClientProtocol for HttpsClient {
       .map_err(|e| classify_tls_handshake_error(e.into()))?;
 
       let io = TokioIo::new(tls_stream);
-      let (mut sr, conn) = http1::handshake(io).await.map_err(|e| {
-        UpstreamError::ProxyInternalError(format!(
-          "HTTPS/1.1 handshake failed: {e}"
-        ))
-      })?;
-
-      let req = build_connect_request(&target, &user);
-      let resp_fut = sr.send_request(req);
-
-      // Drive the connection via tracker (spawn_local + graceful
-      // shutdown support) while waiting for the CONNECT response.
-      tracker.register_connection(async move {
-        if let Err(e) = conn.with_upgrades().await {
-          warn!(
-            "http_upstream: HTTPS CONNECT connection ended before \
-             upgrade: {e}"
-          );
-        }
-      });
-
-      let mut resp = resp_fut.await.map_err(|e| {
-        UpstreamError::ConnectionTerminated(e.to_string())
-      })?;
-
-      let upstream_proxy_status = resp
-        .headers()
-        .get(::http::header::HeaderName::from_static("proxy-status"))
-        .cloned();
-
-      if resp.status() != ::http::StatusCode::OK {
-        return Err(UpstreamError::UpstreamConnectError {
-          status: resp.status(),
-          upstream_proxy_status,
-        });
-      }
-
-      let upgrade = hyper::upgrade::on(&mut resp);
-      let upgraded = upgrade.await.map_err(|e| {
-        UpstreamError::ConnectionTerminated(e.to_string())
-      })?;
-
-      Ok(ConnectResult {
-        transport: Box::new(TokioIo::new(upgraded)),
+      negotiate_tunnel(
+        io,
+        target,
+        &user,
+        &tracker,
         upstream_addr,
-        upstream_proxy_status,
         tunnel_idle_timeout,
-      })
+      )
+      .await
     })
   }
+}
+
+async fn negotiate_tunnel<I>(
+  io: I,
+  target: &ConnectTarget,
+  user: &Option<crate::config::UserCredential>,
+  tracker: &StreamTracker,
+  upstream_addr: Option<std::net::SocketAddr>,
+  tunnel_idle_timeout: Duration,
+) -> Result<ConnectResult, UpstreamError>
+where
+  I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+  let (mut sr, conn) = http1::handshake(io).await.map_err(|e| {
+    UpstreamError::ProxyInternalError(format!(
+      "HTTP/1.1 handshake failed: {e}"
+    ))
+  })?;
+
+  let req = build_connect_request(target, user);
+  let resp_fut = sr.send_request(req);
+
+  // Drive the connection via tracker (spawn_local + graceful
+  // shutdown support) while waiting for the CONNECT response.
+  tracker.register_connection(async move {
+    if let Err(e) = conn.with_upgrades().await {
+      warn!(
+        "http_upstream: CONNECT connection ended before upgrade: {e}"
+      );
+    }
+  });
+
+  let mut resp = resp_fut
+    .await
+    .map_err(|e| UpstreamError::ConnectionTerminated(e.to_string()))?;
+
+  let upstream_proxy_status = resp
+    .headers()
+    .get(::http::header::HeaderName::from_static("proxy-status"))
+    .cloned();
+
+  // RFC 9110 §9.3.6: every 2xx establishes a CONNECT tunnel.
+  if !resp.status().is_success() {
+    return Err(UpstreamError::UpstreamConnectError {
+      status: resp.status(),
+      upstream_proxy_status,
+    });
+  }
+
+  // Hyper 1.6.0 incorrectly classifies 204 before checking CONNECT,
+  // so it does not expose upgraded I/O for that status. Keep its real
+  // failure visible; the dependency case is recorded in
+  // tests/integration/test_connect_upstream_status.py.
+  let upgrade = hyper::upgrade::on(&mut resp);
+  let upgraded = upgrade
+    .await
+    .map_err(|e| UpstreamError::ConnectionTerminated(e.to_string()))?;
+
+  Ok(ConnectResult {
+    transport: Box::new(TokioIo::new(upgraded)),
+    upstream_addr,
+    upstream_proxy_status,
+    tunnel_idle_timeout,
+  })
 }

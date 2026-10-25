@@ -17,16 +17,10 @@ import time
 
 import pytest
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-)
-from .utils.helpers import (
-    create_target_server,
-    create_test_config,
-    start_proxy,
-    wait_for_proxy,
-)
+from tests.fixtures.http_configuration import create_test_config
+from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.proxy_process import BytesProcess, start_proxy
+from tests.fixtures.tcp_peer import create_target_server
 
 # ==============================================================================
 # Test cases - 7.6 Performance scenarios
@@ -58,7 +52,7 @@ class TestPerformance:
                         data = conn.recv(1024)
                         if not data:
                             break
-                        conn.send(b"ECHO:" + data)
+                        conn.sendall(b"ECHO:" + data)
                 except OSError:
                     pass
                 finally:
@@ -80,7 +74,8 @@ class TestPerformance:
             client_sock.connect(("127.0.0.1", proxy_port))
 
             connect_request = (
-                f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n"
+                f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost:"
+                + f" 127.0.0.1:{target_port}\r\n\r\n"
             ).encode()
             client_sock.sendall(connect_request)
 
@@ -105,7 +100,7 @@ class TestPerformance:
                 client_sock.close()
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -137,7 +132,7 @@ class TestPerformance:
                             break
                         total += len(data)
                         received_data.append(data)
-                    conn.send(f"RECEIVED:{total}".encode())
+                    conn.sendall(f"RECEIVED:{total}".encode())
                 except OSError:
                     pass
                 finally:
@@ -159,7 +154,8 @@ class TestPerformance:
             client_sock.connect(("127.0.0.1", proxy_port))
 
             connect_request = (
-                f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n"
+                f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost:"
+                + f" 127.0.0.1:{target_port}\r\n\r\n"
             ).encode()
             client_sock.sendall(connect_request)
 
@@ -177,13 +173,13 @@ class TestPerformance:
             chunk_size = 8192
             test_data = b"X" * chunk_size
 
-            start_time = time.time()
+            start_time = time.monotonic()
             sent = 0
             while sent < data_size:
                 to_send = min(chunk_size, data_size - sent)
                 client_sock.sendall(test_data[:to_send])
                 sent += to_send
-            elapsed = time.time() - start_time
+            elapsed = time.monotonic() - start_time
 
             # Close write side
             client_sock.shutdown(socket.SHUT_WR)
@@ -201,7 +197,7 @@ class TestPerformance:
                 client_sock.close()
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -225,7 +221,7 @@ class TestPerformance:
                 try:
                     data = conn.recv(1024)
                     if data:
-                        conn.send(b"OK")
+                        conn.sendall(b"OK")
                 except OSError:
                     pass
                 finally:
@@ -252,7 +248,8 @@ class TestPerformance:
                     sock.connect(("127.0.0.1", proxy_port))
 
                     connect_request = (
-                        f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n"
+                        f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost:"
+                        + f" 127.0.0.1:{target_port}\r\n\r\n"
                     ).encode()
                     sock.sendall(connect_request)
 
@@ -277,7 +274,7 @@ class TestPerformance:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -311,7 +308,7 @@ class TestPerformance:
                         data = conn.recv(1024)
                         if not data:
                             break
-                        conn.send(b"ECHO:" + data)
+                        conn.sendall(b"ECHO:" + data)
                 except OSError:
                     pass
                 finally:
@@ -343,7 +340,8 @@ class TestPerformance:
 
                         # Send CONNECT request
                         connect_request = (
-                            f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n"
+                            f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost:"
+                            + f" 127.0.0.1:{target_port}\r\n\r\n"
                         ).encode()
                         writer.write(connect_request)
                         await writer.drain()
@@ -381,13 +379,14 @@ class TestPerformance:
 
             # All connections should succeed
             assert success_rate >= 0.99, (
-                f"Success rate {success_rate:.2%} is below 99% for 1000 concurrent connections"
+                f"Success rate {success_rate:.2%} is below 99% for 1000 concurrent"
+                + " connections"
             )
 
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=15)
+                _ = proxy_proc.wait(timeout=15)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)

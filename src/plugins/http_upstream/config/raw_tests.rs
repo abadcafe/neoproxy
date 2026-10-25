@@ -1,8 +1,7 @@
+use super::protocol::{PoolConfig, ProtocolKind};
 use super::raw::{
-  CertificateConfig, PoolConfig, UpstreamAddressConfig,
-  UpstreamServiceArgs,
+  CertificateConfig, UpstreamAddressConfig, UpstreamServiceArgs,
 };
-use super::resolved::ProtocolKind;
 
 #[test]
 fn test_certificate_config_validate_accepts_empty_identity() {

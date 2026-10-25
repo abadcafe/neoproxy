@@ -12,12 +12,9 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use anyhow::Result;
-use http_body_util::{BodyExt, Full};
 
 use crate::config::SerializedArgs;
-use crate::http_message::{
-  BytesBufBodyWrapper, Request, Response, ResponseBody,
-};
+use crate::http_message::{Request, Response};
 use crate::plugin::Plugin;
 use crate::service::{BuildService, Service};
 
@@ -25,8 +22,8 @@ use crate::service::{BuildService, Service};
 pub(crate) struct EchoService {}
 
 impl EchoService {
-  #[allow(clippy::new_ret_no_self)]
-  pub(crate) fn new(_args: SerializedArgs) -> Result<Service> {
+  pub(crate) fn build(args: SerializedArgs) -> Result<Service> {
+    let _: crate::config::EmptyArgs = serde_yaml::from_value(args)?;
     Ok(Service::new(Self {}))
   }
 }
@@ -38,23 +35,13 @@ impl tower::Service<Request> for EchoService {
 
   fn poll_ready(
     &mut self,
-    cx: &mut Context<'_>,
+    _cx: &mut Context<'_>,
   ) -> Poll<Result<(), Self::Error>> {
-    cx.waker().wake_by_ref();
     Poll::Ready(Ok(()))
   }
 
   fn call(&mut self, req: Request) -> Self::Future {
-    let fut = async {
-      let req_body = req.collect().await?.to_bytes();
-      let full = Full::new(req_body);
-      let bytes_buf = BytesBufBodyWrapper::new(full);
-      let resp_body = ResponseBody::new(bytes_buf);
-      let mut resp = Response::new(resp_body);
-      *resp.status_mut() = http::StatusCode::OK;
-      Ok(resp)
-    };
-    Box::pin(fut)
+    Box::pin(async move { Ok(Response::new(req.into_body())) })
   }
 }
 
@@ -64,7 +51,7 @@ pub(crate) struct EchoPlugin {
 
 impl EchoPlugin {
   pub(crate) fn new() -> Self {
-    let builder: Box<dyn BuildService> = Box::new(EchoService::new);
+    let builder: Box<dyn BuildService> = Box::new(EchoService::build);
     let service_builders = HashMap::from([("echo", builder)]);
     Self { service_builders }
   }
@@ -81,7 +68,11 @@ pub(crate) fn plugin_name() -> &'static str {
 }
 
 pub(crate) fn create_plugin(
-  _config: Option<&SerializedArgs>,
+  config: Option<&SerializedArgs>,
 ) -> Result<Box<dyn Plugin>> {
+  if let Some(config) = config {
+    let _: crate::config::EmptyArgs =
+      serde_yaml::from_value(config.clone())?;
+  }
   Ok(Box::new(EchoPlugin::new()))
 }

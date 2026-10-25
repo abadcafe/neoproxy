@@ -3,8 +3,8 @@ use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::{runtime, sync, task};
-use tracing::{error, warn};
+use tokio::{runtime, task};
+use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::listener::Listener;
@@ -12,6 +12,7 @@ use crate::listeners::ListenerManager;
 use crate::plugins::PluginManager;
 use crate::server;
 use crate::service::Service;
+use crate::worker_shutdown::WorkerShutdown;
 
 /// Build a service by name, wrapping it with configured layers.
 ///
@@ -95,6 +96,9 @@ pub(crate) fn build_listeners(
   // Build Listener for each ListenerConfig
   let mut listeners = Vec::new();
   for lc in config.listeners() {
+    let lc: &crate::config::ListenerConfig = lc;
+    // TLS listeners aggregate certificates and client CA roots only
+    // from these associated servers, never from the entire config.
     let servers =
       listener_servers.get(lc.name()).cloned().unwrap_or_default();
 
@@ -115,12 +119,18 @@ pub(crate) fn build_listeners(
 ///
 /// Each server thread creates its own tokio runtime and PluginManager,
 /// builds listeners, and runs them concurrently. The thread waits for
-/// the shutdown signal, then stops all listeners.
+/// the shutdown signal, then stops all listeners. Configuration is
+/// borrowed from the enclosing thread scope for the worker's lifetime.
 pub(crate) fn run_server_thread(
-  shutdown: Arc<sync::Notify>,
+  config: &Config,
+  log_registry: Option<
+    Arc<crate::plugins::access_log::registry::WriterRegistry>,
+  >,
+  mut worker: WorkerShutdown,
   thread_id: usize,
 ) -> Result<()> {
   let local_set = task::LocalSet::new();
+  let shutdown = worker.shutdown_handle();
   let rt = runtime::Builder::new_current_thread()
     .enable_all()
     .thread_name(format!("neoproxy-server-{}", thread_id))
@@ -129,50 +139,102 @@ pub(crate) fn run_server_thread(
   rt.block_on(local_set.run_until(async {
     // Each thread builds its own PluginManager and listeners
     let (mut plugin_manager, plugin_errors) =
-      PluginManager::new(Config::global().plugins().clone());
+      PluginManager::new(config.plugins().clone(), log_registry);
     for err in &plugin_errors {
       warn!("plugin load error: {}: {}", err.name, err.source);
     }
+    if !plugin_errors.is_empty() {
+      plugin_manager.uninstall_all().await;
+      anyhow::bail!(
+        "plugin initialization failed: {}",
+        plugin_errors
+          .iter()
+          .map(|error| format!("{}: {}", error.name, error.source))
+          .collect::<Vec<_>>()
+          .join("; ")
+      );
+    }
     let listener_manager = ListenerManager::new();
 
-    let listeners = build_listeners(
-      &plugin_manager,
-      Config::global(),
-      &listener_manager,
-    )
-    .map_err(|e| {
-      error!("failed to build listeners: {e}");
-      e
-    })?;
-
+    let listeners =
+      match build_listeners(&plugin_manager, config, &listener_manager)
+      {
+        Ok(listeners) => listeners,
+        Err(error) => {
+          plugin_manager.uninstall_all().await;
+          return Err(error);
+        }
+      };
     let mut join_set = task::JoinSet::new();
-
     for listener in &listeners {
       join_set.spawn_local(listener.start());
     }
-
-    shutdown.notified().await;
-
+    let mut failure = None;
+    tokio::select! {
+      _ = shutdown.notified() => {},
+      result = join_set.join_next(), if !join_set.is_empty() => {
+        // Notify peers before cleanup/rendezvous. Waiting until this
+        // thread returns would leave peers running while it waits for them.
+        shutdown.shutdown();
+        failure = match result {
+          Some(Ok(Err(error))) => Some(error),
+          Some(Err(error)) => Some(error.into()),
+          _ => Some(anyhow::anyhow!("listener stopped unexpectedly")),
+        };
+      }
+    }
+    // Stop acceptance and let each protocol driver drain its exchanges,
+    // including streamed response bodies, within the listener budget.
+    // Keep upstream plugin resources alive until those drivers finish.
     for listener in &listeners {
       listener.stop();
     }
+    while let Some(result) = join_set.join_next().await {
+      if failure.is_none() {
+        failure = match result {
+          Ok(Ok(())) => None,
+          Ok(Err(error)) => Some(error),
+          Err(error) => Some(error.into()),
+        };
+      }
+    }
 
-    while join_set.join_next().await.is_some() {}
+    // Protocol drivers can still be needed by upgraded tunnels. Finish
+    // them concurrently with plugin uninstall, sharing the second phase
+    // rather than adding another serial 3s + 2s wait.
+    let mut finishing = task::JoinSet::new();
+    for listener in &listeners {
+      finishing.spawn_local(listener.finish());
+    }
+    tokio::join!(plugin_manager.uninstall_all(), async {
+      while let Some(result) = finishing.join_next().await {
+        if let Err(error) = result {
+          // A protocol-driver panic is a programming error. Preserve
+          // the panic instead of converting it to successful shutdown.
+          if error.is_panic() {
+            std::panic::resume_unwind(error.into_panic());
+          }
+          warn!("listener cleanup cancelled: {error}");
+        }
+      }
+    });
 
-    // Drop listeners first so middleware instances (which hold
-    // mpsc::Sender clones for access_log writer threads) are
-    // released before uninstall(). This ensures the Sender clones
-    // are dropped early, allowing writer threads to see channel
-    // close and begin their final flush. uninstall() then drops the
-    // registry's Sender handles and saves JoinHandles to
-    // PENDING_WRITER_JOINS. The actual thread join happens later in
-    // flush_writer_threads(), called from main.rs after all server
-    // threads have exited (see CR-014 two-phase shutdown design).
+    // Retain endpoints and keep this runtime polling until every worker
+    // finishes both phases. Early socket removal changes UDP reuseport
+    // routing even though the client's address has not changed.
+    info!(
+      "worker {thread_id} business shutdown complete; waiting to \
+       release transports"
+    );
+    worker.finish().await;
     drop(listeners);
 
-    // Uninstall plugins at shutdown
-    plugin_manager.uninstall_all().await;
-
-    Ok(())
+    match failure {
+      Some(error) => {
+        error!("listener failed: {error}");
+        Err(error)
+      }
+      None => Ok(()),
+    }
   }))
 }

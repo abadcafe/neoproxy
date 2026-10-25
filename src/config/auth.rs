@@ -3,7 +3,7 @@
 use serde::Deserialize;
 
 /// User credential for password authentication.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UserCredential {
   /// Username.
@@ -19,5 +19,18 @@ impl UserCredential {
 
   pub(crate) fn password(&self) -> &str {
     &self.password
+  }
+}
+
+impl std::fmt::Debug for UserCredential {
+  fn fmt(
+    &self,
+    formatter: &mut std::fmt::Formatter<'_>,
+  ) -> std::fmt::Result {
+    formatter
+      .debug_struct("UserCredential")
+      .field("username", &self.username)
+      .field("password", &"*")
+      .finish()
   }
 }

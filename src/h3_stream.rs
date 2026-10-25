@@ -1,209 +1,206 @@
+//! module: h3_stream
+//! responsibilities: adapt HTTP/3 tunnel halves to buffered
+//! asynchronous I/O public operations: H3BidirectionalStream::new,
+//! H3Send, H3Recv, H3ClientBidiStream, H3ServerBidiStream
+//! data entities: SendState, SendFuture, H3BidirectionalStream
+//! tests: h3_stream_tests.rs, h3_stream_read_tests.rs,
+//! h3_stream_write_tests.rs
+
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context as TaskContext, Poll};
+use std::task::{Context, Poll};
 
 use bytes::{Buf, Bytes};
-use h3::error::StreamError;
-use tokio::io;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-type SendStateFuture<S> = Pin<
-  Box<dyn Future<Output = (S, Result<(), StreamError>)> + Send + Sync>,
->;
+/// Maximum bytes accepted into one pending H3 send operation.
+const SEND_BUFFER_CAPACITY: usize = 64 * 1024;
 
-/// State for an in-progress send_data or finish operation.
-/// Generic over the send stream type S.
-///
-/// The boxed futures require `Send + Sync` bounds because
-/// `H3ServerBidiStream` must be `Sync` for use with
-/// `http::Extensions::insert`. The `Sync` bound propagates through:
-/// `H3ServerBidiStream` contains `SendState`, which contains these
-/// boxed futures. Without `+ Sync` on the futures, the
-/// `H3ServerBidiStream` type would not be `Sync`, preventing it from
-/// being stored in `http::Extensions` or sent through oneshot channels
-/// in the `H3OnUpgrade` mechanism.
+pub(crate) trait H3Send: Unpin + Send + Sync + 'static {
+  fn send_data(
+    &mut self,
+    data: Bytes,
+  ) -> impl Future<Output = std::io::Result<()>> + Send + Sync;
+  fn finish(
+    &mut self,
+  ) -> impl Future<Output = std::io::Result<()>> + Send + Sync;
+}
+
+pub(crate) trait H3Recv: Unpin {
+  fn poll_recv_data(
+    &mut self,
+    cx: &mut Context<'_>,
+  ) -> Poll<std::io::Result<Option<Bytes>>>;
+}
+
+type SendFuture<S> =
+  Pin<Box<dyn Future<Output = (S, std::io::Result<()>)> + Send + Sync>>;
 enum SendState<S> {
-  Idle,
-  Sending { fut: SendStateFuture<S>, len: usize },
-  Finishing { fut: SendStateFuture<S> },
+  Ready(S),
+  Sending(SendFuture<S>),
+  Finishing(SendFuture<S>),
+  Closed,
 }
 
-/// HTTP/3 bidirectional stream wrapper, generic over send/recv stream
-/// types.
-///
-/// Combines h3 SendStream and RecvStream into a single type
-/// implementing AsyncRead + AsyncWrite, enabling use with
-/// `tokio::io::copy_bidirectional`.
-///
-/// Works with both `h3::client::RequestStream` and
-/// `h3::server::RequestStream` since both have identical `send_data()`,
-/// `finish()`, and `poll_recv_data()` APIs.
-pub(crate) struct H3BidirectionalStream<S: 'static, R> {
-  send: Option<S>,
+pub(crate) struct H3BidirectionalStream<S, R> {
+  send: SendState<S>,
   recv: R,
-  recv_buf: Option<Bytes>,
-  send_state: SendState<S>,
+  buffered: Bytes,
 }
 
-impl<S: 'static, R> H3BidirectionalStream<S, R> {
+impl<S, R> H3BidirectionalStream<S, R> {
   pub(crate) fn new(send: S, recv: R) -> Self {
-    Self {
-      send: Some(send),
-      recv,
-      recv_buf: None,
-      send_state: SendState::Idle,
+    Self { send: SendState::Ready(send), recv, buffered: Bytes::new() }
+  }
+}
+
+impl<S: H3Send, R: Unpin> AsyncWrite for H3BidirectionalStream<S, R> {
+  fn poll_write(
+    self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buffer: &[u8],
+  ) -> Poll<std::io::Result<usize>> {
+    let this = self.get_mut();
+    if matches!(this.send, SendState::Closed | SendState::Finishing(_))
+    {
+      return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+    }
+    if buffer.is_empty() {
+      return Poll::Ready(Ok(0));
+    }
+    std::task::ready!(Pin::new(&mut *this).poll_flush(cx))?;
+    let SendState::Ready(mut send) =
+      std::mem::replace(&mut this.send, SendState::Closed)
+    else {
+      // A successful flush must leave Ready; a violation is our own
+      // state-machine bug and intentionally panics rather than hiding
+      // it.
+      unreachable!("flush left no writable stream")
+    };
+    let count = buffer.len().min(SEND_BUFFER_CAPACITY);
+    let data = Bytes::copy_from_slice(&buffer[..count]);
+    this.send = SendState::Sending(Box::pin(async move {
+      let result = send.send_data(data).await;
+      (send, result)
+    }));
+    // Accept into our bounded buffer now, never acknowledge an earlier
+    // caller's buffer after returning Pending to that caller.
+    Poll::Ready(Ok(count))
+  }
+
+  fn poll_flush(
+    self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<std::io::Result<()>> {
+    let this = self.get_mut();
+    match &mut this.send {
+      SendState::Ready(_) | SendState::Closed => Poll::Ready(Ok(())),
+      SendState::Sending(future) => {
+        let (send, result) =
+          std::task::ready!(future.as_mut().poll(cx));
+        this.send = if result.is_ok() {
+          SendState::Ready(send)
+        } else {
+          SendState::Closed
+        };
+        Poll::Ready(result)
+      }
+      SendState::Finishing(_) => Pin::new(this).poll_shutdown(cx),
+    }
+  }
+
+  fn poll_shutdown(
+    self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<std::io::Result<()>> {
+    let this = self.get_mut();
+    loop {
+      match &mut this.send {
+        SendState::Closed => return Poll::Ready(Ok(())),
+        SendState::Sending(_) => {
+          std::task::ready!(Pin::new(&mut *this).poll_flush(cx))?;
+        }
+        SendState::Ready(_) => {
+          let SendState::Ready(mut send) =
+            std::mem::replace(&mut this.send, SendState::Closed)
+          else {
+            // This arm matched Ready immediately before replacing it;
+            // failing this invariant is a programming bug: let it
+            // panic.
+            unreachable!("ready send state changed during shutdown")
+          };
+          this.send = SendState::Finishing(Box::pin(async move {
+            let result = send.finish().await;
+            (send, result)
+          }));
+        }
+        SendState::Finishing(future) => {
+          let (_, result) = std::task::ready!(future.as_mut().poll(cx));
+          this.send = SendState::Closed;
+          return Poll::Ready(result);
+        }
+      }
     }
   }
 }
 
-// SAFETY: H3BidirectionalStream does not contain any self-referential
-// data. The fields are all owned data: Option<S>, R, Option<Bytes>, and
-// SendState<S>. The SendState enum contains boxed futures, but those
-// futures own their data (including the send stream S), not borrow from
-// self.
-impl<S: 'static, R> Unpin for H3BidirectionalStream<S, R> {}
+impl<S: Unpin, R: H3Recv> AsyncRead for H3BidirectionalStream<S, R> {
+  fn poll_read(
+    self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buffer: &mut ReadBuf<'_>,
+  ) -> Poll<std::io::Result<()>> {
+    let this = self.get_mut();
+    if buffer.remaining() == 0 {
+      return Poll::Ready(Ok(()));
+    }
+    loop {
+      if !this.buffered.is_empty() {
+        let count = buffer.remaining().min(this.buffered.len());
+        buffer.put_slice(&this.buffered.split_to(count));
+        return Poll::Ready(Ok(()));
+      }
+      match std::task::ready!(this.recv.poll_recv_data(cx))? {
+        Some(data) => this.buffered = data,
+        None => return Poll::Ready(Ok(())),
+      }
+    }
+  }
+}
 
-/// Macro to implement AsyncWrite for H3BidirectionalStream with a
-/// specific send stream type. Both h3::client::RequestStream and
-/// h3::server::RequestStream have identical send_data()/finish()
-/// signatures but are different types, so we use a macro to avoid
-/// duplication.
-macro_rules! impl_h3_async_write {
-  ($send_type:ty) => {
-    impl<R> io::AsyncWrite for H3BidirectionalStream<$send_type, R> {
-      fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &[u8],
-      ) -> Poll<Result<usize, std::io::Error>> {
-        loop {
-          match &mut self.send_state {
-            SendState::Idle => {
-              let mut send = self
-                .send
-                .take()
-                .expect(
-                  "internal error: send stream invariant violated in poll_write Idle state \
-                   - this is a bug, please report at https://github.com/example/neoproxy/issues",
-                );
-              let data = Bytes::copy_from_slice(buf);
-              let len = data.len();
-              let fut = Box::pin(async move {
-                let result = send.send_data(data).await;
-                (send, result)
-              });
-              self.send_state = SendState::Sending { fut, len };
-            }
-            SendState::Sending { fut, len } => {
-              let len = *len;
-              match fut.as_mut().poll(cx) {
-                Poll::Ready((send, result)) => {
-                  self.send = Some(send);
-                  self.send_state = SendState::Idle;
-                  return match result {
-                    Ok(()) => Poll::Ready(Ok(len)),
-                    Err(e) if e.is_h3_no_error() => Poll::Ready(Ok(len)),
-                    Err(e) => Poll::Ready(Err(std::io::Error::other(e))),
-                  };
-                }
-                Poll::Pending => return Poll::Pending,
-              }
-            }
-            SendState::Finishing { .. } => {
-              return Poll::Ready(Err(std::io::Error::other(
-                "stream is shutting down",
-              )));
-            }
-          }
-        }
+macro_rules! impl_send {
+  ($stream:ty) => {
+    impl H3Send for $stream {
+      async fn send_data(
+        &mut self,
+        data: Bytes,
+      ) -> std::io::Result<()> {
+        self.send_data(data).await.map_err(std::io::Error::other)
       }
 
-      fn poll_flush(
-        self: Pin<&mut Self>,
-        _cx: &mut TaskContext<'_>,
-      ) -> Poll<Result<(), std::io::Error>> {
-        Poll::Ready(Ok(()))
-      }
-
-      fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-      ) -> Poll<Result<(), std::io::Error>> {
-        loop {
-          match &mut self.send_state {
-            SendState::Idle => {
-              let mut send = self
-                .send
-                .take()
-                .expect(
-                  "internal error: send stream invariant violated in poll_shutdown Idle state \
-                   - this is a bug, please report at https://github.com/example/neoproxy/issues",
-                );
-              let fut = Box::pin(async move {
-                let result = send.finish().await;
-                (send, result)
-              });
-              self.send_state = SendState::Finishing { fut };
-            }
-            SendState::Sending { fut, .. } => {
-              match fut.as_mut().poll(cx) {
-                Poll::Ready((send, _result)) => {
-                  self.send = Some(send);
-                  self.send_state = SendState::Idle;
-                }
-                Poll::Pending => return Poll::Pending,
-              }
-            }
-            SendState::Finishing { fut } => match fut.as_mut().poll(cx) {
-              Poll::Ready((send, result)) => {
-                self.send = Some(send);
-                self.send_state = SendState::Idle;
-                return result.map_err(std::io::Error::other).into();
-              }
-              Poll::Pending => return Poll::Pending,
-            },
-          }
-        }
+      async fn finish(&mut self) -> std::io::Result<()> {
+        self.finish().await.map_err(std::io::Error::other)
       }
     }
   };
 }
-
-/// Macro to implement AsyncRead for H3BidirectionalStream with a
-/// specific recv stream type.
-macro_rules! impl_h3_async_read {
-  ($send_type:ty, $recv_type:ty) => {
-    impl io::AsyncRead
-      for H3BidirectionalStream<$send_type, $recv_type>
-    {
-      fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &mut io::ReadBuf<'_>,
-      ) -> Poll<Result<(), std::io::Error>> {
-        // Return buffered data first
-        if let Some(data) = self.recv_buf.take() {
-          let n = std::cmp::min(data.len(), buf.remaining());
-          buf.put_slice(&data[..n]);
-          if n < data.len() {
-            self.recv_buf = Some(data.slice(n..));
+macro_rules! impl_recv {
+  ($stream:ty) => {
+    impl H3Recv for $stream {
+      fn poll_recv_data(
+        &mut self,
+        cx: &mut Context<'_>,
+      ) -> Poll<std::io::Result<Option<Bytes>>> {
+        match self.poll_recv_data(cx) {
+          Poll::Ready(Ok(data)) => Poll::Ready(Ok(
+            data
+              .map(|mut bytes| bytes.copy_to_bytes(bytes.remaining())),
+          )),
+          Poll::Ready(Err(error)) if error.is_h3_no_error() => {
+            Poll::Ready(Ok(None))
           }
-          return Poll::Ready(Ok(()));
-        }
-
-        // Poll for new data
-        match self.recv.poll_recv_data(cx) {
-          Poll::Ready(Ok(Some(mut data))) => {
-            let bytes = data.copy_to_bytes(data.remaining());
-            let n = std::cmp::min(bytes.len(), buf.remaining());
-            buf.put_slice(&bytes[..n]);
-            if n < bytes.len() {
-              self.recv_buf = Some(bytes.slice(n..));
-            }
-            Poll::Ready(Ok(()))
-          }
-          Poll::Ready(Ok(None)) => Poll::Ready(Ok(())), // EOF
-          Poll::Ready(Err(e)) => {
-            Poll::Ready(Err(std::io::Error::other(e)))
+          Poll::Ready(Err(error)) => {
+            Poll::Ready(Err(std::io::Error::other(error)))
           }
           Poll::Pending => Poll::Pending,
         }
@@ -211,81 +208,19 @@ macro_rules! impl_h3_async_read {
     }
   };
 }
-
-// ---- Client-side (used for outbound connections) ----
-
-impl_h3_async_write!(
+impl_send!(
   h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>
 );
-
-impl_h3_async_read!(
-  h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
-  h3::client::RequestStream<h3_quinn::RecvStream, Bytes>
-);
-
-// ---- Server-side (used by H3 listener via H3OnUpgrade) ----
-
-impl_h3_async_write!(
+impl_send!(
   h3::server::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>
 );
+impl_recv!(h3::client::RequestStream<h3_quinn::RecvStream, Bytes>);
+impl_recv!(h3::server::RequestStream<h3_quinn::RecvStream, Bytes>);
 
-impl_h3_async_read!(
-  h3::server::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
-  h3::server::RequestStream<h3_quinn::RecvStream, Bytes>
-);
-
-// ---- Type aliases for convenience ----
-
-/// Client-side H3 bidirectional stream for outbound proxy connections.
-///
-/// Used when acting as a client connecting to
-/// upstream HTTP/3 proxies. The stream wraps the client-side H3 request
-/// stream obtained from `h3::client::SendRequest::send_request()`.
-///
-/// # Data Flow Direction
-/// - **Send half**: Data written via `AsyncWrite` goes to the upstream
-///   proxy
-/// - **Recv half**: Data read via `AsyncRead` comes from the upstream
-///   proxy
-///
-/// # Usage
-/// ```ignore
-/// let (send_stream, recv_stream) = proxy_stream.split();
-/// let mut h3_stream = H3ClientBidiStream::new(send_stream, recv_stream);
-/// tokio::io::copy_bidirectional(&mut client, &mut h3_stream).await?;
-/// ```
 pub(crate) type H3ClientBidiStream = H3BidirectionalStream<
   h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
   h3::client::RequestStream<h3_quinn::RecvStream, Bytes>,
 >;
-
-/// Server-side H3 bidirectional stream for inbound client connections.
-///
-/// Used by the H3 listener when receiving connections from downstream
-/// clients. The stream wraps the server-side H3 request stream obtained
-/// from `h3::server::Connection::accept()`. Delivered to the Service
-/// via `H3OnUpgrade` after the listener sends the protocol response.
-///
-/// # Data Flow Direction
-/// - **Send half**: Data written via `AsyncWrite` goes to the
-///   downstream client
-/// - **Recv half**: Data read via `AsyncRead` comes from the downstream
-///   client
-///
-/// # Relation to h3 Types
-/// - Send type: `h3::server::RequestStream<h3_quinn::SendStream<Bytes>,
-///   Bytes>` (obtained via `.split()` on the full bidi stream)
-/// - Recv type: `h3::server::RequestStream<h3_quinn::RecvStream,
-///   Bytes>` (obtained via `.split()` on the full bidi stream)
-///
-/// # Usage
-/// ```ignore
-/// // In the H3 listener, after sending response:
-/// let (send_stream, recv_stream) = h3_request_stream.split();
-/// let bidi_stream = H3ServerBidiStream::new(send_stream, recv_stream);
-/// // Send to Service via upgrade channel
-/// upgrade_tx.send(Ok(bidi_stream))?;
-/// ```
 pub(crate) type H3ServerBidiStream = H3BidirectionalStream<
   h3::server::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
   h3::server::RequestStream<h3_quinn::RecvStream, Bytes>,

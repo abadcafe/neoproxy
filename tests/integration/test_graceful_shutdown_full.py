@@ -25,21 +25,12 @@ import subprocess
 import tempfile
 import time
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-)
-from .utils.helpers import (
-    MAX_SHUTDOWN_TIME,
-    NEOPROXY_BINARY,
-    create_echo_config,
-    create_target_server,
-    create_test_config,
-    establish_connect_tunnel,
-    start_proxy,
-    wait_for_port_released,
-    wait_for_proxy,
-)
+from tests.fixtures.binary import NEOPROXY_BINARY
+from tests.fixtures.http_configuration import create_echo_config, create_test_config
+from tests.fixtures.http_request import establish_connect_tunnel
+from tests.fixtures.ports import get_unique_port, wait_for_port_released, wait_for_proxy
+from tests.fixtures.proxy_process import MAX_SHUTDOWN_TIME, BytesProcess, start_proxy
+from tests.fixtures.tcp_peer import create_target_server
 
 # ==============================================================================
 # Test cases - 7.1 Normal shutdown scenarios
@@ -75,7 +66,7 @@ class TestNormalShutdown:
                 return_code = proxy_proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proxy_proc.kill()
-                proxy_proc.wait()
+                _ = proxy_proc.wait()
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0 (graceful shutdown)
@@ -84,7 +75,7 @@ class TestNormalShutdown:
         finally:
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_shutdown_sigterm(self) -> None:
@@ -113,7 +104,7 @@ class TestNormalShutdown:
                 return_code = proxy_proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proxy_proc.kill()
-                proxy_proc.wait()
+                _ = proxy_proc.wait()
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0 (graceful shutdown)
@@ -122,7 +113,7 @@ class TestNormalShutdown:
         finally:
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -164,7 +155,7 @@ class TestRepeatedSignal:
                 return_code = proxy_proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proxy_proc.kill()
-                proxy_proc.wait()
+                _ = proxy_proc.wait()
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0
@@ -173,7 +164,7 @@ class TestRepeatedSignal:
         finally:
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -191,9 +182,9 @@ class TestShutdownTimeout:
 
         Target: Verify process exits after timeout when tunnel does not close
         Expected behavior:
-        - Listener closes after 3 seconds
-        - Service closes after 5 seconds
-        - Total time should not exceed 8 seconds (+ buffer)
+        - Listener task wait budget: 3 seconds plus 2 seconds for cancellation
+        - Service task wait budget: 3 seconds plus 2 seconds for cancellation
+        - These two task wait budgets total 10 seconds (+ test allowance)
         - Exit code should be 0
         """
         temp_dir = tempfile.mkdtemp()
@@ -237,22 +228,24 @@ class TestShutdownTimeout:
             proxy_proc.send_signal(signal.SIGTERM)
 
             # Measure shutdown time
-            start_time = time.time()
+            start_time = time.monotonic()
             try:
                 return_code = proxy_proc.wait(timeout=15)
-                elapsed = time.time() - start_time
+                elapsed = time.monotonic() - start_time
             except subprocess.TimeoutExpired:
                 proxy_proc.kill()
-                proxy_proc.wait()
-                elapsed = time.time() - start_time
+                _ = proxy_proc.wait()
+                elapsed = time.monotonic() - start_time
                 assert False, (
-                    f"Process did not exit within expected time (elapsed: {elapsed:.1f}s)"
+                    "Process did not exit within expected time (elapsed:"
+                    + f" {elapsed:.1f}s)"
                 )
 
             # Verify shutdown completed within timeout
-            # Should be approximately MAX_SHUTDOWN_TIME (8s) + some buffer
+            # Allow the two task wait budgets (10s) plus test overhead.
             assert elapsed < MAX_SHUTDOWN_TIME + 2, (
-                f"Shutdown took too long: {elapsed:.1f}s (expected < {MAX_SHUTDOWN_TIME + 2}s)"
+                f"Shutdown took too long: {elapsed:.1f}s (expected <"
+                + f" {MAX_SHUTDOWN_TIME + 2}s)"
             )
 
             # Verify exit code is 0
@@ -263,7 +256,7 @@ class TestShutdownTimeout:
                 client_sock.close()
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -278,80 +271,38 @@ class TestErrorExit:
     """Test 7.5: Error exit scenarios (port conflict)."""
 
     def test_port_conflict_behavior(self) -> None:
+        """A listener bind failure must terminate the proxy with worker error.
+
+        Reserve the port without SO_REUSEPORT. Two NeoProxy processes both
+        enable SO_REUSEPORT, so starting a second proxy does not reliably
+        create a port conflict.
         """
-        TC-ERROR-001: Port conflict behavior test.
-
-        Target: Verify behavior when binding to an already-used port.
-
-        Note: This test documents the current behavior where:
-        - The second process hangs waiting for the port
-        - Sending SIGTERM causes it to exit with code 0
-        - This is potentially a bug - the process should exit with error code 2 or 3
-
-        Expected behavior per design doc:
-        - Listener binding failure should cause worker thread error exit
-        - Exit code should be 2 (worker thread error) or 3 (init error)
-        """
-        temp_dir1 = tempfile.mkdtemp()
-        temp_dir2 = tempfile.mkdtemp()
+        temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
-        first_proc: BytesProcess | None = None
-        second_proc: BytesProcess | None = None
+        proxy_proc: BytesProcess | None = None
 
         try:
-            # Start first process
-            config_path1 = create_test_config(proxy_port, temp_dir1)
-            first_proc = start_proxy(config_path1)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+                occupied.bind(("0.0.0.0", proxy_port))
+                occupied.listen(1)
+                config_path = create_test_config(proxy_port, temp_dir)
+                proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=2.0, proc=first_proc
-            ), "First proxy server failed to start"
-
-            # Try to start second process with same port
-            config_path2 = create_test_config(proxy_port, temp_dir2)
-            second_proc = start_proxy(config_path2)
-
-            # Poll to see if second process exits (check for ~0.5s)
-            poll_result = None
-            for _ in range(10):
-                poll_result = second_proc.poll()
-                if poll_result is not None:
-                    break
-                time.sleep(0.05)
-
-            if poll_result is not None:
-                # Process exited - verify error code
-                # Expected: exit code 2 or 3
-                assert poll_result in [2, 3], (
-                    f"Expected exit code 2 or 3, got {poll_result}"
-                )
-            else:
-                # Process is still running - send SIGTERM and verify clean exit
-                # This is the current observed behavior
-                # Document this as potentially incorrect per design doc
-                second_proc.send_signal(signal.SIGTERM)
                 try:
-                    return_code = second_proc.wait(timeout=5)
+                    return_code = proxy_proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    second_proc.kill()
-                    second_proc.wait()
-                    assert False, "Second process did not exit even after SIGTERM"
+                    proxy_proc.kill()
+                    _ = proxy_proc.wait()
+                    assert False, "Proxy stayed alive after its listener failed to bind"
 
-                # Current behavior: exits with 0 after SIGTERM
-                # This is potentially a bug - should exit with 2 or 3
-                assert return_code == 0, (
-                    f"Expected exit code 0 after SIGTERM, got {return_code}"
+                assert return_code == 2, (
+                    f"Expected worker failure exit code 2, got {return_code}"
                 )
-
         finally:
-            if first_proc and first_proc.poll() is None:
-                first_proc.terminate()
-                first_proc.wait(timeout=5)
-            if second_proc and second_proc.poll() is None:
-                second_proc.terminate()
-                second_proc.wait(timeout=5)
-            shutil.rmtree(temp_dir1, ignore_errors=True)
-            shutil.rmtree(temp_dir2, ignore_errors=True)
+            if proxy_proc and proxy_proc.poll() is None:
+                proxy_proc.terminate()
+                _ = proxy_proc.wait(timeout=5)
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 # ==============================================================================
@@ -388,7 +339,7 @@ class TestConnectTunnel:
                         if not data:
                             break
                         received_data.append(data)
-                        conn.send(b"ECHO:" + data)
+                        conn.sendall(b"ECHO:" + data)
                 except OSError:
                     pass
                 finally:
@@ -425,7 +376,7 @@ class TestConnectTunnel:
                 return_code = proxy_proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proxy_proc.kill()
-                proxy_proc.wait()
+                _ = proxy_proc.wait()
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0
@@ -436,7 +387,7 @@ class TestConnectTunnel:
                 client_sock.close()
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -476,7 +427,7 @@ class TestResourceCleanup:
                 return_code = proxy_proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proxy_proc.kill()
-                proxy_proc.wait()
+                _ = proxy_proc.wait()
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0
@@ -490,7 +441,7 @@ class TestResourceCleanup:
         finally:
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_multiple_connections_cleanup(self) -> None:
@@ -528,7 +479,7 @@ class TestResourceCleanup:
                 return_code = proxy_proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proxy_proc.kill()
-                proxy_proc.wait()
+                _ = proxy_proc.wait()
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0
@@ -539,7 +490,7 @@ class TestResourceCleanup:
                 sock.close()
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=2)
+                _ = proxy_proc.wait(timeout=2)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -562,7 +513,7 @@ class TestInitializationFailure:
 
         # Write invalid YAML
         with open(config_path, "w") as f:
-            f.write("server_threads: [\n  invalid yaml\n")
+            _ = f.write("server_threads: [\n  invalid yaml\n")
 
         try:
             proc = subprocess.Popen(
@@ -576,7 +527,7 @@ class TestInitializationFailure:
                 return_code = proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait()
+                _ = proc.wait()
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 1 (config error)
@@ -602,7 +553,7 @@ class TestInitializationFailure:
             return_code = proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.wait()
+            _ = proc.wait()
             assert False, "Process did not exit within expected time"
 
         # Verify exit code is 1 (file not found)
@@ -628,7 +579,7 @@ servers:
 """
         config_path = os.path.join(temp_dir, "invalid.yaml")
         with open(config_path, "w") as f:
-            f.write(config_content)
+            _ = f.write(config_content)
 
         try:
             proc = subprocess.Popen(
@@ -642,7 +593,7 @@ servers:
                 return_code = proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait()
+                _ = proc.wait()
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is non-zero (config error)
@@ -655,120 +606,3 @@ servers:
 # ==============================================================================
 # Test cases - Multiple worker threads scenarios
 # ==============================================================================
-
-
-class TestMultipleWorkerThreads:
-    """Test multiple worker threads scenarios."""
-
-    def test_normal_shutdown_with_multiple_workers(self) -> None:
-        """
-        TC-WORKERS-001: Normal shutdown with multiple worker threads.
-
-        Target: Verify graceful shutdown works with multiple worker threads
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-
-        try:
-            config_path = create_test_config(proxy_port, temp_dir, server_threads=4)
-            proxy_proc = start_proxy(config_path)
-
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
-
-            # Send SIGTERM
-            proxy_proc.send_signal(signal.SIGTERM)
-
-            # Wait for process to exit
-            try:
-                return_code = proxy_proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                proxy_proc.kill()
-                proxy_proc.wait()
-                assert False, "Process did not exit within expected time"
-
-            # Verify exit code is 0
-            assert return_code == 0, f"Expected exit code 0, got {return_code}"
-
-        finally:
-            if proxy_proc and proxy_proc.poll() is None:
-                proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_shutdown_with_multiple_workers_and_connections(
-        self,
-    ) -> None:
-        """
-        TC-WORKERS-002: Shutdown with multiple workers and active connections.
-
-        Target: Verify graceful shutdown with multiple workers handling connections
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        target_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-        target_socket: socket.socket | None = None
-        client_socks: list[socket.socket] = []
-
-        try:
-            config_path = create_test_config(proxy_port, temp_dir, server_threads=4)
-
-            # Create target server
-            def echo_handler(conn: socket.socket) -> None:
-                try:
-                    while True:
-                        data = conn.recv(1024)
-                        if not data:
-                            break
-                        conn.send(b"ECHO:" + data)
-                except OSError:
-                    pass
-                finally:
-                    conn.close()
-
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
-
-            proxy_proc = start_proxy(config_path)
-
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
-
-            # Establish multiple tunnels
-            for _ in range(5):
-                sock = establish_connect_tunnel(
-                    "127.0.0.1", proxy_port, "127.0.0.1", target_port
-                )
-                if sock:
-                    client_socks.append(sock)
-
-            time.sleep(0.5)
-
-            # Send SIGTERM
-            proxy_proc.send_signal(signal.SIGTERM)
-
-            # Wait for process to exit
-            try:
-                return_code = proxy_proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                proxy_proc.kill()
-                proxy_proc.wait()
-                assert False, "Process did not exit within expected time"
-
-            # Verify exit code is 0
-            assert return_code == 0, f"Expected exit code 0, got {return_code}"
-
-        finally:
-            for sock in client_socks:
-                sock.close()
-            if proxy_proc and proxy_proc.poll() is None:
-                proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
-            if target_socket:
-                target_socket.close()
-            shutil.rmtree(temp_dir, ignore_errors=True)

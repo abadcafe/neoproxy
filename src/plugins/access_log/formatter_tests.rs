@@ -302,3 +302,21 @@ fn test_format_text_extensions_at_top_level() {
     "Text format should have extension at top level"
   );
 }
+
+#[test]
+fn test_format_text_escapes_untrusted_control_characters() {
+  let mut entry = make_entry();
+  entry.err = Some("error\nforged line\r\u{1b}".into());
+  entry.extensions.insert("user".into(), "alice\nadmin".into());
+  let output = String::from_utf8(
+    crate::plugins::access_log::formatter::format_entry(
+      &entry,
+      LogFormat::Text,
+    ),
+  )
+  .unwrap();
+  assert_eq!(output.lines().count(), 1);
+  assert!(!output.contains('\r'));
+  assert!(!output.contains('\u{1b}'));
+  assert!(output.contains("alice\\nadmin"));
+}

@@ -2,7 +2,7 @@ use std::cell::Cell;
 
 pub(crate) struct WeightedItem<T> {
   weight: usize,
-  current_weight: Cell<isize>,
+  current_weight: Cell<i128>,
   item: T,
 }
 
@@ -22,13 +22,13 @@ pub(crate) fn select<T>(items: &[WeightedItem<T>]) -> Option<&T> {
   }
 
   let total =
-    items.iter().fold(0, |total, item| total + item.weight) as isize;
+    items.iter().map(|item| item.weight as i128).sum::<i128>();
   let mut selected_idx = 0usize;
-  let mut selected_weight = 0isize;
+  let mut selected_weight = i128::MIN;
 
   for (idx, item) in items.iter().enumerate() {
     let new_current_weight =
-      item.current_weight.get() + item.weight as isize;
+      item.current_weight.get() + item.weight as i128;
     item.current_weight.set(new_current_weight);
     if new_current_weight > selected_weight {
       selected_weight = new_current_weight;

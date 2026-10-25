@@ -55,12 +55,12 @@ fn test_authority_host_mismatch_mismatching() {
 
 #[test]
 fn test_authority_host_mismatch_empty_authority() {
-  assert!(!authority_host_mismatch("", "api.example.com"));
+  assert!(authority_host_mismatch("", "api.example.com"));
 }
 
 #[test]
 fn test_authority_host_mismatch_empty_host() {
-  assert!(!authority_host_mismatch("api.example.com", ""));
+  assert!(authority_host_mismatch("api.example.com", ""));
 }
 
 // ========== validate_and_route ==========
@@ -129,17 +129,17 @@ fn test_validate_and_route_authority_matches_host() {
 }
 
 #[test]
-fn test_validate_and_route_authority_mismatches_host() {
+fn test_validate_and_route_absolute_uri_determines_route() {
   let router = build_router();
   let req = http::Request::builder()
     .method("GET")
-    .uri("http://other.example.com/test")
-    .header(http::header::HOST, "api.example.com")
+    .uri("http://api.example.com/test")
+    .header(http::header::HOST, "other.example.com")
     .body(())
     .unwrap();
 
   let result = validate_and_route(&req, &router);
-  assert!(result.is_err());
+  assert_eq!(result.unwrap().service_name, "api");
 }
 
 #[test]
@@ -176,4 +176,79 @@ fn test_validate_and_route_host_with_port_strips_port() {
   let result = validate_and_route(&req, &router);
   assert!(result.is_ok());
   assert_eq!(result.unwrap().service_name, "api");
+}
+
+#[test]
+fn test_validate_and_route_rejects_duplicate_host() {
+  let req = http::Request::builder()
+    .header("Host", "api.example.com")
+    .header("Host", "other.example.com")
+    .body(())
+    .unwrap();
+  assert!(validate_and_route(&req, &build_router()).is_err());
+}
+
+#[test]
+fn test_validate_and_route_ipv6_uses_entire_host() {
+  let router = ServerRouter::build(vec![Server {
+    hostnames: vec!["[::1]".into()],
+    service_name: "ipv6".into(),
+    ..default_server()
+  }]);
+  let req = http::Request::builder()
+    .header("Host", "[::1]:8080")
+    .body(())
+    .unwrap();
+  assert_eq!(
+    validate_and_route(&req, &router).unwrap().service_name,
+    "ipv6"
+  );
+}
+
+#[test]
+fn test_validate_and_route_accepts_empty_port_in_uri_and_host() {
+  for (uri, host) in [
+    ("/path", "api.example.com:"),
+    ("http://api.example.com:/path", "api.example.com"),
+    ("https://api.example.com:/path", "api.example.com:"),
+  ] {
+    let req = http::Request::builder()
+      .uri(uri)
+      .header("Host", host)
+      .body(())
+      .unwrap();
+    assert_eq!(
+      validate_and_route(&req, &build_router()).unwrap().service_name,
+      "api"
+    );
+  }
+}
+
+#[test]
+fn test_validate_and_route_rejects_invalid_nonempty_port_and_userinfo()
+{
+  for authority in [
+    "api.example.com:abc",
+    "api.example.com:65536",
+    "user@api.example.com",
+  ] {
+    let req = http::Request::builder()
+      .uri("/path")
+      .header("Host", authority)
+      .body(())
+      .unwrap();
+    assert!(
+      validate_and_route(&req, &build_router()).is_err(),
+      "{authority}"
+    );
+    let req = http::Request::builder()
+      .uri(format!("http://{authority}/path"))
+      .header("Host", "api.example.com")
+      .body(())
+      .unwrap();
+    assert!(
+      validate_and_route(&req, &build_router()).is_err(),
+      "{authority}"
+    );
+  }
 }

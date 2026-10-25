@@ -11,17 +11,11 @@ import tempfile
 
 import pytest
 
+from tests.fixtures.http_configuration import create_test_config
+
 # Import from conftest
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-)
-from .utils.helpers import (
-    create_test_config,
-    start_proxy,
-    terminate_process,
-    wait_for_proxy,
-)
+from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 
 
 class TestPortAllocation:

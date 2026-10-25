@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use super::protocol::{Http3ProtocolConfig, QuicConfig};
 use super::raw::{
-  Http3ProtocolConfig, HttpUpstreamPluginConfig, QuicConfig,
-  UpstreamAddressConfig, UpstreamConfig,
+  HttpUpstreamPluginConfig, UpstreamAddressConfig, UpstreamConfig,
 };
 
 /// Validate that an address string has host:port format without DNS
@@ -40,6 +40,33 @@ pub(crate) fn validate_plugin_config(
 ) -> Result<()> {
   let mut upstream_names: HashSet<&str> = HashSet::new();
 
+  validate_duration_positive(
+    plugin.request_timeout,
+    "plugin",
+    "request_timeout",
+  )?;
+  validate_duration_positive(
+    plugin.dns_resolve_timeout,
+    "plugin",
+    "dns_resolve_timeout",
+  )?;
+  validate_duration_positive(
+    plugin.http.as_ref().and_then(|value| value.connect_timeout),
+    "plugin",
+    "http.connect_timeout",
+  )?;
+  if let Some(https) = &plugin.https {
+    validate_duration_positive(
+      https.connect_timeout,
+      "plugin",
+      "https.connect_timeout",
+    )?;
+    validate_duration_positive(
+      https.tls_handshake_timeout,
+      "plugin",
+      "https.tls_handshake_timeout",
+    )?;
+  }
   validate_http3_protocol_config(plugin.http3.as_ref(), "plugin")?;
 
   for upstream in &plugin.upstreams {
@@ -53,6 +80,33 @@ pub(crate) fn validate_plugin_config(
 }
 
 fn validate_upstream_config(upstream: &UpstreamConfig) -> Result<()> {
+  validate_duration_positive(
+    upstream.request_timeout,
+    &upstream.name,
+    "request_timeout",
+  )?;
+  validate_duration_positive(
+    upstream.dns_resolve_timeout,
+    &upstream.name,
+    "dns_resolve_timeout",
+  )?;
+  validate_duration_positive(
+    upstream.http.as_ref().and_then(|value| value.connect_timeout),
+    &upstream.name,
+    "http.connect_timeout",
+  )?;
+  if let Some(https) = &upstream.https {
+    validate_duration_positive(
+      https.connect_timeout,
+      &upstream.name,
+      "https.connect_timeout",
+    )?;
+    validate_duration_positive(
+      https.tls_handshake_timeout,
+      &upstream.name,
+      "https.tls_handshake_timeout",
+    )?;
+  }
   if upstream.name.is_empty() {
     bail!("upstream name must not be empty");
   }
@@ -90,6 +144,23 @@ fn validate_address_config(
   addr: &UpstreamAddressConfig,
 ) -> Result<()> {
   addr.protocol()?;
+  validate_duration_positive(
+    addr.http.as_ref().and_then(|value| value.connect_timeout),
+    upstream_name,
+    "http.connect_timeout",
+  )?;
+  if let Some(https) = &addr.https {
+    validate_duration_positive(
+      https.connect_timeout,
+      upstream_name,
+      "https.connect_timeout",
+    )?;
+    validate_duration_positive(
+      https.tls_handshake_timeout,
+      upstream_name,
+      "https.tls_handshake_timeout",
+    )?;
+  }
   validate_address_format(&addr.address)?;
 
   if addr.weight == 0 {
@@ -137,10 +208,21 @@ fn validate_quic_config(
     "quic.max_idle_timeout",
   )?;
   validate_duration_positive(
-    Some(config.keep_alive_interval),
+    config.keep_alive_interval,
     location,
     "quic.keep_alive_interval",
   )?;
+
+  if let Some(value) = config.max_idle_timeout
+    && (value.as_millis() == 0
+      || value.as_millis()
+        > u128::from(quinn::VarInt::MAX.into_inner()))
+  {
+    bail!(
+      "{location} quic.max_idle_timeout must fit a positive QUIC \
+       millisecond value"
+    );
+  }
 
   if let Some(value) = config.max_concurrent_bidi_streams
     && !(1..=10_000).contains(&value)
@@ -164,9 +246,12 @@ fn validate_quic_config(
   }
 
   if let Some(value) = config.receive_window
-    && value == 0
+    && (value == 0 || quinn::VarInt::from_u64(value).is_err())
   {
-    bail!("{location} quic.receive_window must be greater than 0");
+    bail!(
+      "{location} quic.receive_window must fit a positive QUIC \
+       variable integer"
+    );
   }
 
   Ok(())
@@ -178,7 +263,8 @@ fn validate_duration_positive(
   field: &str,
 ) -> Result<()> {
   if let Some(value) = value
-    && value.is_zero()
+    && (value.is_zero()
+      || std::time::Instant::now().checked_add(value).is_none())
   {
     bail!("{location} {field} must be greater than 0s");
   }

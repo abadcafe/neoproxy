@@ -1,7 +1,9 @@
 use serial_test::serial;
 use tower::ServiceExt;
 
-use super::access_log::{create_plugin, plugin_name};
+use super::access_log::{
+  build_registry, create_plugin, create_shared_plugin, plugin_name,
+};
 use crate::config::SerializedArgs;
 use crate::context::RequestContext;
 use crate::plugin::Plugin;
@@ -208,6 +210,46 @@ async fn test_uninstall_flushes_file_layer_entries() {
     content.contains("basic_auth.user"),
     "log file should contain selected context fields, got: {content:?}"
   );
+}
+
+#[tokio::test]
+async fn test_uninstall_shared_plugin_keeps_other_plugin_and_process_writer_alive()
+ {
+  let directory = tempfile::tempdir().unwrap();
+  let prefix =
+    directory.path().join("shared").to_string_lossy().to_string();
+  let registry = build_registry(Some(&writer_config(&prefix))).unwrap();
+  let first = create_shared_plugin(registry.clone());
+  let second = create_shared_plugin(registry.clone());
+  call_file_layer(first.as_ref(), &prefix).await;
+  let layer =
+    second.layer_builder("file").unwrap()(layer_args(&prefix, vec![]))
+      .unwrap();
+  let service = layer.layer(crate::server::placeholder_service());
+  first.uninstall().await;
+  assert!(
+    first.layer_builder("file").unwrap()(layer_args(&prefix, vec![]))
+      .is_err()
+  );
+
+  let mut request = request_with_context();
+  *request.uri_mut() =
+    "http://example.com/after-first-uninstall".parse().unwrap();
+  let response = service.clone().oneshot(request).await.unwrap();
+  assert_eq!(
+    response.status(),
+    http::StatusCode::INTERNAL_SERVER_ERROR
+  );
+  // Also construct a fresh layer through the still-installed plugin.
+  call_file_layer(second.as_ref(), &prefix).await;
+  second.uninstall().await;
+  drop(service);
+  drop(layer);
+  // The process owner performs the final queue drain and flush.
+  drop(registry);
+  let content = std::fs::read_to_string(&prefix).unwrap();
+  assert_eq!(content.lines().count(), 3);
+  assert!(content.contains("/after-first-uninstall"));
 }
 
 #[tokio::test]

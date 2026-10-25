@@ -1,7 +1,7 @@
 use std::path;
 use std::time::Duration;
 
-use super::raw::PoolConfig;
+use super::protocol::PoolConfig;
 use crate::config::UserCredential;
 
 /// Client certificate credential for TLS authentication.
@@ -9,14 +9,6 @@ use crate::config::UserCredential;
 pub(crate) struct ClientCertCredential {
   pub(crate) cert_path: Option<path::PathBuf>,
   pub(crate) key_path: Option<path::PathBuf>,
-}
-
-/// Protocol identifier.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ProtocolKind {
-  Http,
-  Https,
-  Http3,
 }
 
 /// Resolved QUIC config from field-level three-level merge.
@@ -58,4 +50,5 @@ pub(crate) struct Upstream {
   pub(crate) connect_timeout: Duration,
   pub(crate) tunnel_idle_timeout: Duration,
   pub(crate) dns_resolve_timeout: Duration,
+  pub(crate) request_timeout: Duration,
 }

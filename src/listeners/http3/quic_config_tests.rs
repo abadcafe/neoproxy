@@ -140,3 +140,17 @@ fn test_quic_config_default_trait_matches_constants() {
   assert_eq!(config.send_window, DEFAULT_SEND_WINDOW.as_u64());
   assert_eq!(config.receive_window, DEFAULT_RECEIVE_WINDOW.as_u64());
 }
+
+#[test]
+fn test_quic_config_rejects_unrepresentable_values() {
+  for yaml in [
+    "quic: { max_idle_timeout: 18446744073709552s }",
+    "quic: { max_idle_timeout: 4611686018427388s }",
+    "quic: { receive_window: 4611686018427387904B }",
+  ] {
+    assert!(
+      parse_args(yaml).validate_and_apply_defaults().is_err(),
+      "accepted unrepresentable QUIC config {yaml}"
+    );
+  }
+}

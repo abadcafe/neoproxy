@@ -4,6 +4,22 @@ use std::time::Duration;
 
 use crate::shutdown::ShutdownHandle;
 
+#[tokio::test]
+async fn test_notified_observes_shutdown_before_subscription() {
+  let handle = ShutdownHandle::new();
+  handle.shutdown();
+  for _ in 0..3 {
+    assert!(
+      tokio::time::timeout(
+        Duration::from_millis(100),
+        handle.notified()
+      )
+      .await
+      .is_ok()
+    );
+  }
+}
+
 #[test]
 fn test_shutdown_handle_new_is_not_shutdown() {
   let handle = ShutdownHandle::new();

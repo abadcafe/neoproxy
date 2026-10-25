@@ -1,14 +1,16 @@
 //! Shared authentication types.
 //!
-//! Contains `UserPasswordAuth` and `AuthError` used by both the
-//! listener layer (SOCKS5 handshake) and the plugin layer (HTTP Basic
-//! Auth).
+//! Contains credential types and verification for request middleware.
+//! Protocol adapters carry credentials into the HTTP request pipeline;
+//! they do not extract authentication policy from Service.
 
 use std::collections::HashMap;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use subtle::ConstantTimeEq;
+
+use crate::redaction::Redacted;
 
 /// Authentication error types.
 #[derive(Debug, Clone)]
@@ -43,7 +45,7 @@ fn verify_password(
   username: &str,
   password: &str,
 ) -> Result<(), AuthError> {
-  if username.is_empty() || password.is_empty() {
+  if username.is_empty() {
     return Err(AuthError::InvalidCredentials);
   }
 
@@ -66,12 +68,20 @@ fn verify_password(
 
 /// User/password authenticator.
 ///
-/// Handles HTTP Proxy-Authorization header verification and direct
-/// username/password verification (for SOCKS5).
+/// Handles HTTP Basic and typed credentials from converted SOCKS5
+/// requests. Verification takes place in request middleware.
 /// When users are configured, authentication is REQUIRED.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct UserPasswordAuth {
   users: Option<HashMap<String, String>>,
+}
+
+impl std::fmt::Debug for UserPasswordAuth {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("UserPasswordAuth")
+      .field("users", &self.users.as_ref().map(Redacted))
+      .finish()
+  }
 }
 
 impl UserPasswordAuth {
@@ -125,13 +135,16 @@ impl UserPasswordAuth {
       )
     })?;
 
-    if !header_str.starts_with("Basic ") {
+    let (scheme, encoded) =
+      header_str.split_once(' ').ok_or_else(|| {
+        AuthError::ConfigError("Missing authentication scheme".into())
+      })?;
+    if !scheme.eq_ignore_ascii_case("Basic") {
       return Err(AuthError::ConfigError(
-        "Not Basic authentication".to_string(),
+        "Not Basic authentication".into(),
       ));
     }
-
-    let encoded = &header_str[6..];
+    let encoded = encoded.trim_start_matches(' ');
     let decoded = BASE64_STANDARD.decode(encoded).map_err(|_| {
       AuthError::ConfigError(
         "Invalid Base64 encoding in credentials".to_string(),
@@ -159,5 +172,33 @@ impl UserPasswordAuth {
     }
 
     Ok((username, password))
+  }
+}
+
+#[derive(Clone)]
+pub(crate) struct ProxyCredentials {
+  username: String,
+  password: String,
+}
+
+impl std::fmt::Debug for ProxyCredentials {
+  fn fmt(
+    &self,
+    formatter: &mut std::fmt::Formatter<'_>,
+  ) -> std::fmt::Result {
+    formatter
+      .debug_struct("ProxyCredentials")
+      .field("username", &self.username)
+      .field("password", &"*")
+      .finish()
+  }
+}
+impl ProxyCredentials {
+  pub(crate) fn new(username: String, password: String) -> Self {
+    Self { username, password }
+  }
+
+  pub(crate) fn parts(&self) -> (&str, &str) {
+    (&self.username, &self.password)
   }
 }

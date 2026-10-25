@@ -23,7 +23,7 @@ certificates:
   assert_eq!(tls.certificates().len(), 1);
   assert_eq!(tls.certificates()[0].cert_path(), "/path/to/cert.pem");
   assert_eq!(tls.certificates()[0].key_path(), "/path/to/key.pem");
-  assert!(tls.client_ca_certs().is_none());
+  assert!(tls.client_ca_certs().is_empty());
 }
 
 #[test]
@@ -51,11 +51,18 @@ client_ca_certs:
 "#;
   let tls: ServerTlsConfig = serde_yaml::from_str(yaml).unwrap();
   assert_eq!(tls.certificates().len(), 1);
-  assert!(tls.client_ca_certs().is_some());
-  let client_cas = tls.client_ca_certs().unwrap();
+  let client_cas = tls.client_ca_certs();
   assert_eq!(client_cas.len(), 2);
   assert_eq!(client_cas[0], "/path/to/ca1.pem");
   assert_eq!(client_cas[1], "/path/to/ca2.pem");
+}
+
+#[test]
+fn test_server_tls_config_empty_client_ca_list() {
+  let tls: ServerTlsConfig =
+    serde_yaml::from_str("certificates: []\nclient_ca_certs: []\n")
+      .unwrap();
+  assert!(tls.client_ca_certs().is_empty());
 }
 
 #[test]

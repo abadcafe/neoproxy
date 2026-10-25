@@ -57,3 +57,40 @@ upstreams:
 
   assert!(merge_chain_config(&config).is_err());
 }
+
+#[test]
+fn test_merge_chain_config_partial_quic_preserves_inherited_keep_alive()
+{
+  let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
+    r#"
+http3:
+  quic:
+    keep_alive_interval: 11s
+upstreams:
+- name: chain
+  addresses:
+  - address: localhost:443
+    http3:
+      quic:
+        initial_mtu: 1400
+"#,
+  )
+  .unwrap();
+  let resolved = merge_chain_config(&config).unwrap();
+  let address = &resolved["chain"].addresses[0];
+  assert!(
+    matches!(&address.protocol, Protocol::Http3 { quic, .. } if quic.keep_alive_interval == Duration::from_secs(11))
+  );
+}
+
+#[test]
+fn test_merge_chain_config_inherits_request_deadline() {
+  let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
+    "request_timeout: 2s\nupstreams:\n- name: direct",
+  )
+  .unwrap();
+  assert_eq!(
+    merge_chain_config(&config).unwrap()["direct"].request_timeout,
+    Duration::from_secs(2)
+  );
+}

@@ -24,17 +24,10 @@ import re
 import shutil
 import tempfile
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-)
-from .utils.helpers import (
-    create_echo_config,
-    create_test_config,
-    send_raw_request,
-    start_proxy,
-    wait_for_proxy,
-)
+from tests.fixtures.http_configuration import create_echo_config, create_test_config
+from tests.fixtures.http_request import send_raw_request
+from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.proxy_process import BytesProcess, start_proxy
 
 
 def parse_http_response(
@@ -118,7 +111,8 @@ class TestHTTPErrorResponse:
 
             # Verify echo service works correctly (returns 200)
             assert b"200" in response or b"OK" in response, (
-                f"Echo service should return 200, got: {response.decode(errors='ignore')}"
+                "Echo service should return 200, got:"
+                + f" {response.decode(errors='ignore')}"
             )
 
             # Note: Actually triggering a 500 error in black-box testing is difficult
@@ -131,7 +125,7 @@ class TestHTTPErrorResponse:
         finally:
             if proxy_proc:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_400_on_origin_form_request(self) -> None:
@@ -167,7 +161,8 @@ class TestHTTPErrorResponse:
 
             # Verify status code is 400
             assert status_code == 400, (
-                f"Expected status 400, got {status_code}. Response: {response.decode(errors='ignore')}"
+                f"Expected status 400, got {status_code}. Response:"
+                + f" {response.decode(errors='ignore')}"
             )
 
             # Verify Content-Type header is present
@@ -178,7 +173,7 @@ class TestHTTPErrorResponse:
         finally:
             if proxy_proc:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_400_on_invalid_connect_target(self) -> None:
@@ -214,7 +209,8 @@ class TestHTTPErrorResponse:
 
             # Verify status code is 400
             assert status_code == 400, (
-                f"Expected status 400, got {status_code}. Response: {response.decode(errors='ignore')}"
+                f"Expected status 400, got {status_code}. Response:"
+                + f" {response.decode(errors='ignore')}"
             )
 
             # Verify status text contains "Bad Request"
@@ -233,7 +229,7 @@ class TestHTTPErrorResponse:
         finally:
             if proxy_proc:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_echo_service_normal_operation(self) -> None:
@@ -257,10 +253,10 @@ class TestHTTPErrorResponse:
             # Test 1: POST with body
             test_body = b"Hello, Echo Service!"
             request = (
-                b"POST /echo HTTP/1.1\r\n"
-                b"Host: localhost\r\n"
-                b"Content-Length: " + str(len(test_body)).encode() + b"\r\n"
-                b"\r\n" + test_body
+                b"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: "
+                + str(len(test_body)).encode()
+                + b"\r\n\r\n"
+                + test_body
             )
             response = send_raw_request("127.0.0.1", proxy_port, request)
 
@@ -269,7 +265,8 @@ class TestHTTPErrorResponse:
                 f"Expected 200 response, got: {response.decode(errors='ignore')}"
             )
             assert test_body in response, (
-                f"Expected echo body in response, got: {response.decode(errors='ignore')}"
+                "Expected echo body in response, got:"
+                + f" {response.decode(errors='ignore')}"
             )
 
             # Test 2: GET request (empty body)
@@ -284,5 +281,5 @@ class TestHTTPErrorResponse:
         finally:
             if proxy_proc:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)

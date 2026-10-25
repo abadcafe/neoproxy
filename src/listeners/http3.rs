@@ -1,8 +1,14 @@
-#![allow(clippy::await_holding_refcell_ref)]
+mod accepting_connection;
+mod connection;
+mod quic_bind;
 mod quic_config;
 mod recv_body;
+mod request_stream;
 mod stream_handler;
+mod transport;
 
+#[cfg(test)]
+mod quic_bind_tests;
 #[cfg(test)]
 mod quic_config_tests;
 #[cfg(test)]
@@ -15,13 +21,13 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context as AnyhowContext, Result, anyhow};
-use quic_config::{H3_NO_ERROR_CODE, Http3ListenerArgs, QuicConfig};
+use connection::handle_h3_connection;
+use quic_config::{Http3ListenerArgs, QuicConfig};
 use quinn::crypto::rustls::QuicServerConfig;
-use stream_handler::handle_h3_connection;
 use tracing::{info, warn};
+use transport::Transport;
 
 use super::LISTENER_SHUTDOWN_TIMEOUT;
 use crate::config::SerializedArgs;
@@ -30,7 +36,7 @@ use crate::listener::{
 };
 use crate::shutdown::ShutdownHandle;
 use crate::tls::build_tls_server_config;
-use crate::tracker::StreamTracker;
+use crate::tracker::{ABORT_DRAIN_TIMEOUT, StreamTracker};
 
 /// ALPN protocol for HTTP/3
 const H3_ALPN: &[u8] = b"h3";
@@ -51,14 +57,15 @@ struct Http3Listener {
   server_routing_table: Vec<crate::server::Server>,
   /// Stream tracker
   stream_tracker: Rc<StreamTracker>,
+  /// Transport survives request draining and plugin uninstall.
+  transport: Rc<Transport>,
   /// Shutdown handle
   shutdown_handle: ShutdownHandle,
 }
 
 impl Http3Listener {
   /// Create a new HTTP/3 Listener
-  #[allow(clippy::new_ret_no_self)]
-  fn new(
+  fn build(
     addresses: Vec<String>,
     sargs: SerializedArgs,
     server_routing_table: Vec<crate::server::Server>,
@@ -103,6 +110,7 @@ impl Http3Listener {
       quic_config,
       server_routing_table,
       stream_tracker: Rc::new(StreamTracker::new()),
+      transport: Rc::new(Transport::new()),
       shutdown_handle: ShutdownHandle::new(),
     }))
   }
@@ -114,6 +122,7 @@ impl Listening for Http3Listener {
     let tls_config = self.tls_config.clone();
     let quic_config = self.quic_config.clone();
     let stream_tracker = self.stream_tracker.clone();
+    let transport = self.transport.clone();
     let shutdown_handle = self.shutdown_handle.clone();
     let server_routing_table = self.server_routing_table.clone();
 
@@ -153,7 +162,7 @@ impl Listening for Http3Listener {
       let mut endpoints: Vec<quinn::Endpoint> = Vec::new();
       for address in &addresses {
         let endpoint =
-          quinn::Endpoint::server(server_config.clone(), *address)?;
+          transport.bind(*address, server_config.clone())?;
         endpoints.push(endpoint);
       }
 
@@ -167,30 +176,28 @@ impl Listening for Http3Listener {
         tokio::sync::mpsc::channel::<(SocketAddr, quinn::Incoming)>(32);
 
       // Spawn accept task for each endpoint
-      // Note: We share endpoints with Arc for concurrent access
+      // These clones stay within this worker. Other workers bind
+      // independent sockets and own independent endpoint drivers.
       let endpoints: Vec<Arc<quinn::Endpoint>> =
         endpoints.into_iter().map(Arc::new).collect();
       for endpoint in endpoints.clone() {
         let conn_tx = conn_tx.clone();
         let shutdown_handle = shutdown_handle.clone();
-        tokio::spawn(async move {
+        let local_addr = endpoint.local_addr()?;
+        transport.spawn(async move {
           loop {
             tokio::select! {
+              biased;
+              _ = shutdown_handle.notified() => break,
               conn = endpoint.accept() => {
                 match conn {
                   Some(incoming) => {
-                    let local_addr = endpoint
-                      .local_addr()
-                      .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
                     if conn_tx.send((local_addr, incoming)).await.is_err() {
                       break;
                     }
                   }
                   None => break,
                 }
-              }
-              _ = shutdown_handle.notified() => {
-                break;
               }
             }
           }
@@ -203,22 +210,26 @@ impl Listening for Http3Listener {
       // Accept connections loop
       loop {
         let accept_result = tokio::select! {
-          res = conn_rx.recv() => res,
+          biased;
           _ = shutdown_handle.notified() => {
-            // Graceful shutdown
             break;
           }
+          res = conn_rx.recv() => res,
         };
 
         match accept_result {
           Some((local_addr, conn)) => {
             let server_routing_table = server_routing_table.clone();
-            let tracker_for_register = stream_tracker.clone();
             let tracker_for_handler = stream_tracker.clone();
             let stream_shutdown = tracker_for_handler.shutdown_handle();
 
-            tracker_for_register.register_connection(async move {
-              match conn.await {
+            transport.spawn(async move {
+              let handshake = tokio::select! {
+                biased;
+                _ = stream_shutdown.notified() => return,
+                result = conn => result,
+              };
+              match handshake {
                 Ok(quinn_conn) => {
                   let local_addr =
                     quinn_conn.local_ip().map_or(local_addr, |ip| {
@@ -246,6 +257,14 @@ impl Listening for Http3Listener {
         }
       }
 
+      // Stop new QUIC handshakes without closing established
+      // connections or removing sockets from the reuseport group.
+      for endpoint in &endpoints {
+        endpoint.set_server_config(None);
+      }
+      conn_rx.close();
+      while conn_rx.try_recv().is_ok() {}
+
       // Wait for active streams with timeout
       let wait_result = tokio::time::timeout(
         LISTENER_SHUTDOWN_TIMEOUT,
@@ -261,43 +280,36 @@ impl Listening for Http3Listener {
           stream_tracker.active_count()
         );
         stream_tracker.abort_all();
-        // Wait for aborted tasks to be cleaned up with a short timeout
-        // Aborted tasks should finish quickly, but we add a safety
-        // timeout
-        const ABORT_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
+        // Use the same cancellation cleanup budget as TCP listeners
+        // and upstream tasks.
         if stream_tracker
-          .wait_shutdown_with_timeout(ABORT_WAIT_TIMEOUT)
+          .wait_shutdown_with_timeout(ABORT_DRAIN_TIMEOUT)
           .await
           .is_err()
         {
           warn!(
             "Some tasks did not terminate after abort within {:?}",
-            ABORT_WAIT_TIMEOUT
+            ABORT_DRAIN_TIMEOUT
           );
         }
       }
 
-      // Close all endpoints with H3_NO_ERROR code for graceful shutdown
-      for endpoint in &endpoints {
-        endpoint.close(
-          quinn::VarInt::from_u32(H3_NO_ERROR_CODE),
-          b"listener shutdown",
-        );
-      }
-
-      info!("HTTP/3 Listener stopped");
+      info!("HTTP/3 Listener requests drained");
       Ok(())
     })
   }
 
   fn stop(&self) {
-    // Step 1: Trigger shutdown notification to stop accepting new
-    // connections
+    // Stop new connections and tell H3 drivers to send GOAWAY. Ordinary
+    // request handlers keep running within the listener budget;
+    // established tunnels are stopped later by their Service owner.
     self.shutdown_handle.shutdown();
-
-    // Step 2: Notify all active streams to stop
-    // This is required per architecture doc section 2.3.1
     self.stream_tracker.shutdown();
+  }
+
+  fn finish(&self) -> Pin<Box<dyn Future<Output = ()>>> {
+    let transport = self.transport.clone();
+    Box::pin(async move { transport.drain().await })
   }
 }
 
@@ -317,5 +329,5 @@ pub(crate) fn props() -> ListenerProps {
 
 /// Create a listener builder
 pub(crate) fn create_listener_builder() -> Box<dyn BuildListener> {
-  Box::new(Http3Listener::new)
+  Box::new(Http3Listener::build)
 }

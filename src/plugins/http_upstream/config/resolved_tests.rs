@@ -1,9 +1,8 @@
 use std::time::Duration;
 
-use super::raw::PoolConfig;
+use super::protocol::{PoolConfig, ProtocolKind};
 use super::resolved::{
-  Address, ClientCertCredential, Protocol, ProtocolKind, QuicResolved,
-  Upstream,
+  Address, ClientCertCredential, Protocol, QuicResolved, Upstream,
 };
 
 #[test]
@@ -54,6 +53,7 @@ fn test_upstream_preserves_direct_mode_defaults() {
     connect_timeout: Duration::from_secs(10),
     tunnel_idle_timeout: Duration::from_secs(60),
     dns_resolve_timeout: Duration::from_secs(5),
+    request_timeout: Duration::from_secs(30),
   };
 
   assert!(upstream.addresses.is_empty());

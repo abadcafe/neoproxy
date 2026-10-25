@@ -47,6 +47,9 @@ pub(crate) struct PluginManager {
 impl PluginManager {
   pub(crate) fn new(
     plugins_config: HashMap<String, SerializedArgs>,
+    log_registry: Option<
+      std::sync::Arc<access_log::registry::WriterRegistry>,
+    >,
   ) -> (Self, Vec<PluginLoadError>) {
     let known_plugins: &[(&str, CreateFn)] = &[
       (echo::plugin_name(), echo::create_plugin),
@@ -60,6 +63,15 @@ impl PluginManager {
     let mut errors = Vec::new();
 
     for (name, args) in plugins_config {
+      if name == access_log::plugin_name()
+        && let Some(registry) = &log_registry
+      {
+        plugins.insert(
+          name,
+          access_log::create_shared_plugin(registry.clone()),
+        );
+        continue;
+      }
       match known_plugins.iter().find(|(n, _)| *n == name.as_str()) {
         Some((_, create_fn)) => match create_fn(Some(&args)) {
           Ok(plugin) => {
@@ -71,7 +83,10 @@ impl PluginManager {
           }
         },
         None => {
-          warn!("unknown plugin '{}' in config, ignored", name);
+          errors.push(PluginLoadError {
+            name: name.clone(),
+            source: anyhow::anyhow!("unknown plugin '{name}'"),
+          });
         }
       }
     }

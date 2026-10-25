@@ -12,16 +12,10 @@ import shutil
 import socket
 import tempfile
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-)
-from .utils.helpers import (
-    create_target_server,
-    create_test_config,
-    start_proxy,
-    wait_for_proxy,
-)
+from tests.fixtures.http_configuration import create_test_config
+from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.proxy_process import BytesProcess, start_proxy
+from tests.fixtures.tcp_peer import create_target_server
 
 
 def _parse_status_code(response: bytes) -> int | None:
@@ -31,7 +25,7 @@ def _parse_status_code(response: bytes) -> int | None:
         parts = status_line.split()
         if len(parts) >= 2:
             return int(parts[1])
-    except IndexError, ValueError:
+    except ValueError:
         pass
     return None
 
@@ -69,7 +63,7 @@ class TestProxyStatus:
             # Start a target server
             def echo_handler(conn: socket.socket) -> None:
                 try:
-                    conn.recv(1024)
+                    _ = conn.recv(1024)
                     conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
                 except OSError:
                     pass
@@ -90,7 +84,10 @@ class TestProxyStatus:
             sock.settimeout(10)
             sock.connect(("127.0.0.1", proxy_port))
             sock.sendall(
-                f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
+                (
+                    f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost:"
+                    + f" 127.0.0.1:{target_port}\r\n\r\n"
+                ).encode()
             )
 
             # Read response headers
@@ -105,13 +102,15 @@ class TestProxyStatus:
 
             status = _parse_status_code(response)
             assert status == 200, (
-                f"Expected 200, got {status}. Response: {response.decode(errors='ignore')[:200]}"
+                f"Expected 200, got {status}. Response:"
+                + f" {response.decode(errors='ignore')[:200]}"
             )
 
             # Verify Proxy-Status header is present
             ps = _get_header(response, "proxy-status")
             assert ps is not None, (
-                f"Proxy-Status header not found in response: {response.decode(errors='ignore')[:200]}"
+                "Proxy-Status header not found in response:"
+                + f" {response.decode(errors='ignore')[:200]}"
             )
 
             # Should not contain error= on success
@@ -122,7 +121,7 @@ class TestProxyStatus:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -166,7 +165,8 @@ class TestProxyStatus:
 
             status = _parse_status_code(response)
             assert status == 502, (
-                f"Expected 502, got {status}. Response: {response.decode(errors='ignore')[:200]}"
+                f"Expected 502, got {status}. Response:"
+                + f" {response.decode(errors='ignore')[:200]}"
             )
 
             # Verify Proxy-Status header
@@ -183,7 +183,7 @@ class TestProxyStatus:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_connect_timeout_has_proxy_status_error(self) -> None:
@@ -227,7 +227,7 @@ servers:
 """
             config_path = os.path.join(temp_dir, "timeout_config.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             proxy_proc = start_proxy(config_path)
             assert wait_for_proxy(
@@ -257,7 +257,8 @@ servers:
 
             status = _parse_status_code(response)
             assert status == 504 or status == 502, (
-                f"Expected 504 (or 502), got {status}. Response: {response.decode(errors='ignore')[:200]}"
+                f"Expected 504 (or 502), got {status}. Response:"
+                + f" {response.decode(errors='ignore')[:200]}"
             )
 
             # Verify Proxy-Status header has error
@@ -271,7 +272,7 @@ servers:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_non_connect_no_proxy_status(self) -> None:
@@ -323,5 +324,5 @@ servers:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)

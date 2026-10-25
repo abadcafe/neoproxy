@@ -11,329 +11,29 @@ Test matrix:
 - SOCKS5(Password) -> HTTP/3(TLS Cert) -> Target
 """
 
-import os
 import shutil
-import socket
 import subprocess
 import tempfile
-import threading
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-    StringMap,
+from tests.fixtures.chain_configuration import (
+    create_entry_http_no_upstream_auth_config,
+    create_entry_http_wrong_upstream_auth_config,
+    create_entry_socks5_no_upstream_auth_config,
+    create_upstream_no_auth_config,
+    create_upstream_password_config,
 )
-from .utils.certs import (
-    generate_client_cert,
-    generate_test_certificates,
-)
-from .utils.helpers import (
-    create_target_server,
-    start_proxy,
+from tests.fixtures.chain_scenario import is_proxy_auth_response, run_proxy_chain_test
+from tests.fixtures.configuration import StringMap
+from tests.fixtures.ports import (
+    get_unique_port,
     wait_for_proxy,
     wait_for_udp_port_bound,
 )
-from .utils.http_echo import http_echo_handler
+from tests.fixtures.proxy_process import BytesProcess, start_proxy
 
 # ==============================================================================
 # Configuration helper functions
 # ==============================================================================
-
-
-def create_upstream_password_config(
-    h3_port: int, cert_path: str, key_path: str, temp_dir: str
-) -> str:
-    """Create upstream HTTP/3 config with password auth."""
-    config_content = f"""server_threads: 1
-
-plugins:
-  http_upstream:
-    upstreams:
-      - name: direct
-  auth:
-
-services:
-  - name: tunnel
-    kind: http_upstream.upstream
-    args:
-      upstream: direct
-    layers:
-      - kind: auth.basic_auth
-        args:
-          users:
-            - username: user1
-              password: pass1
-
-listeners:
-  - name: h3_main
-    kind: http3
-    addresses: ["0.0.0.0:{h3_port}"]
-
-servers:
-  - name: upstream_http3
-    tls:
-      certificates:
-        - cert_path: "{cert_path}"
-          key_path: "{key_path}"
-    listeners: ["h3_main"]
-    service: tunnel
-"""
-    config_path = os.path.join(temp_dir, "upstream_password.yaml")
-    with open(config_path, "w") as f:
-        f.write(config_content)
-    return config_path
-
-
-def create_upstream_tls_cert_config(
-    h3_port: int,
-    cert_path: str,
-    key_path: str,
-    client_ca_path: str,
-    temp_dir: str,
-) -> str:
-    """Create upstream HTTP/3 config with TLS client cert auth."""
-    config_content = f"""server_threads: 1
-
-plugins:
-  http_upstream:
-    upstreams:
-      - name: direct
-
-services:
-  - name: tunnel
-    kind: http_upstream.upstream
-    args:
-      upstream: direct
-
-listeners:
-  - name: h3_main
-    kind: http3
-    addresses: ["0.0.0.0:{h3_port}"]
-
-servers:
-  - name: upstream_http3_tls
-    tls:
-      certificates:
-        - cert_path: "{cert_path}"
-          key_path: "{key_path}"
-      client_ca_certs:
-        - "{client_ca_path}"
-    listeners: ["h3_main"]
-    service: tunnel
-"""
-    config_path = os.path.join(temp_dir, "upstream_tls_cert.yaml")
-    with open(config_path, "w") as f:
-        f.write(config_content)
-    return config_path
-
-
-def create_entry_http_password_config(
-    http_port: int, h3_port: int, ca_path: str, temp_dir: str
-) -> str:
-    """Create entry HTTP config with password auth, connecting to password upstream."""
-    config_content = f"""server_threads: 1
-
-plugins:
-  http_upstream:
-    certificates:
-      server_ca_path: "{ca_path}"
-    upstreams:
-      - name: test_upstream
-        addresses:
-          - address: "127.0.0.1:{h3_port}"
-            hostname: localhost
-            weight: 1
-            user:
-              username: user1
-              password: pass1
-            http3: {{}}
-  auth:
-
-services:
-  - name: proxy_chain
-    kind: http_upstream.upstream
-    args:
-      upstream: test_upstream
-    layers:
-      - kind: auth.basic_auth
-        args:
-          users:
-            - username: user1
-              password: pass1
-
-listeners:
-  - name: http_main
-    kind: http
-    addresses: ["127.0.0.1:{http_port}"]
-
-servers:
-  - name: entry_http
-    listeners: ["http_main"]
-    service: proxy_chain
-"""
-    config_path = os.path.join(temp_dir, "entry_http_password.yaml")
-    with open(config_path, "w") as f:
-        f.write(config_content)
-    return config_path
-
-
-def create_entry_http_tls_cert_config(
-    http_port: int,
-    h3_port: int,
-    ca_path: str,
-    client_cert_path: str,
-    client_key_path: str,
-    temp_dir: str,
-) -> str:
-    """Create entry HTTP config with password auth, connecting to TLS cert upstream."""
-    config_content = f"""server_threads: 1
-
-plugins:
-  http_upstream:
-    certificates:
-      client_cert_path: "{client_cert_path}"
-      client_key_path: "{client_key_path}"
-      server_ca_path: "{ca_path}"
-    upstreams:
-      - name: test_upstream
-        addresses:
-          - address: "127.0.0.1:{h3_port}"
-            hostname: localhost
-            weight: 1
-            http3: {{}}
-  auth:
-
-services:
-  - name: proxy_chain
-    kind: http_upstream.upstream
-    args:
-      upstream: test_upstream
-    layers:
-      - kind: auth.basic_auth
-        args:
-          users:
-            - username: user1
-              password: pass1
-
-listeners:
-  - name: http_main
-    kind: http
-    addresses: ["127.0.0.1:{http_port}"]
-
-servers:
-  - name: entry_http
-    listeners: ["http_main"]
-    service: proxy_chain
-"""
-    config_path = os.path.join(temp_dir, "entry_http_tls_cert.yaml")
-    with open(config_path, "w") as f:
-        f.write(config_content)
-    return config_path
-
-
-def create_entry_socks5_password_config(
-    socks5_port: int, h3_port: int, ca_path: str, temp_dir: str
-) -> str:
-    """Create entry SOCKS5 config with password auth, connecting to password upstream."""
-    config_content = f"""server_threads: 1
-
-plugins:
-  http_upstream:
-    certificates:
-      server_ca_path: "{ca_path}"
-    upstreams:
-      - name: test_upstream
-        addresses:
-          - address: "127.0.0.1:{h3_port}"
-            hostname: localhost
-            weight: 1
-            user:
-              username: user1
-              password: pass1
-            http3: {{}}
-  auth:
-
-services:
-  - name: proxy_chain
-    kind: http_upstream.upstream
-    args:
-      upstream: test_upstream
-    layers:
-      - kind: auth.basic_auth
-        args:
-          users:
-            - username: user1
-              password: pass1
-
-listeners:
-  - name: socks5_main
-    kind: socks5
-    addresses: ["127.0.0.1:{socks5_port}"]
-
-servers:
-  - name: entry_socks5
-    listeners: ["socks5_main"]
-    service: proxy_chain
-"""
-    config_path = os.path.join(temp_dir, "entry_socks5_password.yaml")
-    with open(config_path, "w") as f:
-        f.write(config_content)
-    return config_path
-
-
-def create_entry_socks5_tls_cert_config(
-    socks5_port: int,
-    h3_port: int,
-    ca_path: str,
-    client_cert_path: str,
-    client_key_path: str,
-    temp_dir: str,
-) -> str:
-    """Create entry SOCKS5 config with password auth, connecting to TLS cert upstream."""
-    config_content = f"""server_threads: 1
-
-plugins:
-  http_upstream:
-    certificates:
-      client_cert_path: "{client_cert_path}"
-      client_key_path: "{client_key_path}"
-      server_ca_path: "{ca_path}"
-    upstreams:
-      - name: test_upstream
-        addresses:
-          - address: "127.0.0.1:{h3_port}"
-            hostname: localhost
-            weight: 1
-            http3: {{}}
-  auth:
-
-services:
-  - name: proxy_chain
-    kind: http_upstream.upstream
-    args:
-      upstream: test_upstream
-    layers:
-      - kind: auth.basic_auth
-        args:
-          users:
-            - username: user1
-              password: pass1
-
-listeners:
-  - name: socks5_main
-    kind: socks5
-    addresses:
-      - "127.0.0.1:{socks5_port}"
-
-servers:
-  - name: entry_socks5
-    service: proxy_chain
-    listeners: ["socks5_main"]
-"""
-    config_path = os.path.join(temp_dir, "entry_socks5_tls_cert.yaml")
-    with open(config_path, "w") as f:
-        f.write(config_content)
-    return config_path
 
 
 # ==============================================================================
@@ -341,200 +41,9 @@ servers:
 # ==============================================================================
 
 
-def create_echo_target_server(
-    host: str, port: int
-) -> tuple[threading.Thread, socket.socket]:
-    """
-    Create an HTTP echo target server for testing.
-
-    This server properly parses HTTP requests and echoes POST body back
-    in a valid HTTP 200 response, compatible with curl's HTTP protocol
-    expectations (CR-011).
-
-    Args:
-        host: Listen address
-        port: Listen port
-
-    Returns:
-        tuple[threading.Thread, socket.socket]: Server thread and socket
-    """
-    return create_target_server(host, port, http_echo_handler)
-
-
 # ==============================================================================
 # Common Test Runner
 # ==============================================================================
-
-
-def run_proxy_chain_test(
-    entry_type: str,  # "http" or "socks5"
-    upstream_auth: str,  # "password" or "tls_cert"
-    target_type: str,  # "baidu" or "mock"
-    http_port: int,
-    h3_port: int,
-    target_port: int | None,
-    temp_dir1: str,
-    temp_dir2: str,
-    shared_test_certs: StringMap | None = None,
-    shared_client_cert: StringMap | None = None,
-) -> None:
-    """
-    Run a proxy chain test with the specified configuration.
-
-    This function consolidates the common test logic to reduce code duplication.
-
-    Args:
-        entry_type: Entry proxy type ("http" or "socks5")
-        upstream_auth: Upstream auth type ("password" or "tls_cert")
-        target_type: Target type ("baidu" or "mock")
-        http_port: Entry HTTP/SOCKS5 port
-        h3_port: Upstream HTTP/3 port
-        target_port: Target server port (for mock tests)
-        temp_dir1: Temp dir for upstream
-        temp_dir2: Temp dir for entry
-        shared_test_certs: Optional session-scoped cert dict for cert reuse
-        shared_client_cert: Optional session-scoped client cert dict for cert reuse
-    """
-    upstream_proc: BytesProcess | None = None
-    entry_proc: BytesProcess | None = None
-    target_socket: socket.socket | None = None
-
-    try:
-        if shared_test_certs:
-            cert_path = shared_test_certs["cert_path"]
-            key_path = shared_test_certs["key_path"]
-            ca_path = shared_test_certs["ca_path"]
-            ca_key_path = shared_test_certs["ca_key_path"]
-        else:
-            cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(
-                temp_dir1
-            )
-
-        # Get client certificate for TLS cert auth
-        client_cert_path = None
-        client_key_path = None
-        if upstream_auth == "tls_cert":
-            if shared_client_cert:
-                client_cert_path = shared_client_cert["client_cert_path"]
-                client_key_path = shared_client_cert["client_key_path"]
-            else:
-                client_cert_path, client_key_path = generate_client_cert(
-                    temp_dir1, ca_path, ca_key_path
-                )
-
-        # Create upstream config
-        if upstream_auth == "password":
-            upstream_config = create_upstream_password_config(
-                h3_port, cert_path, key_path, temp_dir1
-            )
-        else:
-            upstream_config = create_upstream_tls_cert_config(
-                h3_port, cert_path, key_path, ca_path, temp_dir1
-            )
-
-        upstream_proc = start_proxy(upstream_config)
-        assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
-            "Upstream HTTP/3 listener failed to start"
-        )
-
-        # Create entry config
-        if entry_type == "http":
-            if upstream_auth == "password":
-                entry_config = create_entry_http_password_config(
-                    http_port, h3_port, ca_path, temp_dir2
-                )
-            else:
-                assert client_cert_path is not None and client_key_path is not None
-                entry_config = create_entry_http_tls_cert_config(
-                    http_port,
-                    h3_port,
-                    ca_path,
-                    client_cert_path,
-                    client_key_path,
-                    temp_dir2,
-                )
-        else:  # socks5
-            if upstream_auth == "password":
-                entry_config = create_entry_socks5_password_config(
-                    http_port, h3_port, ca_path, temp_dir2
-                )
-            else:
-                assert client_cert_path is not None and client_key_path is not None
-                entry_config = create_entry_socks5_tls_cert_config(
-                    http_port,
-                    h3_port,
-                    ca_path,
-                    client_cert_path,
-                    client_key_path,
-                    temp_dir2,
-                )
-
-        entry_proc = start_proxy(entry_config)
-        assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
-            "Entry listener failed to start"
-        )
-
-        # Create target server for mock tests
-        if target_type == "mock" and target_port:
-            _, target_socket = create_echo_target_server("127.0.0.1", target_port)
-
-        # Run curl
-        if entry_type == "http":
-            curl_proxy = f"http://user1:pass1@127.0.0.1:{http_port}"
-            curl_cmd = ["curl", "-p", "-x", curl_proxy]
-        else:  # socks5
-            curl_cmd = [
-                "curl",
-                "--socks5-basic",
-                "--socks5-hostname",
-                f"127.0.0.1:{http_port}",
-                "--proxy-user",
-                "user1:pass1",
-            ]
-
-        if target_type == "baidu":
-            curl_cmd.extend(
-                [
-                    "https://www.baidu.com",
-                    "-s",
-                    "-o",
-                    "/dev/null",
-                    "-w",
-                    "%{http_code}",
-                    "--connect-timeout",
-                    "30",
-                ]
-            )
-            result = subprocess.run(curl_cmd, capture_output=True, text=True)
-            assert result.stdout == "200", (
-                f"Expected 200, got {result.stdout}. stderr: {result.stderr}"
-            )
-        else:  # mock
-            curl_cmd.extend(
-                [
-                    f"http://127.0.0.1:{target_port}",
-                    "-d",
-                    "test_data_chain",
-                    "--connect-timeout",
-                    "5",
-                ]
-            )
-            result = subprocess.run(curl_cmd, capture_output=True, text=True)
-            assert "test_data_chain" in result.stdout, (
-                f"Expected echo, got stdout: {result.stdout}, stderr: {result.stderr}"
-            )
-
-    finally:
-        if entry_proc:
-            entry_proc.kill()
-            entry_proc.wait(timeout=5)
-        if upstream_proc:
-            upstream_proc.kill()
-            upstream_proc.wait(timeout=5)
-        if target_socket:
-            target_socket.close()
-        shutil.rmtree(temp_dir1, ignore_errors=True)
-        shutil.rmtree(temp_dir2, ignore_errors=True)
 
 
 # ==============================================================================
@@ -708,214 +217,6 @@ class TestProxyChainSocks5ToHTTP3TlsCert:
 # ==============================================================================
 
 
-def create_entry_http_no_upstream_auth_config(
-    http_port: int, h3_port: int, ca_path: str, temp_dir: str
-) -> str:
-    """Create entry HTTP config with password auth, no upstream auth."""
-    config_content = f"""server_threads: 1
-
-plugins:
-  http_upstream:
-    certificates:
-      server_ca_path: "{ca_path}"
-    upstreams:
-      - name: test_upstream
-        addresses:
-          - address: "127.0.0.1:{h3_port}"
-            hostname: localhost
-            weight: 1
-            http3: {{}}
-  auth:
-
-services:
-  - name: proxy_chain
-    kind: http_upstream.upstream
-    args:
-      upstream: test_upstream
-    layers:
-      - kind: auth.basic_auth
-        args:
-          users:
-            - username: user1
-              password: pass1
-
-listeners:
-  - name: http_main
-    kind: http
-    addresses: ["127.0.0.1:{http_port}"]
-
-servers:
-  - name: entry_http
-    listeners: ["http_main"]
-    service: proxy_chain
-"""
-    config_path = os.path.join(temp_dir, "entry_http_no_upstream_auth.yaml")
-    with open(config_path, "w") as f:
-        f.write(config_content)
-    return config_path
-
-
-def create_entry_socks5_no_upstream_auth_config(
-    socks5_port: int, h3_port: int, ca_path: str, temp_dir: str
-) -> str:
-    """Create entry SOCKS5 config with password auth, no upstream auth."""
-    config_content = f"""server_threads: 1
-
-plugins:
-  http_upstream:
-    certificates:
-      server_ca_path: "{ca_path}"
-    upstreams:
-      - name: test_upstream
-        addresses:
-          - address: "127.0.0.1:{h3_port}"
-            hostname: localhost
-            weight: 1
-            http3: {{}}
-  auth:
-
-services:
-  - name: proxy_chain
-    kind: http_upstream.upstream
-    args:
-      upstream: test_upstream
-    layers:
-      - kind: auth.basic_auth
-        args:
-          users:
-            - username: user1
-              password: pass1
-
-listeners:
-  - name: socks5_main
-    kind: socks5
-    addresses:
-      - "127.0.0.1:{socks5_port}"
-
-servers:
-  - name: entry_socks5
-    service: proxy_chain
-    listeners: ["socks5_main"]
-"""
-    config_path = os.path.join(temp_dir, "entry_socks5_no_upstream_auth.yaml")
-    with open(config_path, "w") as f:
-        f.write(config_content)
-    return config_path
-
-
-def create_entry_http_wrong_upstream_auth_config(
-    http_port: int, h3_port: int, ca_path: str, temp_dir: str
-) -> str:
-    """Create entry HTTP config with password auth, wrong upstream credentials."""
-    config_content = f"""server_threads: 1
-
-plugins:
-  http_upstream:
-    certificates:
-      server_ca_path: "{ca_path}"
-    upstreams:
-      - name: test_upstream
-        addresses:
-          - address: "127.0.0.1:{h3_port}"
-            hostname: localhost
-            weight: 1
-            user:
-              username: wrong_user
-              password: wrong_pass
-            http3: {{}}
-  auth:
-
-services:
-  - name: proxy_chain
-    kind: http_upstream.upstream
-    args:
-      upstream: test_upstream
-    layers:
-      - kind: auth.basic_auth
-        args:
-          users:
-            - username: user1
-              password: pass1
-
-listeners:
-  - name: http_main
-    kind: http
-    addresses: ["127.0.0.1:{http_port}"]
-
-servers:
-  - name: entry_http
-    listeners: ["http_main"]
-    service: proxy_chain
-"""
-    config_path = os.path.join(temp_dir, "entry_http_wrong_upstream_auth.yaml")
-    with open(config_path, "w") as f:
-        f.write(config_content)
-    return config_path
-
-
-def create_upstream_no_auth_config(
-    h3_port: int, cert_path: str, key_path: str, temp_dir: str
-) -> str:
-    """Create upstream HTTP/3 config without auth."""
-    config_content = f"""server_threads: 1
-
-plugins:
-  http_upstream:
-    upstreams:
-      - name: direct
-
-services:
-  - name: tunnel
-    kind: http_upstream.upstream
-    args:
-      upstream: direct
-
-listeners:
-  - name: h3_main
-    kind: http3
-    addresses: ["0.0.0.0:{h3_port}"]
-
-servers:
-  - name: upstream_http3
-    tls:
-      certificates:
-        - cert_path: "{cert_path}"
-          key_path: "{key_path}"
-    listeners: ["h3_main"]
-    service: tunnel
-"""
-    config_path = os.path.join(temp_dir, "upstream_no_auth.yaml")
-    with open(config_path, "w") as f:
-        f.write(config_content)
-    return config_path
-
-
-def _is_407_response(result: subprocess.CompletedProcess[str]) -> bool:
-    """Check if a curl result indicates a 407 Proxy Authentication Required response.
-
-    For CONNECT tunnels (HTTPS through HTTP proxy), curl reports 'response 407'
-    in stderr while %{http_code} shows '000'. The exit code varies by curl
-    version and should NOT be relied upon for specific values.
-
-    For plain HTTP proxy requests, curl returns HTTP code 407 normally.
-
-    Args:
-        result: CompletedProcess from curl subprocess run
-
-    Returns:
-        True if the response indicates 407 Proxy Authentication Required
-    """
-    # Case 1: Plain HTTP proxy request - HTTP status code 407 in stdout
-    if result.stdout.strip() == "407":
-        return True
-    # Case 2: CONNECT tunnel - check stderr for "response 407" pattern.
-    # Do NOT check specific exit codes (7, 56, etc.) - they vary by curl version.
-    # The "response 407" pattern is specific enough to avoid false positives.
-    if "response 407" in result.stderr.lower():
-        return True
-    return False
-
-
 class TestNegativeAuthHTTPEntry:
     """Negative tests for HTTP entry proxy authentication."""
 
@@ -985,18 +286,18 @@ class TestNegativeAuthHTTPEntry:
                 text=True,
             )
 
-            assert _is_407_response(result), (
+            assert is_proxy_auth_response(result), (
                 f"Expected 407 response, got http_code={result.stdout}, "
-                f"returncode={result.returncode}, stderr={result.stderr}"
+                + f"returncode={result.returncode}, stderr={result.stderr}"
             )
 
         finally:
             if entry_proc:
                 entry_proc.kill()
-                entry_proc.wait(timeout=5)
+                _ = entry_proc.wait(timeout=5)
             if upstream_proc:
                 upstream_proc.kill()
-                upstream_proc.wait(timeout=5)
+                _ = upstream_proc.wait(timeout=5)
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
@@ -1065,18 +366,18 @@ class TestNegativeAuthHTTPEntry:
                 text=True,
             )
 
-            assert _is_407_response(result), (
+            assert is_proxy_auth_response(result), (
                 f"Expected 407 response, got http_code={result.stdout}, "
-                f"returncode={result.returncode}, stderr={result.stderr}"
+                + f"returncode={result.returncode}, stderr={result.stderr}"
             )
 
         finally:
             if entry_proc:
                 entry_proc.kill()
-                entry_proc.wait(timeout=5)
+                _ = entry_proc.wait(timeout=5)
             if upstream_proc:
                 upstream_proc.kill()
-                upstream_proc.wait(timeout=5)
+                _ = upstream_proc.wait(timeout=5)
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
@@ -1152,16 +453,17 @@ class TestNegativeAuthSOCKS5Entry:
             # or a non-200 HTTP code depending on curl version.
             # The important thing is it does NOT return 200.
             assert result.stdout != "200", (
-                f"Expected non-200 response for wrong SOCKS5 credentials, got {result.stdout}. stderr: {result.stderr}"
+                "Expected non-200 response for wrong SOCKS5 credentials, got"
+                + f" {result.stdout}. stderr: {result.stderr}"
             )
 
         finally:
             if entry_proc:
                 entry_proc.kill()
-                entry_proc.wait(timeout=5)
+                _ = entry_proc.wait(timeout=5)
             if upstream_proc:
                 upstream_proc.kill()
-                upstream_proc.wait(timeout=5)
+                _ = upstream_proc.wait(timeout=5)
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
@@ -1237,15 +539,16 @@ class TestNegativeAuthUpstream:
             # we may see: 407 (forwarded), 502 (bad gateway), or curl error.
             http_code = result.stdout.strip()
             assert http_code != "200", (
-                f"Expected non-200 response for wrong upstream credentials, got {http_code}. stderr: {result.stderr}"
+                "Expected non-200 response for wrong upstream credentials, got"
+                + f" {http_code}. stderr: {result.stderr}"
             )
 
         finally:
             if entry_proc:
                 entry_proc.kill()
-                entry_proc.wait(timeout=5)
+                _ = entry_proc.wait(timeout=5)
             if upstream_proc:
                 upstream_proc.kill()
-                upstream_proc.wait(timeout=5)
+                _ = upstream_proc.wait(timeout=5)
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)

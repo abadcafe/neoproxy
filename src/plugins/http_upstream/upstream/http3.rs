@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+mod upload;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -9,20 +9,22 @@ use std::time::{Duration, Instant};
 use bytes::{Buf, Bytes};
 use h3::client as h3_cli;
 use http_body::{Body, Frame, SizeHint};
-use http_body_util::BodyExt;
 use tracing::{info, warn};
+use upload::Upload;
 
-use super::{ClientProtocol, ConnectResult};
+use super::protocol::{ClientProtocol, ConnectResult};
 use crate::context::{RequestContext, get_server_id};
 use crate::http_message::{
-  RequestBody, Response, ResponseBody, append_proxy_status,
-  build_error_response, build_proxy_status_with_status,
+  RequestBody, Response, ResponseBody, build_error_response,
 };
 use crate::plugins::http_upstream::error::{
   UpstreamError, classify_quic_error,
 };
 use crate::plugins::http_upstream::target_parser::{
-  self, ForwardTarget,
+  ConnectTarget, ForwardTarget,
+};
+use crate::proxy_status::{
+  append_proxy_status, build_proxy_status_with_status,
 };
 use crate::tracker::StreamTracker;
 
@@ -30,11 +32,12 @@ use crate::tracker::StreamTracker;
 // HTTP/3 Address State
 // ============================================================================
 
-/// Per-address H3 connection state, shared across requests via
-/// Rc<RefCell>.
+/// Per-address, worker-local H3 connection state shared through an
+/// Rc<tokio::sync::Mutex<_>>. The lock protects connection setup and
+/// sender cloning, not the lifetime of individual request streams.
 pub(crate) struct Http3AddressState {
-  pub(crate) quinn_conn: Option<quinn::Connection>,
-  pub(crate) send_request:
+  quinn_conn: Option<quinn::Connection>,
+  send_request:
     Option<h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>>,
 }
 
@@ -52,9 +55,9 @@ impl Http3AddressState {
       && self.send_request.is_some()
   }
 }
-use super::QuicConfig;
 use super::address_resolution::resolve_address;
-use super::proxy_auth::apply_proxy_auth;
+use super::protocol::QuicConfig;
+use super::proxy_auth::{apply_proxy_auth, consume_proxy_auth_headers};
 
 // ============================================================================
 // Connection Establishment (H3)
@@ -114,15 +117,6 @@ async fn create_quic_connection(
   tls_config.enable_early_data = true;
   tls_config.alpn_protocols = vec![b"h3".to_vec()];
 
-  let mut cli_endpoint = quinn::Endpoint::client(
-    "[::]:0".parse().unwrap(),
-  )
-  .map_err(|e| {
-    UpstreamError::ProxyInternalError(format!(
-      "failed to create QUIC endpoint: {e}"
-    ))
-  })?;
-
   let mut cli_config = quinn::ClientConfig::new(Arc::new(
     quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)
       .map_err(|e| {
@@ -176,8 +170,6 @@ async fn create_quic_connection(
   }
   cli_config.transport_config(Arc::new(transport));
 
-  cli_endpoint.set_default_client_config(cli_config);
-
   let addr =
     tokio::time::timeout(dns_timeout, resolve_address(address))
       .await
@@ -187,9 +179,25 @@ async fn create_quic_connection(
         ))
       })?
       .map_err(classify_quic_error)?;
+  let bind = std::net::SocketAddr::new(
+    if addr.is_ipv4() {
+      std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+    } else {
+      std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+    },
+    0,
+  );
+  let mut cli_endpoint =
+    quinn::Endpoint::client(bind).map_err(|error| {
+      UpstreamError::ProxyInternalError(format!(
+        "failed to create QUIC endpoint: {error}"
+      ))
+    })?;
+  cli_endpoint.set_default_client_config(cli_config);
   let host: &str = hostname.unwrap_or_else(|| {
     address.split_at(address.rfind(':').unwrap_or(address.len())).0
   });
+  let host = host.trim_start_matches('[').trim_end_matches(']');
   let connecting = cli_endpoint
     .connect(addr, host)
     .map_err(|e| classify_quic_error(e.into()))?;
@@ -220,36 +228,28 @@ pub(super) async fn chain_forward_http3(
   user: Option<crate::config::UserCredential>,
   target: &ForwardTarget,
   req_headers: http::request::Parts,
-  mut req_body: RequestBody,
+  req_body: RequestBody,
   ctx: &RequestContext,
+  tracker: &StreamTracker,
 ) -> Response {
-  let mut fwd_req = http::Request::builder()
-    .method(req_headers.method.clone())
-    .uri(target.absolute_uri().clone())
-    .body(())
-    .unwrap();
-
-  let mut headers = req_headers.headers.clone();
-  target_parser::strip_hop_by_hop_headers(&mut headers);
+  let mut fwd_req = http::Request::from_parts(req_headers, ());
+  *fwd_req.uri_mut() = target.absolute_uri().clone();
+  *fwd_req.version_mut() = http::Version::HTTP_3;
+  crate::hop_headers::strip_connection_headers(fwd_req.headers_mut());
   let host_header = match target.host_header_value() {
     Ok(value) => value,
-    Err(e) => {
-      warn!("http_upstream: invalid H3 forward target authority: {e}");
+    Err(_) => {
       return build_error_response(
         http::StatusCode::BAD_REQUEST,
         "Invalid target address",
       );
     }
   };
-  headers.insert(http::header::HOST, host_header);
+  fwd_req.headers_mut().insert(http::header::HOST, host_header);
   apply_proxy_auth(&user, &mut fwd_req);
 
-  for (name, value) in headers.iter() {
-    fwd_req.headers_mut().insert(name.clone(), value.clone());
-  }
-
   let forward_start = Instant::now();
-  let mut stream = match send_request.send_request(fwd_req).await {
+  let stream = match send_request.send_request(fwd_req).await {
     Ok(s) => s,
     Err(e) => {
       warn!("http_upstream: H3 forward request failed: {e}");
@@ -258,60 +258,25 @@ pub(super) async fn chain_forward_http3(
     }
   };
 
-  let mut finished_by_trailers = false;
-  while let Some(frame) = req_body.frame().await {
-    let frame = match frame {
-      Ok(frame) => frame,
-      Err(e) => {
-        warn!("http_upstream: failed to read request body: {e}");
-        return build_error_response(
-          http::StatusCode::BAD_REQUEST,
-          "Failed to read request body",
-        );
-      }
-    };
-
-    match frame.into_data() {
-      Ok(data) => {
-        if !data.is_empty()
-          && let Err(e) = stream.send_data(data).await
-        {
-          warn!("http_upstream: H3 failed to send body: {e}");
-          return UpstreamError::ProxyInternalError(format!(
-            "Failed to send request body: {e}"
-          ))
-          .to_response(ctx);
-        }
-      }
-      Err(frame) => {
-        if let Ok(trailers) = frame.into_trailers() {
-          if let Err(e) = stream.send_trailers(trailers).await {
-            warn!("http_upstream: H3 failed to send trailers: {e}");
-            return UpstreamError::ProxyInternalError(format!(
-              "Failed to send request trailers: {e}"
-            ))
-            .to_response(ctx);
-          }
-          finished_by_trailers = true;
-          break;
-        }
+  let (send_stream, mut stream) = stream.split();
+  let mut upload = Some(Upload::start(send_stream, req_body, tracker));
+  let response = {
+    let response = stream.recv_response();
+    tokio::pin!(response);
+    tokio::select! {
+      biased;
+      response = &mut response => response,
+      result = upload.as_mut().expect("upload started") => {
+        if let Err(error) = result { return error.to_response(ctx); }
+        upload = None;
+        response.await
       }
     }
-  }
-
-  if !finished_by_trailers && let Err(e) = stream.finish().await {
-    warn!("http_upstream: H3 failed to finish request: {e}");
-    return UpstreamError::ProxyInternalError(format!(
-      "Failed to finish request: {e}"
-    ))
-    .to_response(ctx);
-  }
-
-  let proxy_resp = match stream.recv_response().await {
-    Ok(resp) => resp,
-    Err(e) => {
-      warn!("http_upstream: H3 failed to receive response: {e}");
-      return UpstreamError::ConnectionTerminated(e.to_string())
+  };
+  let proxy_resp = match response {
+    Ok(response) => response,
+    Err(error) => {
+      return UpstreamError::ConnectionTerminated(error.to_string())
         .to_response(ctx);
     }
   };
@@ -325,7 +290,8 @@ pub(super) async fn chain_forward_http3(
 
   let (resp_parts, _) = proxy_resp.into_parts();
   let mut resp_headers = resp_parts.headers;
-  target_parser::strip_hop_by_hop_headers(&mut resp_headers);
+  crate::hop_headers::strip_connection_headers(&mut resp_headers);
+  consume_proxy_auth_headers(&mut resp_headers);
 
   let upstream_ps = resp_headers
     .get(http::header::HeaderName::from_static("proxy-status"))
@@ -352,7 +318,8 @@ pub(super) async fn chain_forward_http3(
     );
   }
 
-  let resp_body = ResponseBody::new(H3ResponseBody::new(stream));
+  let resp_body =
+    ResponseBody::new(H3ResponseBody::new(stream, upload));
 
   match resp.body(resp_body) {
     Ok(r) => r,
@@ -367,7 +334,7 @@ pub(super) async fn chain_forward_http3(
 }
 
 type H3ClientRequestStream =
-  h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
+  h3::client::RequestStream<h3_quinn::RecvStream, Bytes>;
 
 enum H3ResponseBodyState {
   Data,
@@ -378,11 +345,15 @@ enum H3ResponseBodyState {
 struct H3ResponseBody {
   stream: H3ClientRequestStream,
   state: H3ResponseBodyState,
+  upload: Option<Upload>,
 }
 
 impl H3ResponseBody {
-  fn new(stream: H3ClientRequestStream) -> Self {
-    Self { stream, state: H3ResponseBodyState::Data }
+  fn new(
+    stream: H3ClientRequestStream,
+    upload: Option<Upload>,
+  ) -> Self {
+    Self { stream, state: H3ResponseBodyState::Data, upload }
   }
 }
 
@@ -397,7 +368,15 @@ impl Body for H3ResponseBody {
     cx: &mut TaskContext<'_>,
   ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
     let this = self.get_mut();
-
+    if let Some(upload) = &mut this.upload
+      && let Poll::Ready(result) = Pin::new(upload).poll(cx)
+    {
+      this.upload = None;
+      if let Err(error) = result {
+        this.state = H3ResponseBodyState::Done;
+        return Poll::Ready(Some(Err(error.into())));
+      }
+    }
     loop {
       match this.state {
         H3ResponseBodyState::Data => {
@@ -456,7 +435,7 @@ impl Body for H3ResponseBody {
 // ============================================================================
 
 pub(crate) struct Http3Client {
-  pub(crate) state: Rc<RefCell<Http3AddressState>>,
+  pub(crate) state: Rc<tokio::sync::Mutex<Http3AddressState>>,
   pub(crate) proxy_addr: String,
   pub(crate) hostname: Option<String>,
   pub(crate) tls_handshake_timeout: Duration,
@@ -479,12 +458,6 @@ impl ClientProtocol for Http3Client {
   {
     let tls = tls_config.clone();
     let tracker = tracker.clone();
-    let state = self.state.clone();
-    let proxy_addr = self.proxy_addr.clone();
-    let hostname = self.hostname.clone();
-    let quic = self.quic.clone();
-    let tls_handshake_timeout = self.tls_handshake_timeout;
-    let dns_resolve_timeout = self.dns_resolve_timeout;
     let user = self.user.clone();
     Box::pin(async move {
       let tls = tls.ok_or_else(|| {
@@ -493,24 +466,7 @@ impl ClientProtocol for Http3Client {
         )
       })?;
 
-      let send_request = if state.borrow().is_alive() {
-        state.borrow().send_request.clone().unwrap()
-      } else {
-        let (quinn_conn, sr) = establish_http3_connection(
-          &proxy_addr,
-          hostname.as_deref(),
-          &quic,
-          tls_handshake_timeout,
-          dns_resolve_timeout,
-          &tls,
-          &tracker,
-        )
-        .await?;
-        let mut s = state.borrow_mut();
-        s.quinn_conn = Some(quinn_conn);
-        s.send_request = Some(sr.clone());
-        sr
-      };
+      let send_request = self.get_connection(&tls, &tracker).await?;
 
       Ok(
         chain_forward_http3(
@@ -520,6 +476,7 @@ impl ClientProtocol for Http3Client {
           req_headers,
           req_body,
           ctx,
+          &tracker,
         )
         .await,
       )
@@ -528,22 +485,15 @@ impl ClientProtocol for Http3Client {
 
   fn connect_for_tunnel<'a>(
     &'a self,
-    target: &'a str,
+    target: &'a ConnectTarget,
     tls_config: &'a Option<Arc<rustls::ClientConfig>>,
     tracker: &'a Rc<StreamTracker>,
   ) -> Pin<
     Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
   > {
-    let target = target.to_string();
     let tls = tls_config.clone();
     let tracker = tracker.clone();
-    let state = self.state.clone();
-    let proxy_addr = self.proxy_addr.clone();
-    let hostname = self.hostname.clone();
-    let tls_handshake_timeout = self.tls_handshake_timeout;
     let tunnel_idle_timeout = self.tunnel_idle_timeout;
-    let dns_resolve_timeout = self.dns_resolve_timeout;
-    let quic = self.quic.clone();
     let user = self.user.clone();
     Box::pin(async move {
       let tls = tls.ok_or_else(|| {
@@ -552,32 +502,18 @@ impl ClientProtocol for Http3Client {
         )
       })?;
 
-      let mut send_request = if state.borrow().is_alive() {
-        state.borrow().send_request.clone().unwrap()
-      } else {
-        let (quinn_conn, sr) = establish_http3_connection(
-          &proxy_addr,
-          hostname.as_deref(),
-          &quic,
-          tls_handshake_timeout,
-          dns_resolve_timeout,
-          &tls,
-          &tracker,
-        )
-        .await?;
-        let mut s = state.borrow_mut();
-        s.quinn_conn = Some(quinn_conn);
-        s.send_request = Some(sr.clone());
-        sr
-      };
+      let mut send_request =
+        self.get_connection(&tls, &tracker).await?;
 
+      // ConnectTarget can only come from successful request validation.
+      // A fixed CONNECT method with its typed URI must build; panic on
+      // an invariant violation rather than hide a programming error in
+      // a recoverable HTTP response.
       let mut req = ::http::Request::builder()
         .method(::http::Method::CONNECT)
-        .uri(&target)
+        .uri(target.uri())
         .body(())
-        .map_err(|e| {
-          UpstreamError::ProxyInternalError(e.to_string())
-        })?;
+        .expect("validated CONNECT target must build an H3 request");
 
       apply_proxy_auth(&user, &mut req);
 
@@ -595,7 +531,8 @@ impl ClientProtocol for Http3Client {
         .get(::http::header::HeaderName::from_static("proxy-status"))
         .cloned();
 
-      if resp.status() != ::http::StatusCode::OK {
+      // RFC 9110 §9.3.6: every 2xx establishes a CONNECT tunnel.
+      if !resp.status().is_success() {
         return Err(UpstreamError::UpstreamConnectError {
           status: resp.status(),
           upstream_proxy_status,
@@ -616,8 +553,44 @@ impl ClientProtocol for Http3Client {
   }
 
   fn close(&self) {
-    if let Some(ref conn) = self.state.borrow().quinn_conn {
+    if let Ok(state) = self.state.try_lock()
+      && let Some(conn) = &state.quinn_conn
+    {
       conn.close(quinn::VarInt::from_u32(0x100), b"shutdown");
     }
+  }
+}
+
+impl Http3Client {
+  async fn get_connection(
+    &self,
+    tls: &rustls::ClientConfig,
+    tracker: &Rc<StreamTracker>,
+  ) -> Result<
+    h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>,
+    UpstreamError,
+  > {
+    // Serialize only connection establishment; requests clone the
+    // sender and release the lock before opening their independent
+    // streams.
+    let mut state = self.state.lock().await;
+    if state.is_alive()
+      && let Some(sender) = &state.send_request
+    {
+      return Ok(sender.clone());
+    }
+    let (connection, sender) = establish_http3_connection(
+      &self.proxy_addr,
+      self.hostname.as_deref(),
+      &self.quic,
+      self.tls_handshake_timeout,
+      self.dns_resolve_timeout,
+      tls,
+      tracker,
+    )
+    .await?;
+    state.quinn_conn = Some(connection);
+    state.send_request = Some(sender.clone());
+    Ok(sender)
   }
 }

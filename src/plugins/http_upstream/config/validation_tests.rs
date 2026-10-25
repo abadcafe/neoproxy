@@ -106,3 +106,20 @@ upstreams:
 
   assert!(validate_plugin_config(&config).is_err());
 }
+
+#[test]
+fn test_validate_plugin_config_rejects_unrepresentable_quic_values() {
+  for field in [
+    "max_idle_timeout: 100us",
+    "max_idle_timeout: 18446744073709552s",
+    "receive_window: 4611686018427387904",
+  ] {
+    let config: HttpUpstreamPluginConfig = serde_yaml::from_str(&format!(
+      "upstreams:\n  - name: chain\n    addresses:\n      - address: 127.0.0.1:443\n        http3:\n          quic:\n            {field}"
+    )).unwrap();
+    assert!(
+      validate_plugin_config(&config).is_err(),
+      "accepted {field}"
+    );
+  }
+}

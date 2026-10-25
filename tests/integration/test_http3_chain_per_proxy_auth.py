@@ -20,25 +20,21 @@ import socket
 import subprocess
 import tempfile
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-    StringMap,
-)
-from .utils.config_builders import (
+from tests.fixtures.configuration import StringMap
+from tests.fixtures.curl import get_curl_env_without_no_proxy
+from tests.fixtures.h3_configuration import (
     create_http3_chain_config_with_per_proxy_auth,
     create_http3_listener_config,
     create_http3_listener_config_with_password_auth,
     create_http3_listener_config_with_tls_client_cert,
 )
-from .utils.helpers import (
-    create_target_server,
-    get_curl_env_without_no_proxy,
-    one_shot_echo_handler,
-    start_proxy,
+from tests.fixtures.ports import (
+    get_unique_port,
     wait_for_proxy,
     wait_for_udp_port_bound,
 )
+from tests.fixtures.proxy_process import BytesProcess, start_proxy
+from tests.fixtures.tcp_peer import create_target_server, one_shot_echo_handler
 
 # ==============================================================================
 # Test cases - Per-proxy password authentication
@@ -124,16 +120,17 @@ class TestHTTP3ChainPerProxyPasswordAuth:
             )
 
             assert "test_password_auth" in result.stdout, (
-                f"Expected echo data, got stdout: {result.stdout}, stderr: {result.stderr}"
+                f"Expected echo data, got stdout: {result.stdout}, stderr:"
+                + f" {result.stderr}"
             )
 
         finally:
             if chain_proc:
                 chain_proc.kill()
-                chain_proc.wait(timeout=5)
+                _ = chain_proc.wait(timeout=5)
             if h3_proc:
                 h3_proc.kill()
-                h3_proc.wait(timeout=5)
+                _ = h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -229,16 +226,17 @@ class TestHTTP3ChainPerProxyTlsCertAuth:
             )
 
             assert "test_tls_cert_auth" in result.stdout, (
-                f"Expected echo data, got stdout: {result.stdout}, stderr: {result.stderr}"
+                f"Expected echo data, got stdout: {result.stdout}, stderr:"
+                + f" {result.stderr}"
             )
 
         finally:
             if chain_proc:
                 chain_proc.kill()
-                chain_proc.wait(timeout=5)
+                _ = chain_proc.wait(timeout=5)
             if h3_proc:
                 h3_proc.kill()
-                h3_proc.wait(timeout=5)
+                _ = h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -329,16 +327,17 @@ class TestHTTP3ChainAuthInheritance:
             )
 
             assert "test_inheritance" in result.stdout, (
-                f"Expected echo data (inheritance should work), got stdout: {result.stdout}, stderr: {result.stderr}"
+                "Expected echo data (inheritance should work), got stdout:"
+                + f" {result.stdout}, stderr: {result.stderr}"
             )
 
         finally:
             if chain_proc:
                 chain_proc.kill()
-                chain_proc.wait(timeout=5)
+                _ = chain_proc.wait(timeout=5)
             if h3_proc:
                 h3_proc.kill()
-                h3_proc.wait(timeout=5)
+                _ = h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -424,16 +423,17 @@ class TestHTTP3ChainAuthFailure:
             # Note: returncode != 0 is reliable for detecting failure,
             # but specific exit codes (7, 56, etc.) vary by curl version.
             assert result.returncode != 0 or "407" in result.stdout, (
-                f"Expected 407 error, got stdout: {result.stdout}, stderr: {result.stderr}"
+                f"Expected 407 error, got stdout: {result.stdout}, stderr:"
+                + f" {result.stderr}"
             )
 
         finally:
             if chain_proc:
                 chain_proc.kill()
-                chain_proc.wait(timeout=5)
+                _ = chain_proc.wait(timeout=5)
             if h3_proc:
                 h3_proc.kill()
-                h3_proc.wait(timeout=5)
+                _ = h3_proc.wait(timeout=5)
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
@@ -516,7 +516,7 @@ servers:
 """
             config_path = os.path.join(temp_dir2, "chain_config.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             chain_proc = start_proxy(config_path)
             assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
@@ -544,17 +544,17 @@ servers:
             )
 
             assert "override_test" in result.stdout, (
-                f"Expected echo data (per-proxy CA should override default), "
-                f"got stdout: {result.stdout}, stderr: {result.stderr}"
+                "Expected echo data (per-proxy CA should override default), "
+                + f"got stdout: {result.stdout}, stderr: {result.stderr}"
             )
 
         finally:
             if chain_proc:
                 chain_proc.kill()
-                chain_proc.wait(timeout=5)
+                _ = chain_proc.wait(timeout=5)
             if h3_proc:
                 h3_proc.kill()
-                h3_proc.wait(timeout=5)
+                _ = h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)

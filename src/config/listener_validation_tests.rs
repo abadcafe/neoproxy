@@ -241,7 +241,7 @@ servers:
 }
 
 #[test]
-fn test_validate_hostname_routing_unknown_listener_kind_is_skipped() {
+fn test_validate_hostname_routing_unknown_listener_kind_is_rejected() {
   let collector = validate_yaml(
     r#"
 listeners:
@@ -256,7 +256,7 @@ servers:
 "#,
   );
 
-  assert!(!collector.has_errors(), "{:?}", collector.errors());
+  assert!(collector.has_errors(), "{:?}", collector.errors());
 }
 
 #[test]

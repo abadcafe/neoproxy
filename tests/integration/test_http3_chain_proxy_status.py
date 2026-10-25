@@ -11,22 +11,19 @@ import socket
 import subprocess
 import tempfile
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-)
-from .utils.certs import generate_test_certificates
-from .utils.config_builders import (
+from tests.fixtures.binary import NEOPROXY_BINARY
+from tests.fixtures.certificates import generate_test_certificates
+from tests.fixtures.h3_configuration import (
     create_http3_chain_config,
     create_http3_listener_config,
 )
-from .utils.helpers import (
-    NEOPROXY_BINARY,
-    create_target_server,
-    terminate_process,
+from tests.fixtures.ports import (
+    get_unique_port,
     wait_for_proxy,
     wait_for_udp_port_bound,
 )
+from tests.fixtures.proxy_process import BytesProcess, terminate_process
+from tests.fixtures.tcp_peer import create_target_server
 
 
 def _parse_status_code(response: bytes) -> int | None:
@@ -36,7 +33,7 @@ def _parse_status_code(response: bytes) -> int | None:
         parts = status_line.split()
         if len(parts) >= 2:
             return int(parts[1])
-    except IndexError, ValueError:
+    except ValueError:
         pass
     return None
 
@@ -76,7 +73,7 @@ class TestHttp3ChainProxyStatus:
             # Start a TCP target server
             def echo_handler(conn: socket.socket) -> None:
                 try:
-                    conn.recv(1024)
+                    _ = conn.recv(1024)
                     conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
                 except OSError:
                     pass
@@ -123,7 +120,10 @@ class TestHttp3ChainProxyStatus:
             sock.settimeout(15)
             sock.connect(("127.0.0.1", http_port))
             sock.sendall(
-                f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
+                (
+                    f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost:"
+                    + f" 127.0.0.1:{target_port}\r\n\r\n"
+                ).encode()
             )
 
             # Read response headers
@@ -140,7 +140,8 @@ class TestHttp3ChainProxyStatus:
 
             status = _parse_status_code(response)
             assert status == 200, (
-                f"Expected 200, got {status}. Response: {response.decode(errors='ignore')[:200]}"
+                f"Expected 200, got {status}. Response:"
+                + f" {response.decode(errors='ignore')[:200]}"
             )
 
             # Verify Proxy-Status header
@@ -225,7 +226,7 @@ servers:
 """
             config_path = f"{temp_dir}/dns_error_config.yaml"
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             entry_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
@@ -257,10 +258,12 @@ servers:
 
             status = _parse_status_code(response)
             assert status is not None, (
-                f"Could not parse status. Response: {response.decode(errors='ignore')[:200]}"
+                "Could not parse status. Response:"
+                + f" {response.decode(errors='ignore')[:200]}"
             )
             assert status == 502 or status == 503, (
-                f"Expected 502 or 503, got {status}. Response: {response.decode(errors='ignore')[:200]}"
+                f"Expected 502 or 503, got {status}. Response:"
+                + f" {response.decode(errors='ignore')[:200]}"
             )
 
             ps = _get_header(response, "proxy-status")
@@ -295,7 +298,6 @@ servers:
         cert_path, key_path, ca_path, _ = generate_test_certificates(temp_dir)
         entry_proc: BytesProcess | None = None
         upstream_proc: BytesProcess | None = None
-        target_socket: socket.socket | None = None
 
         try:
             # Start a target server on a different port - but DON'T start
@@ -339,7 +341,10 @@ servers:
             sock.settimeout(15)
             sock.connect(("127.0.0.1", http_port))
             sock.sendall(
-                f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
+                (
+                    f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost:"
+                    + f" 127.0.0.1:{target_port}\r\n\r\n"
+                ).encode()
             )
 
             response = b""
@@ -357,7 +362,8 @@ servers:
             # The upstream connect_tcp returns 502 on connection refused
             # http3_chain relays the upstream status as-is
             assert status == 502, (
-                f"Expected 502, got {status}. Response: {response.decode(errors='ignore')[:200]}"
+                f"Expected 502, got {status}. Response:"
+                + f" {response.decode(errors='ignore')[:200]}"
             )
 
             ps = _get_header(response, "proxy-status")
@@ -383,8 +389,6 @@ servers:
                 terminate_process(entry_proc)
             if upstream_proc:
                 terminate_process(upstream_proc)
-            if target_socket:
-                target_socket.close()
             import shutil
 
             shutil.rmtree(temp_dir, ignore_errors=True)

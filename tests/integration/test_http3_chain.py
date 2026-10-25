@@ -20,23 +20,20 @@ import subprocess
 import tempfile
 import time
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-    StringMap,
-)
-from .utils.config_builders import (
+from tests.fixtures.binary import NEOPROXY_BINARY
+from tests.fixtures.configuration import StringMap
+from tests.fixtures.h3_configuration import (
     create_http3_chain_config,
     create_http3_listener_config,
 )
-from .utils.helpers import (
-    NEOPROXY_BINARY,
-    create_target_server,
-    start_proxy,
+from tests.fixtures.http_echo import http_echo_handler
+from tests.fixtures.ports import (
+    get_unique_port,
     wait_for_proxy,
     wait_for_udp_port_bound,
 )
-from .utils.http_echo import http_echo_handler
+from tests.fixtures.proxy_process import BytesProcess, start_proxy
+from tests.fixtures.tcp_peer import create_target_server
 
 # Alias for backward compatibility in this file
 
@@ -85,7 +82,7 @@ class TestHTTP3ChainProxy:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_http3_chain_graceful_shutdown(self, shared_test_certs: StringMap) -> None:
@@ -115,11 +112,11 @@ class TestHTTP3ChainProxy:
                 "127.0.0.1", http_port, timeout=5.0, proc=proxy_proc
             ), "HTTP listener failed to start"
 
-            start_time = time.time()
+            start_time = time.monotonic()
             proxy_proc.send_signal(signal.SIGTERM)
 
             return_code = proxy_proc.wait(timeout=10)
-            elapsed = time.time() - start_time
+            elapsed = time.monotonic() - start_time
 
             assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
@@ -130,7 +127,7 @@ class TestHTTP3ChainProxy:
         finally:
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_http3_chain_multiple_proxies(self, shared_test_certs: StringMap) -> None:
@@ -171,10 +168,10 @@ class TestHTTP3ChainProxy:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_http3_chain_missing_ca(self, shared_test_certs: StringMap) -> None:
+    def test_http3_chain_missing_ca(self) -> None:
         """
         TC-CHAIN-004: HTTP/3 Chain with missing CA certificate.
 
@@ -223,7 +220,7 @@ servers:
 """
             config_path = os.path.join(temp_dir, "missing_ca.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
@@ -239,12 +236,12 @@ servers:
                 assert exit_code != 0, "Expected non-zero exit code for missing CA file"
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait()
+                _ = proc.wait()
 
         finally:
             if proc and proc.poll() is None:
                 proc.terminate()
-                proc.wait(timeout=2)
+                _ = proc.wait(timeout=2)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_http3_chain_data_transmission(self, shared_test_certs: StringMap) -> None:
@@ -317,16 +314,17 @@ servers:
             )
 
             assert "test_data_through_chain" in result.stdout, (
-                f"Expected echo data, got stdout: {result.stdout}, stderr: {result.stderr}"
+                f"Expected echo data, got stdout: {result.stdout}, stderr:"
+                + f" {result.stderr}"
             )
 
         finally:
             if chain_proc:
                 chain_proc.kill()
-                chain_proc.wait(timeout=5)
+                _ = chain_proc.wait(timeout=5)
             if h3_proc:
                 h3_proc.kill()
-                h3_proc.wait(timeout=5)
+                _ = h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -355,7 +353,6 @@ class TestFullProxyChain:
 
         chain_proc: BytesProcess | None = None
         h3_proc: BytesProcess | None = None
-        target_socket: socket.socket | None = None
 
         try:
             cert_path = shared_test_certs["cert_path"]
@@ -395,12 +392,10 @@ class TestFullProxyChain:
         finally:
             if chain_proc:
                 chain_proc.kill()
-                chain_proc.wait(timeout=5)
+                _ = chain_proc.wait(timeout=5)
             if h3_proc:
                 h3_proc.kill()
-                h3_proc.wait(timeout=5)
-            if target_socket:
-                target_socket.close()
+                _ = h3_proc.wait(timeout=5)
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
@@ -464,10 +459,10 @@ class TestFullProxyChain:
         finally:
             if chain_proc and chain_proc.poll() is None:
                 chain_proc.terminate()
-                chain_proc.wait(timeout=5)
+                _ = chain_proc.wait(timeout=5)
             if h3_proc and h3_proc.poll() is None:
                 h3_proc.terminate()
-                h3_proc.wait(timeout=5)
+                _ = h3_proc.wait(timeout=5)
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
@@ -527,10 +522,10 @@ class TestHTTP3ChainGracefulShutdown:
             )
 
             # Shutdown chain (no active streams)
-            start_time = time.time()
+            start_time = time.monotonic()
             chain_proc.send_signal(signal.SIGTERM)
             return_code = chain_proc.wait(timeout=5)
-            elapsed = time.time() - start_time
+            elapsed = time.monotonic() - start_time
 
             assert return_code == 0, f"Chain exit code: {return_code}"
             # Should complete quickly when no active streams
@@ -541,10 +536,10 @@ class TestHTTP3ChainGracefulShutdown:
         finally:
             if chain_proc and chain_proc.poll() is None:
                 chain_proc.terminate()
-                chain_proc.wait(timeout=5)
+                _ = chain_proc.wait(timeout=5)
             if h3_proc:
                 h3_proc.kill()
-                h3_proc.wait(timeout=5)
+                _ = h3_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_chain_uninstall_with_active_stream(
@@ -614,10 +609,10 @@ class TestHTTP3ChainGracefulShutdown:
             )
 
             # Trigger shutdown while server is running
-            start_time = time.time()
+            start_time = time.monotonic()
             chain_proc.send_signal(signal.SIGTERM)
             return_code = chain_proc.wait(timeout=15)
-            elapsed = time.time() - start_time
+            elapsed = time.monotonic() - start_time
 
             assert return_code == 0, f"Chain exit code: {return_code}"
             # Should complete within timeout + buffer (5s timeout + buffer)
@@ -626,10 +621,10 @@ class TestHTTP3ChainGracefulShutdown:
         finally:
             if chain_proc and chain_proc.poll() is None:
                 chain_proc.terminate()
-                chain_proc.wait(timeout=5)
+                _ = chain_proc.wait(timeout=5)
             if h3_proc:
                 h3_proc.kill()
-                h3_proc.wait(timeout=5)
+                _ = h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -648,13 +643,15 @@ class TestWRRLoadBalancing:
     Note: Black-box testing of WRR weight distribution is limited because:
     1. HTTP/3 listeners don't log per-request transfer completions at consistent times
     2. UDP/QUIC connections don't have observable connection state like TCP
-    3. The WRR selection happens internally in http3_chain with no external observability
+    3. The WRR selection happens internally in http3_chain with no external
+    observability
 
     The WRR algorithm itself is verified by unit tests in src/plugins/http3_chain.rs:
     - test_proxy_group_schedule_wrr_single: Single proxy always returns index 0
     - test_proxy_group_schedule_wrr_two_proxies_weight_2_to_1: 2:1 weight distribution
     - test_proxy_group_schedule_wrr_two_proxies_weight_3_to_1: 3:1 weight distribution
-    - test_proxy_group_schedule_wrr_three_proxies: Multiple proxies with different weights
+    - test_proxy_group_schedule_wrr_three_proxies: Multiple proxies with different
+    weights
     - test_proxy_group_schedule_wrr_equal_weights: Equal weight distribution
     - test_proxy_group_schedule_wrr_deterministic: Repeatability of WRR selections
 
@@ -676,7 +673,8 @@ class TestWRRLoadBalancing:
 
         Note: Precise weight distribution verification requires internal observability
         which is not available in black-box testing. The WRR algorithm correctness
-        is verified by unit tests in src/plugins/http3_chain.rs (test_proxy_group_schedule_wrr_*).
+        is verified by unit tests in src/plugins/http3_chain.rs
+        (test_proxy_group_schedule_wrr_*).
         """
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
@@ -778,13 +776,13 @@ class TestWRRLoadBalancing:
         finally:
             if chain_proc:
                 chain_proc.kill()
-                chain_proc.wait(timeout=5)
+                _ = chain_proc.wait(timeout=5)
             if h3_proc1:
                 h3_proc1.kill()
-                h3_proc1.wait(timeout=5)
+                _ = h3_proc1.wait(timeout=5)
             if h3_proc2:
                 h3_proc2.kill()
-                h3_proc2.wait(timeout=5)
+                _ = h3_proc2.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -870,7 +868,8 @@ class TestConnectionReuse:
                     env={**os.environ, "no_proxy": "", "NO_PROXY": ""},
                 )
                 assert f"request_{i}" in result.stdout, (
-                    f"Request {i} failed: stdout={result.stdout}, stderr={result.stderr}"
+                    f"Request {i} failed: "
+                    + f"stdout={result.stdout}, stderr={result.stderr}"
                 )
 
             # Gracefully shutdown chain service so WorkerGuard flushes logs
@@ -893,16 +892,17 @@ class TestConnectionReuse:
 
             quic_count = log_content.count("QUIC connection established")
             assert quic_count == 1, (
-                f"Expected exactly 1 'QUIC connection established', got {quic_count}.\nLog tail:\n{log_content[-2000:]}"
+                "Expected exactly 1 'QUIC connection established', got"
+                + f" {quic_count}.\nLog tail:\n{log_content[-2000:]}"
             )
 
         finally:
             if chain_proc and chain_proc.poll() is None:
                 chain_proc.kill()
-                chain_proc.wait(timeout=5)
+                _ = chain_proc.wait(timeout=5)
             if h3_proc:
                 h3_proc.kill()
-                h3_proc.wait(timeout=5)
+                _ = h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)

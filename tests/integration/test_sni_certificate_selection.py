@@ -17,16 +17,9 @@ import ssl
 import tempfile
 from dataclasses import dataclass
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-)
-from .utils.certs import generate_ca, generate_server_cert
-from .utils.helpers import (
-    start_proxy,
-    terminate_process,
-    wait_for_proxy,
-)
+from tests.fixtures.certificates import generate_ca, generate_server_cert
+from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 
 
 @dataclass(frozen=True)
@@ -100,7 +93,7 @@ def create_multi_server_config(
 
     config_path = os.path.join(temp_dir, "multi_server_config.yaml")
     with open(config_path, "w") as f:
-        f.write("\n".join(config_lines))
+        _ = f.write("\n".join(config_lines))
 
     return config_path
 
@@ -163,7 +156,7 @@ def create_single_server_config(
 
     config_path = os.path.join(temp_dir, "test_config.yaml")
     with open(config_path, "w") as f:
-        f.write(config_content)
+        _ = f.write(config_content)
 
     return config_path
 
@@ -401,11 +394,11 @@ class TestSniCertificateSelection:
                 terminate_process(proxy_proc, force=True)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_wildcard_certificate_matches_bare_domain(self) -> None:
+    def test_explicit_san_covers_bare_domain(self) -> None:
         """
-        Wildcard certificate (*.test.local) matches bare domain (test.local).
+        A certificate with an explicit test.local SAN covers the bare domain.
 
-        This is the behavior we implement - wildcard also matches the bare domain.
+        The explicit bare-domain SAN provides coverage; the wildcard SAN does not.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
@@ -414,7 +407,8 @@ class TestSniCertificateSelection:
         try:
             ca_cert_path, ca_key_path = generate_ca(temp_dir)
 
-            # Include both wildcard and bare domain in SAN for OpenSSL client verification
+            # Include both wildcard and bare domain in SAN for OpenSSL client
+            # verification
             cert_path, key_path = generate_server_cert(
                 temp_dir,
                 ca_cert_path,
@@ -432,9 +426,8 @@ class TestSniCertificateSelection:
                 "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
             ), "Proxy failed to start"
 
-            # Test SNI=test.local -> should succeed (bare domain match via wildcard)
-            # Note: We add test.local to SAN because OpenSSL client verification
-            # doesn't recognize bare domain matching wildcard patterns
+            # The explicit test.local SAN supplies bare-domain coverage.
+            # It is independent of the wildcard SAN and default-server selection.
             success, error = try_tls_connection_with_sni(
                 "127.0.0.1", proxy_port, "test.local", ca_cert_path
             )
@@ -486,7 +479,8 @@ class TestSniCertificateSelection:
                 ca_cert_path,
             )
             assert not success, (
-                "Expected TLS connection to FAIL for bar.foo.test.local (multi-level subdomain)"
+                "Expected TLS connection to FAIL for bar.foo.test.local (multi-level"
+                + " subdomain)"
             )
 
         finally:
@@ -496,9 +490,8 @@ class TestSniCertificateSelection:
 
     def test_unknown_sni_rejected(self) -> None:
         """
-        SNI not matching any certificate causes TLS handshake failure.
-
-        No default certificate is used - unknown SNI is rejected.
+        SNI not matching any configured hostname is rejected when no default
+        server is configured.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
@@ -537,7 +530,8 @@ class TestSniCertificateSelection:
                 ca_cert_path,
             )
             assert not success, (
-                "Expected TLS connection to FAIL for unknown.test.local (no matching cert)"
+                "Expected TLS connection to FAIL for unknown.test.local (no matching"
+                + " cert)"
             )
 
         finally:

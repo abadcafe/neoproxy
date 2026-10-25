@@ -81,6 +81,18 @@ impl AuthPlugin {
         }
 
         let config: AuthConfig = serde_yaml::from_value(args)?;
+        anyhow::ensure!(
+          !config.users.is_empty(),
+          "basic_auth requires at least one user"
+        );
+        let mut usernames = std::collections::HashSet::new();
+        for user in &config.users {
+          anyhow::ensure!(
+            !user.username().is_empty()
+              && usernames.insert(user.username()),
+            "basic_auth usernames must be nonempty and unique"
+          );
+        }
         let auth = UserPasswordAuth::from_users(&config.users);
         Ok(Layer::new(AuthLayer { auth }))
       });
@@ -103,8 +115,12 @@ pub(crate) fn plugin_name() -> &'static str {
 }
 
 pub(crate) fn create_plugin(
-  _config: Option<&SerializedArgs>,
+  config: Option<&SerializedArgs>,
 ) -> Result<Box<dyn Plugin>> {
+  if let Some(config) = config {
+    let _: crate::config::EmptyArgs =
+      serde_yaml::from_value(config.clone())?;
+  }
   Ok(Box::new(AuthPlugin::new()))
 }
 
@@ -148,17 +164,32 @@ impl tower::Service<Request> for AuthMiddleware {
       }
     };
 
-    if let Some(auth_header) = req.headers().get("Proxy-Authorization")
-      && let Some((username, password)) =
-        parse_basic_auth_header(auth_header)
-      && self.auth.verify_credentials(&username, &password).is_ok()
-    {
-      ctx.insert("basic_auth.user", username);
-      ctx
-        .insert("basic_auth.auth_type", AuthType::Password.to_string());
-
-      let mut inner = self.inner.clone();
-      return Box::pin(async move { inner.call(req).await });
+    let credentials = req
+      .extensions()
+      .get::<crate::auth::ProxyCredentials>()
+      .cloned()
+      .or_else(|| {
+        let mut fields = req
+          .headers()
+          .get_all(http::header::PROXY_AUTHORIZATION)
+          .iter();
+        let field = fields.next()?;
+        if fields.next().is_some() {
+          return None;
+        }
+        let (username, password) = parse_basic_auth_header(field)?;
+        Some(crate::auth::ProxyCredentials::new(username, password))
+      });
+    if let Some(credentials) = credentials {
+      let (username, password) = credentials.parts();
+      if self.auth.verify_credentials(username, password).is_ok() {
+        ctx.insert("basic_auth.user", username);
+        ctx.insert(
+          "basic_auth.auth_type",
+          AuthType::Password.to_string(),
+        );
+        return self.inner.call(req);
+      }
     }
 
     Box::pin(async move { Ok(build_407_response()) })

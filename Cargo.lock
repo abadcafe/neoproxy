@@ -1151,6 +1151,7 @@ dependencies = [
  "humantime-serde",
  "hyper",
  "hyper-util",
+ "libc",
  "local-channel",
  "pin-project-lite",
  "quinn",
@@ -1163,6 +1164,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "serial_test",
+ "socket2 0.6.3",
  "subtle",
  "tempfile",
  "time",
@@ -2378,6 +2380,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

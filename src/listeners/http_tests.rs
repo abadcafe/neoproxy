@@ -3,6 +3,32 @@
 use super::listener_args_fixture::empty_args;
 use super::server_fixtures::plain_servers;
 use crate::listeners::http;
+
+#[test]
+fn test_http_builder_accept_retry_delay_can_be_configured() {
+  let args = serde_yaml::from_str("accept_retry_delay: 250ms").unwrap();
+  let result = http::create_listener_builder()(
+    vec!["127.0.0.1:0".into()],
+    args,
+    vec![],
+  );
+  assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn test_http_builder_rejects_invalid_accept_retry_delay() {
+  for value in ["0s", "invalid", "18446744073709551615s"] {
+    let args =
+      serde_yaml::from_str(&format!("accept_retry_delay: {value:?}"))
+        .unwrap();
+    let result = http::create_listener_builder()(
+      vec!["127.0.0.1:0".into()],
+      args,
+      vec![],
+    );
+    assert!(result.is_err(), "accepted invalid retry delay {value}");
+  }
+}
 use crate::server::Server;
 
 // ========== listener_name ==========

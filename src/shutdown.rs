@@ -1,57 +1,38 @@
-//! Shutdown notification primitive.
+//! module: shutdown
+//! responsibilities: persistent cancellation shared by tasks and worker
+//! threads public operations: ShutdownHandle::{new, shutdown, notified,
+//! is_shutdown}, SERVICE_SHUTDOWN_TIMEOUT data entities: ShutdownHandle
+//! tests: shutdown_tests.rs
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use tokio::sync;
+use tokio_util::sync::CancellationToken;
 
-/// Shutdown Handle for listeners and services.
-///
-/// Provides a simple shutdown notification mechanism using a boolean
-/// flag and async notification. Clones share the same underlying state.
+/// Second-phase grace shared by Service cleanup and retained protocol
+/// drivers. They run concurrently; cancellation cleanup uses the
+/// existing tracker abort budget.
+pub(crate) const SERVICE_SHUTDOWN_TIMEOUT: Duration =
+  Duration::from_secs(3);
+
+#[derive(Clone, Default)]
 pub(crate) struct ShutdownHandle {
-  notify: Arc<sync::Notify>,
-  is_shutdown: Arc<AtomicBool>,
+  token: CancellationToken,
 }
 
 impl ShutdownHandle {
   pub(crate) fn new() -> Self {
-    Self {
-      notify: Arc::new(sync::Notify::new()),
-      is_shutdown: Arc::new(AtomicBool::new(false)),
-    }
+    Self::default()
   }
 
-  /// Trigger shutdown notification.
-  ///
-  /// Sets the shutdown flag and notifies all waiters.
   pub(crate) fn shutdown(&self) {
-    self.is_shutdown.store(true, Ordering::SeqCst);
-    self.notify.notify_waiters()
+    self.token.cancel();
   }
 
-  /// Wait for shutdown notification.
   pub(crate) async fn notified(&self) {
-    self.notify.notified().await
+    self.token.cancelled().await;
   }
 
-  /// Check if shutdown has been triggered.
   pub(crate) fn is_shutdown(&self) -> bool {
-    self.is_shutdown.load(Ordering::SeqCst)
-  }
-}
-
-impl Clone for ShutdownHandle {
-  fn clone(&self) -> Self {
-    Self {
-      notify: self.notify.clone(),
-      is_shutdown: self.is_shutdown.clone(),
-    }
-  }
-}
-
-impl Default for ShutdownHandle {
-  fn default() -> Self {
-    Self::new()
+    self.token.is_cancelled()
   }
 }

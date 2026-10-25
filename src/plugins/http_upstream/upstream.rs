@@ -1,21 +1,17 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
-use std::future::Future;
 use std::io::BufReader;
-use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
 use rustls::pki_types::CertificateDer;
 
+use self::protocol::{ClientProtocol, ConnectResult, QuicConfig};
 use super::config::{CertificateConfig, ClientCertCredential};
 use super::error::UpstreamError;
-use super::target_parser::ForwardTarget;
+use super::target_parser::{ConnectTarget, ForwardTarget};
 use crate::context::RequestContext;
 use crate::http_message::{RequestBody, Response};
 use crate::tracker::StreamTracker;
@@ -27,21 +23,31 @@ mod address_resolution_tests;
 mod connect_request;
 #[cfg(test)]
 mod connect_request_tests;
+mod direct;
+#[cfg(test)]
+mod direct_tests;
+mod forward;
+#[cfg(test)]
+mod forward_tests;
 mod http;
 mod http3;
 #[cfg(test)]
 mod http3_tests;
 #[cfg(test)]
 mod http_tests;
+pub(super) mod protocol;
 mod proxy_auth;
 #[cfg(test)]
 mod proxy_auth_tests;
 mod scheduler;
 #[cfg(test)]
 mod scheduler_tests;
+mod tcp_connect;
+#[cfg(test)]
+mod tcp_connect_tests;
 
-use self::address_resolution::TimeoutResolver;
-use self::http::{HttpClient, HttpsClient, ProxyConnector};
+use self::direct::DirectClient;
+use self::http::{HttpProxyClient, HttpsClient, ProxyConnector};
 use self::http3::{Http3AddressState, Http3Client};
 use self::scheduler::WeightedItem;
 
@@ -49,49 +55,7 @@ use self::scheduler::WeightedItem;
 // Runtime Types (self-contained, no dependency on config types)
 // ============================================================================
 
-/// Runtime QUIC configuration, copied from config at construction time.
-#[derive(Clone, Debug)]
-pub(crate) struct QuicConfig {
-  pub(crate) max_idle_timeout: Option<Duration>,
-  pub(crate) keep_alive_interval: Duration,
-  pub(crate) max_concurrent_bidi_streams: Option<u64>,
-  pub(crate) initial_mtu: Option<u16>,
-  pub(crate) send_window: Option<u64>,
-  pub(crate) receive_window: Option<u64>,
-}
-
-// ============================================================================
-// Client Protocol Trait — abstraction over HTTP/HTTPS/H3 upstream
-// clients
-// ============================================================================
-
-/// Unified interface for forwarding requests and establishing tunnels,
-/// implemented by each protocol variant (Http, Https, H3).
-pub(crate) trait ClientProtocol {
-  fn forward<'a>(
-    &'a self,
-    tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    tracker: &'a Rc<StreamTracker>,
-    target: &'a ForwardTarget,
-    req_headers: ::http::request::Parts,
-    req_body: RequestBody,
-    ctx: &'a RequestContext,
-  ) -> Pin<Box<dyn Future<Output = Result<Response, UpstreamError>> + 'a>>;
-
-  fn connect_for_tunnel<'a>(
-    &'a self,
-    target: &'a str,
-    tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    tracker: &'a Rc<StreamTracker>,
-  ) -> Pin<
-    Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
-  >;
-
-  /// Close any held connections (QUIC, etc.). Default is no-op.
-  fn close(&self) {}
-}
-
-type Address = WeightedItem<Box<dyn ClientProtocol>>;
+type ScheduledClient = WeightedItem<Box<dyn ClientProtocol>>;
 
 // ============================================================================
 // Upstream
@@ -100,17 +64,15 @@ type Address = WeightedItem<Box<dyn ClientProtocol>>;
 /// A resolved upstream with its addresses and optional direct-client
 /// fallback.
 pub(crate) struct Upstream {
-  addresses: Vec<Address>,
-  direct_client: Option<Box<dyn ClientProtocol>>,
+  clients: Vec<ScheduledClient>,
+  request_timeout: std::time::Duration,
 }
 
 impl Upstream {
-  /// Pick a client from WRR-scheduled addresses, falling back to
-  /// direct_client.
+  /// Select an explicitly constructed transport from the weighted pool.
   fn client(&self) -> Result<&dyn ClientProtocol, UpstreamError> {
-    scheduler::select(&self.addresses)
+    scheduler::select(&self.clients)
       .map(|client| client.as_ref())
-      .or(self.direct_client.as_deref())
       .ok_or_else(|| {
         UpstreamError::ProxyInternalError("no addresses".into())
       })
@@ -125,32 +87,47 @@ impl Upstream {
     req_body: RequestBody,
     ctx: &RequestContext,
   ) -> Result<Response, UpstreamError> {
-    self
-      .client()?
-      .forward(tls_config, tracker, target, req_headers, req_body, ctx)
-      .await
+    tokio::time::timeout(
+      self.request_timeout,
+      self.client()?.forward(
+        tls_config,
+        tracker,
+        target,
+        req_headers,
+        req_body,
+        ctx,
+      ),
+    )
+    .await
+    .map_err(|_| {
+      UpstreamError::ConnectionTimeout(
+        "upstream response header deadline exceeded".into(),
+      )
+    })?
   }
 
   pub(crate) async fn connect_for_tunnel(
     &self,
-    target: &str,
+    target: &ConnectTarget,
     tls_config: &Option<Arc<rustls::ClientConfig>>,
     tracker: &Rc<StreamTracker>,
   ) -> Result<ConnectResult, UpstreamError> {
-    self.client()?.connect_for_tunnel(target, tls_config, tracker).await
+    tokio::time::timeout(
+      self.request_timeout,
+      self.client()?.connect_for_tunnel(target, tls_config, tracker),
+    )
+    .await
+    .map_err(|_| {
+      UpstreamError::ConnectionTimeout(
+        "upstream tunnel establishment deadline exceeded".into(),
+      )
+    })?
   }
 }
 
 // ============================================================================
 // Connect Result & Tunnel Transport
 // ============================================================================
-
-pub(crate) struct ConnectResult {
-  pub(crate) transport: Box<dyn crate::stream::Io>,
-  pub(crate) upstream_addr: Option<std::net::SocketAddr>,
-  pub(crate) upstream_proxy_status: Option<::http::HeaderValue>,
-  pub(crate) tunnel_idle_timeout: Duration,
-}
 
 // ============================================================================
 // TLS Config Builder
@@ -232,7 +209,17 @@ impl UpstreamRegistry {
     certificates: Option<&CertificateConfig>,
     tracker: Rc<StreamTracker>,
   ) -> Result<Self> {
-    let tls_config = {
+    let requires_tls = upstreams.values().any(|upstream| {
+      upstream.addresses.iter().any(|address| {
+        !matches!(
+          address.protocol,
+          super::config::Protocol::Http { .. }
+        )
+      })
+    });
+    let tls_config = if !requires_tls && certificates.is_none() {
+      None
+    } else {
       let server_ca =
         certificates.and_then(|c| c.server_ca_path.as_deref());
       let roots = build_root_cert_store(server_ca)?;
@@ -260,32 +247,14 @@ impl UpstreamRegistry {
 
     for (upstream_name, upstream) in upstreams {
       if upstream.addresses.is_empty() {
-        // Direct mode: no proxy addresses, HttpClient connects to
-        // origin directly
-        let mut connector = HttpConnector::new_with_resolver(
-          TimeoutResolver::new(upstream.dns_resolve_timeout),
-        );
-        connector.set_connect_timeout(Some(upstream.connect_timeout));
-        let mut builder =
-          Client::builder(hyper_util::rt::TokioExecutor::new());
-        builder.pool_max_idle_per_host(
-          upstream.pool_config.max_idle_per_host,
-        );
-        builder.pool_idle_timeout(upstream.pool_config.idle_timeout);
-        let client = builder.build(connector);
-
         entries.insert(
           upstream_name,
           Rc::new(Upstream {
-            addresses: vec![],
-            direct_client: Some(Box::new(HttpClient {
-              client,
-              proxy_addr: None,
-              connect_timeout: upstream.connect_timeout,
-              tunnel_idle_timeout: upstream.tunnel_idle_timeout,
-              dns_resolve_timeout: upstream.dns_resolve_timeout,
-              user: None,
-            })),
+            request_timeout: upstream.request_timeout,
+            clients: vec![ScheduledClient::new(
+              1,
+              Box::new(DirectClient::new(&upstream)),
+            )],
           }),
         );
         continue;
@@ -311,11 +280,11 @@ impl UpstreamRegistry {
                 .pool_idle_timeout(upstream.pool_config.idle_timeout)
                 .build(connector);
 
-            addresses.push(Address::new(
+            addresses.push(ScheduledClient::new(
               addr.weight,
-              Box::new(HttpClient::<ProxyConnector> {
+              Box::new(HttpProxyClient::<ProxyConnector> {
                 client,
-                proxy_addr: Some(addr.address.clone()),
+                proxy_addr: addr.address.clone(),
                 connect_timeout: *connect_timeout,
                 tunnel_idle_timeout: addr.tunnel_idle_timeout,
                 dns_resolve_timeout: upstream.dns_resolve_timeout,
@@ -341,6 +310,8 @@ impl UpstreamRegistry {
                 )
                 .0
             });
+            let host =
+              host.trim_start_matches('[').trim_end_matches(']');
             let inner = ProxyConnector::new(
               addr.address.clone(),
               *connect_timeout,
@@ -360,7 +331,7 @@ impl UpstreamRegistry {
                 .pool_idle_timeout(upstream.pool_config.idle_timeout)
                 .build(connector);
 
-            addresses.push(Address::new(
+            addresses.push(ScheduledClient::new(
               addr.weight,
               Box::new(HttpsClient {
                 client,
@@ -378,10 +349,12 @@ impl UpstreamRegistry {
             tls_handshake_timeout,
             quic,
           } => {
-            addresses.push(Address::new(
+            addresses.push(ScheduledClient::new(
               addr.weight,
               Box::new(Http3Client {
-                state: Rc::new(RefCell::new(Http3AddressState::new())),
+                state: Rc::new(tokio::sync::Mutex::new(
+                  Http3AddressState::new(),
+                )),
                 proxy_addr: addr.address.clone(),
                 hostname: addr.hostname.clone(),
                 tls_handshake_timeout: *tls_handshake_timeout,
@@ -405,7 +378,10 @@ impl UpstreamRegistry {
 
       entries.insert(
         upstream_name,
-        Rc::new(Upstream { addresses, direct_client: None }),
+        Rc::new(Upstream {
+          clients: addresses,
+          request_timeout: upstream.request_timeout,
+        }),
       );
     }
 
@@ -445,11 +421,8 @@ impl UpstreamRegistry {
 
   pub(crate) fn close_all(&self) {
     for upstream in self.entries.values() {
-      for addr in &upstream.addresses {
-        addr.item().close();
-      }
-      if let Some(ref dc) = upstream.direct_client {
-        dc.close();
+      for client in &upstream.clients {
+        client.item().close();
       }
     }
   }

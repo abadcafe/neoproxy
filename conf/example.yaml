@@ -138,10 +138,13 @@ services:
 #   - args: Listener-type-specific parameters (optional)
 
 listeners:
-  # HTTP listener - no extra args
+  # HTTP listener - configurable accept retry delay
   - name: http_chain
     kind: http
     addresses: ["127.0.0.1:8080"]
+    args:
+      # Resource/unknown accept error retry delay (default: 1s)
+      accept_retry_delay: "1s"
 
   # HTTPS listener - supports TLS handshake timeout
   - name: https_chain
@@ -150,6 +153,8 @@ listeners:
     args:
       # TLS handshake timeout (default: 5s)
       tls_handshake_timeout: "5s"
+      # Resource/unknown accept error retry delay (default: 1s)
+      accept_retry_delay: "1s"
 
   # HTTP/3 listener - supports QUIC protocol tuning
   - name: http3_chain
@@ -176,6 +181,8 @@ listeners:
     args:
       # Handshake timeout (default: 3s)
       handshake_timeout: "3s"
+      # Resource/unknown accept error retry delay (default: 1s)
+      accept_retry_delay: "1s"
 
   # HTTP listener on alternate port (for connect_proxy)
   - name: http_connect
@@ -203,7 +210,9 @@ listeners:
 # Servers define listening endpoints and route to services.
 # Each server has:
 #   - name: Server identifier for logging
-#   - hostnames: Virtual hostnames for SNI/Host routing (optional)
+#   - hostnames: names for independent SNI and authority/Host server routing
+#     Empty names designate this listener's default server. SNI selects
+#     the server first, then its first client-compatible certificate.
 #     Supports exact ("api.example.com") and wildcard ("*.example.com") patterns.
 #     Empty = default/catch-all server.
 #   - tls: Server-level TLS configuration (required for https/http3)

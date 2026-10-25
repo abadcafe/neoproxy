@@ -3,30 +3,40 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::mpsc;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
 use tracing::warn;
 
 use super::context::AccessLogEntry;
-use super::registry::LogEntry;
 use crate::context::RequestContext;
 use crate::http_message::{Request, Response};
 use crate::service::Service;
 
+/// The middleware defines its delivery contract; writer backends
+/// implement it without exposing a channel or registry representation.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum DeliveryError {
+  Full,
+  Stopped,
+}
+pub(crate) trait LogSink: Send + Sync {
+  fn record(&self, entry: AccessLogEntry) -> Result<(), DeliveryError>;
+}
+
 /// Layer that creates AccessLogMiddleware instances.
 pub(crate) struct AccessLogLayer {
-  tx: mpsc::SyncSender<LogEntry>,
+  sink: Arc<dyn LogSink>,
   context_fields: Vec<String>,
 }
 
 impl AccessLogLayer {
   pub(crate) fn new(
-    tx: mpsc::SyncSender<LogEntry>,
+    sink: Arc<dyn LogSink>,
     context_fields: Vec<String>,
   ) -> Self {
-    Self { tx, context_fields }
+    Self { sink, context_fields }
   }
 }
 
@@ -36,7 +46,7 @@ impl tower::Layer<Service> for AccessLogLayer {
   fn layer(&self, inner: Service) -> Service {
     Service::new(AccessLogMiddleware {
       inner,
-      tx: self.tx.clone(),
+      sink: self.sink.clone(),
       context_fields: self.context_fields.clone(),
     })
   }
@@ -45,7 +55,7 @@ impl tower::Layer<Service> for AccessLogLayer {
 /// Middleware that logs access entries.
 struct AccessLogMiddleware {
   inner: Service,
-  tx: mpsc::SyncSender<LogEntry>,
+  sink: Arc<dyn LogSink>,
   context_fields: Vec<String>,
 }
 
@@ -53,7 +63,7 @@ impl Clone for AccessLogMiddleware {
   fn clone(&self) -> Self {
     Self {
       inner: self.inner.clone(),
-      tx: self.tx.clone(),
+      sink: self.sink.clone(),
       context_fields: self.context_fields.clone(),
     }
   }
@@ -73,7 +83,7 @@ impl tower::Service<Request> for AccessLogMiddleware {
 
   fn call(&mut self, req: Request) -> Self::Future {
     let start = Instant::now();
-    let tx = self.tx.clone();
+    let sink = self.sink.clone();
     let context_fields = self.context_fields.clone();
 
     let method = req.method().to_string();
@@ -85,10 +95,10 @@ impl tower::Service<Request> for AccessLogMiddleware {
       .cloned()
       .unwrap_or_default();
 
-    let mut inner = self.inner.clone();
+    let future = self.inner.call(req);
 
     Box::pin(async move {
-      let result = inner.call(req).await;
+      let result = future.await;
 
       let entry = build_log_entry(
         &result,
@@ -99,13 +109,13 @@ impl tower::Service<Request> for AccessLogMiddleware {
         &target,
       );
 
-      if let Err(e) = tx.try_send(LogEntry { entry }) {
+      if let Err(e) = sink.record(entry) {
         match e {
-          std::sync::mpsc::TrySendError::Full(_) => {
-            warn!("access_log: channel full, dropping log entry");
+          DeliveryError::Full => {
+            warn!("access_log: sink full, dropping log entry");
           }
-          std::sync::mpsc::TrySendError::Disconnected(_) => {
-            warn!("access_log: channel closed, dropping log entry");
+          DeliveryError::Stopped => {
+            warn!("access_log: sink stopped, dropping log entry");
           }
         }
       }

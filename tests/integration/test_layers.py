@@ -11,11 +11,9 @@ import socket
 import threading
 import time
 
-from .types import (
-    ConfigDict,
-    ProxyWithConfig,
-)
-from .utils.helpers import curl_request, curl_request_with_headers
+from tests.fixtures.configuration import ConfigDict
+from tests.fixtures.curl import curl_request, curl_request_with_headers
+from tests.fixtures.http_scenario import ProxyWithConfig
 
 
 def _find_access_log(log_dir: str, prefix: str = "access") -> str | None:
@@ -58,8 +56,8 @@ def wait_for_log_file(
     Returns:
         True if the log file exists (and contains the text if specified).
     """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         log_path = _find_access_log(log_dir, prefix)
         if log_path is not None:
             if contains is None:
@@ -730,9 +728,9 @@ class TestMultiThreadedAccessLog:
 
             # Poll for log file with enough lines
             log_dir = os.path.join(proxy.working_dir, "logs")
-            deadline = time.time() + 3.0
+            deadline = time.monotonic() + 3.0
             lines: list[str] = []
-            while time.time() < deadline:
+            while time.monotonic() < deadline:
                 log_path = _find_access_log(log_dir)
                 if log_path is not None and os.path.exists(log_path):
                     with open(log_path) as f:

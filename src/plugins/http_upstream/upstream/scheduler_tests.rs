@@ -32,3 +32,13 @@ fn test_select_empty_items() {
   let items: Vec<WeightedItem<&str>> = vec![];
   assert_eq!(select(&items), None);
 }
+
+#[test]
+fn test_select_large_weights_do_not_overflow() {
+  let items = [
+    WeightedItem::new(usize::MAX, "first"),
+    WeightedItem::new(usize::MAX, "second"),
+  ];
+  assert_eq!(select(&items), Some(&"first"));
+  assert_eq!(select(&items), Some(&"second"));
+}

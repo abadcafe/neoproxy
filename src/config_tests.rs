@@ -2,6 +2,174 @@
 
 use crate::config::{Config, ListenerConfig, Server};
 
+fn config_with_private_parameters() -> Config {
+  Config::parse_str(
+    r#"
+server_threads: 2
+tls_provider: np-private-provider-value
+plugins:
+  future_plugin:
+    password: np-private-plugin-password
+    nested:
+    - payload: np-private-unknown-payload
+      access_token: np-private-access-token
+      token_count: 42
+    - np-private-sequence-value
+listeners:
+- name: np-private-listener-name
+  kind: http
+  addresses: ["127.0.0.1:8080"]
+  args:
+    token: np-private-listener-token
+services:
+- name: np-private-service-name
+  kind: echo.echo
+  args:
+    arbitrary_key: np-private-service-value
+  layers:
+  - kind: auth.basic_auth
+    args:
+      users:
+      - username: np-private-user
+        password: np-private-layer-password
+servers:
+- name: np-private-server-name
+  listeners: [np-private-listener-name]
+  service: np-private-service-name
+"#,
+  )
+  .unwrap()
+}
+
+#[test]
+fn test_debug_preserves_configuration_except_passwords_and_tokens() {
+  let config = config_with_private_parameters();
+  for output in [format!("{config:?}"), format!("{config:#?}")] {
+    assert!(output.contains("server_threads: 2"));
+    for value in [
+      "np-private-provider-value",
+      "np-private-listener-name",
+      "127.0.0.1:8080",
+      "np-private-service-name",
+      "np-private-service-value",
+      "np-private-server-name",
+      "np-private-user",
+      "np-private-unknown-payload",
+      "np-private-sequence-value",
+      "future_plugin",
+      "password",
+      "token",
+      "access_token",
+      "token_count",
+      "42",
+    ] {
+      assert!(output.contains(value), "Debug omitted {value}");
+    }
+    for value in [
+      "np-private-plugin-password",
+      "np-private-access-token",
+      "np-private-listener-token",
+      "np-private-layer-password",
+    ] {
+      assert!(!output.contains(value), "Debug exposed {value}");
+    }
+    assert_eq!(output.matches("\"*\"").count(), 4);
+  }
+  // Redaction belongs to formatting; consumers still receive intact
+  // configuration data, including opaque future-plugin parameters.
+  assert_eq!(
+    config.plugins()["future_plugin"]["password"].as_str(),
+    Some("np-private-plugin-password")
+  );
+  assert_eq!(
+    config.listeners()[0].args()["token"].as_str(),
+    Some("np-private-listener-token")
+  );
+  assert_eq!(
+    config.services()[0].args()["arbitrary_key"].as_str(),
+    Some("np-private-service-value")
+  );
+  assert_eq!(
+    config.services()[0].layers()[0].args()["users"][0]["password"]
+      .as_str(),
+    Some("np-private-layer-password")
+  );
+}
+
+#[test]
+fn test_debug_preserves_empty_configuration_fields() {
+  let config = Config::default();
+  for output in [format!("{config:?}"), format!("{config:#?}")] {
+    assert!(output.contains("server_threads: 4"));
+    for field in [
+      "listeners: []",
+      "services: []",
+      "servers: []",
+      "plugins: {}",
+      "tls_provider: None",
+    ] {
+      assert!(output.contains(field));
+    }
+  }
+}
+
+#[test]
+fn test_debug_clone_preserves_parameter_values() {
+  let config = config_with_private_parameters().clone();
+  let output = format!("{config:#?}");
+  assert!(output.contains("np-private-unknown-payload"));
+  assert!(!output.contains("np-private-plugin-password"));
+  assert_eq!(
+    config.plugins()["future_plugin"]["password"].as_str(),
+    Some("np-private-plugin-password")
+  );
+  assert_eq!(
+    config.plugins()["future_plugin"]["nested"][0]["payload"].as_str(),
+    Some("np-private-unknown-payload")
+  );
+}
+
+#[test]
+fn test_debug_parameter_owners_only_mask_blacklisted_fields() {
+  let config = config_with_private_parameters();
+  for (output, visible, hidden) in [
+    (
+      format!("{:?}", config.listeners()[0]),
+      "np-private-listener-name",
+      "np-private-listener-token",
+    ),
+    (
+      format!("{:#?}", config.listeners()[0]),
+      "127.0.0.1:8080",
+      "np-private-listener-token",
+    ),
+    (
+      format!("{:?}", config.services()[0]),
+      "np-private-service-value",
+      "np-private-layer-password",
+    ),
+    (
+      format!("{:#?}", config.services()[0]),
+      "np-private-service-name",
+      "np-private-layer-password",
+    ),
+    (
+      format!("{:?}", config.services()[0].layers()[0]),
+      "np-private-user",
+      "np-private-layer-password",
+    ),
+    (
+      format!("{:#?}", config.services()[0].layers()[0]),
+      "basic_auth",
+      "np-private-layer-password",
+    ),
+  ] {
+    assert!(output.contains(visible));
+    assert!(!output.contains(hidden));
+    assert!(output.contains("\"*\""));
+  }
+}
+
 /// Get the temporary directory for tests.
 fn get_temp_dir() -> std::path::PathBuf {
   let temp_dir = std::path::PathBuf::from("tmp");
@@ -368,4 +536,16 @@ servers: []
     mapping
       .contains_key(serde_yaml::Value::String("writers".to_string()))
   );
+}
+
+#[test]
+fn test_parse_str_rejects_duplicate_definition_names() {
+  for yaml in [
+    "listeners: [{name: repeated}, {name: repeated}]",
+    "services: [{name: repeated, kind: echo.echo}, {name: repeated, \
+     kind: echo.echo}]",
+    "servers: [{name: repeated}, {name: repeated}]",
+  ] {
+    assert!(Config::parse_str(yaml).is_err());
+  }
 }

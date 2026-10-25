@@ -3,6 +3,7 @@
 //! Provides [`StreamTracker`] for tracking async tasks with graceful
 //! shutdown support. Supports dual-layer tracking (connections +
 //! streams) for protocols like QUIC.
+//! Panicked task results are logged and resumed when collected.
 
 use std::cell::RefCell;
 use std::future::{Future, poll_fn};
@@ -12,6 +13,8 @@ use std::time::Duration;
 use tokio::task::{JoinError, JoinSet};
 
 use crate::shutdown::ShutdownHandle;
+
+pub(crate) const ABORT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Stream task tracker for graceful shutdown.
 ///
@@ -41,8 +44,9 @@ impl StreamTracker {
   pub(crate) fn register(
     &self,
     stream_future: impl Future<Output = ()> + 'static,
-  ) {
-    self.streams.borrow_mut().spawn_local(stream_future);
+  ) -> tokio::task::AbortHandle {
+    reap_completed(&self.streams);
+    self.streams.borrow_mut().spawn_local(stream_future)
   }
 
   /// Register a connection task (for protocols like QUIC).
@@ -51,6 +55,7 @@ impl StreamTracker {
     &self,
     conn_future: impl Future<Output = ()> + 'static,
   ) -> tokio::task::AbortHandle {
+    reap_completed(&self.connections);
     self.connections.borrow_mut().spawn_local(conn_future)
   }
 
@@ -74,7 +79,7 @@ impl StreamTracker {
   /// A timeout is applied because aborted tasks may still be holding
   /// locks or in CPU-bound loops, preventing immediate cancellation.
   pub(crate) async fn drain(&self) {
-    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+    let _ = tokio::time::timeout(ABORT_DRAIN_TIMEOUT, async {
       drain_join_set(&self.streams).await;
       drain_join_set(&self.connections).await;
     })
@@ -104,6 +109,7 @@ impl StreamTracker {
         self.active_count()
       );
       self.abort_all();
+      self.drain().await;
     }
   }
 
@@ -124,6 +130,7 @@ impl StreamTracker {
 
   /// Count of active stream tasks.
   pub(crate) fn active_count(&self) -> usize {
+    reap_completed(&self.streams);
     self.streams.borrow().len()
   }
 }
@@ -141,5 +148,31 @@ async fn join_next(
 }
 
 async fn drain_join_set(join_set: &RefCell<JoinSet<()>>) {
-  while join_next(join_set).await.is_some() {}
+  while let Some(result) = join_next(join_set).await {
+    propagate_task_panic(result);
+  }
+}
+
+fn reap_completed(join_set: &RefCell<JoinSet<()>>) {
+  while let Some(result) = join_set.borrow_mut().try_join_next() {
+    propagate_task_panic(result);
+  }
+}
+
+// Tokio turns spawned-task panics into JoinError values. A panic is a
+// programming error, not a recoverable connection failure: deliberately
+// resume the original unwind so listener/worker supervision observes
+// it. Expected cancellation from abort_all() is not a programming
+// error.
+fn propagate_task_panic(result: Result<(), JoinError>) {
+  if let Err(error) = result
+    && error.is_panic()
+  {
+    tracing::error!(
+      task_id = %error.id(),
+      error = %error,
+      "tracked task panicked; propagating programming failure"
+    );
+    std::panic::resume_unwind(error.into_panic());
+  }
 }

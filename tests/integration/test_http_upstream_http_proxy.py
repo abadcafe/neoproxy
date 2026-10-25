@@ -8,15 +8,10 @@ import ssl
 import subprocess
 import tempfile
 
-from .conftest import get_unique_port
-from .types import BytesProcess, TargetHandler
-from .utils.certs import generate_test_certificates
-from .utils.helpers import (
-    create_target_server,
-    start_proxy,
-    terminate_process,
-    wait_for_proxy,
-)
+from tests.fixtures.certificates import generate_test_certificates
+from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
+from tests.fixtures.tcp_peer import TargetHandler, create_target_server
 
 
 def _read_headers(conn: socket.socket) -> bytes:
@@ -77,7 +72,7 @@ servers:
 """
     config_path = os.path.join(temp_dir, "http_upstream_http_proxy.yaml")
     with open(config_path, "w", encoding="utf-8") as file:
-        file.write(config_content)
+        _ = file.write(config_content)
     return config_path
 
 
@@ -115,7 +110,7 @@ servers:
 """
     config_path = os.path.join(temp_dir, "http_upstream_https_proxy.yaml")
     with open(config_path, "w", encoding="utf-8") as file:
-        file.write(config_content)
+        _ = file.write(config_content)
     return config_path
 
 
@@ -292,7 +287,10 @@ def test_http_upstream_http_proxy_connect_tunnel() -> None:
 
         with socket.create_connection(("127.0.0.1", entry_port), timeout=5.0) as sock:
             sock.sendall(
-                f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
+                (
+                    f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost:"
+                    + f" 127.0.0.1:{target_port}\r\n\r\n"
+                ).encode()
             )
             connect_response = _read_headers(sock)
             assert b" 200 " in connect_response
@@ -355,7 +353,10 @@ def test_http_upstream_https_proxy_connect_tunnel() -> None:
 
         with socket.create_connection(("127.0.0.1", entry_port), timeout=5.0) as sock:
             sock.sendall(
-                f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode()
+                (
+                    f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost:"
+                    + f" 127.0.0.1:{target_port}\r\n\r\n"
+                ).encode()
             )
             connect_response = _read_headers(sock)
             assert b" 200 " in connect_response

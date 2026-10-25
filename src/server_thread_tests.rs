@@ -186,7 +186,7 @@ impl Plugin for TestAssemblyPlugin {
 fn make_test_plugin_manager() -> PluginManager {
   let mut config = HashMap::new();
   config.insert("echo".to_string(), SerializedArgs::Null);
-  let (pm, _errors) = PluginManager::new(config);
+  let (pm, _errors) = PluginManager::new(config, None);
   pm
 }
 
@@ -194,7 +194,7 @@ fn make_test_plugin_manager_with_layers(
   counters: &[Arc<AtomicUsize>],
   names: &[&'static str],
 ) -> PluginManager {
-  let (mut pm, _errors) = PluginManager::new(HashMap::new());
+  let (mut pm, _errors) = PluginManager::new(HashMap::new(), None);
   let mut plugin = TestAssemblyPlugin::new();
   for (name, counter) in names.iter().zip(counters.iter()) {
     plugin = plugin.with_layer(name, counter.clone());
@@ -213,7 +213,7 @@ fn parse_config(yaml: &str) -> Config {
 
 #[test]
 fn test_build_service_with_layers_not_found() {
-  let (pm, _errors) = PluginManager::new(HashMap::new());
+  let (pm, _errors) = PluginManager::new(HashMap::new(), None);
   let config = Config::default();
   let result = build_service_with_layers(&pm, &config, "nonexistent");
   assert!(result.is_err());
@@ -227,7 +227,7 @@ fn test_build_service_with_layers_not_found() {
 
 #[test]
 fn test_build_listeners_empty_config() {
-  let (pm, _errors) = PluginManager::new(HashMap::new());
+  let (pm, _errors) = PluginManager::new(HashMap::new(), None);
   let config = Config::default();
   let listener_manager = ListenerManager::new();
   let result = build_listeners(&pm, &config, &listener_manager);
@@ -445,7 +445,7 @@ servers: []
 
 #[test]
 fn test_build_service_with_layers_plugin_not_found() {
-  let (pm, _errors) = PluginManager::new(HashMap::new());
+  let (pm, _errors) = PluginManager::new(HashMap::new(), None);
   let config = parse_config(
     r#"
 services:

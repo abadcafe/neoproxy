@@ -28,19 +28,12 @@ import tempfile
 from collections.abc import Generator
 from contextlib import contextmanager
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-    StringMap,
-)
-from .utils.certs import generate_test_certificates
-from .utils.config_builders import create_http3_chain_config
-from .utils.helpers import (
-    send_raw_request,
-    start_proxy,
-    terminate_process,
-    wait_for_proxy,
-)
+from tests.fixtures.certificates import generate_test_certificates
+from tests.fixtures.configuration import StringMap
+from tests.fixtures.h3_configuration import create_http3_chain_config
+from tests.fixtures.http_request import send_raw_request
+from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 
 
 def parse_http_response(
@@ -133,7 +126,8 @@ class TestHTTP3ChainForwardProxy:
             status_code, _, _, _ = parse_http_response(response)
 
             assert status_code == 400, (
-                f"Expected 400 for origin-form GET, got {status_code}. Response: {response.decode(errors='ignore')}"
+                f"Expected 400 for origin-form GET, got {status_code}. Response:"
+                + f" {response.decode(errors='ignore')}"
             )
 
     def test_https_scheme_returns_400(self, shared_test_certs: StringMap) -> None:
@@ -152,14 +146,16 @@ class TestHTTP3ChainForwardProxy:
             status_code, _, _, _ = parse_http_response(response)
 
             assert status_code == 400, (
-                f"Expected 400 for https:// scheme, got {status_code}. Response: {response.decode(errors='ignore')}"
+                f"Expected 400 for https:// scheme, got {status_code}. Response:"
+                + f" {response.decode(errors='ignore')}"
             )
 
     def test_absolute_form_with_unreachable_upstream_fails_gracefully(
         self, shared_test_certs: StringMap
     ) -> None:
         """
-        TC-CHAIN-FWD-003: Valid absolute-form URI with unreachable upstream fails gracefully.
+        TC-CHAIN-FWD-003: Valid absolute-form URI with unreachable upstream fails
+        gracefully.
 
         A well-formed http:// forward request passes validation and reaches
         the upstream connection step. When the upstream H3 proxy is not
@@ -205,7 +201,8 @@ class TestHTTP3ChainForwardProxy:
         self, shared_test_certs: StringMap
     ) -> None:
         """
-        TC-CHAIN-FWD-004: Proxy stays alive after receiving both forward and CONNECT requests.
+        TC-CHAIN-FWD-004: Proxy stays alive after receiving both forward and CONNECT
+        requests.
 
         Sends an origin-form GET (→ 400) and an https-scheme GET (→ 400) and
         verifies the proxy process is still running after each. This confirms
@@ -222,7 +219,8 @@ class TestHTTP3ChainForwardProxy:
                 response = send_raw_request("127.0.0.1", http_port, request)
                 status_code, _, _, _ = parse_http_response(response)
                 assert status_code == 400, (
-                    f"Expected 400, got {status_code}: {response.decode(errors='ignore')}"
+                    f"Expected 400, got {status_code}:"
+                    + f" {response.decode(errors='ignore')}"
                 )
                 assert proc.poll() is None, (
                     "Proxy crashed after receiving a validation-error request"
@@ -232,7 +230,8 @@ class TestHTTP3ChainForwardProxy:
         self, shared_test_certs: StringMap
     ) -> None:
         """
-        TC-CHAIN-FWD-005: CONNECT requests are dispatched via CONNECT path, not forward path.
+        TC-CHAIN-FWD-005: CONNECT requests are dispatched via CONNECT path, not forward
+        path.
 
         Adding forward proxy support must not break CONNECT dispatch.
         A CONNECT request with an unreachable upstream should fail gracefully
@@ -270,7 +269,8 @@ class TestHTTP3ChainForwardProxy:
         self, shared_test_certs: StringMap
     ) -> None:
         """
-        TC-CHAIN-FWD-006: POST with absolute-form URI and unreachable upstream fails gracefully.
+        TC-CHAIN-FWD-006: POST with absolute-form URI and unreachable upstream fails
+        gracefully.
 
         POST requests are handled by the forward proxy path. With an unreachable
         upstream, the proxy should fail gracefully without crashing.
@@ -303,7 +303,8 @@ class TestHTTP3ChainForwardProxy:
             )
             # Proxy must still be running (no crash/panic)
             assert proc.poll() is None, (
-                "Proxy crashed while handling POST forward request to unreachable upstream"
+                "Proxy crashed while handling POST forward request to unreachable"
+                + " upstream"
             )
             status = (
                 int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0

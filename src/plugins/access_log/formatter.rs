@@ -19,41 +19,40 @@ fn format_text(entry: &AccessLogEntry) -> Vec<u8> {
   use std::fmt::Write;
   let mut buf = String::with_capacity(256);
 
-  let format_desc = time::format_description::parse(
-    "[year]-[month]-[day] [hour]:[minute]:[second]",
-  )
-  .unwrap_or_default();
+  let format_desc = time::macros::format_description!(
+    "[year]-[month]-[day] [hour]:[minute]:[second]"
+  );
   let time_str = entry
     .time
-    .format(&format_desc)
+    .format(format_desc)
     .unwrap_or_else(|_| "???".to_string());
 
   let _ = write!(
     buf,
     "[{}] {}:{} -> {}:{} {} {} {} {}ms",
     time_str,
-    entry.client_ip,
+    escape(&entry.client_ip),
     entry.client_port,
-    entry.server_ip,
+    escape(&entry.server_ip),
     entry.server_port,
-    entry.method,
-    entry.target,
+    escape(&entry.method),
+    escape(&entry.target),
     entry.status,
     entry.duration_ms,
   );
 
   if !entry.service.is_empty() {
-    let _ = write!(buf, " svc={}", entry.service);
+    let _ = write!(buf, " svc={}", escape(&entry.service));
   }
 
   if let Some(err) = &entry.err {
-    let _ = write!(buf, " err={}", err);
+    let _ = write!(buf, " err={}", escape(err));
   }
 
   let mut sorted_exts: Vec<_> = entry.extensions.iter().collect();
-  sorted_exts.sort_by_key(|(k, _)| (*k).clone());
+  sorted_exts.sort_by_key(|(key, _)| *key);
   for (key, value) in &sorted_exts {
-    let _ = write!(buf, " {}={}", key, value);
+    let _ = write!(buf, " {}={}", escape(key), escape(value));
   }
 
   buf.push('\n');
@@ -98,7 +97,7 @@ fn format_json(entry: &AccessLogEntry) -> Vec<u8> {
   if !entry.extensions.is_empty() {
     let mut ext_obj = serde_json::Map::new();
     let mut sorted_exts: Vec<_> = entry.extensions.iter().collect();
-    sorted_exts.sort_by_key(|(k, _)| (*k).clone());
+    sorted_exts.sort_by_key(|(key, _)| *key);
     for (key, value) in sorted_exts {
       ext_obj.insert(key.clone(), json!(value));
     }
@@ -112,4 +111,8 @@ fn format_json(entry: &AccessLogEntry) -> Vec<u8> {
     serde_json::to_string(&obj).unwrap_or_default().into_bytes();
   bytes.push(b'\n');
   bytes
+}
+
+fn escape(value: &str) -> String {
+  value.chars().flat_map(char::escape_debug).collect()
 }

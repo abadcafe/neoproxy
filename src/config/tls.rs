@@ -1,10 +1,12 @@
 //! TLS configuration types and validation.
 
 use std::fs;
+use std::sync::{Arc, OnceLock};
 
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use super::{ConfigError, ConfigErrorCollector};
+use super::error::{ConfigError, ConfigErrorCollector};
 
 /// Certificate configuration (cert + key pair)
 #[derive(Deserialize, Clone, Debug)]
@@ -27,23 +29,93 @@ impl CertificateConfig {
 }
 
 /// Server-level TLS configuration
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ServerTlsConfig {
   /// List of certificates (cert_path + key_path pairs)
   pub(in crate::config) certificates: Vec<CertificateConfig>,
-  /// Optional client CA certificates for mTLS
+  /// CA roots contributed to each associated TLS listener's shared
+  /// client trust store. A nonempty list requires HTTPS/H3 requests
+  /// routed here to present a certificate authenticated by that store.
+  /// Omitted and empty lists both leave client authentication
+  /// optional.
   #[serde(default)]
-  pub(in crate::config) client_ca_certs: Option<Vec<String>>,
+  pub(in crate::config) client_ca_certs: Vec<String>,
+  #[serde(skip)]
+  compiled:
+    Arc<OnceLock<Result<Arc<crate::certificate::Candidates>, String>>>,
+  #[serde(skip)]
+  roots: Arc<OnceLock<Result<rustls::RootCertStore, String>>>,
+}
+
+impl std::fmt::Debug for ServerTlsConfig {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("ServerTlsConfig")
+      .field("certificates", &self.certificates)
+      .field("client_ca_certs", &self.client_ca_certs)
+      .finish()
+  }
 }
 
 impl ServerTlsConfig {
+  /// Compile a configuration snapshot explicitly. Clones share its
+  /// certificate/CA caches; no worker or handshake reads the files
+  /// again.
+  pub(crate) fn compile(
+    &self,
+    hostnames: &[String],
+  ) -> Result<Arc<crate::certificate::Candidates>> {
+    let candidates = self
+      .compiled
+      .get_or_init(|| {
+        crate::certificate::Candidates::load(
+          self
+            .certificates
+            .iter()
+            .map(|cert| (cert.cert_path(), cert.key_path())),
+        )
+        .map(Arc::new)
+        .map_err(|error| format!("{error:#}"))
+      })
+      .as_ref()
+      .map_err(|error| anyhow::anyhow!("{error}"))?;
+    candidates.validate_names(hostnames)?;
+    let _ = self.client_roots()?;
+    Ok(candidates.clone())
+  }
+
+  pub(crate) fn client_roots(&self) -> Result<&rustls::RootCertStore> {
+    self
+      .roots
+      .get_or_init(|| {
+        crate::certificate::load_roots(&self.client_ca_certs)
+          .map_err(|error| format!("{error:#}"))
+      })
+      .as_ref()
+      .map_err(|error| anyhow::anyhow!("{error}"))
+  }
+
   pub(crate) fn certificates(&self) -> &[CertificateConfig] {
     &self.certificates
   }
 
-  pub(crate) fn client_ca_certs(&self) -> Option<&[String]> {
-    self.client_ca_certs.as_deref()
+  pub(crate) fn client_ca_certs(&self) -> &[String] {
+    &self.client_ca_certs
+  }
+}
+
+impl super::Config {
+  /// Compile TLS before any worker starts or listener binds. The
+  /// compiled snapshots are shared through the cloned configuration.
+  pub(crate) fn compile_tls(&self) -> Result<()> {
+    for server in self.servers() {
+      if let Some(tls) = server.tls() {
+        let _ = tls.compile(server.hostnames()).with_context(|| {
+          format!("server '{}' TLS configuration", server.name())
+        })?;
+      }
+    }
+    Ok(())
   }
 }
 

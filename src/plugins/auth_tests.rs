@@ -145,17 +145,7 @@ users:
 fn test_basic_auth_layer_builder_empty_users() {
   let plugin = AuthPlugin::new();
   let builder = plugin.layer_builder("basic_auth").unwrap();
-
-  let args: SerializedArgs = serde_yaml::from_str(
-    r#"
-users: []
-"#,
-  )
-  .unwrap();
-
-  let layer = builder(args).unwrap();
-  let inner = crate::server::placeholder_service();
-  let _wrapped = layer.layer(inner);
+  assert!(builder(serde_yaml::from_str("users: []").unwrap()).is_err());
 }
 
 // ============== Middleware Tests ==============
@@ -392,4 +382,10 @@ fn test_auth_type_to_string_none() {
 #[test]
 fn test_auth_type_to_string_password() {
   assert_eq!(AuthType::Password.to_string(), "password");
+}
+
+#[test]
+fn test_create_plugin_rejects_unknown_global_arguments() {
+  let arguments = serde_yaml::from_str("unknown: true").unwrap();
+  assert!(create_plugin(Some(&arguments)).is_err());
 }

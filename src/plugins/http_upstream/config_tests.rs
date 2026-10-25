@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use super::config::protocol::ProtocolKind;
+use super::config::raw::UpstreamAddressConfig;
 use super::config::*;
 
 #[test]

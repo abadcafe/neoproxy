@@ -1,5 +1,7 @@
 //! Configuration validation orchestration.
 
+use super::document::Config;
+use super::error::{ConfigError, ConfigErrorCollector};
 use super::listener::ListenerPropertiesProvider;
 use super::listener_validation::{
   validate_address_conflicts, validate_hostname,
@@ -8,7 +10,16 @@ use super::listener_validation::{
 };
 use super::service::validate_service;
 use super::tls::validate_server_tls;
-use super::{Config, ConfigError, ConfigErrorCollector};
+
+impl Config {
+  pub(crate) fn validate(
+    &self,
+    collector: &mut ConfigErrorCollector,
+    listener_manager: &dyn ListenerPropertiesProvider,
+  ) {
+    validate_config(self, collector, listener_manager);
+  }
+}
 
 /// Validate server_threads global setting.
 fn validate_server_threads(
@@ -40,6 +51,8 @@ pub(super) fn validate_config(
   collector: &mut ConfigErrorCollector,
   listener_manager: &dyn ListenerPropertiesProvider,
 ) {
+  super::bindings::validate(config, collector, listener_manager);
+
   // Validate global settings
   validate_server_threads(config.server_threads(), collector);
 

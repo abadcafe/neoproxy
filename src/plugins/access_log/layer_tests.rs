@@ -1,7 +1,9 @@
+use std::sync::Arc;
 use std::time::Instant;
 
-use super::layer::{AccessLogLayer, build_log_entry};
-use super::registry::LogEntry;
+use super::layer::{
+  AccessLogLayer, DeliveryError, LogSink, build_log_entry,
+};
 use super::tracing_capture::TracingCapture;
 use crate::context::RequestContext;
 use crate::http_message::Response;
@@ -252,32 +254,28 @@ fn empty_request() -> crate::http_message::Request {
     .unwrap()
 }
 
+struct FailingSink {
+  error: DeliveryError,
+}
+impl LogSink for FailingSink {
+  fn record(
+    &self,
+    _entry: super::context::AccessLogEntry,
+  ) -> Result<(), DeliveryError> {
+    Err(self.error)
+  }
+}
+
 #[tokio::test]
-async fn test_access_log_layer_warns_when_channel_full() {
+async fn test_access_log_layer_warns_when_sink_full() {
   use tower::ServiceExt;
 
   let (capture, _guard) = TracingCapture::new();
 
-  let (tx, _rx) = std::sync::mpsc::sync_channel::<LogEntry>(1);
-  let dummy_entry = LogEntry {
-    entry: super::context::AccessLogEntry {
-      time: time::OffsetDateTime::now_utc(),
-      client_ip: String::new(),
-      client_port: 0,
-      server_ip: String::new(),
-      server_port: 0,
-      method: String::new(),
-      target: String::new(),
-      status: 0,
-      duration_ms: 0,
-      service: String::new(),
-      err: None,
-      extensions: std::collections::HashMap::new(),
-    },
-  };
-  tx.try_send(dummy_entry).unwrap();
-
-  let access_log_layer = AccessLogLayer::new(tx, vec![]);
+  let access_log_layer = AccessLogLayer::new(
+    Arc::new(FailingSink { error: DeliveryError::Full }),
+    vec![],
+  );
   let mut service = tower::Layer::layer(
     &access_log_layer,
     crate::server::placeholder_service(),
@@ -287,23 +285,23 @@ async fn test_access_log_layer_warns_when_channel_full() {
 
   let output = capture.output();
   assert!(
-    output.contains("channel full"),
-    "tracing should capture 'channel full' warning from middleware, \
-     got: {:?}",
+    output.contains("sink full"),
+    "tracing should capture 'sink full' warning from middleware, got: \
+     {:?}",
     &output[..output.len().min(500)]
   );
 }
 
 #[tokio::test]
-async fn test_access_log_layer_warns_when_channel_closed() {
+async fn test_access_log_layer_warns_when_sink_stopped() {
   use tower::ServiceExt;
 
   let (capture, _guard) = TracingCapture::new();
 
-  let (tx, rx) = std::sync::mpsc::sync_channel::<LogEntry>(1);
-  drop(rx);
-
-  let access_log_layer = AccessLogLayer::new(tx, vec![]);
+  let access_log_layer = AccessLogLayer::new(
+    Arc::new(FailingSink { error: DeliveryError::Stopped }),
+    vec![],
+  );
   let mut service = tower::Layer::layer(
     &access_log_layer,
     crate::server::placeholder_service(),
@@ -313,8 +311,8 @@ async fn test_access_log_layer_warns_when_channel_closed() {
 
   let output = capture.output();
   assert!(
-    output.contains("channel closed"),
-    "tracing should capture 'channel closed' warning from middleware, \
+    output.contains("sink stopped"),
+    "tracing should capture 'sink stopped' warning from middleware, \
      got: {:?}",
     &output[..output.len().min(500)]
   );

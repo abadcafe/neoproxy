@@ -55,54 +55,6 @@ pub(crate) type ResponseBody = UnsyncBoxBody<Bytes, anyhow::Error>;
 pub(crate) type Request = http::Request<RequestBody>;
 pub(crate) type Response = http::Response<ResponseBody>;
 
-/// Build a Proxy-Status header value with an error parameter.
-pub(crate) fn build_proxy_status_error(
-  identifier: &str,
-  error: &str,
-) -> http::HeaderValue {
-  let val = format!("{identifier}; error={error}");
-  http::HeaderValue::from_str(&val).unwrap_or_else(|_| {
-    http::HeaderValue::from_static("neoproxy; error=unknown")
-  })
-}
-
-/// Build a Proxy-Status header value with received-status only (no
-/// error).
-pub(crate) fn build_proxy_status_with_status(
-  identifier: &str,
-  status: u16,
-) -> http::HeaderValue {
-  let val = format!("{identifier}; received-status={status}");
-  http::HeaderValue::from_str(&val)
-    .unwrap_or_else(|_| http::HeaderValue::from_static("neoproxy"))
-}
-
-/// Append a new entry to an existing Proxy-Status Structured Fields
-/// List value.
-///
-/// Per RFC 9209 Section 2, intermediaries SHOULD preserve existing
-/// members of the Proxy-Status field to allow debugging of the entire
-/// chain.  This function combines the existing value (e.g. from the
-/// upstream proxy) with the current proxy's entry by comma-separating
-/// them as required by the Structured Fields List format.
-pub(crate) fn append_proxy_status(
-  existing: Option<&http::HeaderValue>,
-  new_entry: &http::HeaderValue,
-) -> http::HeaderValue {
-  match existing {
-    Some(existing_val) => {
-      let combined = format!(
-        "{}, {}",
-        existing_val.to_str().unwrap_or(""),
-        new_entry.to_str().unwrap_or("")
-      );
-      http::HeaderValue::from_str(&combined)
-        .unwrap_or_else(|_| new_entry.clone())
-    }
-    None => new_entry.clone(),
-  }
-}
-
 /// Build an empty response with the given status code.
 pub(crate) fn build_empty_response(
   status: http::StatusCode,

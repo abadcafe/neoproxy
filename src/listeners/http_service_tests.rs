@@ -70,12 +70,8 @@ fn test_http_service_adaptor_new_http_with_addrs() {
 
 #[test]
 fn test_http_service_adaptor_new_https_with_client_cert() {
-  let _adaptor = HttpServiceAdaptor::new_https(
-    test_servers(),
-    None,
-    None,
-    true, // client cert presented
-  );
+  let _adaptor =
+    HttpServiceAdaptor::new_https(test_servers(), None, None, true);
 }
 
 #[test]

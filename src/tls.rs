@@ -2,371 +2,155 @@
 //!
 //! This module provides:
 //! - Certificate loading from PEM files
-//! - SAN (Subject Alternative Name) extraction
-//! - SNI-to-certificate mapping with wildcard support
+//! - SNI-to-server selection with an explicit listener default
+//! - Ordered selection from compiled server certificate candidates
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, bail};
-use rustls::InconsistentKeys;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use anyhow::{Context, Result, ensure};
 use rustls::server::{
   ClientHello, ResolvesServerCert, WebPkiClientVerifier,
 };
-use rustls::sign::{CertifiedKey, SigningKey};
-use tracing::{info, warn};
+use rustls::sign::CertifiedKey;
 
-use crate::config::CertificateConfig;
 use crate::server::Server;
 
-/// SNI resolver that supports exact and wildcard domain matching.
-///
-/// This resolver:
-/// 1. First attempts exact domain match
-/// 2. Then tries wildcard patterns in configuration order
-/// 3. Returns None if no match (TLS handshake will fail)
-///
-/// There is no default certificate - unknown SNI results in handshake
-/// failure.
+/// Per-listener virtual servers. A matched server without TLS remains
+/// a match: it cannot silently fall back to another server's
+/// certificate.
 #[derive(Debug)]
-pub(crate) struct SniResolver {
-  /// Exact domain -> certificate mapping
-  exact_certs: HashMap<String, Arc<CertifiedKey>>,
-  /// Wildcard patterns -> certificate (ordered by configuration)
-  wildcard_certs: Vec<(String, Arc<CertifiedKey>)>,
+struct TlsServer {
+  certificates: Option<Arc<crate::certificate::Candidates>>,
+}
+
+#[derive(Debug, Default)]
+struct SniResolver {
+  exact: HashMap<String, Arc<TlsServer>>,
+  wildcards: HashMap<String, Arc<TlsServer>>,
+  default: Option<Arc<TlsServer>>,
 }
 
 impl SniResolver {
-  /// Create a new empty resolver.
-  pub(crate) fn new() -> Self {
-    Self { exact_certs: HashMap::new(), wildcard_certs: Vec::new() }
-  }
-
-  /// Add an exact domain mapping.
-  pub(crate) fn add_exact(
-    &mut self,
-    domain: String,
-    cert: Arc<CertifiedKey>,
-  ) {
-    self.exact_certs.insert(domain, cert);
-  }
-
-  /// Add a wildcard domain mapping.
-  pub(crate) fn add_wildcard(
-    &mut self,
-    pattern: String,
-    cert: Arc<CertifiedKey>,
-  ) {
-    self.wildcard_certs.push((pattern, cert));
-  }
-}
-
-impl Default for SniResolver {
-  fn default() -> Self {
-    Self::new()
+  fn compile(servers: &[Server]) -> Result<Self> {
+    let mut resolver = Self::default();
+    for (index, server) in servers.iter().enumerate() {
+      let certificates = server
+        .tls
+        .as_ref()
+        .map(|tls| tls.compile(&server.hostnames))
+        .transpose()
+        .with_context(|| {
+          format!(
+            "TLS server[{index}] (service '{}')",
+            server.service_name
+          )
+        })?;
+      let selected = Arc::new(TlsServer { certificates });
+      if server.hostnames.is_empty() {
+        ensure!(
+          resolver.default.is_none(),
+          "multiple default TLS servers"
+        );
+        resolver.default = Some(selected.clone());
+      }
+      for name in &server.hostnames {
+        let name = crate::hostname::normalize(name);
+        if let Some(suffix) = name.strip_prefix("*.") {
+          ensure!(
+            resolver
+              .wildcards
+              .insert(suffix.to_string(), selected.clone())
+              .is_none(),
+            "duplicate TLS hostname '{name}'"
+          );
+        } else {
+          ensure!(
+            resolver
+              .exact
+              .insert(name.clone(), selected.clone())
+              .is_none(),
+            "duplicate TLS hostname '{name}'"
+          );
+        }
+      }
+    }
+    Ok(resolver)
   }
 }
 
 impl ResolvesServerCert for SniResolver {
   fn resolve(
     &self,
-    client_hello: ClientHello<'_>,
+    hello: ClientHello<'_>,
   ) -> Option<Arc<CertifiedKey>> {
-    let sni = client_hello.server_name()?;
-
-    // 1. Exact match
-    if let Some(cert) = self.exact_certs.get(sni) {
-      return Some(cert.clone());
-    }
-
-    // 2. Wildcard match (in configuration order)
-    for (pattern, cert) in &self.wildcard_certs {
-      if matches_wildcard(pattern, sni) {
-        return Some(cert.clone());
-      }
-    }
-
-    // 3. No match - return None, TLS handshake will fail
-    None
+    let name = hello.server_name().map(crate::hostname::normalize);
+    let selected = name
+      .as_ref()
+      .and_then(|name| {
+        self.exact.get(name).or_else(|| {
+          crate::hostname::wildcard_suffix(name)
+            .and_then(|suffix| self.wildcards.get(suffix))
+        })
+      })
+      .or(self.default.as_ref())?;
+    selected.certificates.as_ref()?.choose(hello.signature_schemes())
   }
-}
-
-/// Check if a hostname matches a wildcard pattern.
-///
-/// Rules:
-/// - Pattern must start with "*."
-/// - "*.example.com" matches single-level subdomain: "foo.example.com"
-/// - "*.example.com" matches bare domain: "example.com"
-/// - "*.example.com" does NOT match multi-level subdomain:
-///   "bar.foo.example.com"
-fn matches_wildcard(pattern: &str, hostname: &str) -> bool {
-  if !pattern.starts_with("*.") {
-    return false;
-  }
-
-  let suffix = &pattern[1..]; // ".example.com"
-
-  // Check bare domain match: hostname == "example.com"
-  if hostname == &pattern[2..] {
-    return true;
-  }
-
-  // Check subdomain match: hostname ends with ".example.com"
-  if !hostname.ends_with(suffix) {
-    return false;
-  }
-
-  // Get the prefix (subdomain part)
-  let prefix_len = hostname.len() - suffix.len();
-  let prefix = &hostname[..prefix_len];
-
-  // Empty prefix means hostname == ".example.com" (with leading dot) -
-  // weird but allow
-  if prefix.is_empty() {
-    return true;
-  }
-
-  // Prefix should not contain "." (single-level subdomain only)
-  // "foo" is ok, "bar.foo" is not
-  !prefix.contains('.')
-}
-
-/// Load certificates and private key from a certificate config.
-///
-/// Returns a tuple of (certificates, private_key).
-///
-/// This function also validates that the certificate and key match,
-/// catching configuration errors at startup time.
-pub(crate) fn load_cert_and_key(
-  config: &CertificateConfig,
-) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
-  // Load certificate file
-  let cert_file =
-    File::open(config.cert_path()).with_context(|| {
-      format!("Failed to open certificate file: {}", config.cert_path())
-    })?;
-  let mut cert_reader = BufReader::new(cert_file);
-  let certs: Vec<CertificateDer> =
-    rustls_pemfile::certs(&mut cert_reader)
-      .collect::<Result<Vec<_>, _>>()
-      .with_context(|| "Failed to parse certificates")?;
-
-  if certs.is_empty() {
-    bail!("No certificates found in {}", config.cert_path());
-  }
-
-  // Load private key
-  let key_file = File::open(config.key_path()).with_context(|| {
-    format!("Failed to open private key file: {}", config.key_path())
-  })?;
-  let mut key_reader = BufReader::new(key_file);
-  let key =
-    rustls_pemfile::private_key(&mut key_reader)?.ok_or_else(|| {
-      anyhow!("No private key found in {}", config.key_path())
-    })?;
-
-  // Create signing key to verify it's valid
-  let signing_key = load_signing_key(key.clone_key())
-    .map_err(|e| anyhow!("Unsupported private key type: {:?}", e))?;
-
-  // Create a CertifiedKey and verify the keys match
-  let certified_key = CertifiedKey::new(certs.clone(), signing_key);
-
-  // Use rustls's built-in key consistency check
-  match certified_key.keys_match() {
-    Ok(()) => {
-      // Keys match, all good
-    }
-    Err(rustls::Error::InconsistentKeys(
-      InconsistentKeys::KeyMismatch,
-    )) => {
-      bail!(
-        "Certificate and private key do not match: {} and {}",
-        config.cert_path(),
-        config.key_path()
-      );
-    }
-    Err(rustls::Error::NoCertificatesPresented) => {
-      bail!("No certificates provided");
-    }
-    Err(e) => {
-      // Unknown consistency - this is OK, continue
-      // rustls will validate during handshake
-      warn!("Could not verify certificate/key consistency: {}", e);
-    }
-  }
-
-  Ok((certs, key))
-}
-
-/// Load a signing key using the default crypto provider.
-/// Provider-agnostic: works with both ring and rustls-openssl.
-pub(crate) fn load_signing_key(
-  key: PrivateKeyDer<'static>,
-) -> Result<Arc<dyn SigningKey>> {
-  let provider = rustls::crypto::CryptoProvider::get_default()
-    .expect("CryptoProvider must be installed before loading keys");
-  Ok(provider.key_provider.load_private_key(key)?)
-}
-
-/// Extract Subject Alternative Names (SAN) from a certificate.
-///
-/// SAN entries typically contain DNS names that the certificate is
-/// valid for. These are used to build the SNI-to-certificate mapping.
-///
-/// Note: This function uses a simple approach - it parses the
-/// certificate using x509-parser to extract SAN entries. For
-/// production, consider caching the parsed certificates.
-pub(crate) fn extract_san_dns_names(
-  cert: &CertificateDer,
-) -> Result<Vec<String>> {
-  // Use x509-parser to extract SAN
-  let (_, parsed) = x509_parser::parse_x509_certificate(cert.as_ref())
-    .map_err(|e| anyhow!("Failed to parse certificate: {}", e))?;
-
-  let mut dns_names = Vec::new();
-
-  // Extract SAN extension
-  if let Some(san_ext) = parsed.extensions().iter().find(|ext| {
-    ext.oid == x509_parser::oid_registry::OID_X509_EXT_SUBJECT_ALT_NAME
-  })
-    && let x509_parser::extensions::ParsedExtension::SubjectAlternativeName(san) = san_ext.parsed_extension() {
-            for entry in &san.general_names {
-                if let x509_parser::extensions::GeneralName::DNSName(name) = entry {
-                    dns_names.push(name.to_string());
-                }
-            }
-        }
-
-  Ok(dns_names)
-}
-
-/// Build an SNI resolver from multiple servers' TLS configurations.
-///
-/// This function:
-/// 1. Iterates through all servers in the routing table
-/// 2. Loads certificates from each server's TLS config
-/// 3. Extracts SAN from each certificate
-/// 4. Builds exact and wildcard SNI mappings
-///
-/// No default certificate is used - unknown SNI will cause TLS
-/// handshake failure.
-pub(crate) fn build_sni_resolver(
-  servers: &[Server],
-) -> Result<Arc<SniResolver>> {
-  let mut resolver = SniResolver::new();
-
-  for server in servers {
-    let Some(tls) = &server.tls else {
-      continue;
-    };
-
-    if tls.certificates().is_empty() {
-      warn!(
-        "Server '{}' has TLS config but no certificates",
-        server.service_name
-      );
-      continue;
-    }
-
-    for cert_config in tls.certificates() {
-      let (certs, key) = load_cert_and_key(cert_config)?;
-
-      // Build certified key
-      let certified_key = CertifiedKey::new(
-        certs.clone(),
-        load_signing_key(key.clone_key()).map_err(|e| {
-          anyhow!("Unsupported private key type: {:?}", e)
-        })?,
-      );
-      let certified_key = Arc::new(certified_key);
-
-      // Extract SAN and add to resolver
-      for cert_der in &certs {
-        match extract_san_dns_names(cert_der) {
-          Ok(dns_names) => {
-            for name in dns_names {
-              if name.starts_with("*.") {
-                info!(
-                  "Adding wildcard SNI mapping: {} -> {}",
-                  name,
-                  cert_config.cert_path()
-                );
-                resolver.add_wildcard(name, certified_key.clone());
-              } else {
-                info!(
-                  "Adding exact SNI mapping: {} -> {}",
-                  name,
-                  cert_config.cert_path()
-                );
-                resolver.add_exact(name, certified_key.clone());
-              }
-            }
-          }
-          Err(e) => {
-            warn!("Failed to extract SAN from certificate: {}", e);
-            // Continue anyway - the certificate might still work for
-            // some clients
-          }
-        }
-      }
-    }
-  }
-
-  Ok(Arc::new(resolver))
 }
 
 /// Build TLS server config with SNI support.
 ///
-/// Creates a rustls::ServerConfig that:
-/// - Uses SNI resolver for certificate selection
-/// - Requests client certificates but does not require them
-///   (allow_unauthenticated). The actual enforcement happens at the
-///   HTTP layer after routing to the correct server.
+/// `servers` contains only the servers associated with this listener.
+/// Their configured hostnames form this listener's SNI server index;
+/// each server owns an ordered compiled certificate list. Their
+/// client CA roots form one shared client trust domain for the
+/// listener. No certificates or CA roots are collected from unrelated
+/// listeners. SNI selects a server for certificate choice, while client
+/// verification still uses the listener-wide CA union.
 ///
-/// Note: This takes the full routing table to support multi-server
-/// certificate selection. Client CA certificates from all servers
-/// are merged into a single verifier.
+/// If client CA roots are configured, TLS authenticates any presented
+/// client certificate against their union, while allowing clients to
+/// omit a certificate. An untrusted presented certificate fails the
+/// handshake; `allow_unauthenticated` does not waive its validation.
+/// Omitted and empty CA path lists do not require client certificates.
+/// After HTTP routing, a server with a nonempty `client_ca_certs` list
+/// only requires that the connection presented a certificate. Requests
+/// do not repeat chain verification or require authority to equal SNI.
 pub(crate) fn build_tls_server_config(
   servers: &[Server],
   alpn_protocols: Vec<Vec<u8>>,
 ) -> Result<Arc<rustls::ServerConfig>> {
-  let sni_resolver = build_sni_resolver(servers)?;
+  let sni_resolver = Arc::new(SniResolver::compile(servers)?);
 
-  // Collect all client_ca_certs from all servers
+  // Build this listener's shared client trust store from its servers.
   let mut roots = rustls::RootCertStore::empty();
-  let mut has_client_ca = false;
-
-  for server in servers {
-    if let Some(tls) = &server.tls
-      && let Some(client_ca_certs) = tls.client_ca_certs()
-    {
-      has_client_ca = true;
-      for ca_path in client_ca_certs {
-        let ca_file = File::open(ca_path).with_context(|| {
-          format!("Failed to open client CA file: {}", ca_path)
-        })?;
-        let mut ca_reader = BufReader::new(ca_file);
-        let ca_certs: Vec<CertificateDer> =
-          rustls_pemfile::certs(&mut ca_reader)
-            .collect::<Result<Vec<_>, _>>()
-            .with_context(|| {
-              "Failed to parse client CA certificates"
-            })?;
-        for cert in ca_certs {
-          roots.add(cert)?;
-        }
-      }
-    }
+  for (server_index, server) in servers.iter().enumerate() {
+    let Some(tls) = &server.tls else {
+      continue;
+    };
+    roots.roots.extend(
+      tls
+        .client_roots()
+        .with_context(|| {
+          format!(
+            "TLS server[{server_index}] (service '{}')",
+            server.service_name
+          )
+        })?
+        .roots
+        .iter()
+        .cloned(),
+    );
   }
 
-  let mut config = if has_client_ca {
-    // Request client certificates but allow unauthenticated
-    // connections. Per-server enforcement happens at the HTTP layer
-    // after routing.
+  // Every configured CA file must contribute a certificate or fail
+  // above. An empty store therefore means no CA paths were configured,
+  // including when all servers use the default empty lists.
+  let mut config = if !roots.is_empty() {
+    // Certificate authentication stays in TLS. Anonymous connections
+    // may finish the handshake so request routing can decide whether
+    // a certificate is required; every presented certificate must pass
+    // this listener's shared verifier.
     let verifier = WebPkiClientVerifier::builder(roots.into())
       .allow_unauthenticated()
       .build()?;
@@ -382,4 +166,41 @@ pub(crate) fn build_tls_server_config(
   config.alpn_protocols = alpn_protocols;
 
   Ok(Arc::new(config))
+}
+
+/// Install the rustls crypto provider based on configuration.
+pub(crate) fn install_provider(provider_name: &str) -> Result<()> {
+  match provider_name {
+    #[cfg(feature = "tls-openssl")]
+    "openssl" => {
+      rustls_openssl::default_provider().install_default().map_err(
+        |_| {
+          anyhow::anyhow!(
+            "Failed to install rustls-openssl rustls crypto provider",
+          )
+        },
+      )?;
+      Ok(())
+    }
+    #[cfg(not(feature = "tls-openssl"))]
+    "openssl" => {
+      anyhow::bail!(
+        "tls_provider 'openssl' requires the 'tls-openssl' cargo \
+         feature"
+      )
+    }
+    "ring" => {
+      rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| {
+          anyhow::anyhow!("Failed to install rustls crypto provider")
+        })?;
+      Ok(())
+    }
+    other => {
+      anyhow::bail!(
+        "Unknown tls_provider '{other}'. Supported: 'ring', 'openssl'"
+      )
+    }
+  }
 }

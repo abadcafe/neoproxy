@@ -148,3 +148,36 @@ fn test_build_listener_callable() {
   let result = builder(vec![], SerializedArgs::Null, vec![]);
   assert!(result.is_ok());
 }
+
+#[tokio::test]
+async fn test_finish_waits_for_retained_protocol_resources() {
+  use crate::shutdown::ShutdownHandle;
+
+  struct ProtocolListener(ShutdownHandle);
+  impl Listening for ProtocolListener {
+    fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+      Box::pin(async { Ok(()) })
+    }
+
+    fn stop(&self) {}
+
+    fn finish(&self) -> Pin<Box<dyn Future<Output = ()>>> {
+      let released = self.0.clone();
+      Box::pin(async move { released.notified().await })
+    }
+  }
+
+  let released = ShutdownHandle::new();
+  let listener = Listener::new(ProtocolListener(released.clone()));
+  let mut finishing = listener.finish();
+  assert!(
+    tokio::time::timeout(
+      std::time::Duration::from_millis(10),
+      &mut finishing
+    )
+    .await
+    .is_err()
+  );
+  released.shutdown();
+  finishing.await;
+}

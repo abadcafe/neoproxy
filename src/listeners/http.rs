@@ -1,39 +1,28 @@
-#![allow(clippy::await_holding_refcell_ref)]
 use std::future;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 
 use anyhow::{Context, Result};
-use hyper_util::rt as rt_util;
-use hyper_util::server::conn::auto as conn_util;
 use serde::Deserialize;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::config::SerializedArgs;
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };
 use crate::listeners::http_service::HttpServiceAdaptor;
+use crate::listeners::tcp_accept::{self, AcceptRetryDelay};
 use crate::listeners::tcp_listener_base::TcpListenerBase;
 use crate::server::Server;
 
-/// Executor for spawning tasks on the current tokio LocalSet.
-#[derive(Clone)]
-struct TokioLocalExecutor;
-
-impl<F> hyper::rt::Executor<F> for TokioLocalExecutor
-where
-  F: Future + 'static,
-{
-  fn execute(&self, fut: F) {
-    tokio::task::spawn_local(fut);
-  }
-}
-
 /// HTTP Listener configuration arguments.
 #[derive(Deserialize, Default, Clone, Debug)]
-struct HttpListenerArgs {}
+#[serde(default, deny_unknown_fields)]
+struct HttpListenerArgs {
+  header_read_timeout: super::http_connection::HeaderDeadline,
+  accept_retry_delay: AcceptRetryDelay,
+}
 
 /// HTTP Listener implementation with shared-address routing support.
 struct HttpListener {
@@ -43,6 +32,8 @@ struct HttpListener {
   server_routing_table: Vec<Server>,
   /// Shared TCP listener base for lifecycle management
   base: TcpListenerBase,
+  header_deadline: super::http_connection::HeaderDeadline,
+  accept_retry_delay: AcceptRetryDelay,
 }
 
 impl HttpListener {
@@ -50,6 +41,7 @@ impl HttpListener {
   fn from_args(
     addresses: Vec<String>,
     server_routing_table: Vec<Server>,
+    args: HttpListenerArgs,
   ) -> Result<Self> {
     // Parse addresses - any invalid address is an error
     let addresses: Vec<SocketAddr> = addresses
@@ -65,17 +57,22 @@ impl HttpListener {
       addresses,
       server_routing_table,
       base: TcpListenerBase::new(),
+      header_deadline: args.header_read_timeout,
+      accept_retry_delay: args.accept_retry_delay,
     })
   }
 
-  #[allow(clippy::new_ret_no_self)]
-  fn new(
+  fn build(
     addresses: Vec<String>,
     sargs: SerializedArgs,
     server_routing_table: Vec<Server>,
   ) -> Result<Listener> {
-    let _args: HttpListenerArgs = serde_yaml::from_value(sargs)?;
-    Ok(Listener::new(Self::from_args(addresses, server_routing_table)?))
+    let args: HttpListenerArgs = serde_yaml::from_value(sargs)?;
+    Ok(Listener::new(Self::from_args(
+      addresses,
+      server_routing_table,
+      args,
+    )?))
   }
 
   fn serve_addr(
@@ -86,41 +83,50 @@ impl HttpListener {
     let stream_tracker = self.base.stream_tracker();
     let shutdown_handle = self.base.shutdown_handle();
     let server_routing_table = self.server_routing_table.clone();
+    let header_deadline = self.header_deadline;
+    let accept_retry_delay = self.accept_retry_delay;
     let accepting_fut = async move {
       // Log listener startup event
       info!("HTTP listener started on {}", addr);
 
-      let shutdown = async move || shutdown_handle.notified().await;
+      let shutdown = || shutdown_handle.notified();
       let accepting = || async {
-        match listener.accept().await {
-          Err(e) => {
-            error!("accepting new connection failed: {e}");
-          }
+        match tcp_accept::accept(addr, accept_retry_delay, || {
+          listener.accept()
+        })
+        .await
+        {
+          Err(error) => return Err(error),
           Ok((stream, raddr)) => {
             let local_addr = stream.local_addr().ok();
-            let io = rt_util::TokioIo::new(stream);
             let svc = HttpServiceAdaptor::new_http(
               server_routing_table.clone(),
               Some(raddr),
               local_addr,
             );
-            let builder = conn_util::Builder::new(TokioLocalExecutor);
+            let connection_shutdown = shutdown_handle.clone();
             stream_tracker.register(async move {
-              // Do not need any graceful shutdown actions here for
-              // connections. The `Service`s should do this instead.
-              let conn =
-                builder.serve_connection_with_upgrades(io, svc);
-              if let Err(e) = conn.await {
-                warn!("connection from {raddr} on {local_addr:?}: {e}");
+              if let Err(error) = super::http_connection::serve(
+                stream,
+                svc,
+                header_deadline,
+                connection_shutdown,
+              )
+              .await
+              {
+                warn!(
+                  "connection from {raddr} on {local_addr:?}: {error}"
+                );
               }
             });
           }
         }
+        Ok::<(), std::io::Error>(())
       };
 
       loop {
         tokio::select! {
-          _ = accepting() => {},
+          result = accepting() => result.with_context(|| format!("HTTP accept failed on {addr}"))?,
           _ = shutdown() => {
             // Graceful shutdown for the TcpListener.
             info!("HTTP listener on {} shutting down", addr);
@@ -165,5 +171,5 @@ pub(crate) fn props() -> ListenerProps {
 }
 
 pub(crate) fn create_listener_builder() -> Box<dyn BuildListener> {
-  Box::new(HttpListener::new)
+  Box::new(HttpListener::build)
 }

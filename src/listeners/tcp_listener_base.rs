@@ -3,6 +3,12 @@
 //! Provides [`TcpListenerBase`] which encapsulates the common lifecycle
 //! pattern shared by HTTP and HTTPS listeners: JoinSet management,
 //! stream tracking, and graceful shutdown.
+//!
+//! module: tcp_listener_base
+//! responsibilities: manage TCP listener lifecycle
+//! public operations: TcpListenerBase lifecycle methods
+//! data entities: TcpListenerBase
+//! tests: tcp_listener_base_tests.rs
 
 use std::cell::RefCell;
 use std::future::{Future, poll_fn};
@@ -24,9 +30,9 @@ use crate::tracker::StreamTracker;
 /// lifecycle management to this base while keeping their own accept
 /// loop logic.
 pub(crate) struct TcpListenerBase {
-  pub(crate) listening_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
-  pub(crate) stream_tracker: Rc<StreamTracker>,
-  pub(crate) graceful_shutdown_timeout: Duration,
+  listening_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
+  stream_tracker: Rc<StreamTracker>,
+  graceful_shutdown_timeout: Duration,
 }
 
 impl TcpListenerBase {
@@ -59,21 +65,37 @@ impl TcpListenerBase {
     let shutdown = self.stream_tracker.shutdown_handle();
     let graceful_timeout = self.graceful_shutdown_timeout;
     Box::pin(async move {
-      shutdown.notified().await;
-      while let Some(res) = join_next(&listening_set).await {
-        match res {
-          Err(e) => {
-            tracing::error!("listening join error: {}", e)
-          }
-          Ok(res) => {
-            if let Err(e) = res {
-              tracing::error!("listening error: {}", e)
+      let mut failure = None;
+      loop {
+        tokio::select! {
+          _ = shutdown.notified() => break,
+          result = join_next(&listening_set), if !listening_set.borrow().is_empty() => {
+            match result {
+              Some(Ok(Ok(()))) => {},
+              Some(Ok(Err(error))) => { failure = Some(error); break; },
+              Some(Err(error)) => { failure = Some(error.into()); break; },
+              None => break,
             }
           }
         }
       }
+      stream_tracker.shutdown();
+      while let Some(result) = join_next(&listening_set).await {
+        match result {
+          Ok(Ok(())) => {}
+          Ok(Err(error)) => {
+            failure.get_or_insert(error);
+          }
+          Err(error) => {
+            failure.get_or_insert(error.into());
+          }
+        }
+      }
       stream_tracker.graceful_shutdown(graceful_timeout).await;
-      Ok(())
+      match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+      }
     })
   }
 

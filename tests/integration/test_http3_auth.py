@@ -19,35 +19,25 @@ import socket
 import subprocess
 import tempfile
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-    StringMap,
-)
-from .utils.certs import (
-    generate_ca,
-    generate_client_cert,
-)
-from .utils.config_builders import (
+from tests.fixtures.binary import NEOPROXY_BINARY
+from tests.fixtures.certificates import generate_ca, generate_client_cert
+from tests.fixtures.configuration import StringMap
+from tests.fixtures.h3_configuration import (
     create_http3_listener_config_with_mtls_and_password,
     create_http3_listener_config_with_password_auth,
     create_http3_listener_config_with_tls_client_cert,
 )
-from .utils.helpers import (
-    NEOPROXY_BINARY,
-    create_target_server,
-    echo_handler,
-    start_proxy,
-    wait_for_udp_port_bound,
-)
 
 # Alias for convenience
-from .utils.http3_client import (
+from tests.fixtures.http3_client import (
     H3Client,
     perform_h3_connect_test,
     perform_h3_connection_test,
     perform_h3_tls_client_cert_test,
 )
+from tests.fixtures.ports import get_unique_port, wait_for_udp_port_bound
+from tests.fixtures.proxy_process import BytesProcess, start_proxy
+from tests.fixtures.tcp_peer import create_target_server, echo_handler
 
 # ==============================================================================
 # Test cases - 7.3 Password Authentication scenarios
@@ -98,7 +88,7 @@ class TestHTTP3PasswordAuth:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_password_auth_valid_credentials(
@@ -141,7 +131,7 @@ class TestHTTP3PasswordAuth:
                         data = conn.recv(1024)
                         if not data:
                             break
-                        conn.send(b"ECHO:" + data)
+                        conn.sendall(b"ECHO:" + data)
                 except OSError:
                     pass
                 finally:
@@ -158,7 +148,7 @@ class TestHTTP3PasswordAuth:
             ), "HTTP/3 listener failed to start"
 
             # Test with real HTTP/3 client using valid credentials
-            async def do_auth_connect():
+            async def do_auth_connect() -> tuple[bool, int]:
                 (
                     success,
                     status_code,
@@ -191,7 +181,7 @@ class TestHTTP3PasswordAuth:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -235,7 +225,7 @@ class TestHTTP3PasswordAuth:
                         data = conn.recv(1024)
                         if not data:
                             break
-                        conn.send(b"ECHO:" + data)
+                        conn.sendall(b"ECHO:" + data)
                 except OSError:
                     pass
                 finally:
@@ -252,7 +242,7 @@ class TestHTTP3PasswordAuth:
             ), "HTTP/3 listener failed to start"
 
             # Test with wrong password
-            async def do_auth_connect():
+            async def do_auth_connect() -> tuple[bool, int]:
                 (
                     success,
                     status_code,
@@ -285,7 +275,7 @@ class TestHTTP3PasswordAuth:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -337,7 +327,7 @@ class TestHTTP3TLSClientCertAuth:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_tls_client_cert_missing_ca_rejected(
@@ -356,7 +346,8 @@ class TestHTTP3TLSClientCertAuth:
             cert_path = shared_test_certs["cert_path"]
             key_path = shared_test_certs["key_path"]
 
-            # NEW config format: top-level listener with server-level TLS with non-existent client_ca_certs
+            # NEW config format: top-level listener with server-level TLS with non-
+            # existent client_ca_certs
             config_content = f"""server_threads: 1
 
 plugins:
@@ -388,7 +379,7 @@ servers:
 """
             config_path = os.path.join(temp_dir, "missing_ca.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
@@ -400,11 +391,12 @@ servers:
             try:
                 return_code = proc.wait(timeout=5)
                 assert return_code != 0, (
-                    f"Expected non-zero exit code for missing CA file, got {return_code}"
+                    "Expected non-zero exit code for "
+                    + f"missing CA file, got {return_code}"
                 )
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait()
+                _ = proc.wait()
                 raise AssertionError(
                     "Process should have exited with error for missing CA file"
                 )
@@ -450,7 +442,7 @@ servers:
         finally:
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_tls_client_cert_valid_cert_accepted(
@@ -488,7 +480,7 @@ servers:
             ), "HTTP/3 listener failed to start"
 
             # Test with real HTTP/3 client using valid client certificate
-            async def do_client_cert_connect():
+            async def do_client_cert_connect() -> tuple[bool, int, str]:
                 (
                     success,
                     status_code,
@@ -519,7 +511,7 @@ servers:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_tls_client_cert_invalid_cert_rejected(
@@ -570,7 +562,7 @@ servers:
             ), "HTTP/3 listener failed to start"
 
             # Test with HTTP/3 client using INVALID client certificate
-            async def do_invalid_client_cert_connect():
+            async def do_invalid_client_cert_connect() -> tuple[bool, int, str]:
                 (
                     success,
                     status_code,
@@ -597,8 +589,9 @@ servers:
             # CRITICAL ASSERTION: Invalid client certificates (signed by untrusted CA)
             # are rejected at the TLS layer. The connection must fail.
             assert not success, (
-                f"SECURITY VIOLATION: Connection with invalid client cert should be rejected. "
-                f"Server accepted invalid certificate signed by untrusted CA. Message: {message}"
+                "SECURITY VIOLATION: Connection with invalid client cert should be"
+                + " rejected. Server accepted invalid certificate signed by untrusted"
+                + f" CA. Message: {message}"
             )
 
             # The rejection should happen at TLS layer with a specific error message,
@@ -611,7 +604,7 @@ servers:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_tls_client_cert_no_cert_returns_403(
@@ -651,7 +644,7 @@ servers:
             ), "HTTP/3 listener failed to start"
 
             # Test with HTTP/3 client without client certificate
-            async def do_no_cert_connect():
+            async def do_no_cert_connect() -> tuple[bool, int, str]:
                 (
                     success,
                     status_code,
@@ -676,16 +669,18 @@ servers:
             # Plan B: TLS handshake succeeds (allow_unauthenticated), but
             # HTTP layer returns 403 when client cert is required but missing.
             assert success, (
-                f"TLS handshake should succeed without client cert (allow_unauthenticated). Message: {message}"
+                "TLS handshake should succeed without client cert"
+                + f" (allow_unauthenticated). Message: {message}"
             )
             assert status_code == 403, (
-                f"Expected 403 Forbidden for missing client certificate, got {status_code}. Message: {message}"
+                "Expected 403 Forbidden for missing client certificate, got"
+                + f" {status_code}. Message: {message}"
             )
 
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -744,7 +739,7 @@ class TestHTTP3DualAuth:
             ), "HTTP/3 listener failed to start"
 
             # Use H3Client with client cert AND password
-            async def do_dual_auth():
+            async def do_dual_auth() -> tuple[bool, int]:
                 client = H3Client(
                     "127.0.0.1",
                     proxy_port,
@@ -781,7 +776,7 @@ class TestHTTP3DualAuth:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -827,7 +822,7 @@ class TestHTTP3DualAuth:
             ), "HTTP/3 listener failed to start"
 
             # Connect WITHOUT client cert - should fail at transport layer
-            async def do_no_cert_connect():
+            async def do_no_cert_connect() -> tuple[bool, int, str]:
                 (
                     success,
                     status_code,
@@ -853,17 +848,19 @@ class TestHTTP3DualAuth:
             finally:
                 loop.close()
 
-            # CRITICAL: With AND logic, missing cert = transport failure = connection rejected
+            # CRITICAL: With AND logic, missing cert = transport failure = connection
+            # rejected
             # The client should NOT be able to fall back to password auth
             assert not success, (
-                f"SECURITY: No cert should be rejected at transport layer even with valid password. "
-                f"Got success={success}, status={status_code}, msg={message}"
+                "SECURITY: No cert should be rejected at transport layer even with"
+                + f" valid password. Got success={success}, status={status_code},"
+                + f" msg={message}"
             )
 
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -910,7 +907,7 @@ class TestHTTP3DualAuth:
             ), "HTTP/3 listener failed to start"
 
             # Use H3Client with valid client cert but WRONG password
-            async def do_wrong_password():
+            async def do_wrong_password() -> tuple[bool, int]:
                 client = H3Client(
                     "127.0.0.1",
                     proxy_port,
@@ -947,7 +944,7 @@ class TestHTTP3DualAuth:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -994,7 +991,7 @@ class TestHTTP3DualAuth:
             ), "HTTP/3 listener failed to start"
 
             # Use H3Client with valid client cert but NO password
-            async def do_no_password():
+            async def do_no_password() -> tuple[bool, int]:
                 client = H3Client(
                     "127.0.0.1",
                     proxy_port,
@@ -1030,7 +1027,7 @@ class TestHTTP3DualAuth:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1076,7 +1073,7 @@ class TestHTTP3DualAuth:
             ), "HTTP/3 listener failed to start"
 
             # Connect with INVALID cert - should fail at transport
-            async def do_invalid_cert():
+            async def do_invalid_cert() -> tuple[bool, int, str]:
                 (
                     success,
                     status_code,
@@ -1103,8 +1100,8 @@ class TestHTTP3DualAuth:
             # CRITICAL: With AND logic, invalid cert = transport failure
             # No fallback to password auth allowed
             assert not success, (
-                f"SECURITY: Invalid cert should be rejected at transport layer "
-                f"even in dual-auth mode. No password fallback. Message: {message}"
+                "SECURITY: Invalid cert should be rejected at transport layer "
+                + f"even in dual-auth mode. No password fallback. Message: {message}"
             )
 
             # The rejection should happen at TLS layer with a specific error message
@@ -1116,5 +1113,5 @@ class TestHTTP3DualAuth:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)

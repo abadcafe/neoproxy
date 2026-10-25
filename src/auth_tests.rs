@@ -168,3 +168,46 @@ fn test_parse_basic_auth_password_with_colon() {
   assert_eq!(user, "user");
   assert_eq!(pass, "pass:word");
 }
+
+#[test]
+fn test_parse_basic_auth_accepts_case_insensitive_scheme_and_spaces() {
+  for value in ["basic dXNlcjpwYXNz", "BASIC   dXNlcjpwYXNz"] {
+    assert_eq!(
+      UserPasswordAuth::parse_basic_auth(
+        &http::HeaderValue::from_str(value).unwrap()
+      )
+      .unwrap(),
+      ("user".into(), "pass".into())
+    );
+  }
+}
+
+#[test]
+fn test_debug_redacts_credentials() {
+  let auth = UserPasswordAuth::from_users(&[user_credential(
+    "private-user",
+    "private-password",
+  )]);
+  let output = format!("{auth:?}");
+  assert!(output.contains("private-user"));
+  assert!(!output.contains("private-password"));
+  assert!(output.contains("users"));
+  assert!(output.contains("\"*\""));
+  assert!(output.contains("UserPasswordAuth"));
+}
+
+#[test]
+fn test_debug_proxy_credentials_only_masks_password() {
+  let credentials = crate::auth::ProxyCredentials::new(
+    "visible-user".into(),
+    "hidden-password".into(),
+  );
+  for output in
+    [format!("{credentials:?}"), format!("{credentials:#?}")]
+  {
+    assert!(output.contains("username: \"visible-user\""));
+    assert!(output.contains("password: \"*\""));
+    assert!(!output.contains("hidden-password"));
+  }
+  assert_eq!(credentials.parts(), ("visible-user", "hidden-password"));
+}

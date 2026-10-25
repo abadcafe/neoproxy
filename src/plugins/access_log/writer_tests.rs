@@ -1,5 +1,6 @@
+use std::cell::Cell;
 use std::fs;
-use std::time::Duration;
+use std::rc::Rc;
 
 use byte_unit::Byte;
 
@@ -101,36 +102,34 @@ fn test_multiple_writes_flush_as_multiple_lines() {
 }
 
 #[test]
-fn test_flush_if_interval_elapsed_does_not_flush_before_interval() {
-  let dir = tempfile::tempdir().unwrap();
-  let config = AccessLogWriterConfig {
-    flush_interval: Duration::from_secs(3600),
-    ..writer_config(&dir, "access.log", LogFormat::Text)
-  };
+fn test_write_below_capacity_remains_buffered_until_flush() {
+  let directory = tempfile::tempdir().unwrap();
+  let config = writer_config(&directory, "access.log", LogFormat::Text);
   let mut writer = AccessLogWriter::from_config(&config);
-
   writer.write(&make_entry(200));
-  writer.flush_if_interval_elapsed();
-
-  assert!(!dir.path().join("access.log").exists());
+  assert!(!directory.path().join("access.log").exists());
+  writer.flush();
+  assert!(
+    fs::read_to_string(directory.path().join("access.log"))
+      .unwrap()
+      .contains("200")
+  );
 }
 
 #[test]
-fn test_flush_if_interval_elapsed_flushes_after_interval() {
-  let dir = tempfile::tempdir().unwrap();
+fn test_write_reaching_capacity_flushes_without_explicit_flush() {
+  let directory = tempfile::tempdir().unwrap();
   let config = AccessLogWriterConfig {
-    flush_interval: Duration::from_millis(1),
-    ..writer_config(&dir, "access.log", LogFormat::Text)
+    buffer_capacity: Byte::from_u64(1),
+    ..writer_config(&directory, "access.log", LogFormat::Text)
   };
   let mut writer = AccessLogWriter::from_config(&config);
-
-  writer.write(&make_entry(200));
-  std::thread::sleep(Duration::from_millis(5));
-  writer.flush_if_interval_elapsed();
-
-  let content =
-    fs::read_to_string(dir.path().join("access.log")).unwrap();
-  assert!(content.contains("200"));
+  writer.write(&make_entry(201));
+  assert!(
+    fs::read_to_string(directory.path().join("access.log"))
+      .unwrap()
+      .contains("201")
+  );
 }
 
 #[test]
@@ -168,4 +167,157 @@ fn test_buffer_size_limit_drops_oversized_entry() {
   writer.flush();
 
   assert!(!dir.path().join("access.log").exists());
+}
+
+#[test]
+fn test_write_rotates_full_file_and_preserves_entries() {
+  let dir = tempfile::tempdir().unwrap();
+  let config = AccessLogWriterConfig {
+    max_file_size: Byte::from_u64(1),
+    ..writer_config(&dir, "access.log", LogFormat::Text)
+  };
+  for status in [200, 201, 202] {
+    // Reopening must account for bytes already on disk.
+    let mut writer = AccessLogWriter::from_config(&config);
+    writer.write(&make_entry(status));
+    writer.flush();
+  }
+  let entries: Vec<_> = fs::read_dir(dir.path())
+    .unwrap()
+    .map(|path| fs::read_to_string(path.unwrap().path()).unwrap())
+    .collect();
+  assert_eq!(entries.len(), 3);
+  for status in [200, 201, 202] {
+    assert!(
+      entries.iter().any(|text| text.contains(&status.to_string()))
+    );
+  }
+}
+
+#[test]
+fn test_write_archive_numbers_advance_after_old_archive_is_removed() {
+  let dir = tempfile::tempdir().unwrap();
+  let config = AccessLogWriterConfig {
+    max_file_size: Byte::from_u64(1),
+    ..writer_config(&dir, "access.log", LogFormat::Text)
+  };
+  let mut writer = AccessLogWriter::from_config(&config);
+  for status in [200, 201, 202] {
+    writer.write(&make_entry(status));
+    writer.flush();
+  }
+  fs::remove_file(dir.path().join("access.log.1")).unwrap();
+  writer.write(&make_entry(203));
+  writer.flush();
+  assert!(!dir.path().join("access.log.1").exists());
+  let archive =
+    fs::read_to_string(dir.path().join("access.log.3")).unwrap();
+  assert!(archive.contains("202"));
+}
+
+#[test]
+fn test_write_skips_occupied_archive_number_without_overwriting() {
+  let dir = tempfile::tempdir().unwrap();
+  let config = AccessLogWriterConfig {
+    max_file_size: Byte::from_u64(1),
+    ..writer_config(&dir, "access.log", LogFormat::Text)
+  };
+  let mut writer = AccessLogWriter::from_config(&config);
+  for status in [200, 201] {
+    writer.write(&make_entry(status));
+    writer.flush();
+  }
+  fs::write(dir.path().join("access.log.2"), "existing archive\n")
+    .unwrap();
+  writer.write(&make_entry(202));
+  writer.flush();
+  assert_eq!(
+    fs::read_to_string(dir.path().join("access.log.2")).unwrap(),
+    "existing archive\n"
+  );
+  assert!(
+    fs::read_to_string(dir.path().join("access.log.3"))
+      .unwrap()
+      .contains("201")
+  );
+}
+
+#[test]
+fn test_flush_date_change_switches_file_and_resets_archive_sequence() {
+  let dir = tempfile::tempdir().unwrap();
+  let config = AccessLogWriterConfig {
+    max_file_size: Byte::from_u64(1),
+    rotate_daily: true,
+    ..writer_config(&dir, "access", LogFormat::Text)
+  };
+  let date = Rc::new(Cell::new(time::macros::date!(2026 - 10 - 25)));
+  let source = date.clone();
+  let mut writer =
+    AccessLogWriter::with_date_source(&config, move || {
+      Ok(source.get())
+    });
+  for status in [200, 201, 202] {
+    writer.write(&make_entry(status));
+    writer.flush();
+  }
+  let previous = dir.path().join("access.2026-10-25");
+  let previous_content = fs::read(&previous).unwrap();
+  date.set(time::macros::date!(2026 - 10 - 26));
+  for status in [203, 204] {
+    writer.write(&make_entry(status));
+    writer.flush();
+  }
+  assert_eq!(fs::read(previous).unwrap(), previous_content);
+  assert!(
+    fs::read_to_string(dir.path().join("access.2026-10-26.1"))
+      .unwrap()
+      .contains("203")
+  );
+  assert!(
+    fs::read_to_string(dir.path().join("access.2026-10-26"))
+      .unwrap()
+      .contains("204")
+  );
+  assert!(!dir.path().join("access.2026-10-26.3").exists());
+
+  // Clock corrections can revisit a date. Existing archives still
+  // belong to that date and must remain intact when its file reopens.
+  date.set(time::macros::date!(2026 - 10 - 25));
+  writer.write(&make_entry(205));
+  writer.flush();
+  assert_eq!(
+    fs::read(dir.path().join("access.2026-10-25.3")).unwrap(),
+    previous_content
+  );
+}
+
+#[test]
+fn test_flush_daily_rotation_does_not_fall_back_to_utc_on_date_error() {
+  let dir = tempfile::tempdir().unwrap();
+  let config = AccessLogWriterConfig {
+    rotate_daily: true,
+    ..writer_config(&dir, "access", LogFormat::Text)
+  };
+  let mut writer = AccessLogWriter::with_date_source(&config, || {
+    Err(time::error::IndeterminateOffset)
+  });
+  writer.write(&make_entry(200));
+  writer.flush();
+  assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn test_flush_without_daily_rotation_does_not_require_local_date() {
+  let dir = tempfile::tempdir().unwrap();
+  let config = writer_config(&dir, "access.log", LogFormat::Text);
+  let mut writer = AccessLogWriter::with_date_source(&config, || {
+    Err(time::error::IndeterminateOffset)
+  });
+  writer.write(&make_entry(200));
+  writer.flush();
+  assert!(
+    fs::read_to_string(dir.path().join("access.log"))
+      .unwrap()
+      .contains("200")
+  );
 }

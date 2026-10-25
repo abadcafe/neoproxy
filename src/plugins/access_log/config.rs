@@ -42,8 +42,9 @@ fn default_rotate_daily() -> bool {
 /// Configuration for a single named access log writer.
 ///
 /// `path_prefix` is the unique key for each writer. The actual log file
-/// is `{path_prefix}.{date}` when `rotate_daily` is enabled, or
-/// `{path_prefix}` when `rotate_daily` is false.
+/// is `{path_prefix}.{local_date}` when `rotate_daily` is enabled, or
+/// `{path_prefix}` when `rotate_daily` is false. The date is evaluated
+/// in the process's local timezone when buffered entries are flushed.
 #[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AccessLogWriterConfig {
@@ -56,16 +57,18 @@ pub(crate) struct AccessLogWriterConfig {
   /// Max buffer; drops entries when full.
   #[serde(default = "default_max_buffer_size")]
   pub(crate) max_buffer_size: Byte,
-  /// Max time between flushes.
+  /// Periodic flush interval, scheduled by the registry's writer
+  /// thread independently of earlier buffer-capacity flushes.
   #[serde(
     with = "humantime_serde",
     default = "default_flush_interval"
   )]
   pub(crate) flush_interval: Duration,
-  /// Max file size before rotation.
+  /// File size threshold checked before a buffered write. One batch
+  /// can exceed the threshold; the following flush rotates the file.
   #[serde(default = "default_max_file_size")]
   pub(crate) max_file_size: Byte,
-  /// Rotate at date boundary.
+  /// Rotate when the process's local calendar date changes.
   #[serde(default = "default_rotate_daily")]
   pub(crate) rotate_daily: bool,
   /// Log format (text / json).

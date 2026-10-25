@@ -53,7 +53,17 @@ where
 ///
 /// **Note:** This is the *runtime* service type, not to be confused
 /// with `config::Service` which represents configuration data.
-pub(crate) struct Service(Box<dyn CloneService>);
+///
+/// Returning a Response completes the service call, not necessarily
+/// the exchange: its body may still be streaming. The listener's HTTP
+/// driver owns transport shutdown until an upgrade transfers I/O to
+/// a separately managed tunnel task.
+/// Authentication is a request middleware concern. Protocol adapters
+/// submit complete HTTP requests instead of extracting policy from
+/// this type to execute middleware decisions before a request exists.
+pub(crate) struct Service {
+  inner: Box<dyn CloneService>,
+}
 
 impl Service {
   /// Create a new service from a tower::Service implementation.
@@ -67,7 +77,7 @@ impl Service {
       > + Clone
       + 'static,
   {
-    Self(Box::new(inner))
+    Self { inner: Box::new(inner) }
   }
 }
 
@@ -77,17 +87,17 @@ impl tower::Service<Request> for Service {
   type Response = Response;
 
   fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
-    self.0.poll_ready(cx)
+    self.inner.poll_ready(cx)
   }
 
   fn call(&mut self, req: Request) -> Self::Future {
-    self.0.call(req)
+    self.inner.call(req)
   }
 }
 
 impl Clone for Service {
   fn clone(&self) -> Self {
-    Self(self.0.clone_boxed())
+    Self { inner: self.inner.clone_boxed() }
   }
 }
 

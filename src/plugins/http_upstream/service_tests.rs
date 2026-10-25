@@ -55,7 +55,7 @@ fn make_direct_service() -> RuntimeService {
   .unwrap();
   let st = Rc::new(StreamTracker::new());
   let registry = Rc::new(RefCell::new(build_registry(plugin_config)));
-  UpstreamService::new(sargs, st, registry).unwrap()
+  UpstreamService::build(sargs, st, registry).unwrap()
 }
 
 #[test]
@@ -74,7 +74,7 @@ async fn test_direct_service_new_with_direct_upstream() {
   .unwrap();
   let st = Rc::new(StreamTracker::new());
   let registry = Rc::new(RefCell::new(build_registry(plugin_config)));
-  let result = UpstreamService::new(sargs, st, registry);
+  let result = UpstreamService::build(sargs, st, registry);
   assert!(result.is_ok());
 }
 
@@ -187,7 +187,7 @@ async fn test_upstream_service_new_missing_upstream_fails() {
   .unwrap();
   let st = Rc::new(StreamTracker::new());
   let registry = Rc::new(RefCell::new(build_registry(plugin_config)));
-  let result = UpstreamService::new(sargs, st, registry);
+  let result = UpstreamService::build(sargs, st, registry);
   assert!(result.is_err());
 }
 
@@ -214,7 +214,7 @@ upstreams:
     serde_yaml::Value::String("test".into()),
   )]))
   .unwrap();
-  let result = UpstreamService::new(sargs, st, registry);
+  let result = UpstreamService::build(sargs, st, registry);
   assert!(result.is_ok());
 }
 

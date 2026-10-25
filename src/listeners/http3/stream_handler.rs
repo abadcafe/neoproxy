@@ -1,20 +1,18 @@
 use std::net::SocketAddr;
-use std::rc::Rc;
 
 use bytes::Bytes;
 use h3::server;
 use http_body_util::BodyExt;
-use tower::Service;
+use tower::ServiceExt;
 use tracing::warn;
 
 use super::recv_body::H3RecvBody;
+use super::request_stream::CancellableStream;
 use crate::http_message::{
   BytesBufBodyWrapper, RequestBody, Response, build_error_response,
 };
-use crate::listeners::header_validation::authority_host_mismatch;
-use crate::shutdown::ShutdownHandle;
+use crate::listeners::header_validation::validate_and_route;
 use crate::stream::H3UpgradeTrigger;
-use crate::tracker::StreamTracker;
 
 /// Handle a single HTTP/3 stream by delegating to the Service.
 ///
@@ -34,82 +32,43 @@ use crate::tracker::StreamTracker;
 /// errors upward.
 pub(super) async fn handle_h3_stream(
   req: http::Request<()>,
-  stream: server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+  stream: server::RequestStream<CancellableStream, Bytes>,
   server_router: crate::server::ServerRouter,
-  _shutdown_handle: ShutdownHandle,
   client_addr: SocketAddr,
   local_addr: SocketAddr,
   client_cert_presented: bool,
 ) -> () {
   let method = req.method().clone();
 
-  // Phase 1a: Check :authority MUST exist
-  let authority = match req.uri().authority() {
-    Some(a) => a,
-    None => {
-      let resp = build_error_response(
-        http::StatusCode::BAD_REQUEST,
-        "Bad Request: :authority is required",
-      );
-      let mut stream = stream;
-      if let Err(e) = send_h3_response(&mut stream, resp, true).await {
-        warn!("Failed to send 400 response: {e}");
+  let routing_entry = match validate_and_route(&req, &server_router) {
+    Ok(entry) => entry,
+    Err(response) => {
+      let mut stream = ResponseWriter::new(stream);
+      if let Err(error) = stream.send(*response).await {
+        warn!("Failed to send routing error: {error}");
       }
       return;
     }
   };
 
-  // Phase 1b: If Host header exists, it must equal :authority
-  if let Some(host_val) = req.headers().get(http::header::HOST)
-    && let Ok(host_str) = host_val.to_str()
-    && authority_host_mismatch(authority.as_ref(), host_str)
-  {
-    let resp = build_error_response(
-      http::StatusCode::BAD_REQUEST,
-      "Bad Request: :authority and Host headers differ",
-    );
-    let mut stream = stream;
-    if let Err(e) = send_h3_response(&mut stream, resp, true).await {
-      warn!("Failed to send 400 response: {e}");
-    }
-    return;
-  }
-
-  // Phase 2: Route FIRST based on :authority
-  let hostname = req.uri().authority().map(|a| a.host());
-  let routing_entry = server_router.route(hostname);
-
-  let routing_entry = match routing_entry {
-    Some(entry) => entry,
-    None => {
-      let resp = build_error_response(
-        http::StatusCode::NOT_FOUND,
-        "Not Found: No matching server for this host",
-      );
-      let mut stream = stream;
-      if let Err(e) = send_h3_response(&mut stream, resp, true).await {
-        warn!("Failed to send 404 response: {e}");
-      }
-      return;
-    }
-  };
-
-  // Phase 2b: Check client certificate requirement
-  // If the server requires mTLS (has client_ca_certs) but the
-  // client did not present a certificate, reject with 403.
+  // QUIC/TLS already authenticated any presented client certificate
+  // against this listener's combined CA roots. Only the requirement
+  // for a non-anonymous connection depends on the routed server.
+  // Do not revalidate certificates per stream or compare the proxy's
+  // SNI with the request authority, which can name a tunnel target.
   if routing_entry.requires_client_cert() && !client_cert_presented {
     let resp = build_error_response(
       http::StatusCode::FORBIDDEN,
       "Forbidden: client certificate required",
     );
-    let mut stream = stream;
-    if let Err(e) = send_h3_response(&mut stream, resp, true).await {
+    let mut stream = ResponseWriter::new(stream);
+    if let Err(e) = stream.send(resp).await {
       warn!("Failed to send 403 response: {e}");
     }
     return;
   }
 
-  let mut service = routing_entry.service.clone();
+  let service = routing_entry.service.clone();
 
   // Phase 3: Build RequestContext with connection-level keys and insert
   // into request extensions. Auth and access logging are now handled
@@ -141,19 +100,12 @@ pub(super) async fn handle_h3_stream(
       let body = RequestBody::new(BytesBufBodyWrapper::new(
         H3RecvBody::new(recv_stream),
       ));
-      (body, Some(send_stream), None)
+      (body, Some(ResponseWriter::new(send_stream)), None)
     };
 
-  let mut request = http::Request::builder()
-    .method(req.method().clone())
-    .uri(req.uri().clone())
-    .version(req.version())
-    .body(request_body)
-    .expect("failed to build request");
-
-  for (name, value) in req.headers() {
-    request.headers_mut().insert(name.clone(), value.clone());
-  }
+  let (parts, ()) = req.into_parts();
+  let mut request = http::Request::from_parts(parts, request_body);
+  crate::hop_headers::join_cookie_headers(request.headers_mut());
 
   // Insert RequestContext into request extensions
   request.extensions_mut().insert(ctx);
@@ -167,7 +119,7 @@ pub(super) async fn handle_h3_stream(
   };
 
   // Phase 6: Call Service
-  let result = service.call(request).await;
+  let result = service.oneshot(request).await;
 
   // Phase 7: Handle Service response
   match result {
@@ -206,7 +158,7 @@ pub(super) async fn handle_h3_stream(
           }
         }
       } else if let Some(ref mut stream) = stream_holder
-        && let Err(e) = send_h3_response(stream, resp, true).await
+        && let Err(e) = stream.send(resp).await
       {
         warn!("H3 failed to send response: {e}");
       }
@@ -225,7 +177,7 @@ pub(super) async fn handle_h3_stream(
           http::StatusCode::BAD_GATEWAY,
           "Bad Gateway",
         );
-        if let Err(e) = send_h3_response(stream, resp, true).await {
+        if let Err(e) = stream.send(resp).await {
           warn!("H3 failed to send error response: {e}");
         }
       }
@@ -233,121 +185,55 @@ pub(super) async fn handle_h3_stream(
   }
 }
 
-/// Send an HTTP/3 response with optional stream finish
-///
-/// # Arguments
-/// * `stream` - The HTTP/3 send stream (send half or full bidi stream)
-/// * `resp` - The HTTP response to send
-/// * `finish_stream` - If true, close the stream after sending
-///   response. Should be false for CONNECT success response to allow
-///   bidirectional data transfer.
-pub(super) async fn send_h3_response<S>(
-  stream: &mut server::RequestStream<S, Bytes>,
-  resp: Response,
-  finish_stream: bool,
-) -> anyhow::Result<()>
-where
-  S: h3::quic::SendStream<Bytes>,
-{
-  let (parts, body) = resp.into_parts();
-  let resp = http::Response::from_parts(parts, ());
-
-  // Send response headers
-  stream.send_response(resp).await?;
-
-  // Send response body if any
-  let body_bytes = body.collect().await?.to_bytes();
-  if !body_bytes.is_empty() {
-    stream.send_data(body_bytes).await?;
-  }
-
-  // Finish the stream only if requested
-  // For CONNECT success, we don't finish to allow bidirectional
-  // transfer
-  if finish_stream {
-    stream.finish().await?;
-  }
-
-  Ok(())
+/// Cancelling an exchange must reset its response stream. Dropping a
+/// Quinn sender alone sends FIN, which can disguise a truncated body.
+struct ResponseWriter<S: h3::quic::SendStream<Bytes>> {
+  stream: server::RequestStream<S, Bytes>,
+  finished: bool,
 }
 
-// ============================================================================
-// HTTP/3 Connection Handler
-// ============================================================================
+impl<S: h3::quic::SendStream<Bytes>> ResponseWriter<S> {
+  fn new(stream: server::RequestStream<S, Bytes>) -> Self {
+    Self { stream, finished: false }
+  }
 
-/// Handle a single HTTP/3 connection
-pub(super) async fn handle_h3_connection(
-  conn: quinn::Connection,
-  server_routing_table: Vec<crate::server::Server>,
-  stream_tracker: Rc<StreamTracker>,
-  shutdown_handle: ShutdownHandle,
-  local_addr: SocketAddr,
-) {
-  let client_addr = conn.remote_address();
-
-  // Check whether client presented a certificate during TLS handshake
-  let client_cert_presented = conn.peer_identity().is_some();
-
-  // Build ServerRouter once for the entire connection
-  let server_router =
-    crate::server::ServerRouter::build(server_routing_table);
-
-  // Create H3 connection
-  let mut h3_conn = match h3::server::builder()
-    .build(h3_quinn::Connection::new(conn))
-    .await
-  {
-    Ok(c) => c,
-    Err(e) => {
-      warn!("Failed to create H3 connection: {e}");
-      return;
-    }
-  };
-
-  // Accept and handle streams
-  loop {
-    let accept_result = tokio::select! {
-      res = h3_conn.accept() => res,
-      _ = shutdown_handle.notified() => {
-        // Graceful shutdown
-        break;
-      }
-    };
-
-    match accept_result {
-      Ok(Some(resolver)) => {
-        let server_router = server_router.clone();
-        let stream_shutdown = stream_tracker.shutdown_handle();
-        stream_tracker.register(async move {
-          match resolver.resolve_request().await {
-            Ok((req, stream)) => {
-              handle_h3_stream(
-                req,
-                stream,
-                server_router,
-                stream_shutdown,
-                client_addr,
-                local_addr,
-                client_cert_presented,
-              )
-              .await;
-            }
-            Err(e) => {
-              warn!("Failed to resolve request: {e}");
-            }
+  async fn send(&mut self, response: Response) -> anyhow::Result<()> {
+    let (mut parts, mut body) = response.into_parts();
+    // Preserve this proxy's locally generated 407 challenge.
+    crate::hop_headers::strip_connection_headers(&mut parts.headers);
+    self
+      .stream
+      .send_response(http::Response::from_parts(parts, ()))
+      .await?;
+    while let Some(frame) = body.frame().await {
+      let frame = frame?;
+      match frame.into_data() {
+        Ok(data) => {
+          if !data.is_empty() {
+            self.stream.send_data(data).await?;
           }
-        });
-      }
-      Ok(None) => {
-        // Connection closed
-        break;
-      }
-      Err(e) => {
-        if !e.is_h3_no_error() {
-          warn!("connection from {client_addr} on {local_addr}: {e}");
         }
-        break;
+        Err(frame) => {
+          if let Ok(mut trailers) = frame.into_trailers() {
+            crate::hop_headers::strip_trailer_headers(&mut trailers);
+            self.stream.send_trailers(trailers).await?;
+            self.stream.finish().await?;
+            self.finished = true;
+            return Ok(());
+          }
+        }
       }
+    }
+    self.stream.finish().await?;
+    self.finished = true;
+    Ok(())
+  }
+}
+
+impl<S: h3::quic::SendStream<Bytes>> Drop for ResponseWriter<S> {
+  fn drop(&mut self) {
+    if !self.finished {
+      self.stream.stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
     }
   }
 }

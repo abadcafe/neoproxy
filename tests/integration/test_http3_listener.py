@@ -24,19 +24,11 @@ import time
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-    StringMap,
-)
-from .utils.config_builders import (
-    create_http3_listener_config,
-)
-from .utils.helpers import (
-    NEOPROXY_BINARY,
-    start_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.binary import NEOPROXY_BINARY
+from tests.fixtures.configuration import StringMap
+from tests.fixtures.h3_configuration import create_http3_listener_config
+from tests.fixtures.ports import get_unique_port, wait_for_udp_port_bound
+from tests.fixtures.proxy_process import BytesProcess, start_proxy
 
 # Alias for backward compatibility in this file
 
@@ -44,55 +36,6 @@ from .utils.helpers import (
 # ==============================================================================
 # Test helper functions (unique to this module)
 # ==============================================================================
-
-
-def run_curl_http3_connect(
-    proxy_host: str,
-    proxy_port: int,
-    target_host: str,
-    target_port: int,
-    cert_path: str | None = None,
-    ca_path: str | None = None,
-    username: str | None = None,
-    password: str | None = None,
-    timeout: float = 10.0,
-) -> tuple[int, str, str]:
-    """
-    Use curl to send HTTP/3 CONNECT request through proxy chain.
-
-    Note: This tests the HTTP/3 chain service by using curl's HTTP proxy
-    feature, which then connects to the HTTP/3 backend.
-
-    Args:
-        proxy_host: Proxy server host
-        proxy_port: Proxy server port
-        target_host: Target server host
-        target_port: Target server port
-        cert_path: Optional client certificate path
-        ca_path: Optional CA certificate path for server verification
-        username: Optional username for proxy auth
-        password: Optional password for proxy auth
-        timeout: Request timeout
-
-    Returns:
-        tuple[int, str, str]: (return_code, stdout, stderr)
-    """
-    cmd = [
-        "curl",
-        "-s",
-        "-p",
-        "-x",
-        f"http://{proxy_host}:{proxy_port}",
-        "--connect-timeout",
-        str(int(timeout)),
-        f"http://{target_host}:{target_port}/",
-    ]
-
-    if username and password:
-        cmd.extend(["-U", f"{username}:{password}"])
-
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 5)
-    return result.returncode, result.stdout, result.stderr
 
 
 # ==============================================================================
@@ -135,7 +78,7 @@ class TestHTTP3BasicConnection:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_http3_listener_graceful_shutdown(
@@ -171,7 +114,7 @@ class TestHTTP3BasicConnection:
                 return_code = proxy_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proxy_proc.kill()
-                proxy_proc.wait()
+                _ = proxy_proc.wait()
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0
@@ -180,7 +123,7 @@ class TestHTTP3BasicConnection:
         finally:
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -222,7 +165,7 @@ class TestHTTP3Authentication:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -281,7 +224,7 @@ servers:
 """
             config_path = os.path.join(temp_dir, "invalid_config.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
@@ -294,7 +237,7 @@ servers:
                 return_code = proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait()
+                _ = proc.wait()
                 assert False, "Process did not exit within expected time"
 
             # Should exit with error code
@@ -346,7 +289,7 @@ servers:
 """
             config_path = os.path.join(temp_dir, "invalid_config.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
@@ -359,7 +302,7 @@ servers:
                 return_code = proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait()
+                _ = proc.wait()
                 assert False, "Process did not exit within expected time"
 
             assert return_code == 1, f"Expected exit code 1, got {return_code}"
@@ -385,7 +328,7 @@ servers:
             key_path2 = os.path.join(temp_dir, "wrong.key")
             _key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
             with open(key_path2, "wb") as _f:
-                _f.write(
+                _ = _f.write(
                     _key.private_bytes(
                         serialization.Encoding.PEM,
                         serialization.PrivateFormat.TraditionalOpenSSL,
@@ -423,7 +366,7 @@ servers:
 """
             config_path = os.path.join(temp_dir, "mismatch_config.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
@@ -436,7 +379,7 @@ servers:
                 return_code = proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait()
+                _ = proc.wait()
                 assert False, "Process did not exit within expected time"
 
             # Should exit with error code due to key mismatch
@@ -492,7 +435,7 @@ class TestHTTP3ConfigValidation:
             proxy_proc = start_proxy(config_path)
 
             # Invalid value is rejected at startup (bail!)
-            proxy_proc.wait(timeout=5)
+            _ = proxy_proc.wait(timeout=5)
             assert proxy_proc.returncode != 0, (
                 "HTTP/3 listener should reject invalid max_concurrent_bidi_streams"
             )
@@ -500,12 +443,13 @@ class TestHTTP3ConfigValidation:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_missing_required_fields(self) -> None:
         """
-        TC-H3-CFG-002: Missing required fields causes startup failure (NEW config format).
+        TC-H3-CFG-002: Missing required fields causes startup failure (NEW config
+        format).
 
         Target: Verify HTTP/3 listener fails without server-level TLS configuration
         using the new config format.
@@ -540,7 +484,7 @@ servers:
 """
             config_path = os.path.join(temp_dir, "missing_fields.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
@@ -553,7 +497,7 @@ servers:
                 return_code = proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait()
+                _ = proc.wait()
                 assert False, "Process did not exit within expected time"
 
             assert return_code != 0, f"Expected non-zero exit code, got {return_code}"
@@ -563,7 +507,8 @@ servers:
 
     def test_invalid_address_format(self, shared_test_certs: StringMap) -> None:
         """
-        TC-H3-CFG-003: Invalid address format causes startup failure (NEW config format).
+        TC-H3-CFG-003: Invalid address format causes startup failure (NEW config
+        format).
 
         Target: Verify HTTP/3 listener fails with invalid address
         using the new config format with server-level TLS.
@@ -603,7 +548,7 @@ servers:
 """
             config_path = os.path.join(temp_dir, "invalid_addr.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
@@ -616,7 +561,7 @@ servers:
                 return_code = proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait()
+                _ = proc.wait()
                 assert False, "Process did not exit within expected time"
 
             assert return_code != 0, f"Expected non-zero exit code, got {return_code}"
@@ -656,11 +601,11 @@ class TestHTTP3GracefulShutdown:
                 "HTTP/3 listener failed to start"
             )
 
-            start_time = time.time()
+            start_time = time.monotonic()
             proxy_proc.send_signal(signal.SIGTERM)
 
             return_code = proxy_proc.wait(timeout=5)
-            elapsed = time.time() - start_time
+            elapsed = time.monotonic() - start_time
 
             assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
@@ -670,7 +615,7 @@ class TestHTTP3GracefulShutdown:
         finally:
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_shutdown_with_multiple_workers(self, shared_test_certs: StringMap) -> None:
@@ -706,7 +651,7 @@ class TestHTTP3GracefulShutdown:
                 return_code = proxy_proc.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 proxy_proc.kill()
-                proxy_proc.wait()
+                _ = proxy_proc.wait()
                 assert False, "Process did not exit within expected time"
 
             assert return_code == 0, f"Expected exit code 0, got {return_code}"
@@ -714,7 +659,7 @@ class TestHTTP3GracefulShutdown:
         finally:
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -748,9 +693,7 @@ class TestHTTP3EchoService:
         """
         import asyncio
 
-        from .utils.http3_client import (
-            H3Client,
-        )
+        from tests.fixtures.http3_client import H3Client
 
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
@@ -787,7 +730,7 @@ servers:
 """
             config_path = os.path.join(temp_dir, "echo_config.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             proxy_proc = subprocess.Popen(
                 [NEOPROXY_BINARY, "--config", config_path],
@@ -800,7 +743,7 @@ servers:
             )
 
             # Send a GET request using HTTP/3 client
-            async def do_get_request():
+            async def do_get_request() -> tuple[bool, int, bytes]:
                 client = H3Client("127.0.0.1", proxy_port, ca_path=ca_path)
                 connected = await asyncio.wait_for(client.connect(), timeout=15.0)
                 if not connected:
@@ -829,7 +772,7 @@ servers:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
 
             # Check log files for errors
             log_dir = os.path.join(temp_dir, "logs")
@@ -839,8 +782,8 @@ servers:
                     with open(log_path, "r", errors="replace") as f:
                         log_content = f.read()
                         assert "Service dropped the receiver" not in log_content, (
-                            f"Should not have 'Service dropped the receiver' error in logs. "
-                            f"File: {log_file}, Content: {log_content}"
+                            "Should not have 'Service dropped the receiver' error in"
+                            + f" logs. File: {log_file}, Content: {log_content}"
                         )
 
             shutil.rmtree(temp_dir, ignore_errors=True)

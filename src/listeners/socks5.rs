@@ -9,8 +9,6 @@
 //!   authentication)
 //! - `command` — SOCKS5 command processing (CONNECT/BIND/UDP ASSOCIATE)
 
-#![allow(clippy::await_holding_refcell_ref)]
-
 mod command;
 mod handshake;
 
@@ -24,14 +22,13 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use base64::Engine;
 use command::{CommandError, read_command_and_target};
 use handshake::{
   DEFAULT_HANDSHAKE_TIMEOUT, HandshakeError, perform_handshake,
 };
 use serde::Deserialize;
-use tower::Service;
 
+use super::tcp_accept::{self, AcceptRetryDelay};
 use super::tcp_listener_base::TcpListenerBase;
 use crate::config::SerializedArgs;
 use crate::http_message::{BytesBufBodyWrapper, RequestBody};
@@ -56,18 +53,25 @@ struct Socks5Listener {
   service: RuntimeService,
   /// Handshake timeout duration.
   handshake_timeout: Duration,
+  accept_retry_delay: AcceptRetryDelay,
   /// Service name for identification in logs.
   service_name: String,
 }
 
 impl Socks5Listener {
   /// Create a new Socks5Listener from parsed configuration.
-  #[allow(clippy::new_ret_no_self)]
-  fn new(
+  fn build(
     addresses: Vec<String>,
     args: Socks5ListenerArgs,
     server_routing_table: Vec<crate::server::Server>,
   ) -> Result<Listener> {
+    anyhow::ensure!(
+      !args.handshake_timeout.is_zero()
+        && std::time::Instant::now()
+          .checked_add(args.handshake_timeout)
+          .is_some(),
+      "handshake_timeout must be positive and representable"
+    );
     let addresses = resolve_addresses(&addresses)?;
 
     let service = server_routing_table
@@ -85,6 +89,7 @@ impl Socks5Listener {
       base: TcpListenerBase::new(),
       service,
       handshake_timeout: args.handshake_timeout,
+      accept_retry_delay: args.accept_retry_delay,
       service_name,
     }))
   }
@@ -113,33 +118,18 @@ impl Socks5Listener {
     let listener = super::tcp_bind::create_tcp_listener(addr)?;
     let stream_tracker = self.base.stream_tracker();
     let shutdown_handle = self.base.shutdown_handle();
+    let accept_retry_delay = self.accept_retry_delay;
 
     let accepting_fut = async move {
       tracing::info!("SOCKS5 listener started on {}", addr);
 
       let accepting = || async {
-        match listener.accept().await {
-          Err(e) => {
-            // Distinguish between fatal and temporary errors
-            // Fatal errors should exit the accept loop
-            if is_fatal_accept_error(&e) {
-              tracing::error!(
-                "fatal accept error on {}: {}, shutting down listener",
-                addr,
-                e
-              );
-              // Return true to signal fatal error
-              true
-            } else {
-              // Temporary error, log and continue
-              tracing::warn!(
-                "temporary accept error on {}: {}, continuing",
-                addr,
-                e
-              );
-              false
-            }
-          }
+        match tcp_accept::accept(addr, accept_retry_delay, || {
+          listener.accept()
+        })
+        .await
+        {
+          Err(error) => return Err(error),
           Ok((stream, peer_addr)) => {
             tracing::info!(
               "SOCKS5 connection established from {}",
@@ -147,7 +137,7 @@ impl Socks5Listener {
             );
 
             // Clone handles for use in connection handler
-            let mut service = service.clone();
+            let service = service.clone();
             let service_name = service_name.clone();
 
             // Register connection handler
@@ -220,47 +210,58 @@ impl Socks5Listener {
                 }
               };
 
-              // Step 2: Read command and target address
-              let command_result =
-                match read_command_and_target(handshake_result.proto)
-                  .await
-                {
-                  Ok(result) => result,
-                  Err(e) => {
-                    // Command error responses are already sent
-                    match e {
-                      CommandError::CommandNotSupported { command } => {
-                        tracing::warn!(
-                          "SOCKS5 command {} not supported from {}",
-                          command,
-                          peer_addr
-                        );
-                      }
-                      CommandError::UnknownCommand { command } => {
-                        tracing::warn!(
-                          "SOCKS5 unknown command {} from {}",
-                          command,
-                          peer_addr
-                        );
-                      }
-                      CommandError::ClientDisconnected => {
-                        tracing::warn!(
-                          "SOCKS5 client disconnected during command \
-                           processing from {}",
-                          peer_addr
-                        );
-                      }
-                      CommandError::IoError(e) => {
-                        tracing::warn!(
-                          "SOCKS5 command read error from {}: {}",
-                          peer_addr,
-                          e
-                        );
-                      }
+              // Bound the command phase as well as authentication.
+              let command = match tokio::time::timeout(
+                handshake_timeout,
+                read_command_and_target(handshake_result.proto),
+              )
+              .await
+              {
+                Ok(result) => result,
+                Err(_) => {
+                  tracing::warn!(
+                    "SOCKS5 command timed out from {peer_addr}"
+                  );
+                  return;
+                }
+              };
+              let command_result = match command {
+                Ok(result) => result,
+                Err(e) => {
+                  // Command error responses are already sent
+                  match e {
+                    CommandError::CommandNotSupported { command } => {
+                      tracing::warn!(
+                        "SOCKS5 command {} not supported from {}",
+                        command,
+                        peer_addr
+                      );
                     }
-                    return;
+                    CommandError::UnknownCommand { command } => {
+                      tracing::warn!(
+                        "SOCKS5 unknown command {} from {}",
+                        command,
+                        peer_addr
+                      );
+                    }
+                    CommandError::ClientDisconnected => {
+                      tracing::warn!(
+                        "SOCKS5 client disconnected during command \
+                         processing from {}",
+                        peer_addr
+                      );
+                    }
+                    CommandError::IoError(e) => {
+                      tracing::warn!(
+                        "SOCKS5 command read error from {}: {}",
+                        peer_addr,
+                        e
+                      );
+                    }
                   }
-                };
+                  return;
+                }
+              };
 
               // Step 3: Create upgrade pair
               let (trigger, on_upgrade) =
@@ -272,29 +273,39 @@ impl Socks5Listener {
                 extract_host_port(&command_result.target_addr);
               let uri = format_connect_uri(&host, port);
 
-              let mut request = http::Request::builder()
+              let request = http::Request::builder()
                 .method(http::Method::CONNECT)
                 .uri(&uri)
                 .version(http::Version::HTTP_11)
                 .body(RequestBody::new(BytesBufBodyWrapper::new(
                   http_body_util::Empty::<bytes::Bytes>::new(),
-                )))
-                .expect("failed to build CONNECT request");
+                )));
+              let mut request = match request {
+                Ok(request) => request,
+                Err(error) => {
+                  tracing::warn!("invalid SOCKS5 target: {error}");
+                  let _ = trigger
+                    .send_error(
+                      fast_socks5::ReplyError::AddressTypeNotSupported,
+                    )
+                    .await;
+                  return;
+                }
+              };
 
-              // Inject SOCKS5 credentials as Proxy-Authorization header
-              // so the auth middleware can verify them
+              // The complete target is now available. Carry credentials
+              // unchanged into the HTTP service; do not validate them
+              // in the protocol adapter. Typed fields
+              // also preserve SOCKS5 usernames containing
+              // ':' that HTTP Basic cannot encode without
+              // changing the username/password boundary.
               if let (Some(username), Some(password)) =
-                (&handshake_result.username, &handshake_result.password)
+                (handshake_result.username, handshake_result.password)
               {
-                let credentials =
-                  base64::engine::general_purpose::STANDARD
-                    .encode(format!("{username}:{password}"));
-                request.headers_mut().insert(
-                  "Proxy-Authorization",
-                  http::HeaderValue::from_str(&format!(
-                    "Basic {credentials}"
-                  ))
-                  .unwrap(),
+                request.extensions_mut().insert(
+                  crate::auth::ProxyCredentials::new(
+                    username, password,
+                  ),
                 );
               }
 
@@ -312,7 +323,8 @@ impl Socks5Listener {
               request.extensions_mut().insert(ctx);
 
               // Step 5: Call the associated Service
-              let result = service.call(request).await;
+              let result =
+                tower::ServiceExt::oneshot(service, request).await;
 
               // Step 6: Based on Response, send SOCKS5 reply via
               // trigger
@@ -358,9 +370,9 @@ impl Socks5Listener {
                 }
               }
             });
-            false
           }
         }
+        Ok::<(), std::io::Error>(())
       };
 
       let shutdown = || async {
@@ -370,13 +382,7 @@ impl Socks5Listener {
       // Main accept loop
       loop {
         tokio::select! {
-          fatal = accepting() => {
-            if fatal {
-              // Fatal error, exit loop
-              break;
-            }
-            // Continue accepting connections
-          }
+          result = accepting() => result.with_context(|| format!("SOCKS5 accept failed on {addr}"))?,
           _ = shutdown() => {
             // Graceful shutdown for the TcpListener
             tracing::info!("SOCKS5 listener on {} shutting down", addr);
@@ -422,13 +428,7 @@ impl Listening for Socks5Listener {
         self.service_name.clone(),
       ) {
         Ok(f) => tasks.push(f),
-        Err(e) => {
-          tracing::error!(
-            "failed to start listener on {}: {}",
-            addr,
-            e
-          );
-        }
+        Err(error) => return Box::pin(future::ready(Err(error))),
       }
     }
 
@@ -454,6 +454,7 @@ impl Clone for Socks5Listener {
       base: TcpListenerBase::new(),
       service: self.service.clone(),
       handshake_timeout: self.handshake_timeout,
+      accept_retry_delay: self.accept_retry_delay,
       service_name: self.service_name.clone(),
     }
   }
@@ -464,11 +465,15 @@ impl Clone for Socks5Listener {
 struct Socks5ListenerArgs {
   /// Handshake timeout duration.
   handshake_timeout: Duration,
+  accept_retry_delay: AcceptRetryDelay,
 }
 
 impl Default for Socks5ListenerArgs {
   fn default() -> Self {
-    Self { handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT }
+    Self {
+      handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+      accept_retry_delay: Default::default(),
+    }
   }
 }
 
@@ -482,6 +487,8 @@ fn parse_config(args: SerializedArgs) -> Result<Socks5ListenerArgs> {
       default = "default_handshake_timeout"
     )]
     handshake_timeout: Duration,
+    #[serde(default)]
+    accept_retry_delay: AcceptRetryDelay,
   }
 
   fn default_handshake_timeout() -> Duration {
@@ -491,19 +498,10 @@ fn parse_config(args: SerializedArgs) -> Result<Socks5ListenerArgs> {
   let config: ConfigYaml = serde_yaml::from_value(args)
     .context("failed to parse SOCKS5 listener config")?;
 
-  Ok(Socks5ListenerArgs { handshake_timeout: config.handshake_timeout })
-}
-
-/// Determines if an accept error is fatal and should stop the listener.
-fn is_fatal_accept_error(e: &std::io::Error) -> bool {
-  use std::io::ErrorKind;
-  matches!(
-    e.kind(),
-    ErrorKind::InvalidInput
-      | ErrorKind::InvalidData
-      | ErrorKind::NotFound
-      | ErrorKind::PermissionDenied
-  )
+  Ok(Socks5ListenerArgs {
+    handshake_timeout: config.handshake_timeout,
+    accept_retry_delay: config.accept_retry_delay,
+  })
 }
 
 /// Resolves address strings to SocketAddr.
@@ -565,7 +563,7 @@ pub(crate) fn create_listener_builder() -> Box<dyn BuildListener> {
      args: SerializedArgs,
      server_routing_table: Vec<crate::server::Server>| {
       let listener_args = parse_config(args)?;
-      Socks5Listener::new(
+      Socks5Listener::build(
         addresses,
         listener_args,
         server_routing_table,

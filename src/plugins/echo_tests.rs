@@ -13,13 +13,14 @@ use crate::plugin::Plugin;
 
 #[test]
 fn test_echo_service_new() {
-  let result = EchoService::new(serde_yaml::Value::Null);
+  let result = EchoService::build(serde_yaml::Value::Null);
   assert!(result.is_ok());
 }
 
 #[test]
 fn test_echo_service_poll_ready() {
-  let mut service = EchoService::new(serde_yaml::Value::Null).unwrap();
+  let mut service =
+    EchoService::build(serde_yaml::Value::Null).unwrap();
   let waker = noop_waker();
   let mut cx = Context::from_waker(&waker);
   let result = Service::poll_ready(&mut service, &mut cx);
@@ -39,7 +40,8 @@ fn make_echo_request(body: &[u8]) -> Request {
 
 #[tokio::test]
 async fn test_echo_service_call_empty_body() {
-  let mut service = EchoService::new(serde_yaml::Value::Null).unwrap();
+  let mut service =
+    EchoService::build(serde_yaml::Value::Null).unwrap();
   let req = make_echo_request(b"");
   let fut = service.call(req);
   let resp = fut.await.unwrap();
@@ -50,7 +52,8 @@ async fn test_echo_service_call_empty_body() {
 
 #[tokio::test]
 async fn test_echo_service_call_with_body() {
-  let mut service = EchoService::new(serde_yaml::Value::Null).unwrap();
+  let mut service =
+    EchoService::build(serde_yaml::Value::Null).unwrap();
   let req = make_echo_request(b"hello world");
   let fut = service.call(req);
   let resp = fut.await.unwrap();
@@ -61,7 +64,8 @@ async fn test_echo_service_call_with_body() {
 
 #[tokio::test]
 async fn test_echo_service_call_large_body() {
-  let mut service = EchoService::new(serde_yaml::Value::Null).unwrap();
+  let mut service =
+    EchoService::build(serde_yaml::Value::Null).unwrap();
   let large_data = vec![0u8; 1024 * 1024]; // 1MB
   let req = make_echo_request(&large_data);
   let fut = service.call(req);
@@ -104,4 +108,12 @@ fn test_echo_plugin_new_creates_builder() {
   let builder = plugin.service_builder("echo").unwrap();
   let service = builder(serde_yaml::Value::Null);
   assert!(service.is_ok());
+}
+
+#[test]
+fn test_build_rejects_unknown_service_arguments() {
+  assert!(
+    EchoService::build(serde_yaml::from_str("unknown: true").unwrap())
+      .is_err()
+  );
 }

@@ -21,21 +21,12 @@ import tempfile
 from collections.abc import Generator
 from contextlib import contextmanager
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-    StringMap,
-)
-from .utils.certs import generate_test_certificates
-from .utils.config_builders import (
-    create_http3_chain_config,
-)
-from .utils.helpers import (
-    send_raw_request,
-    start_proxy,
-    terminate_process,
-    wait_for_proxy,
-)
+from tests.fixtures.certificates import generate_test_certificates
+from tests.fixtures.configuration import StringMap
+from tests.fixtures.h3_configuration import create_http3_chain_config
+from tests.fixtures.http_request import send_raw_request
+from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 
 
 def parse_http_response(
@@ -155,7 +146,8 @@ class TestHTTP3ChainConnectValidation:
             status_code, _status_text, headers, _body = parse_http_response(response)
 
             assert status_code == 400, (
-                f"Expected 400 for origin-form GET, got {status_code}. Response: {response.decode(errors='ignore')}"
+                f"Expected 400 for origin-form GET, got {status_code}. Response:"
+                + f" {response.decode(errors='ignore')}"
             )
 
             assert "content-type" in headers, (
@@ -188,7 +180,8 @@ class TestHTTP3ChainConnectValidation:
             status_code, _, _, _ = parse_http_response(response)
 
             assert status_code == 400, (
-                f"Expected 400 for missing port, got {status_code}. Response: {response.decode(errors='ignore')}"
+                f"Expected 400 for missing port, got {status_code}. Response:"
+                + f" {response.decode(errors='ignore')}"
             )
 
     def test_connect_port_zero_returns_400(self, shared_test_certs: StringMap) -> None:
@@ -212,7 +205,8 @@ class TestHTTP3ChainConnectValidation:
             status_code, _, _, _ = parse_http_response(response)
 
             assert status_code == 400, (
-                f"Expected 400 for port zero, got {status_code}. Response: {response.decode(errors='ignore')}"
+                f"Expected 400 for port zero, got {status_code}. Response:"
+                + f" {response.decode(errors='ignore')}"
             )
 
     def test_connect_no_authority_returns_400(
@@ -238,7 +232,8 @@ class TestHTTP3ChainConnectValidation:
             status_code, _, _, _ = parse_http_response(response)
 
             assert status_code == 400, (
-                f"Expected 400 for no authority, got {status_code}. Response: {response.decode(errors='ignore')}"
+                f"Expected 400 for no authority, got {status_code}. Response:"
+                + f" {response.decode(errors='ignore')}"
             )
 
 
@@ -338,7 +333,7 @@ servers:
 """
             config_path = os.path.join(temp_dir, "bad_address.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             proxy_proc = start_proxy(config_path)
 

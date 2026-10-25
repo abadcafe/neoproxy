@@ -11,7 +11,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use anyhow::Result;
 use tracing::{info, warn};
@@ -21,6 +20,7 @@ use self::upstream::UpstreamRegistry;
 use crate::config::SerializedArgs;
 use crate::plugin::Plugin;
 use crate::service::{BuildService, Service};
+use crate::shutdown::SERVICE_SHUTDOWN_TIMEOUT;
 use crate::tracker::StreamTracker;
 
 mod config;
@@ -42,8 +42,6 @@ mod service_tests;
 mod target_parser_tests;
 #[cfg(test)]
 mod upstream_tests;
-
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ============================================================================
 // Plugin
@@ -67,7 +65,7 @@ impl HttpUpstreamPlugin {
     let upstream_registry = registry.clone();
     let upstream_builder: Box<dyn BuildService> =
       Box::new(move |args: SerializedArgs| -> Result<Service> {
-        service::UpstreamService::new(
+        service::UpstreamService::build(
           args,
           upstream_st.clone(),
           upstream_registry.clone(),
@@ -103,17 +101,24 @@ impl Plugin for HttpUpstreamPlugin {
 
     Box::pin(async move {
       info!("http_upstream: starting graceful shutdown");
+      // Established tunnels have no HTTP message completion boundary.
+      // Stop transfers now, then wait for cleanup; this timeout is not
+      // a grace period for continued tunnel traffic. Listener draining
+      // has already allowed ordinary HTTP exchanges to finish first.
       st.shutdown();
       registry.borrow_mut().close_all();
 
-      match st.wait_shutdown_with_timeout(SHUTDOWN_TIMEOUT).await {
+      match st
+        .wait_shutdown_with_timeout(SERVICE_SHUTDOWN_TIMEOUT)
+        .await
+      {
         Ok(()) => {
           info!("http_upstream: all streams closed gracefully")
         }
         Err(_) => {
           warn!(
             "http_upstream: shutdown timed out after \
-             {SHUTDOWN_TIMEOUT:?}, forcing close"
+             {SERVICE_SHUTDOWN_TIMEOUT:?}, forcing close"
           );
           st.abort_all();
           st.drain().await;

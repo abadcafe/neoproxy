@@ -11,7 +11,8 @@
 
 use serde::Deserialize;
 
-use super::SerializedArgs;
+use super::args::SerializedArgs;
+use crate::redaction::Redacted;
 
 /// Transport layer protocol type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,13 +68,28 @@ pub(crate) trait ListenerPropertiesProvider {
 }
 
 /// Top-level listener configuration.
-#[derive(Deserialize, Default, Clone, Debug)]
+#[derive(Deserialize, Default, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct ListenerConfig {
   pub(in crate::config) name: String,
   pub(in crate::config) kind: String,
   pub(in crate::config) addresses: Vec<String>,
   pub(in crate::config) args: SerializedArgs,
+}
+
+impl std::fmt::Debug for ListenerConfig {
+  fn fmt(
+    &self,
+    formatter: &mut std::fmt::Formatter<'_>,
+  ) -> std::fmt::Result {
+    formatter
+      .debug_struct("ListenerConfig")
+      .field("name", &self.name)
+      .field("kind", &self.kind)
+      .field("addresses", &self.addresses)
+      .field("args", &Redacted(&self.args))
+      .finish()
+  }
 }
 
 impl ListenerConfig {

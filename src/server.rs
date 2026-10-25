@@ -1,4 +1,3 @@
-#![allow(clippy::borrowed_box)]
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -7,43 +6,6 @@ use anyhow::Result;
 use tower::service_fn;
 
 use crate::service::Service;
-
-// ============================================================================
-// Hostname Matching
-// ============================================================================
-
-/// Check if a hostname matches a pattern.
-///
-/// Pattern can be:
-/// - Exact match: "api.example.com" matches exactly "api.example.com"
-/// - Wildcard match: "*.example.com" matches "foo.example.com" but not
-///   "example.com"
-///
-/// DNS matching is case-insensitive.
-fn matches_hostname(pattern: &str, hostname: &str) -> bool {
-  // DNS is case-insensitive
-  let pattern_lower = pattern.to_lowercase();
-  let hostname_lower = hostname.to_lowercase();
-
-  // Exact match
-  if pattern_lower == hostname_lower {
-    return true;
-  }
-
-  // Wildcard match
-  if let Some(suffix) = pattern_lower.strip_prefix("*.") {
-    // hostname must end with .suffix and have exactly one additional
-    // level
-    if let Some(rest) =
-      hostname_lower.strip_suffix(&format!(".{}", suffix))
-    {
-      // rest should not contain any dots (single level)
-      return !rest.contains('.');
-    }
-  }
-
-  false
-}
 
 /// Create a placeholder service for routing table initialization.
 /// The actual service is selected at request time from the routing
@@ -79,13 +41,17 @@ impl Server {
     self.service_name.clone()
   }
 
-  /// Check whether this server requires client certificate
-  /// authentication.
-  ///
-  /// Returns true if the server has TLS config with client CA
-  /// certificates configured, meaning mTLS is required.
+  /// Whether HTTPS/H3 requests routed here require an authenticated
+  /// client connection. TLS has already validated any presented client
+  /// certificate against the listener's combined CA roots. This is a
+  /// presence requirement for a nonempty CA path list; omitted and
+  /// empty lists do not require a client certificate. Each listener
+  /// still has a shared trust domain across its associated servers.
   pub(crate) fn requires_client_cert(&self) -> bool {
-    self.tls.as_ref().and_then(|t| t.client_ca_certs()).is_some()
+    self
+      .tls
+      .as_ref()
+      .is_some_and(|tls| !tls.client_ca_certs().is_empty())
   }
 }
 
@@ -96,58 +62,63 @@ impl Server {
 /// default fallback.
 #[derive(Clone)]
 pub(crate) struct ServerRouter {
-  servers: Vec<Rc<Server>>,
+  routes: Rc<Routes>,
+}
+
+struct Routes {
+  exact: std::collections::HashMap<String, Rc<Server>>,
+  wildcards: std::collections::HashMap<String, Rc<Server>>,
+  default: Option<Rc<Server>>,
 }
 
 impl ServerRouter {
-  /// Build a router from a list of servers.
-  ///
-  /// Each server is wrapped in `Rc` for cheap cloning during routing.
   pub(crate) fn build(servers: Vec<Server>) -> Self {
-    let servers: Vec<Rc<Server>> =
-      servers.into_iter().map(Rc::new).collect();
-    Self { servers }
+    let mut routes = Routes {
+      exact: Default::default(),
+      wildcards: Default::default(),
+      default: None,
+    };
+    for server in servers {
+      let server = Rc::new(server);
+      if server.hostnames.is_empty() {
+        routes.default.get_or_insert(server.clone());
+      }
+      for pattern in &server.hostnames {
+        let normalized = crate::hostname::normalize(pattern);
+        if let Some(suffix) = normalized.strip_prefix("*.") {
+          routes
+            .wildcards
+            .entry(suffix.to_owned())
+            .or_insert_with(|| server.clone());
+        } else {
+          routes
+            .exact
+            .entry(normalized)
+            .or_insert_with(|| server.clone());
+        }
+      }
+    }
+    Self { routes: Rc::new(routes) }
   }
 
-  /// Route a request to the appropriate server based on hostname.
-  ///
-  /// Priority: exact match > wildcard match > default server (no
-  /// hostnames). Returns `None` if no match is found.
   pub(crate) fn route(
     &self,
     hostname: Option<&str>,
   ) -> Option<Rc<Server>> {
-    match hostname {
-      Some(h) => {
-        let mut wildcard_match: Option<Rc<Server>> = None;
-        let mut default_server: Option<Rc<Server>> = None;
-
-        for server in &self.servers {
-          if server.hostnames.is_empty() {
-            if default_server.is_none() {
-              default_server = Some(server.clone());
-            }
-            continue;
-          }
-
-          for pattern in &server.hostnames {
-            if matches_hostname(pattern, h) {
-              if pattern.starts_with("*.") {
-                if wildcard_match.is_none() {
-                  wildcard_match = Some(server.clone());
-                }
-              } else {
-                return Some(server.clone());
-              }
-            }
-          }
-        }
-        wildcard_match.or(default_server)
-      }
-      None => {
-        self.servers.iter().find(|s| s.hostnames.is_empty()).cloned()
-      }
-    }
+    let Some(hostname) = hostname else {
+      return self.routes.default.clone();
+    };
+    let hostname = crate::hostname::normalize(hostname);
+    self
+      .routes
+      .exact
+      .get(&hostname)
+      .or_else(|| {
+        crate::hostname::wildcard_suffix(&hostname)
+          .and_then(|suffix| self.routes.wildcards.get(suffix))
+      })
+      .cloned()
+      .or_else(|| self.routes.default.clone())
   }
 }
 

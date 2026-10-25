@@ -12,29 +12,18 @@ HTTP CONNECT regression testing is covered separately in test_http_connect.py.
 import os
 import shutil
 import socket
-import struct
 import tempfile
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
+from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
+from tests.fixtures.socks5_client import (
+    socks5_connect_domain,
+    socks5_connect_ipv4,
+    socks5_handshake_no_auth,
 )
-from .utils.helpers import (
-    create_target_server,
-    start_proxy,
-    terminate_process,
-    wait_for_proxy,
-)
-
-# SOCKS5 constants
-SOCKS5_VERSION = 0x05
-SOCKS5_AUTH_NONE = 0x00
-SOCKS5_CMD_CONNECT = 0x01
-SOCKS5_ATYP_IPV4 = 0x01
-SOCKS5_ATYP_DOMAIN = 0x03
-SOCKS5_ATYP_IPV6 = 0x04
-SOCKS5_REP_SUCCESS = 0x00
-SOCKS5_REP_CONNECTION_REFUSED = 0x05
+from tests.fixtures.socks5_protocol import AuthMethod, ReplyCode
+from tests.fixtures.socks5_result import CommandReply, MethodReply
+from tests.fixtures.tcp_peer import create_target_server
 
 
 def create_socks5_connect_tcp_config(
@@ -68,93 +57,27 @@ servers:
 """
     config_path = os.path.join(temp_dir, "config.yaml")
     with open(config_path, "w") as f:
-        f.write(config_content)
+        _ = f.write(config_content)
     return config_path
 
 
-def recv_exact(sock: socket.socket, n: int) -> bytes:
-    """Receive exactly n bytes from a socket, handling partial TCP reads.
-
-    TCP does not guarantee that recv(N) returns N bytes even for small
-    reads. This helper loops until all n bytes are received or the
-    connection is closed.
-    """
-    buf = b""
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            break
-        buf += chunk
-    return buf
+# REP field
 
 
-def socks5_handshake_no_auth(sock: socket.socket) -> None:
-    """Perform SOCKS5 handshake with no authentication."""
-    # Send greeting: VER=5, NMETHODS=1, METHOD=NO_AUTH
-    sock.sendall(bytes([SOCKS5_VERSION, 0x01, SOCKS5_AUTH_NONE]))
-    # Receive method selection
-    resp = recv_exact(sock, 2)
-    assert len(resp) >= 2, f"Short handshake response: {len(resp)} bytes"
-    assert resp[0] == SOCKS5_VERSION, f"Expected SOCKS5 version, got {resp[0]}"
-    assert resp[1] == SOCKS5_AUTH_NONE, f"Expected no auth, got {resp[1]}"
-
-
-def socks5_connect_ipv4(
-    sock: socket.socket,
-    host: str,
-    port: int,
-) -> int:
-    """Send SOCKS5 CONNECT request for IPv4 target. Returns reply code."""
-    ip_bytes = socket.inet_aton(host)
-    # VER=5, CMD=CONNECT, RSV=0, ATYP=IPv4, DST.ADDR, DST.PORT
-    req = bytes([SOCKS5_VERSION, SOCKS5_CMD_CONNECT, 0x00, SOCKS5_ATYP_IPV4])
-    req += ip_bytes + struct.pack("!H", port)
-    sock.sendall(req)
-    # Read reply (10 bytes for IPv4: VER, REP, RSV, ATYP, 4-byte addr, 2-byte port)
-    reply = recv_exact(sock, 10)
-    assert len(reply) >= 10, f"Short SOCKS5 reply: {len(reply)} bytes"
-    assert reply[0] == SOCKS5_VERSION
-    return reply[1]  # REP field
-
-
-def socks5_connect_domain(
-    sock: socket.socket,
-    domain: str,
-    port: int,
-) -> int:
-    """Send SOCKS5 CONNECT request for domain target. Returns reply code."""
-    domain_bytes = domain.encode("ascii")
-    req = bytes([SOCKS5_VERSION, SOCKS5_CMD_CONNECT, 0x00, SOCKS5_ATYP_DOMAIN])
-    req += bytes([len(domain_bytes)]) + domain_bytes + struct.pack("!H", port)
-    sock.sendall(req)
-    # Read reply header (4 bytes: VER, REP, RSV, ATYP)
-    header = recv_exact(sock, 4)
-    assert len(header) >= 4, f"Short SOCKS5 reply header: {len(header)} bytes"
-    assert header[0] == SOCKS5_VERSION
-    # Read the remaining bind address + port based on ATYP
-    # so leftover bytes don't pollute subsequent data transfer.
-    atyp = header[3]
-    if atyp == SOCKS5_ATYP_IPV4:
-        # 4 bytes IPv4 addr + 2 bytes port
-        recv_exact(sock, 6)
-    elif atyp == SOCKS5_ATYP_DOMAIN:
-        # 1 byte domain len + domain bytes + 2 bytes port
-        domain_len_buf = recv_exact(sock, 1)
-        if domain_len_buf:
-            recv_exact(sock, domain_len_buf[0] + 2)
-    elif atyp == SOCKS5_ATYP_IPV6:
-        # 16 bytes IPv6 addr + 2 bytes port
-        recv_exact(sock, 18)
-    return header[1]  # REP field
+# REP field
 
 
 class TestSocks5UpgradeConnectTcp:
     """Test SOCKS5 CONNECT through connect_tcp service."""
 
+    temp_dir: str = ""
+    processes: list[BytesProcess] = []
+    sockets: list[socket.socket] = []
+
     def setup_method(self) -> None:
         self.temp_dir = tempfile.mkdtemp(prefix="neoproxy_upgrade_test_")
-        self.processes: list[BytesProcess] = []
-        self.sockets: list[socket.socket] = []
+        self.processes = []
+        self.sockets = []
 
     def teardown_method(self) -> None:
         for proc in self.processes:
@@ -213,9 +136,10 @@ class TestSocks5UpgradeConnectTcp:
         self.sockets.append(sock)
         sock.connect(("127.0.0.1", proxy_port))
 
-        socks5_handshake_no_auth(sock)
+        assert socks5_handshake_no_auth(sock) == MethodReply(AuthMethod.NONE)
         rep = socks5_connect_ipv4(sock, "127.0.0.1", target_port)
-        assert rep == SOCKS5_REP_SUCCESS, f"Expected success, got REP={rep}"
+        assert isinstance(rep, CommandReply)
+        assert rep.code is ReplyCode.SUCCESS, f"Expected success, got REP={rep}"
 
         # Bidirectional transfer
         test_data = b"Hello from SOCKS5 upgrade test!"
@@ -236,9 +160,10 @@ class TestSocks5UpgradeConnectTcp:
         self.sockets.append(sock)
         sock.connect(("127.0.0.1", proxy_port))
 
-        socks5_handshake_no_auth(sock)
+        assert socks5_handshake_no_auth(sock) == MethodReply(AuthMethod.NONE)
         rep = socks5_connect_domain(sock, "localhost", target_port)
-        assert rep == SOCKS5_REP_SUCCESS, f"Expected success, got REP={rep}"
+        assert isinstance(rep, CommandReply)
+        assert rep.code is ReplyCode.SUCCESS, f"Expected success, got REP={rep}"
 
         test_data = b"Domain target test data"
         sock.sendall(test_data)
@@ -258,10 +183,11 @@ class TestSocks5UpgradeConnectTcp:
         self.sockets.append(sock)
         sock.connect(("127.0.0.1", proxy_port))
 
-        socks5_handshake_no_auth(sock)
+        assert socks5_handshake_no_auth(sock) == MethodReply(AuthMethod.NONE)
         rep = socks5_connect_ipv4(sock, "127.0.0.1", closed_port)
+        assert isinstance(rep, CommandReply)
         # Should get a non-zero error reply (connection refused or general failure)
-        assert rep != SOCKS5_REP_SUCCESS, (
+        assert rep.code is not ReplyCode.SUCCESS, (
             f"Expected error reply for refused connection, got REP={rep}"
         )
 
@@ -281,9 +207,10 @@ class TestSocks5UpgradeConnectTcp:
         self.sockets.append(sock)
         sock.connect(("127.0.0.1", proxy_port))
 
-        socks5_handshake_no_auth(sock)
+        assert socks5_handshake_no_auth(sock) == MethodReply(AuthMethod.NONE)
         rep = socks5_connect_ipv4(sock, "127.0.0.1", closed_port)
-        assert rep == SOCKS5_REP_CONNECTION_REFUSED, (
+        assert isinstance(rep, CommandReply)
+        assert rep.code is ReplyCode.CONNECTION_REFUSED, (
             f"Expected REP=0x05 (Connection Refused), got REP={rep}"
         )
 
@@ -301,9 +228,10 @@ class TestSocks5UpgradeConnectTcp:
             sock.settimeout(5.0)
             self.sockets.append(sock)
             sock.connect(("127.0.0.1", proxy_port))
-            socks5_handshake_no_auth(sock)
+            assert socks5_handshake_no_auth(sock) == MethodReply(AuthMethod.NONE)
             rep = socks5_connect_ipv4(sock, "127.0.0.1", target_port)
-            assert rep == SOCKS5_REP_SUCCESS
+            assert isinstance(rep, CommandReply)
+            assert rep.code is ReplyCode.SUCCESS
             connections.append(sock)
 
         # Send different data on each connection
@@ -326,9 +254,10 @@ class TestSocks5UpgradeConnectTcp:
         self.sockets.append(sock)
         sock.connect(("127.0.0.1", proxy_port))
 
-        socks5_handshake_no_auth(sock)
+        assert socks5_handshake_no_auth(sock) == MethodReply(AuthMethod.NONE)
         rep = socks5_connect_ipv4(sock, "127.0.0.1", target_port)
-        assert rep == SOCKS5_REP_SUCCESS
+        assert isinstance(rep, CommandReply)
+        assert rep.code is ReplyCode.SUCCESS
 
         # Send 64KB of data
         test_data = b"X" * 65536

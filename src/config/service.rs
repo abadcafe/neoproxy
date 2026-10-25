@@ -1,13 +1,28 @@
-//! Service and layer configuration types.
+//! module: service
+//! responsibility: parse and expose configured services
+//! public operations: Service accessors and Debug, ServiceRaw::parse,
+//! validate_service
+//! data entities: Service, ServiceRaw
+//! tests: service_tests.rs; config_tests.rs via config's public
+//! interface
 
+mod kind;
+#[cfg(test)]
+mod kind_tests;
+mod layer;
+#[cfg(test)]
+mod layer_tests;
+use kind::parse_plugin_kind;
+pub(crate) use layer::Layer;
+use layer::LayerRaw;
 use serde::Deserialize;
 
-use super::{
-  ConfigError, ConfigErrorCollector, Layer, LayerRaw, SerializedArgs,
-};
+use super::args::SerializedArgs;
+use super::error::{ConfigError, ConfigErrorCollector};
+use crate::redaction::Redacted;
 
 /// Service configuration (raw, before kind parsing).
-#[derive(Deserialize, Default, Clone, Debug)]
+#[derive(Deserialize, Default, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct ServiceRaw {
   name: String,
@@ -16,14 +31,45 @@ pub(super) struct ServiceRaw {
   layers: Vec<LayerRaw>,
 }
 
+impl std::fmt::Debug for ServiceRaw {
+  fn fmt(
+    &self,
+    formatter: &mut std::fmt::Formatter<'_>,
+  ) -> std::fmt::Result {
+    formatter
+      .debug_struct("ServiceRaw")
+      .field("name", &self.name)
+      .field("kind", &self.kind)
+      .field("args", &Redacted(&self.args))
+      .field("layers", &self.layers)
+      .finish()
+  }
+}
+
 /// Service configuration (after kind parsing).
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub(crate) struct Service {
   pub(in crate::config) name: String,
   pub(in crate::config) plugin_name: String,
   pub(in crate::config) kind: String,
   pub(in crate::config) args: SerializedArgs,
   pub(in crate::config) layers: Vec<Layer>,
+}
+
+impl std::fmt::Debug for Service {
+  fn fmt(
+    &self,
+    formatter: &mut std::fmt::Formatter<'_>,
+  ) -> std::fmt::Result {
+    formatter
+      .debug_struct("Service")
+      .field("name", &self.name)
+      .field("plugin_name", &self.plugin_name)
+      .field("kind", &self.kind)
+      .field("args", &Redacted(&self.args))
+      .field("layers", &self.layers)
+      .finish()
+  }
 }
 
 impl Service {
@@ -45,52 +91,6 @@ impl Service {
 
   pub(crate) fn layers(&self) -> &[Layer] {
     &self.layers
-  }
-}
-
-/// Parse a `plugin_name.entity_name` kind string into (plugin_name,
-/// entity_name).
-///
-/// Requires exactly one dot separator with non-empty parts on both
-/// sides.
-fn parse_plugin_kind(
-  kind: &str,
-  entity_name: &str,
-) -> anyhow::Result<(String, String)> {
-  if kind.is_empty() {
-    return Err(anyhow::anyhow!(
-      "invalid {} kind '', expected 'plugin_name.{}_name'",
-      entity_name,
-      entity_name
-    ));
-  }
-  let dot_count = kind.matches('.').count();
-  if dot_count != 1 {
-    return Err(anyhow::anyhow!(
-      "invalid {} kind '{}', expected 'plugin_name.{}_name'",
-      entity_name,
-      kind,
-      entity_name
-    ));
-  }
-  let parts: Vec<&str> = kind.splitn(2, '.').collect();
-  let plugin_name = parts[0];
-  let name = parts[1];
-  if plugin_name.is_empty() || name.is_empty() {
-    return Err(anyhow::anyhow!(
-      "invalid {} kind '{}', expected 'plugin_name.{}_name'",
-      entity_name,
-      kind,
-      entity_name
-    ));
-  }
-  Ok((plugin_name.to_string(), name.to_string()))
-}
-
-impl LayerRaw {
-  pub(super) fn parse(self) -> anyhow::Result<Layer> {
-    let (plugin_name, kind) = parse_plugin_kind(&self.kind, "layer")?;
-    Ok(Layer { plugin_name, kind, args: self.args })
   }
 }
 

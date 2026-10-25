@@ -3,11 +3,11 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use serde::Deserialize;
 
-use super::defaults::{
-  default_idle_timeout, default_keep_alive_interval,
-  default_max_idle_per_host, default_weight,
+use super::defaults::default_weight;
+use super::protocol::{
+  Http3ProtocolConfig, HttpProtocolConfig, HttpsProtocolConfig,
+  PoolConfig, ProtocolKind,
 };
-use super::resolved::ProtocolKind;
 use crate::config::UserCredential;
 
 /// Global TLS client identity configuration. Shared across all
@@ -34,80 +34,6 @@ impl CertificateConfig {
       );
     }
     Ok(())
-  }
-}
-
-/// QUIC transport-layer configuration.
-/// Participates in three-level inheritance with field-level merge.
-#[derive(Deserialize, Clone, Debug, Default)]
-#[serde(deny_unknown_fields)]
-pub(super) struct QuicConfig {
-  #[serde(with = "humantime_serde", default)]
-  pub(super) max_idle_timeout: Option<Duration>,
-  #[serde(
-    with = "humantime_serde",
-    default = "default_keep_alive_interval"
-  )]
-  pub(super) keep_alive_interval: Duration,
-  #[serde(default)]
-  pub(super) max_concurrent_bidi_streams: Option<u64>,
-  #[serde(default)]
-  pub(super) initial_mtu: Option<u16>,
-  #[serde(default)]
-  pub(super) send_window: Option<u64>,
-  #[serde(default)]
-  pub(super) receive_window: Option<u64>,
-}
-
-/// HTTP protocol configuration. Participates in three-level
-/// inheritance.
-#[derive(Deserialize, Clone, Debug, Default)]
-#[serde(deny_unknown_fields)]
-pub(super) struct HttpProtocolConfig {
-  #[serde(with = "humantime_serde", default)]
-  pub(super) connect_timeout: Option<Duration>,
-}
-
-/// HTTPS protocol configuration. Participates in three-level
-/// inheritance.
-#[derive(Deserialize, Clone, Debug, Default)]
-#[serde(deny_unknown_fields)]
-pub(super) struct HttpsProtocolConfig {
-  #[serde(with = "humantime_serde", default)]
-  pub(super) connect_timeout: Option<Duration>,
-  #[serde(with = "humantime_serde", default)]
-  pub(super) tls_handshake_timeout: Option<Duration>,
-}
-
-/// HTTP/3 protocol configuration. Participates in three-level
-/// inheritance. No `connect_timeout` because QUIC connection timeout is
-/// governed by quinn transport config.
-#[derive(Deserialize, Clone, Debug, Default)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Http3ProtocolConfig {
-  #[serde(with = "humantime_serde", default)]
-  pub(super) tls_handshake_timeout: Option<Duration>,
-  #[serde(default)]
-  pub(super) quic: Option<QuicConfig>,
-}
-
-/// Connection pool configuration. At upstream level only, NOT
-/// inherited.
-#[derive(Deserialize, Clone, Debug)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PoolConfig {
-  #[serde(default = "default_max_idle_per_host")]
-  pub(crate) max_idle_per_host: usize,
-  #[serde(with = "humantime_serde", default = "default_idle_timeout")]
-  pub(crate) idle_timeout: Duration,
-}
-
-impl Default for PoolConfig {
-  fn default() -> Self {
-    Self {
-      max_idle_per_host: default_max_idle_per_host(),
-      idle_timeout: default_idle_timeout(),
-    }
   }
 }
 
@@ -177,6 +103,8 @@ pub(super) struct UpstreamConfig {
   pub(super) tunnel_idle_timeout: Option<Duration>,
   #[serde(with = "humantime_serde", default)]
   pub(super) dns_resolve_timeout: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) request_timeout: Option<Duration>,
   #[serde(default)]
   pub(super) user: Option<UserCredential>,
   #[serde(default)]
@@ -197,6 +125,8 @@ pub(crate) struct HttpUpstreamPluginConfig {
   pub(super) tunnel_idle_timeout: Option<Duration>,
   #[serde(with = "humantime_serde", default)]
   pub(super) dns_resolve_timeout: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) request_timeout: Option<Duration>,
   #[serde(default)]
   pub(super) user: Option<UserCredential>,
   #[serde(default)]

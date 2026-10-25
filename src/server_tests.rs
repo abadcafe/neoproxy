@@ -1,7 +1,7 @@
 //! Black-box tests for the server module.
 
 use std::rc::Rc;
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::task::{Context, Poll, Waker};
 
 use tower::Service;
 
@@ -208,21 +208,10 @@ fn test_server_router_none_hostname_no_default() {
 
 // ============== Placeholder Service Tests ==============
 
-// Create a no-op waker
-fn no_op_clone(_: *const ()) -> RawWaker {
-  no_op_raw_waker()
-}
-fn no_op(_: *const ()) {}
-fn no_op_raw_waker() -> RawWaker {
-  static VTABLE: RawWakerVTable =
-    RawWakerVTable::new(no_op_clone, no_op, no_op, no_op);
-  RawWaker::new(std::ptr::null(), &VTABLE)
-}
-
 #[test]
 fn test_placeholder_service_poll_ready() {
-  let waker = unsafe { Waker::from_raw(no_op_raw_waker()) };
-  let mut cx = Context::from_waker(&waker);
+  let waker = Waker::noop();
+  let mut cx = Context::from_waker(waker);
 
   let mut service = placeholder_service();
   match service.poll_ready(&mut cx) {
@@ -295,4 +284,35 @@ fn test_matches_hostname_case_insensitive_via_router() {
   let router = ServerRouter::build(servers);
   // DNS is case-insensitive
   assert!(router.route(Some("API.EXAMPLE.COM")).is_some());
+}
+
+#[test]
+fn test_route_rejects_empty_wildcard_label_and_accepts_root_dot() {
+  let router = ServerRouter::build(vec![Server {
+    hostnames: vec!["*.example.com".into()],
+    service: placeholder_service(),
+    service_name: "wildcard".into(),
+    tls: None,
+  }]);
+  assert!(router.route(Some(".example.com")).is_none());
+  assert!(router.route(Some("API.EXAMPLE.COM.")).is_some());
+}
+#[test]
+fn test_requires_client_cert_only_for_nonempty_ca_paths() {
+  for (ca_setting, required) in [
+    ("", false),
+    ("client_ca_certs: []\n", false),
+    ("client_ca_certs: [ca.pem]\n", true),
+  ] {
+    let tls =
+      serde_yaml::from_str(&format!("certificates: []\n{ca_setting}"))
+        .unwrap();
+    let server = crate::server::Server {
+      hostnames: vec![],
+      service: crate::server::placeholder_service(),
+      service_name: "client-ca".into(),
+      tls: Some(tls),
+    };
+    assert_eq!(server.requires_client_cert(), required);
+  }
 }

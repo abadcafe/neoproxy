@@ -16,15 +16,12 @@ import subprocess
 import tempfile
 import time
 
-from .conftest import get_unique_port
-from .types import (
+from tests.fixtures.http_configuration import create_test_config
+from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.proxy_process import (
     BytesProcess,
-)
-from .utils.helpers import (
-    create_test_config,
     start_proxy,
     wait_for_process_running,
-    wait_for_proxy,
 )
 
 # ==============================================================================
@@ -54,7 +51,7 @@ servers: []
 """
     config_path = os.path.join(temp_dir, "empty_config.yaml")
     with open(config_path, "w") as f:
-        f.write(config_content)
+        _ = f.write(config_content)
     return config_path
 
 
@@ -92,7 +89,7 @@ class TestBoundaryConditions:
             )
 
             # Record start time
-            start_time = time.time()
+            start_time = time.monotonic()
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -100,10 +97,10 @@ class TestBoundaryConditions:
             # Wait for process to exit
             try:
                 return_code = proxy_proc.wait(timeout=5.0)
-                elapsed = time.time() - start_time
+                elapsed = time.monotonic() - start_time
             except subprocess.TimeoutExpired:
                 proxy_proc.kill()
-                proxy_proc.wait()
+                _ = proxy_proc.wait()
                 assert False, (
                     "Process did not exit within expected time (no worker threads)"
                 )
@@ -119,7 +116,7 @@ class TestBoundaryConditions:
         finally:
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_empty_config_sigint(self) -> None:
@@ -149,7 +146,7 @@ class TestBoundaryConditions:
                 return_code = proxy_proc.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
                 proxy_proc.kill()
-                proxy_proc.wait()
+                _ = proxy_proc.wait()
                 assert False, "Process did not exit within expected time"
 
             # Verify exit code is 0
@@ -158,7 +155,7 @@ class TestBoundaryConditions:
         finally:
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -189,11 +186,11 @@ class TestShutdownTiming:
                 "Proxy server failed to start"
             )
 
-            start_time = time.time()
+            start_time = time.monotonic()
             proxy_proc.send_signal(signal.SIGTERM)
 
             return_code = proxy_proc.wait(timeout=10)
-            elapsed = time.time() - start_time
+            elapsed = time.monotonic() - start_time
 
             assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
@@ -203,7 +200,7 @@ class TestShutdownTiming:
         finally:
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -243,8 +240,8 @@ class TestLogVerification:
 
             # Wait for log directory to be flushed to disk
             log_dir = os.path.join(temp_dir, "logs")
-            start_wait = time.time()
-            while time.time() - start_wait < 2.0:
+            start_wait = time.monotonic()
+            while time.monotonic() - start_wait < 2.0:
                 if os.path.exists(log_dir):
                     break
                 time.sleep(0.05)
@@ -273,5 +270,5 @@ class TestLogVerification:
         finally:
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)

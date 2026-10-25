@@ -12,8 +12,9 @@ import os
 import subprocess
 import tempfile
 
-from .conftest import get_unique_port
-from .utils.helpers import NEOPROXY_BINARY, wait_for_process_running
+from tests.fixtures.binary import NEOPROXY_BINARY
+from tests.fixtures.ports import get_unique_port
+from tests.fixtures.proxy_process import wait_for_process_running
 
 # ==============================================================================
 # Test helper functions
@@ -42,7 +43,7 @@ def run_neoproxy_with_config(
         if config_content is None:
             raise ValueError("Either config_content or config_path must be provided")
         temp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
-        temp_file.write(config_content)
+        _ = temp_file.write(config_content)
         temp_file.close()
         config_path = temp_file.name
 
@@ -62,7 +63,7 @@ def run_neoproxy_with_config(
 def write_and_close_stdin(proc: subprocess.Popen[str], config: str) -> None:
     stdin = proc.stdin
     assert stdin is not None
-    stdin.write(config)
+    _ = stdin.write(config)
     stdin.close()
 
 
@@ -309,7 +310,7 @@ servers:
   service: echo
 """
         temp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
-        temp_file.write(config)
+        _ = temp_file.write(config)
         temp_file.close()
 
         proc = subprocess.Popen(
@@ -325,7 +326,7 @@ servers:
         finally:
             if proc.poll() is None:
                 proc.terminate()
-                proc.wait(timeout=5)
+                _ = proc.wait(timeout=5)
             os.unlink(temp_file.name)
 
 
@@ -384,7 +385,7 @@ servers:
             )
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
-            proxy_proc.wait()
+            _ = proxy_proc.wait()
             raise AssertionError("Process should have exited")
 
     def test_empty_addresses_list(self) -> None:
@@ -435,7 +436,7 @@ servers:
             )
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
-            proxy_proc.wait()
+            _ = proxy_proc.wait()
             raise AssertionError("Process should have exited")
 
     def test_invalid_address_format(self) -> None:
@@ -525,7 +526,7 @@ servers:
             )
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
-            proxy_proc.wait()
+            _ = proxy_proc.wait()
             raise AssertionError("Process should have exited")
 
     def test_unknown_field_ca_path_in_service(self) -> None:
@@ -574,11 +575,12 @@ servers:
         try:
             exit_code = proxy_proc.wait(timeout=5.0)
             assert exit_code != 0, (
-                f"Expected non-zero exit code for unknown field ca_path, got {exit_code}"
+                "Expected non-zero exit code for "
+                + f"unknown field ca_path, got {exit_code}"
             )
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
-            proxy_proc.wait()
+            _ = proxy_proc.wait()
             raise AssertionError("Process should have exited")
 
     def test_invalid_handshake_timeout_format(self) -> None:
@@ -629,11 +631,12 @@ servers:
         try:
             exit_code = proxy_proc.wait(timeout=5.0)
             assert exit_code != 0, (
-                f"Expected non-zero exit code for invalid timeout format, got {exit_code}"
+                "Expected non-zero exit code for invalid timeout format, got"
+                + f" {exit_code}"
             )
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
-            proxy_proc.wait()
+            _ = proxy_proc.wait()
             raise AssertionError("Process should have exited")
 
     def test_client_ca_path_rejected_in_socks5(self) -> None:
@@ -685,11 +688,12 @@ servers:
         try:
             exit_code = proxy_proc.wait(timeout=5.0)
             assert exit_code != 0, (
-                f"Expected non-zero exit code for client_ca_path in SOCKS5, got {exit_code}"
+                "Expected non-zero exit code for client_ca_path in SOCKS5, got"
+                + f" {exit_code}"
             )
         except subprocess.TimeoutExpired:
             proxy_proc.kill()
-            proxy_proc.wait()
+            _ = proxy_proc.wait()
             raise AssertionError("Process should have exited")
 
 
@@ -704,7 +708,7 @@ class TestHostnameRouting:
     @staticmethod
     def _write_config(config_content: str) -> str:
         temp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
-        temp_file.write(config_content)
+        _ = temp_file.write(config_content)
         temp_file.close()
         return temp_file.name
 
@@ -955,7 +959,7 @@ servers:
         finally:
             if proc.poll() is None:
                 proc.terminate()
-                proc.wait(timeout=5)
+                _ = proc.wait(timeout=5)
 
     def test_wildcard_and_exact_no_conflict(self) -> None:
         """
@@ -978,9 +982,6 @@ listeners:
 - name: http_wildcard
   kind: http
   addresses: ["127.0.0.1:{http_port}"]
-- name: http_specific
-  kind: http
-  addresses: ["127.0.0.1:{http_port}"]
 
 servers:
 - name: wildcard
@@ -989,7 +990,7 @@ servers:
   service: echo
 - name: specific
   hostnames: ["api.example.com"]
-  listeners: ["http_specific"]
+  listeners: ["http_wildcard"]
   service: echo
 """
         proc = subprocess.Popen(
@@ -1003,7 +1004,7 @@ servers:
         finally:
             if proc.poll() is None:
                 proc.terminate()
-                proc.wait(timeout=5)
+                _ = proc.wait(timeout=5)
 
     def test_different_hostnames_no_conflict(self) -> None:
         """
@@ -1026,9 +1027,6 @@ listeners:
 - name: http_a
   kind: http
   addresses: ["127.0.0.1:{http_port}"]
-- name: http_b
-  kind: http
-  addresses: ["127.0.0.1:{http_port}"]
 
 servers:
 - name: server_a
@@ -1037,7 +1035,7 @@ servers:
   service: echo
 - name: server_b
   hostnames: ["web.example.com"]
-  listeners: ["http_b"]
+  listeners: ["http_a"]
   service: echo
 """
         proc = subprocess.Popen(
@@ -1051,4 +1049,4 @@ servers:
         finally:
             if proc.poll() is None:
                 proc.terminate()
-                proc.wait(timeout=5)
+                _ = proc.wait(timeout=5)

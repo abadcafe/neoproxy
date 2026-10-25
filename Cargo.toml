@@ -21,7 +21,7 @@ serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9.34"
 tower = { version = "0.5.2", features = ["full"] }
-time = { version = "0.3.4", features = ["local-offset"] }
+time = { version = "0.3.4", features = ["local-offset", "macros", "formatting"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["local-time",
   "env-filter"] }
@@ -31,12 +31,15 @@ rustls-pemfile = "2.2.0"
 rustls-native-certs = "0.8.2"
 tokio-rustls = "0.26"
 rustls-openssl = { version = "0.3", optional = true }
-h3 = "0.0.8"
-h3-quinn = { version = "0.0.10", features = ["datagram"] }
+# Allow future 0.0.x releases; update this pair together in Cargo.lock.
+h3 = "~0.0.8"
+h3-quinn = { version = "~0.0.10", features = ["datagram"] }
 quinn = { version = "0.11.9", features = ["qlog", "rustls", "rustls-log"] }
-tokio-util = { version = "0.7.17", features = ["io"] }
+socket2 = { version = "0.6.3", features = ["all"] }
+tokio-util = { version = "0.7.17", features = ["io", "rt"] }
 futures-core = "0.3.31"
 local-channel = "0.1.5"
+libc = "0.2"
 base64 = "0.22"
 fast-socks5 = "1.0.0"
 subtle = "2"

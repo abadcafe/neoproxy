@@ -10,10 +10,9 @@ use super::defaults::{
   default_keep_alive_interval, default_tls_handshake_timeout,
   default_tunnel_idle_timeout,
 };
-use super::raw::{HttpUpstreamPluginConfig, QuicConfig};
-use super::resolved::{
-  Address, Protocol, ProtocolKind, QuicResolved, Upstream,
-};
+use super::protocol::{ProtocolKind, QuicConfig};
+use super::raw::HttpUpstreamPluginConfig;
+use super::resolved::{Address, Protocol, QuicResolved, Upstream};
 use super::validation::validate_plugin_config;
 use crate::config::UserCredential;
 
@@ -30,9 +29,9 @@ fn merge_quic_field_level(
       plugin.and_then(|q| q.max_idle_timeout).as_ref(),
     ),
     keep_alive_interval: resolve_field_with_default(
-      addr.map(|q| q.keep_alive_interval).as_ref(),
-      upstream.map(|q| q.keep_alive_interval).as_ref(),
-      plugin.map(|q| q.keep_alive_interval).as_ref(),
+      addr.and_then(|q| q.keep_alive_interval).as_ref(),
+      upstream.and_then(|q| q.keep_alive_interval).as_ref(),
+      plugin.and_then(|q| q.keep_alive_interval).as_ref(),
       default_keep_alive_interval(),
     ),
     max_concurrent_bidi_streams: resolve_field(
@@ -180,6 +179,12 @@ pub(crate) fn merge_chain_config(
         connect_timeout,
         tunnel_idle_timeout,
         dns_resolve_timeout,
+        request_timeout: resolve_field_with_default(
+          upstream.request_timeout.as_ref(),
+          plugin.request_timeout.as_ref(),
+          None,
+          std::time::Duration::from_secs(30),
+        ),
       },
     );
   }

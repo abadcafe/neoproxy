@@ -1,77 +1,72 @@
-//! HTTP header validation for listener request routing.
-//!
-//! Provides authority-vs-host consistency checks and request routing
-//! based on the Host header via ServerRouter.
+//! module: header_validation
+//! responsibilities: select a validated routing authority for incoming
+//! HTTP requests public operations: authority_host_mismatch,
+//! validate_and_route data entities: none
+//! tests: header_validation_tests.rs
 
 use std::rc::Rc;
 
+use crate::http_authority;
 use crate::http_message::{Response, build_error_response};
 use crate::server::{Server, ServerRouter};
 
-/// Check if authority and Host header values differ.
-///
-/// Per RFC 9114 §4.3.1, if both `:authority` and Host are present,
-/// they MUST contain the same value. Comparison is case-insensitive.
-///
-/// # Arguments
-/// * `authority_str` - The full authority string (e.g.,
-///   "example.com:443")
-/// * `host_header` - The raw Host header value
-///
-/// # Returns
-/// `true` if authority and Host differ (mismatch), `false` otherwise
 pub(crate) fn authority_host_mismatch(
-  authority_str: &str,
-  host_header: &str,
+  authority: &str,
+  host: &str,
 ) -> bool {
-  if authority_str.is_empty() || host_header.is_empty() {
-    return false;
-  }
-  authority_str.to_lowercase() != host_header.to_lowercase()
+  !authority.eq_ignore_ascii_case(host)
 }
 
-/// Validate request headers and route to the correct server.
-///
-/// Checks that a Host header is present, that it is consistent with
-/// `:authority` (if present), and routes the request to a server via
-/// the `ServerRouter`.
-///
-/// Returns `Ok(routing_entry)` on success, or `Err(error_response)`
-/// if validation or routing fails.
 pub(crate) fn validate_and_route<B>(
   req: &http::Request<B>,
   router: &ServerRouter,
 ) -> Result<Rc<Server>, Box<Response>> {
-  // Host header is required
-  let host_header = match req
-    .headers()
-    .get(http::header::HOST)
-    .and_then(|h| h.to_str().ok())
-    .map(|s| s.to_string())
-  {
-    Some(h) => h,
-    None => {
-      return Err(Box::new(build_error_response(
-        http::StatusCode::BAD_REQUEST,
-        "Bad Request: Host header is required",
-      )));
-    }
-  };
-
-  // If :authority exists, it must equal Host header
-  if let Some(authority) = req.uri().authority()
-    && authority_host_mismatch(authority.as_ref(), &host_header)
-  {
-    return Err(Box::new(build_error_response(
+  let bad_request = || {
+    Box::new(build_error_response(
       http::StatusCode::BAD_REQUEST,
-      "Bad Request: :authority and Host headers differ",
-    )));
+      "Bad Request: invalid authority or Host",
+    ))
+  };
+  let mut hosts = req.headers().get_all(http::header::HOST).iter();
+  let host = hosts
+    .next()
+    .map(|value| value.to_str().map_err(|_| bad_request()))
+    .transpose()?;
+  if hosts.next().is_some() {
+    return Err(bad_request());
   }
-
-  // Route via Host header
-  let host = host_header.split(':').next().unwrap_or(&host_header);
-  match router.route(Some(host)) {
-    Some(entry) => Ok(entry),
-    None => Err(Box::new(super::error_response::build_404_response())),
+  let host_authority = host
+    .map(|host| {
+      let authority = host
+        .parse::<http::uri::Authority>()
+        .map_err(|_| bad_request())?;
+      http_authority::normalize(&authority).map_err(|_| bad_request())
+    })
+    .transpose()?;
+  // HTTP/1.1 requires a Host field even for absolute-form requests.
+  if req.version() == http::Version::HTTP_11 && host.is_none() {
+    return Err(bad_request());
   }
+  let authority = req.uri().authority();
+  if let Some(authority) = authority
+    && req.version() == http::Version::HTTP_3
+    && host.is_some_and(|host| {
+      authority_host_mismatch(authority.as_str(), host)
+    })
+  {
+    return Err(bad_request());
+  }
+  let normalized_authority = authority
+    .map(http_authority::normalize)
+    .transpose()
+    .map_err(|_| bad_request())?;
+  // RFC 9112 §3.2.2: absolute-form target replaces the supplied Host.
+  let authority =
+    normalized_authority.as_ref().or(host_authority.as_ref());
+  if authority.is_none() {
+    return Err(bad_request());
+  }
+  router.route(authority.map(http::uri::Authority::host)).ok_or_else(
+    || Box::new(super::error_response::build_404_response()),
+  )
 }

@@ -5,7 +5,6 @@
 //! - Concrete listener implementations (http, https, http3, socks5)
 //! - Shared infrastructure (tcp_bind, http_service, header_validation)
 
-#![allow(clippy::borrowed_box)]
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -22,9 +21,15 @@ pub(crate) mod error_response;
 pub(crate) mod header_validation;
 pub(crate) mod http;
 pub(crate) mod http3;
+mod http_connection;
+#[cfg(test)]
+mod http_connection_tests;
 pub(crate) mod http_service;
 pub(crate) mod https;
 pub(crate) mod socks5;
+mod tcp_accept;
+#[cfg(test)]
+mod tcp_accept_tests;
 pub(crate) mod tcp_bind;
 pub(crate) mod tcp_listener_base;
 
@@ -41,26 +46,10 @@ pub(crate) struct ListenerManager {
 impl ListenerManager {
   pub(crate) fn new() -> Self {
     let builders = HashMap::from([
-      (
-        http::listener_name(),
-        Box::new(http::create_listener_builder())
-          as Box<dyn BuildListener>,
-      ),
-      (
-        https::listener_name(),
-        Box::new(https::create_listener_builder())
-          as Box<dyn BuildListener>,
-      ),
-      (
-        http3::listener_name(),
-        Box::new(http3::create_listener_builder())
-          as Box<dyn BuildListener>,
-      ),
-      (
-        socks5::listener_name(),
-        Box::new(socks5::create_listener_builder())
-          as Box<dyn BuildListener>,
-      ),
+      (http::listener_name(), http::create_listener_builder()),
+      (https::listener_name(), https::create_listener_builder()),
+      (http3::listener_name(), http3::create_listener_builder()),
+      (socks5::listener_name(), socks5::create_listener_builder()),
     ]);
     let props = HashMap::from([
       (http::listener_name(), http::props()),

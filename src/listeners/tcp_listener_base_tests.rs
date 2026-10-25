@@ -9,19 +9,51 @@ use anyhow::Result;
 
 use super::tcp_listener_base::TcpListenerBase;
 
+#[tokio::test]
+async fn test_tcp_listener_base_accept_failure_stops_peers_and_preserves_error()
+ {
+  tokio::task::LocalSet::new()
+    .run_until(async {
+      let base = TcpListenerBase::new();
+      let shutdown = base.shutdown_handle();
+      let peer_stopped = Rc::new(Cell::new(false));
+      let stopped = peer_stopped.clone();
+      let failure = async {
+        super::tcp_accept::accept(
+          "127.0.0.1:1234".parse().unwrap(),
+          Default::default(),
+          || {
+            std::future::ready(Err::<(), _>(
+              std::io::Error::from_raw_os_error(libc::EBADF),
+            ))
+          },
+        )
+        .await?;
+        Ok(())
+      };
+      let peer = async move {
+        shutdown.notified().await;
+        stopped.set(true);
+        Ok(())
+      };
+      let tasks: Vec<Pin<Box<dyn Future<Output = Result<()>>>>> =
+        vec![Box::pin(failure), Box::pin(peer)];
+      let result = base.start_with_tasks(tasks).await;
+      let error = result.unwrap_err();
+      assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().raw_os_error(),
+        Some(libc::EBADF)
+      );
+      assert!(base.shutdown_handle().is_shutdown());
+      assert!(peer_stopped.get());
+    })
+    .await;
+}
+
 #[test]
 fn test_new_initializes_empty_stream_tracker() {
   let base = TcpListenerBase::new();
   assert_eq!(base.stream_tracker().active_count(), 0);
-}
-
-#[test]
-fn test_new_sets_shutdown_timeout_to_3_seconds() {
-  let base = TcpListenerBase::new();
-  assert_eq!(
-    base.graceful_shutdown_timeout,
-    super::LISTENER_SHUTDOWN_TIMEOUT
-  );
 }
 
 #[tokio::test]
@@ -107,10 +139,8 @@ async fn test_tcp_listener_base_start_with_failing_task() {
       // Trigger shutdown
       base.stop();
 
-      // The future should still complete (errors are logged, not
-      // propagated)
       let result = handle.await.unwrap();
-      assert!(result.is_ok());
+      assert!(result.is_err());
     })
     .await;
 }

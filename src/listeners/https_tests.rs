@@ -4,6 +4,32 @@ use super::listener_args_fixture::empty_args;
 use super::server_fixtures::{no_tls_servers, tls_servers};
 use crate::listeners::https;
 
+#[test]
+fn test_https_builder_accept_retry_delay_can_be_configured() {
+  let args = serde_yaml::from_str("accept_retry_delay: 250ms").unwrap();
+  let result = https::create_listener_builder()(
+    vec!["127.0.0.1:0".into()],
+    args,
+    tls_servers(),
+  );
+  assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn test_https_builder_rejects_invalid_accept_retry_delay() {
+  for value in ["0s", "invalid", "18446744073709551615s"] {
+    let args =
+      serde_yaml::from_str(&format!("accept_retry_delay: {value:?}"))
+        .unwrap();
+    let result = https::create_listener_builder()(
+      vec!["127.0.0.1:0".into()],
+      args,
+      tls_servers(),
+    );
+    assert!(result.is_err(), "accepted invalid retry delay {value}");
+  }
+}
+
 // ========== listener_name ==========
 
 #[test]
@@ -109,4 +135,18 @@ fn test_https_builder_ipv6_address_succeeds() {
   let result =
     builder(vec!["[::1]:0".to_string()], empty_args(), tls_servers());
   assert!(result.is_ok());
+}
+
+#[test]
+fn test_https_builder_rejects_unrepresentable_deadlines() {
+  let builder = https::create_listener_builder();
+  for value in ["0s", "18446744073709551615s"] {
+    let args = serde_yaml::from_str(&format!(
+      "tls_handshake_timeout: {value:?}"
+    ))
+    .unwrap();
+    let result =
+      builder(vec!["127.0.0.1:0".into()], args, tls_servers());
+    assert!(result.is_err(), "accepted invalid deadline {value}");
+  }
 }

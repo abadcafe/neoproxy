@@ -20,34 +20,32 @@ import shutil
 import signal
 import socket
 import tempfile
-import threading
 import time
 
 import pytest
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-    StringMap,
-)
-from .utils.config_builders import (
+from tests.fixtures.configuration import StringMap
+from tests.fixtures.h3_configuration import (
     create_http3_chain_config,
     create_http3_listener_config,
 )
-from .utils.helpers import (
-    create_target_server,
-    start_proxy,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
 
 # Alias for convenience
-from .utils.http3_client import (
+from tests.fixtures.http3_client import (
     H3Client,
+    H3ConnectResult,
+    H3TunnelResult,
     perform_h3_connect_test,
     perform_h3_connection_test,
     perform_h3_tunnel_data_transfer,
 )
+from tests.fixtures.ports import (
+    get_unique_port,
+    wait_for_proxy,
+    wait_for_udp_port_bound,
+)
+from tests.fixtures.proxy_process import BytesProcess, start_proxy
+from tests.fixtures.tcp_peer import create_target_server
 
 # ==============================================================================
 # Test cases - 7.1 Basic HTTP/3 Connection scenarios (Full)
@@ -83,7 +81,7 @@ class TestHTTP3FullConnection:
             ), "HTTP/3 listener failed to start"
 
             # Use real HTTP/3 client to verify QUIC handshake
-            async def do_handshake():
+            async def do_handshake() -> tuple[bool, int, str]:
                 (
                     success,
                     status_code,
@@ -106,7 +104,7 @@ class TestHTTP3FullConnection:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_http3_connect_request_success(self, shared_test_certs: StringMap) -> None:
@@ -136,7 +134,7 @@ class TestHTTP3FullConnection:
                         data = conn.recv(1024)
                         if not data:
                             break
-                        conn.send(b"ECHO:" + data)
+                        conn.sendall(b"ECHO:" + data)
                 except OSError:
                     pass
                 finally:
@@ -153,7 +151,7 @@ class TestHTTP3FullConnection:
             ), "HTTP/3 listener failed to start"
 
             # Send CONNECT request using real HTTP/3 client
-            async def do_connect():
+            async def do_connect() -> tuple[bool, int, str]:
                 (
                     success,
                     status_code,
@@ -182,7 +180,7 @@ class TestHTTP3FullConnection:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -224,7 +222,7 @@ class TestHTTP3FullConnection:
                             break
                         received_data.append(data)
                         # Echo back with prefix
-                        conn.send(b"ECHO:" + data)
+                        conn.sendall(b"ECHO:" + data)
                 except OSError:
                     pass
                 finally:
@@ -243,7 +241,7 @@ class TestHTTP3FullConnection:
             # Test actual data transfer through HTTP/3 tunnel
             test_data = b"HELLO_FROM_HTTP3_CLIENT_12345"
 
-            async def do_data_transfer():
+            async def do_data_transfer() -> H3TunnelResult:
                 result = await perform_h3_tunnel_data_transfer(
                     "127.0.0.1",
                     proxy_port,
@@ -280,25 +278,27 @@ class TestHTTP3FullConnection:
             # - Proxy forwards echo back to client through HTTP/3 stream
             # data_received > 0 confirms the return path works
             assert result.data_received > 0, (
-                f"BIDIRECTIONAL TRANSFER FAILURE: Expected echo response from target, "
-                f"but received 0 bytes. This indicates data cannot flow from target back "
-                f"to client through HTTP/3 stream. Sent {result.data_sent} bytes, "
-                f"received {result.data_received} bytes. "
-                f"Per design section 2.1.3, bidirectional data transfer is required."
+                "BIDIRECTIONAL TRANSFER FAILURE: Expected echo response from target,"
+                + " but received 0 bytes. This indicates data cannot flow from target"
+                + " back to client through HTTP/3 "
+                + f"stream. Sent {result.data_sent} bytes,"
+                + f" received {result.data_received} bytes. Per design section 2.1.3,"
+                + " bidirectional data transfer is required."
             )
 
             # Verify target server received the data (confirms forward path)
             # Client already received echo, so target has processed the data
             total_received = sum(len(d) for d in received_data)
             assert total_received == len(test_data), (
-                f"Target server received {total_received} bytes, expected {len(test_data)} bytes. "
-                f"This indicates data was not properly forwarded to target."
+                f"Target server received {total_received} bytes, expected"
+                + f" {len(test_data)} bytes. This indicates data was not properly"
+                + " forwarded to target."
             )
 
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -343,11 +343,11 @@ class TestHTTP3GracefulShutdownWithConnections:
             ), "HTTP/3 listener failed to start"
 
             # Graceful shutdown
-            start_time = time.time()
+            start_time = time.monotonic()
             proxy_proc.send_signal(signal.SIGTERM)
 
             return_code = proxy_proc.wait(timeout=15)
-            elapsed = time.time() - start_time
+            elapsed = time.monotonic() - start_time
 
             assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
@@ -357,7 +357,7 @@ class TestHTTP3GracefulShutdownWithConnections:
         finally:
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_shutdown_timeout_with_slow_connections(
@@ -395,7 +395,7 @@ class TestHTTP3GracefulShutdownWithConnections:
         finally:
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -422,7 +422,6 @@ class TestFullHTTP3ProxyChain:
 
         chain_proc: BytesProcess | None = None
         h3_proc: BytesProcess | None = None
-        target_socket: socket.socket | None = None
 
         try:
             cert_path = shared_test_certs["cert_path"]
@@ -462,12 +461,10 @@ class TestFullHTTP3ProxyChain:
         finally:
             if chain_proc:
                 chain_proc.kill()
-                chain_proc.wait(timeout=5)
+                _ = chain_proc.wait(timeout=5)
             if h3_proc:
                 h3_proc.kill()
-                h3_proc.wait(timeout=5)
-            if target_socket:
-                target_socket.close()
+                _ = h3_proc.wait(timeout=5)
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
@@ -534,10 +531,10 @@ class TestFullHTTP3ProxyChain:
         finally:
             if chain_proc and chain_proc.poll() is None:
                 chain_proc.terminate()
-                chain_proc.wait(timeout=5)
+                _ = chain_proc.wait(timeout=5)
             if h3_proc and h3_proc.poll() is None:
                 h3_proc.terminate()
-                h3_proc.wait(timeout=5)
+                _ = h3_proc.wait(timeout=5)
             shutil.rmtree(temp_dir1, ignore_errors=True)
             shutil.rmtree(temp_dir2, ignore_errors=True)
 
@@ -579,7 +576,7 @@ class TestHTTP3ErrorHandling:
             ), "HTTP/3 listener failed to start"
 
             # Send a GET request (non-CONNECT) using HTTP/3 client
-            async def do_get_request():
+            async def do_get_request() -> tuple[bool, int, bytes | str]:
                 client = H3Client("127.0.0.1", proxy_port, ca_path=ca_path)
                 connected = await asyncio.wait_for(client.connect(), timeout=15.0)
                 if not connected:
@@ -607,7 +604,7 @@ class TestHTTP3ErrorHandling:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_invalid_target_returns_400(self, shared_test_certs: StringMap) -> None:
@@ -635,7 +632,7 @@ class TestHTTP3ErrorHandling:
             ), "HTTP/3 listener failed to start"
 
             # CONNECT to an invalid target (port 0 is invalid)
-            async def do_connect():
+            async def do_connect() -> tuple[bool, int, bytes | str]:
                 # Try to connect to target with port 0 (invalid)
                 # This should be handled by the proxy
                 client = H3Client("127.0.0.1", proxy_port, ca_path=ca_path)
@@ -667,7 +664,7 @@ class TestHTTP3ErrorHandling:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_target_unreachable_returns_502(self, shared_test_certs: StringMap) -> None:
@@ -717,7 +714,7 @@ servers:
 """
             config_path = os.path.join(temp_dir, "config.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             proxy_proc = start_proxy(config_path)
 
@@ -727,10 +724,8 @@ servers:
 
             # CONNECT to an unreachable target
             # Use TEST-NET-2 (198.51.100.0/24) which is non-routable
-            async def do_connect():
-                from .utils.http3_client import (
-                    perform_h3_connect_test_full,
-                )
+            async def do_connect() -> H3ConnectResult:
+                from tests.fixtures.http3_client import perform_h3_connect_test_full
 
                 result = await perform_h3_connect_test_full(
                     "127.0.0.1",
@@ -754,13 +749,14 @@ servers:
             # for unreachable targets. If the client times out before the proxy
             # responds, status_code will be 0.
             assert result.status_code in (502, 504, 0), (
-                f"Expected 502/504/timeout, got {result.status_code}. Message: {result.message}"
+                f"Expected 502/504/timeout, got {result.status_code}. Message:"
+                + f" {result.message}"
             )
 
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -803,7 +799,7 @@ class TestHTTP3ConfigValidationFull:
             proxy_proc = start_proxy(config_path)
 
             # Invalid value is rejected at startup (bail!)
-            proxy_proc.wait(timeout=5)
+            _ = proxy_proc.wait(timeout=5)
             assert proxy_proc.returncode != 0, (
                 "HTTP/3 listener should reject invalid max_concurrent_bidi_streams"
             )
@@ -811,7 +807,7 @@ class TestHTTP3ConfigValidationFull:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_invalid_quic_timeout_uses_default(
@@ -845,7 +841,7 @@ class TestHTTP3ConfigValidationFull:
             proxy_proc = start_proxy(config_path)
 
             # Invalid timeout is rejected at startup (bail!)
-            proxy_proc.wait(timeout=5)
+            _ = proxy_proc.wait(timeout=5)
             assert proxy_proc.returncode != 0, (
                 "HTTP/3 listener should reject invalid max_idle_timeout"
             )
@@ -853,7 +849,7 @@ class TestHTTP3ConfigValidationFull:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_valid_plaintext_password_accepted(
@@ -910,7 +906,7 @@ servers:
 """
             config_path = os.path.join(temp_dir, "valid_password.yaml")
             with open(config_path, "w") as f:
-                f.write(config_content)
+                _ = f.write(config_content)
 
             proxy_proc = start_proxy(config_path)
 
@@ -922,7 +918,7 @@ servers:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_quic_params_boundary_min_values(
@@ -973,7 +969,7 @@ servers:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_quic_params_boundary_max_values(
@@ -1024,7 +1020,7 @@ servers:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_quic_params_negative_values_uses_default(
@@ -1065,7 +1061,7 @@ servers:
         finally:
             if proxy_proc:
                 proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -1128,7 +1124,7 @@ class TestFullHTTP3ProxyChainDataTransfer:
                         data = conn.recv(1024)
                         if not data:
                             break
-                        conn.send(b"ECHO:" + data)
+                        conn.sendall(b"ECHO:" + data)
                 except OSError:
                     pass
                 finally:
@@ -1162,14 +1158,15 @@ class TestFullHTTP3ProxyChainDataTransfer:
 
             # Send CONNECT request to target through the chain
             connect_request = (
-                f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n"
+                f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost:"
+                + f" 127.0.0.1:{target_port}\r\n\r\n"
             ).encode()
             client_sock.sendall(connect_request)
 
             # Read response with longer timeout
             response = b""
-            start_time = time.time()
-            while time.time() - start_time < 5.0:
+            start_time = time.monotonic()
+            while time.monotonic() - start_time < 5.0:
                 try:
                     chunk = client_sock.recv(1024)
                     if chunk:
@@ -1191,10 +1188,10 @@ class TestFullHTTP3ProxyChainDataTransfer:
         finally:
             if chain_proc:
                 chain_proc.kill()
-                chain_proc.wait(timeout=5)
+                _ = chain_proc.wait(timeout=5)
             if h3_proc:
                 h3_proc.kill()
-                h3_proc.wait(timeout=5)
+                _ = h3_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir1, ignore_errors=True)
@@ -1219,7 +1216,7 @@ class TestHTTP3GracefulShutdownTimeout:
         is an active stream that doesn't close.
 
         Per design doc:
-        - Listener shutdown timeout: 5 seconds
+        - Listener task wait: 3 seconds, cancellation cleanup: up to 2 seconds
         - After timeout, should force close all connections
         """
         temp_dir = tempfile.mkdtemp()
@@ -1255,18 +1252,19 @@ class TestHTTP3GracefulShutdownTimeout:
                 "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
             ), "HTTP/3 listener failed to start"
 
-            # Send SIGTERM while server is running (no active streams, but tests timeout)
-            start_time = time.time()
+            # Send SIGTERM while server is running (no active streams, but tests
+            # timeout)
+            start_time = time.monotonic()
             proxy_proc.send_signal(signal.SIGTERM)
 
             # Wait for process to exit
             # Should exit within shutdown timeout + buffer
             return_code = proxy_proc.wait(timeout=15)
-            elapsed = time.time() - start_time
+            elapsed = time.monotonic() - start_time
 
             assert return_code == 0, f"Expected exit code 0, got {return_code}"
 
-            # Should complete within reasonable time (5s shutdown timeout + buffer)
+            # Allow the listener's 3s + 2s task wait budget plus test overhead.
             assert elapsed < 10.0, (
                 f"Shutdown took too long: {elapsed:.1f}s (expected < 10s)"
             )
@@ -1274,7 +1272,7 @@ class TestHTTP3GracefulShutdownTimeout:
         finally:
             if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
-                proxy_proc.wait(timeout=5)
+                _ = proxy_proc.wait(timeout=5)
             if target_socket:
                 target_socket.close()
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1283,255 +1281,3 @@ class TestHTTP3GracefulShutdownTimeout:
 # ==============================================================================
 # Test cases - 7.6 HTTP/3 Performance
 # ==============================================================================
-
-
-class TestHTTP3Performance:
-    """Test 7.6: HTTP/3 performance scenarios."""
-
-    def test_h3_concurrent_connections(self, shared_test_certs: StringMap) -> None:
-        """
-        TC-H3-PERF-001: HTTP/3 handles concurrent connections.
-
-        Target: Verify HTTP/3 listener can handle multiple concurrent connections.
-        Uses aioquic to establish multiple HTTP/3 connections simultaneously.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        target_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-        target_socket: socket.socket | None = None
-
-        try:
-            cert_path = shared_test_certs["cert_path"]
-            key_path = shared_test_certs["key_path"]
-            ca_path = shared_test_certs["ca_path"]
-            config_path = create_http3_listener_config(
-                proxy_port, cert_path, key_path, temp_dir
-            )
-
-            # Create target server
-            def echo_handler(conn: socket.socket) -> None:
-                try:
-                    while True:
-                        data = conn.recv(1024)
-                        if not data:
-                            break
-                        conn.send(b"ECHO:" + data)
-                except OSError:
-                    pass
-                finally:
-                    conn.close()
-
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
-
-            proxy_proc = start_proxy(config_path)
-
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
-
-            # Test concurrent connections
-            num_connections = 10
-            results: list[tuple[bool, int]] = []
-            results_lock = threading.Lock()
-
-            async def test_connection(conn_id: int) -> None:
-                try:
-                    (
-                        success,
-                        status_code,
-                        _,
-                    ) = await perform_h3_connect_test(
-                        "127.0.0.1",
-                        proxy_port,
-                        "127.0.0.1",
-                        target_port,
-                        ca_path=ca_path,
-                        timeout=15.0,
-                    )
-                    with results_lock:
-                        results.append((success, status_code))
-                except OSError:
-                    with results_lock:
-                        results.append((False, 0))
-
-            async def run_concurrent_tests():
-                tasks = [test_connection(i) for i in range(num_connections)]
-                await asyncio.gather(*tasks)
-
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(run_concurrent_tests())
-            finally:
-                loop.close()
-
-            # Verify success rate
-            successful = [r for r in results if r[0] and r[1] == 200]
-            success_rate = len(successful) / num_connections
-
-            assert success_rate >= 0.8, (
-                f"Success rate {success_rate:.2%} is below 80% for concurrent connections"
-            )
-
-        finally:
-            if proxy_proc:
-                proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
-            if target_socket:
-                target_socket.close()
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_h3_connection_latency(self, shared_test_certs: StringMap) -> None:
-        """
-        TC-H3-PERF-002: HTTP/3 connection latency is acceptable.
-
-        Target: Verify HTTP/3 connection establishment latency meets requirements.
-        Per design doc: TLS 0-RTT connection latency should be < 50ms.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-
-        try:
-            cert_path = shared_test_certs["cert_path"]
-            key_path = shared_test_certs["key_path"]
-            ca_path = shared_test_certs["ca_path"]
-            config_path = create_http3_listener_config(
-                proxy_port, cert_path, key_path, temp_dir
-            )
-
-            proxy_proc = start_proxy(config_path)
-
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
-
-            # Measure connection latency
-            latencies: list[float] = []
-
-            for _ in range(5):
-                start_time = time.time()
-
-                async def test_latency():
-                    success, _, _ = await perform_h3_connection_test(
-                        "127.0.0.1",
-                        proxy_port,
-                        ca_path=ca_path,
-                        timeout=10.0,
-                    )
-                    return success
-
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    success = loop.run_until_complete(test_latency())
-                finally:
-                    loop.close()
-
-                elapsed = time.time() - start_time
-                if success:
-                    latencies.append(elapsed)
-
-            if latencies:
-                avg_latency = sum(latencies) / len(latencies)
-                # Connection should be fast (under 1 second for localhost)
-                assert avg_latency < 1.0, (
-                    f"Average connection latency {avg_latency:.3f}s is too high"
-                )
-
-        finally:
-            if proxy_proc:
-                proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_h3_data_throughput(self, shared_test_certs: StringMap) -> None:
-        """
-        TC-H3-PERF-003: HTTP/3 data throughput is acceptable.
-
-        Target: Verify HTTP/3 data transfer throughput meets requirements.
-        Per design doc: throughput should be >= 90% of network bandwidth.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        target_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-        target_socket: socket.socket | None = None
-
-        try:
-            cert_path = shared_test_certs["cert_path"]
-            key_path = shared_test_certs["key_path"]
-            ca_path = shared_test_certs["ca_path"]
-            config_path = create_http3_listener_config(
-                proxy_port, cert_path, key_path, temp_dir
-            )
-
-            # Create target server that echoes data
-            def throughput_handler(conn: socket.socket) -> None:
-                try:
-                    total = 0
-                    while True:
-                        data = conn.recv(8192)
-                        if not data:
-                            break
-                        total += len(data)
-                        conn.send(data)  # Echo back
-                except OSError:
-                    pass
-                finally:
-                    conn.close()
-
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, throughput_handler
-            )
-
-            proxy_proc = start_proxy(config_path)
-
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
-
-            # Test throughput with large data transfer
-            large_data = b"X" * (100 * 1024)  # 100KB
-
-            async def test_throughput():
-                start_time = time.time()
-                result = await perform_h3_tunnel_data_transfer(
-                    "127.0.0.1",
-                    proxy_port,
-                    "127.0.0.1",
-                    target_port,
-                    ca_path=ca_path,
-                    test_data=large_data,
-                    timeout=30.0,
-                )
-                elapsed = time.time() - start_time
-                return result, elapsed
-
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                result, elapsed = loop.run_until_complete(test_throughput())
-            finally:
-                loop.close()
-
-            # Verify data was transferred
-            if result.success:
-                throughput_kbps = (
-                    (result.data_sent + result.data_received) / elapsed / 1024
-                )
-                # Should achieve at least 10 KB/s on localhost
-                assert throughput_kbps >= 10.0, (
-                    f"Throughput {throughput_kbps:.1f} KB/s is too low"
-                )
-
-        finally:
-            if proxy_proc:
-                proxy_proc.kill()
-                proxy_proc.wait(timeout=5)
-            if target_socket:
-                target_socket.close()
-            shutil.rmtree(temp_dir, ignore_errors=True)

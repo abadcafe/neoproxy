@@ -21,20 +21,14 @@ import subprocess
 import tempfile
 import threading
 
-from .conftest import get_unique_port
-from .types import (
-    BytesProcess,
-)
-from .utils.helpers import (
-    create_target_server,
-    create_test_config,
-    curl_request_with_headers,
-    get_curl_env_without_no_proxy,
-    send_raw_request,
-    start_proxy,
-    terminate_process,
-    wait_for_proxy,
-)
+from pydantic import TypeAdapter
+
+from tests.fixtures.curl import curl_request_with_headers, get_curl_env_without_no_proxy
+from tests.fixtures.http_configuration import create_test_config
+from tests.fixtures.http_request import send_raw_request
+from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
+from tests.fixtures.tcp_peer import create_target_server
 
 
 def parse_http_status(response: bytes) -> int:
@@ -64,11 +58,11 @@ def make_http_target_server(
     body_len = len(body)
     response = (
         f"HTTP/1.1 {status} OK\r\n"
-        f"Content-Type: text/plain\r\n"
-        f"Content-Length: {body_len}\r\n"
-        f"Connection: close\r\n"
-        f"{extra_headers}"
-        f"\r\n"
+        + "Content-Type: text/plain\r\n"
+        + f"Content-Length: {body_len}\r\n"
+        + "Connection: close\r\n"
+        + f"{extra_headers}"
+        + "\r\n"
     ).encode() + body
 
     def handler(conn: socket.socket) -> None:
@@ -132,7 +126,8 @@ class TestConnectTcpForwardProxy:
             response = send_raw_request("127.0.0.1", proxy_port, request)
 
             assert parse_http_status(response) == 400, (
-                f"Expected 400 for origin-form GET, got: {response.decode(errors='ignore')}"
+                "Expected 400 for origin-form GET, got:"
+                + f" {response.decode(errors='ignore')}"
             )
         finally:
             if proxy_proc:
@@ -161,7 +156,8 @@ class TestConnectTcpForwardProxy:
             response = send_raw_request("127.0.0.1", proxy_port, request)
 
             assert parse_http_status(response) == 400, (
-                f"Expected 400 for https:// scheme, got: {response.decode(errors='ignore')}"
+                "Expected 400 for https:// scheme, got:"
+                + f" {response.decode(errors='ignore')}"
             )
         finally:
             if proxy_proc:
@@ -252,7 +248,10 @@ class TestConnectTcpForwardProxy:
                 except socket.timeout:
                     pass
                 received_bodies.append(body_bytes)
-                resp = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+                resp = (
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length:"
+                    + b" 2\r\nConnection: close\r\n\r\nOK"
+                )
                 conn.sendall(resp)
             except OSError:
                 pass
@@ -326,7 +325,9 @@ class TestConnectTcpForwardProxy:
             # Bind and immediately release a port so we know it's not listening
             listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             listener.bind(("127.0.0.1", 0))
-            dead_port = listener.getsockname()[1]
+            dead_port = TypeAdapter(tuple[str, int]).validate_python(
+                listener.getsockname()
+            )[1]
             listener.close()
 
             config_path = create_test_config(proxy_port, temp_dir)
@@ -336,13 +337,15 @@ class TestConnectTcpForwardProxy:
             )
 
             request = (
-                f"GET http://127.0.0.1:{dead_port}/ HTTP/1.1\r\nHost: 127.0.0.1:{dead_port}\r\n\r\n"
+                f"GET http://127.0.0.1:{dead_port}/ HTTP/1.1\r\nHost:"
+                + f" 127.0.0.1:{dead_port}\r\n\r\n"
             ).encode()
             response = send_raw_request("127.0.0.1", proxy_port, request, timeout=8.0)
 
             status = parse_http_status(response)
             assert status == 502, (
-                f"Expected 502 for unreachable target, got {status}: {response.decode(errors='ignore')}"
+                f"Expected 502 for unreachable target, got {status}:"
+                + f" {response.decode(errors='ignore')}"
             )
         finally:
             if proxy_proc:
@@ -427,7 +430,8 @@ class TestConnectTcpForwardProxy:
             try:
                 sock.connect(("127.0.0.1", proxy_port))
                 connect_req = (
-                    f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n"
+                    f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost:"
+                    + f" 127.0.0.1:{target_port}\r\n\r\n"
                 ).encode()
                 sock.sendall(connect_req)
 
@@ -439,7 +443,8 @@ class TestConnectTcpForwardProxy:
                     resp += chunk
 
                 assert b"200" in resp, (
-                    f"Expected 200 CONNECT response, got: {resp.decode(errors='ignore')}"
+                    "Expected 200 CONNECT response, "
+                    + f"got: {resp.decode(errors='ignore')}"
                 )
 
                 sock.sendall(b"HELLO")

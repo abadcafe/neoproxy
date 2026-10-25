@@ -1,7 +1,7 @@
 //! Shared HTTP service adaptor for HTTP/HTTPS listeners.
 //!
 //! Provides a unified `hyper::Service` implementation that handles
-//! request routing, client certificate verification, and context
+//! request routing, authenticated-connection requirements, and context
 //! injection for both HTTP and HTTPS listeners.
 
 use std::future::Future;
@@ -20,26 +20,25 @@ use crate::listeners::error_response::build_403_forbidden;
 use crate::listeners::header_validation::validate_and_route;
 use crate::server::{Server, ServerRouter};
 
-/// Client certificate verification policy.
+/// Connection authentication state supplied by the listener.
 pub(crate) enum ClientCertPolicy {
   /// HTTP listener — TLS not involved, no client cert to check.
   NotApplicable,
-  /// HTTPS listener — indicates whether the client presented a cert.
+  /// HTTPS listener — any presented certificate has already passed
+  /// TLS authentication against this listener's combined CA roots.
   Presented(bool),
 }
 
 impl ClientCertPolicy {
-  /// Returns `true` if the policy requires a cert but none was
-  /// presented.
   fn is_absent(&self) -> bool {
-    matches!(self, ClientCertPolicy::Presented(false))
+    matches!(self, Self::Presented(false))
   }
 }
 
 /// Unified HTTP/HTTPS service adaptor with routing support.
 ///
-/// Handles request validation, routing, optional client certificate
-/// checking, and service invocation for both HTTP and HTTPS listeners.
+/// Handles request validation, routing, connection authentication
+/// requirements, and service invocation for HTTP and HTTPS listeners.
 pub(crate) struct HttpServiceAdaptor {
   /// Server router for hostname-based routing
   server_router: ServerRouter,
@@ -47,7 +46,7 @@ pub(crate) struct HttpServiceAdaptor {
   client_addr: Option<SocketAddr>,
   /// Local (server) address from accept
   local_addr: Option<SocketAddr>,
-  /// Client certificate verification policy
+  /// Client authentication state from the TLS handshake
   client_cert_policy: ClientCertPolicy,
 }
 
@@ -110,9 +109,12 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
         Err(resp) => return Box::pin(async { Ok(*resp) }),
       };
 
-    // Check client certificate requirement (HTTPS only)
-    // If the server requires mTLS (has client_ca_certs) but the
-    // client did not present a certificate, reject with 403.
+    // TLS already authenticated any presented certificate against
+    // this listener's combined CA roots. Routing only determines
+    // whether an anonymous connection may access this server; do not
+    // revalidate the chain against the request server's CA subset.
+    // SNI selects the TLS certificate, while authority/Host routes the
+    // request. Proxy destinations need not equal the proxy's SNI.
     if routing_entry.requires_client_cert()
       && self.client_cert_policy.is_absent()
     {

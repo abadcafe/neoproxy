@@ -11,12 +11,15 @@ use super::error::UpstreamError;
 use super::target_parser::{
   self, ConnectTargetError, ForwardTargetError,
 };
-use super::upstream::{ConnectResult, UpstreamRegistry};
+use super::upstream::UpstreamRegistry;
+use super::upstream::protocol::ConnectResult;
 use crate::context::{RequestContext, get_server_id};
 use crate::http_message::{
-  Request, RequestBody, Response, append_proxy_status,
-  build_empty_response, build_error_response,
-  build_proxy_status_with_status,
+  Request, RequestBody, Response, build_empty_response,
+  build_error_response,
+};
+use crate::proxy_status::{
+  append_proxy_status, build_proxy_status_with_status,
 };
 use crate::service::Service;
 use crate::stream::{self, Io};
@@ -35,8 +38,7 @@ pub(crate) struct UpstreamService {
 }
 
 impl UpstreamService {
-  #[allow(clippy::new_ret_no_self)]
-  pub(crate) fn new(
+  pub(crate) fn build(
     sargs: crate::config::SerializedArgs,
     stream_tracker: Rc<StreamTracker>,
     registry: Rc<RefCell<UpstreamRegistry>>,
@@ -146,24 +148,21 @@ async fn chain_connect(
   upgrade: Option<stream::UpgradeFuture>,
   ctx: &RequestContext,
 ) -> Result<Response> {
-  let (host, port) =
-    match target_parser::parse_connect_target(&req_headers) {
-      Ok(result) => result,
-      Err(ConnectTargetError::NotConnectMethod) => {
-        return Ok(build_error_response(
-          http::StatusCode::METHOD_NOT_ALLOWED,
-          "Only CONNECT method is supported",
-        ));
-      }
-      Err(_) => {
-        return Ok(build_error_response(
-          http::StatusCode::BAD_REQUEST,
-          "Invalid target address",
-        ));
-      }
-    };
-  let target = format!("{host}:{port}");
-
+  let target = match target_parser::parse_connect_target(&req_headers) {
+    Ok(result) => result,
+    Err(ConnectTargetError::NotConnectMethod) => {
+      return Ok(build_error_response(
+        http::StatusCode::METHOD_NOT_ALLOWED,
+        "Only CONNECT method is supported",
+      ));
+    }
+    Err(_) => {
+      return Ok(build_error_response(
+        http::StatusCode::BAD_REQUEST,
+        "Invalid target address",
+      ));
+    }
+  };
   let (tls_config, tracker) = {
     let reg = registry.borrow();
     (reg.tls_config(), reg.tracker())
@@ -218,6 +217,10 @@ async fn chain_connect(
 
 /// Complete a CONNECT tunnel by building the 200 response and
 /// registering bidirectional transfer.
+///
+/// Unlike ordinary response bodies, upgraded I/O leaves the listener's
+/// HTTP driver. The plugin tracks this task across the upgrade handoff
+/// and stops its transfer when the plugin is uninstalled.
 async fn complete_tunnel(
   target: Box<dyn Io>,
   st: &Rc<StreamTracker>,

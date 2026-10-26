@@ -64,16 +64,24 @@ mod proxy_status_tests;
 mod redaction;
 #[cfg(test)]
 mod redaction_tests;
+mod request_id;
+#[cfg(test)]
+mod request_id_tests;
 mod server;
 mod server_thread;
 mod service;
 mod shutdown;
 mod stream;
+#[cfg(test)]
+mod stream_transfer_tests;
 mod tls;
 mod tracker;
 mod via;
 #[cfg(test)]
 mod via_tests;
+mod worker_runtime;
+#[cfg(test)]
+mod worker_runtime_tests;
 mod worker_shutdown;
 #[cfg(test)]
 mod worker_shutdown_tests;

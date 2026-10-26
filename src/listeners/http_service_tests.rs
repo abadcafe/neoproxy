@@ -151,7 +151,8 @@ async fn test_dispatch_plain_http_does_not_apply_tls_certificate_policy()
 }
 
 #[tokio::test]
-async fn test_dispatch_preserves_service_errors() {
+async fn test_dispatch_service_errors_return_identified_internal_error()
+{
   let service = HttpService::new_http(
     ServerRouter::build(vec![Server {
       hostnames: vec![],
@@ -162,12 +163,98 @@ async fn test_dispatch_preserves_service_errors() {
     "127.0.0.1:1234".parse().unwrap(),
     "127.0.0.1:8080".parse().unwrap(),
   );
+  let response =
+    service.dispatch(request(Version::HTTP_11)).await.unwrap();
+  assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
   assert_eq!(
-    service
-      .dispatch(request(Version::HTTP_11))
-      .await
-      .unwrap_err()
-      .to_string(),
-    "placeholder"
+    response.headers()["x-request-id"].to_str().unwrap().len(),
+    32
   );
+}
+
+#[tokio::test]
+async fn test_dispatch_keeps_inbound_headers_and_sets_response_id_from_context()
+ {
+  for version in [Version::HTTP_11, Version::HTTP_2, Version::HTTP_3] {
+    for incoming in [None, Some("opaque-caller-id")] {
+      let handler =
+        Service::new(tower::service_fn(move |request: Request| {
+          Box::pin(async move {
+            assert_eq!(
+              request
+                .headers()
+                .get("x-request-id")
+                .map(|value| value.to_str().unwrap()),
+              incoming
+            );
+            let id = request
+              .extensions()
+              .get::<RequestContext>()
+              .unwrap()
+              .request_id()
+              .unwrap();
+            let mut response =
+              build_error_response(StatusCode::OK, &id.to_string());
+            response.headers_mut().append(
+              "x-request-id",
+              "untrusted-upstream".parse().unwrap(),
+            );
+            response
+              .headers_mut()
+              .append("x-request-id", "duplicate".parse().unwrap());
+            Ok(response)
+          })
+            as Pin<Box<dyn Future<Output = Result<Response>>>>
+        }));
+      let service = HttpService::new_http(
+        ServerRouter::build(vec![Server {
+          hostnames: vec![],
+          service: handler,
+          service_name: "identity".into(),
+          tls: None,
+        }]),
+        "127.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:8080".parse().unwrap(),
+      );
+      let mut request = request(version);
+      if let Some(value) = incoming {
+        request
+          .headers_mut()
+          .insert("x-request-id", value.parse().unwrap());
+      }
+      let response = service.dispatch(request).await.unwrap();
+      let id =
+        response.headers()["x-request-id"].to_str().unwrap().to_owned();
+      assert_eq!(
+        response.headers().get_all("x-request-id").iter().count(),
+        1
+      );
+      if let Some(incoming) = incoming {
+        assert_eq!(id, incoming);
+      } else {
+        assert_eq!(id.len(), 32);
+      }
+      use http_body_util::BodyExt;
+      assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        id
+      );
+    }
+  }
+}
+
+#[tokio::test]
+async fn test_dispatch_routing_errors_include_incoming_request_id() {
+  let service = HttpService::new_http(
+    ServerRouter::build(vec![]),
+    "127.0.0.1:1234".parse().unwrap(),
+    "127.0.0.1:8080".parse().unwrap(),
+  );
+  let mut request = request(Version::HTTP_11);
+  request
+    .headers_mut()
+    .insert("x-request-id", "error-id".parse().unwrap());
+  let response = service.dispatch(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::NOT_FOUND);
+  assert_eq!(response.headers()["x-request-id"], "error-id");
 }

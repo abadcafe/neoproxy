@@ -1,13 +1,12 @@
 //! module: http_message
 //! responsibility: adapt normalized streaming HTTP messages
-//! public operations: BytesBufBodyWrapper, new, RequestBody,
-//! ResponseBody, Request, Response, build_empty_response,
+//! public operations: BytesBufBodyWrapper, new, with_trailer_policy,
+//! RequestBody, ResponseBody, Request, Response, build_empty_response,
 //! build_error_response
 //! data entities: BytesBufBodyWrapper, RequestBody, ResponseBody,
 //! Request, Response
 //! tests: http_message_tests.rs
 
-use std::error::Error;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -21,19 +20,30 @@ pin_project_lite::pin_project! {
   pub(crate) struct BytesBufBodyWrapper<B> {
     #[pin]
     inner: B,
+    trailer_policy: crate::hop_headers::TrailerPolicy,
   }
 }
 
 impl<B> BytesBufBodyWrapper<B> {
   pub(crate) fn new(inner: B) -> Self {
-    Self { inner }
+    Self::with_trailer_policy(
+      inner,
+      crate::hop_headers::TrailerPolicy::default(),
+    )
+  }
+
+  pub(crate) fn with_trailer_policy(
+    inner: B,
+    trailer_policy: crate::hop_headers::TrailerPolicy,
+  ) -> Self {
+    Self { inner, trailer_policy }
   }
 }
 
 impl<B> Body for BytesBufBodyWrapper<B>
 where
   B: Body,
-  B::Error: Error + Send + Sync + 'static,
+  B::Error: Into<anyhow::Error>,
 {
   type Data = B::Data;
   type Error = anyhow::Error;
@@ -42,12 +52,13 @@ where
     self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-    self.project().inner.poll_frame(cx).map(|frame| {
+    let this = self.project();
+    this.inner.poll_frame(cx).map(|frame| {
       frame.map(|result| {
         result
           .map(|frame| match frame.into_trailers() {
             Ok(mut trailers) => {
-              crate::hop_headers::strip_trailer_headers(&mut trailers);
+              this.trailer_policy.apply(&mut trailers);
               Frame::trailers(trailers)
             }
             Err(frame) => frame,

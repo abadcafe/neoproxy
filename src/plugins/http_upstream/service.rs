@@ -19,7 +19,7 @@ use super::target_parser::{
 };
 use super::upstream::UpstreamRegistry;
 use super::upstream::protocol::ConnectResult;
-use crate::context::{RequestContext, get_server_id};
+use crate::context::RequestContext;
 use crate::http_message::{
   Request, RequestBody, Response, build_empty_response,
   build_error_response,
@@ -182,43 +182,43 @@ async fn chain_connect(
     Ok(upstream) => upstream,
     Err(e) => return Ok(e.to_response(ctx)),
   };
-  let result =
-    upstream.connect_for_tunnel(&target, &tls_config, &tracker).await;
+  let result = upstream
+    .connect_for_tunnel(&target, &req_headers, &tls_config, &tracker)
+    .await;
   let result = match result {
     Ok(r) => r,
     Err(e) => {
-      warn!("UpstreamService: CONNECT to upstream failed: {e}");
       return Ok(e.to_response(ctx));
     }
   };
-  let connect_ms = connect_start.elapsed().as_millis() as u64;
-  ctx.insert("upstream.connect_ms", connect_ms.to_string());
+  ctx.set(
+    crate::context::fields::upstream::CONNECT_TIME,
+    connect_start.elapsed(),
+  );
 
   let ConnectResult {
     transport,
     upstream_addr,
-    upstream_proxy_status,
+    upstream_response,
     tunnel_idle_timeout,
   } = result;
 
   let target_io: Box<dyn Io> = transport;
 
-  let client_addr = ctx
-    .client_addr()
-    .map(|address| address.to_string())
-    .unwrap_or_default();
-  let upstream_ip =
-    upstream_addr.map(|a| format!(" ({a})")).unwrap_or_default();
-  let tunnel_desc = format!("{client_addr} -> {target}{upstream_ip}");
+  let completion = super::tunnel_log::TunnelLog::new(
+    ctx,
+    &target.to_string(),
+    upstream_addr,
+  );
 
   complete_tunnel(
     target_io,
     st,
     upgrade,
     ctx,
-    upstream_proxy_status,
+    upstream_response,
     tunnel_idle_timeout,
-    &tunnel_desc,
+    completion,
   )
   .await
 }
@@ -234,12 +234,28 @@ async fn complete_tunnel(
   st: &Rc<StreamTracker>,
   upgrade: Option<stream::UpgradeFuture>,
   ctx: &RequestContext,
-  upstream_proxy_status: Option<http::HeaderValue>,
+  upstream_response: Option<http::response::Parts>,
   tunnel_idle_timeout: Duration,
-  tunnel_desc: &str,
+  completion: super::tunnel_log::TunnelLog,
 ) -> Result<Response> {
   let mut resp = build_tunnel_response();
-  if let Some(ref id) = get_server_id(ctx) {
+  if let Some(mut upstream) = upstream_response {
+    drop(crate::hop_headers::strip_connection_headers(
+      &mut upstream.headers,
+    ));
+    crate::via::append(&mut upstream.headers, upstream.version);
+    upstream.headers.remove(http::header::CONTENT_LENGTH);
+    upstream.headers.remove(http::header::TRAILER);
+    upstream.headers.remove(http::header::PROXY_AUTHENTICATE);
+    upstream.headers.remove(http::header::PROXY_AUTHORIZATION);
+    upstream.headers.remove("alt-svc");
+    *resp.headers_mut() = upstream.headers;
+  }
+  let upstream_proxy_status =
+    crate::proxy_status::take_proxy_status(resp.headers_mut());
+  if let Some(ref id) =
+    ctx.server_addr().map(|address| address.to_string())
+  {
     let our_entry = build_proxy_status_with_status(id, 200);
     resp.headers_mut().insert(
       http::header::HeaderName::from_static("proxy-status"),
@@ -247,32 +263,38 @@ async fn complete_tunnel(
     );
   }
 
+  if !resp.headers().contains_key("proxy-status")
+    && let Some(status) = upstream_proxy_status
+  {
+    resp.headers_mut().insert("proxy-status", status);
+  }
+
   let shutdown_handle = st.shutdown_handle();
-  let tunnel_desc = tunnel_desc.to_string();
 
   st.register(async move {
     let client = match upgrade {
       Some(u) => match u.await {
         Ok(c) => c,
         Err(e) => {
-          warn!("tunnel {tunnel_desc} upgrade failed: {e}");
+          completion.upgrade_failed(&e);
           return;
         }
       },
       None => {
-        warn!("tunnel {tunnel_desc}: no upgrade available");
+        completion.upgrade_failed(&"no upgrade available");
         return;
       }
     };
 
-    stream::run_tunnel(
+    let end = stream::run_tunnel(
       client,
       target,
       shutdown_handle,
       tunnel_idle_timeout,
-      &tunnel_desc,
+      completion.progress(),
     )
     .await;
+    completion.finish(end);
   });
 
   Ok(resp)
@@ -324,7 +346,6 @@ async fn chain_forward(
   let upstream = match registry.get_upstream(upstream_name) {
     Ok(upstream) => upstream,
     Err(e) => {
-      warn!("UpstreamService: failed to get upstream for forward: {e}");
       return Ok(e.to_response(ctx));
     }
   };
@@ -333,9 +354,6 @@ async fn chain_forward(
     .await
   {
     Ok(resp) => Ok(resp),
-    Err(e) => {
-      warn!("UpstreamService: forward failed: {e}");
-      Ok(e.to_response(ctx))
-    }
+    Err(e) => Ok(e.to_response(ctx)),
   }
 }

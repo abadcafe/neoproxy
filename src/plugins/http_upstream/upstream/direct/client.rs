@@ -91,25 +91,93 @@ impl OriginClient {
     mut request: Request,
     tracker: &Rc<StreamTracker>,
   ) -> Result<Response, UpstreamError> {
+    let ctx = request
+      .extensions()
+      .get::<crate::context::RequestContext>()
+      .cloned();
     let origin = Origin::from_uri(request.uri()).ok_or_else(|| {
       UpstreamError::ProxyInternalError("invalid origin URI".into())
     })?;
     // Alt-Used describes this connection, never a previous proxy hop.
     request.headers_mut().remove("alt-used");
-    let mut routes =
-      self.alternatives.borrow_mut().routes(&origin, Instant::now());
-    if routes.is_empty() {
-      routes = self.dns.routes(&origin).await;
-    } else {
-      routes = self.dns.alternatives(routes).await;
-    }
-    if origin.is_https() && self.config.dns_servers.is_some() {
-      routes.push(Route {
+    // Optional discovery/probes share one budget. Once a request is
+    // submitted, the caller's full response-header deadline applies;
+    // cancelling a committed request must never trigger a replay.
+    let selected = tokio::time::timeout(
+      self.config.request_timeout / 3,
+      self.discover_transport(
+        &origin,
+        request.uri(),
+        tracker,
+        ctx.as_ref(),
+      ),
+    )
+    .await
+    .ok()
+    .flatten();
+    let selected = if let Some((key, transport)) = selected {
+      request.headers_mut().insert(
+        "alt-used",
+        key
+          .route
+          .authority()
+          .parse()
+          .expect("validated endpoint authority"),
+      );
+      Some((key, transport))
+    } else if origin.is_https() && self.config.dns_servers.is_some() {
+      // Custom discovery DNS also owns HTTPS authority address
+      // resolution. This final path retains the request's remaining
+      // budget and does not claim an alternative was used.
+      let route = Route {
         host: origin.host().into(),
         port: origin.port(),
         protocol: WireProtocol::Negotiated,
-      });
-    }
+      };
+      Some(
+        self
+          .prepare_route(
+            &origin,
+            &route,
+            request.uri(),
+            tracker,
+            ctx.as_ref(),
+          )
+          .await?,
+      )
+    } else {
+      None
+    };
+    let response = if let Some((key, transport)) = selected {
+      let response =
+        self.exchange(&transport, request, tracker).await?;
+      if response.status() == http::StatusCode::MISDIRECTED_REQUEST {
+        self.alternatives.borrow_mut().invalidate(&origin);
+        self.mark_broken(origin.clone(), key.route.clone());
+        self.pools.borrow_mut().remove(&key);
+      }
+      response
+    } else {
+      self.base.send(request).await?
+    };
+    self.observe(&origin, &response);
+    Ok(response)
+  }
+
+  async fn discover_transport(
+    &self,
+    origin: &Origin,
+    uri: &http::Uri,
+    tracker: &Rc<StreamTracker>,
+    ctx: Option<&crate::context::RequestContext>,
+  ) -> Option<(PoolKey, Rc<Transport>)> {
+    let advertised =
+      self.alternatives.borrow_mut().routes(origin, Instant::now());
+    let routes = if advertised.is_empty() {
+      self.dns.routes(origin).await
+    } else {
+      self.dns.alternatives(advertised).await
+    };
     for route in routes {
       if self
         .broken
@@ -119,69 +187,96 @@ impl OriginClient {
       {
         continue;
       }
-      let addresses = self.dns.addresses(&route).await;
-      let selected = crate::address_race::connect(
-        addresses,
-        self.config.request_timeout,
-        |address| {
-          let origin = &origin;
-          let route = &route;
-          let uri = request.uri();
-          async move {
-            let key = PoolKey {
-              origin: origin.clone(),
-              route: route.clone(),
-              address,
-            };
-            self
-              .transport(&key, uri, tracker)
-              .await
-              .map(|transport| (key, transport))
-          }
-        },
-      )
-      .await;
-      let (key, transport) = match selected {
-        Ok(selected) => selected,
-        Err(error) => {
-          tracing::debug!(?error, endpoint = %route.authority(), "origin alternative unavailable before request submission");
+      match self.prepare_route(origin, &route, uri, tracker, ctx).await
+      {
+        Ok(selected) => return Some(selected),
+        Err(_) => {
           self.mark_broken(origin.clone(), route);
-          continue;
         }
-      };
-      request.headers_mut().insert(
-        "alt-used",
-        route
-          .authority()
-          .parse()
-          .expect("validated endpoint authority"),
-      );
-      let response = match transport.as_ref() {
-        Transport::Tcp(client) => client.send(request).await,
-        Transport::Quic(session) => {
-          let (mut parts, body) = request.into_parts();
-          parts.version = http::Version::HTTP_3;
-          http3::exchange(
-            session,
-            &self.tls,
-            http::Request::from_parts(parts, ()),
-            body,
-            tracker,
-          )
-          .await
-        }
-      }?;
-      self.observe(&origin, &response);
-      if response.status() == http::StatusCode::MISDIRECTED_REQUEST {
-        self.alternatives.borrow_mut().invalidate(&origin);
-        self.mark_broken(origin, route);
-        self.pools.borrow_mut().remove(&key);
       }
-      return Ok(response);
     }
-    let response = self.base.send(request).await?;
-    self.observe(&origin, &response);
-    Ok(response)
+    None
+  }
+
+  async fn prepare_route(
+    &self,
+    origin: &Origin,
+    route: &Route,
+    uri: &http::Uri,
+    tracker: &Rc<StreamTracker>,
+    ctx: Option<&crate::context::RequestContext>,
+  ) -> Result<(PoolKey, Rc<Transport>), UpstreamError> {
+    let started = std::time::Instant::now();
+    let addresses = self.dns.addresses(route).await;
+    if let Some(ctx) = ctx {
+      let observation =
+        super::super::observation::ConnectionObservation::new();
+      observation.dns(
+        &route.host,
+        started.elapsed(),
+        self.config.dns_resolve_timeout,
+        &addresses,
+      );
+      observation.record(ctx);
+    }
+    crate::address_race::connect(
+      addresses,
+      self.config.request_timeout,
+      |address| async move {
+        let key = PoolKey {
+          origin: origin.clone(),
+          route: route.clone(),
+          address,
+        };
+        self
+          .transport(&key, uri, tracker)
+          .await
+          .map(|transport| (key, transport))
+      },
+    )
+    .await
+    .map_err(|error| match error {
+      crate::address_race::RaceError::NoAddresses => {
+        UpstreamError::DnsError(format!(
+          "no addresses for {}",
+          route.host
+        ))
+      }
+      crate::address_race::RaceError::InvalidDeadline => {
+        UpstreamError::ProxyInternalError(
+          "origin deadline exceeds clock range".into(),
+        )
+      }
+      crate::address_race::RaceError::Timeout => {
+        UpstreamError::ConnectionTimeout(
+          "origin connection deadline exceeded".into(),
+        )
+      }
+      crate::address_race::RaceError::Failed(error) => error,
+    })
+  }
+
+  async fn exchange(
+    &self,
+    transport: &Transport,
+    request: Request,
+    tracker: &Rc<StreamTracker>,
+  ) -> Result<Response, UpstreamError> {
+    match transport {
+      Transport::Tcp(client) => client.send(request).await,
+      Transport::Quic(session) => {
+        let (mut parts, body) = request.into_parts();
+        parts.version = http::Version::HTTP_3;
+        http3::exchange(
+          session,
+          &self.tls,
+          http::Request::from_parts(parts, ()),
+          body,
+          tracker,
+        )
+        .await
+      }
+    }
   }
 
   fn mark_broken(&self, origin: Origin, route: Route) {

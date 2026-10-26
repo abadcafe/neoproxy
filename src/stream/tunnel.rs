@@ -1,7 +1,7 @@
 //! module: tunnel
 //! responsibilities: copy a bidirectional tunnel under cancellation and
 //! idle deadlines public operations: run_tunnel
-//! data entities: ActivityStream, TaggedIo
+//! data entities: ActivityStream, TaggedIo, SideError
 //! tests: stream_tests.rs, stream_tunnel_tests.rs through stream's
 //! public interface
 
@@ -10,9 +10,11 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{info, warn};
 
 use super::idle::IdleTracker;
+use super::transfer::{
+  IoSide, TransferEnd, TransferProgress, WrittenCounter,
+};
 use crate::shutdown::ShutdownHandle;
 
 /// Records actual byte progress; the tunnel owns the one idle timer.
@@ -21,11 +23,16 @@ use crate::shutdown::ShutdownHandle;
 struct ActivityStream<S> {
   stream: S,
   tracker: IdleTracker,
+  written: WrittenCounter,
 }
 
 impl<S> ActivityStream<S> {
-  fn new(stream: S, tracker: IdleTracker) -> Self {
-    Self { stream, tracker }
+  fn new(
+    stream: S,
+    tracker: IdleTracker,
+    written: WrittenCounter,
+  ) -> Self {
+    Self { stream, tracker, written }
   }
 }
 
@@ -59,6 +66,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for ActivityStream<S> {
     match Pin::new(&mut this.stream).poll_write(cx, buf) {
       Poll::Ready(Ok(n)) => {
         if n > 0 {
+          this.written.add(n);
           this.tracker.touch();
         }
         Poll::Ready(Ok(n))
@@ -91,11 +99,11 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for ActivityStream<S> {
 /// side failed.
 struct TaggedIo<S> {
   inner: S,
-  tag: &'static str,
+  tag: IoSide,
 }
 
 impl<S> TaggedIo<S> {
-  fn new(inner: S, tag: &'static str) -> Self {
+  fn new(inner: S, tag: IoSide) -> Self {
     Self { inner, tag }
   }
 }
@@ -109,7 +117,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for TaggedIo<S> {
     match Pin::new(&mut self.inner).poll_read(cx, buf) {
       Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::new(
         e.kind(),
-        format!("[{}] {}", self.tag, e),
+        SideError { side: self.tag, source: e },
       ))),
       other => other,
     }
@@ -125,7 +133,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for TaggedIo<S> {
     match Pin::new(&mut self.inner).poll_write(cx, buf) {
       Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::new(
         e.kind(),
-        format!("[{}] {}", self.tag, e),
+        SideError { side: self.tag, source: e },
       ))),
       other => other,
     }
@@ -138,7 +146,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for TaggedIo<S> {
     match Pin::new(&mut self.inner).poll_flush(cx) {
       Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::new(
         e.kind(),
-        format!("[{}] {}", self.tag, e),
+        SideError { side: self.tag, source: e },
       ))),
       other => other,
     }
@@ -151,7 +159,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for TaggedIo<S> {
     match Pin::new(&mut self.inner).poll_shutdown(cx) {
       Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::new(
         e.kind(),
-        format!("[{}] {}", self.tag, e),
+        SideError { side: self.tag, source: e },
       ))),
       other => other,
     }
@@ -162,74 +170,63 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for TaggedIo<S> {
 // Tunnel functions
 // ============================================================================
 
-/// Run bidirectional copy between client and target streams.
-///
-/// Handles shutdown notification and idle timeout. Logs the outcome.
-/// Idle timeout is shared across both directions: if data flows in
-/// EITHER direction, the connection is considered active.
+#[derive(Debug)]
+struct SideError {
+  side: IoSide,
+  source: std::io::Error,
+}
+impl std::fmt::Display for SideError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "[{}] {}", self.side, self.source)
+  }
+}
+impl std::error::Error for SideError {
+  fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+    Some(&self.source)
+  }
+}
+
+/// Copy a tunnel without logging; the caller owns completion reporting.
 pub(crate) async fn run_tunnel<C, T>(
   client: C,
   target: T,
   shutdown_handle: ShutdownHandle,
   idle_timeout: Duration,
-  tunnel_desc: &str,
-) where
+  progress: TransferProgress,
+) -> TransferEnd
+where
   C: AsyncRead + AsyncWrite + Unpin,
   T: AsyncRead + AsyncWrite + Unpin,
 {
   if shutdown_handle.is_shutdown() {
-    warn!("tunnel {tunnel_desc}: shutdown already triggered, aborting");
-    return;
+    return TransferEnd::Shutdown;
   }
-
-  info!("tunnel {tunnel_desc}: bidirectional transfer started");
-
   let tracker = IdleTracker::new(idle_timeout);
   let mut client_pinned = TaggedIo::new(
-    ActivityStream::new(client, tracker.clone()),
-    "client",
+    ActivityStream::new(
+      client,
+      tracker.clone(),
+      progress.client_written(),
+    ),
+    IoSide::Client,
   );
   let mut target_pinned = TaggedIo::new(
-    ActivityStream::new(target, tracker.clone()),
-    "upstream",
+    ActivityStream::new(
+      target,
+      tracker.clone(),
+      progress.upstream_written(),
+    ),
+    IoSide::Upstream,
   );
-
-  let result = tokio::select! {
-    res = tokio::io::copy_bidirectional(
-      &mut client_pinned,
-      &mut target_pinned,
-    ) => res,
-    _ = async {
-      loop {
-        tokio::time::sleep_until(tracker.deadline()).await;
-        // Progress in either direction can make the previous alarm
-        // stale. Re-arm for the shared deadline without closing the
-        // active tunnel or extending idle time merely for a poll.
-        if tracker.is_idle() {
-          break;
-        }
+  tokio::select! {
+    result = tokio::io::copy_bidirectional(&mut client_pinned, &mut target_pinned) => match result {
+      Ok(_) => TransferEnd::Completed,
+      Err(error) => {
+        let side = error.get_ref().and_then(|inner| inner.downcast_ref::<SideError>()).map(|tagged| tagged.side);
+        TransferEnd::Failed { side, error }
       }
-    } => Err(std::io::Error::new(
-      std::io::ErrorKind::TimedOut, "idle timeout",
-    )),
-    _ = shutdown_handle.notified() => {
-      warn!("tunnel {tunnel_desc}: shutdown by notification");
-      return;
-    }
-  };
-
-  match result {
-    Ok((_sent, _received)) => {
-      info!("tunnel {tunnel_desc}: transfer completed");
-    }
-    Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-      warn!(
-        "tunnel {tunnel_desc}: idle timeout after {idle_timeout:?}, \
-         closing"
-      );
-    }
-    Err(e) => {
-      warn!("tunnel {tunnel_desc}: transfer error: {e}");
-    }
+    },
+    _ = async { loop { tokio::time::sleep_until(tracker.deadline()).await; if tracker.is_idle() { break; } } } => TransferEnd::IdleTimeout,
+    _ = shutdown_handle.notified() => TransferEnd::Shutdown,
   }
 }

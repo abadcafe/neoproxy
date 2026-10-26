@@ -59,10 +59,10 @@ async fn test_connect_for_tunnel_preserves_peer_and_bytes_after_response_headers
         .uri("origin.test:443")
         .body(())
         .unwrap();
-      let target =
-        parse_connect_target(&request.into_parts().0).unwrap();
+      let (parts, ()) = request.into_parts();
+      let target = parse_connect_target(&parts).unwrap();
       let mut connected = client
-        .connect_for_tunnel(&target, &None, &tracker)
+        .connect_for_tunnel(&target, &parts, &None, &tracker)
         .await
         .unwrap();
       assert_eq!(connected.upstream_addr, Some(address));

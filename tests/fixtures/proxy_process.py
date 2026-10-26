@@ -11,7 +11,7 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import ExitStack, contextmanager
 
 from .binary import NEOPROXY_BINARY
@@ -25,13 +25,19 @@ type ProcessFactory = Callable[[str], BytesProcess]
 MAX_SHUTDOWN_TIME = 10
 
 
-def start_proxy(config_path: str, *, nofile_limit: int | None = None) -> BytesProcess:
+def start_proxy(
+    config_path: str,
+    *,
+    nofile_limit: int | None = None,
+    env: Mapping[str, str] | None = None,
+) -> BytesProcess:
     """
     Start proxy server process.
 
     Args:
         config_path: Path to configuration file
         nofile_limit: Optional soft descriptor limit for this child only.
+        env: Optional child environment; the parent environment is unchanged.
 
     Returns:
         subprocess.Popen: Proxy server process
@@ -57,6 +63,7 @@ os.execv(sys.argv[2], sys.argv[2:])
         stderr=subprocess.PIPE,
         text=False,
         cwd=os.path.dirname(config_path),
+        env=env,
     )
     return proc
 

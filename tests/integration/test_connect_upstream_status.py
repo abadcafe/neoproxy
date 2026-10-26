@@ -68,7 +68,10 @@ servers:
             async with asyncio.timeout(3):
                 writer.write(
                     b"CONNECT target.example:443 HTTP/1.1\r\n"
-                    + b"Host: target.example:443\r\n\r\n"
+                    + b"Host: target.example:443\r\nVia: 1.0 previous\r\n"
+                    + b"X-End-To-End: retained\r\nConnection: x-private\r\n"
+                    + b"X-Private: remove\r\n"
+                    + b"Proxy-Authorization: Basic previous\r\n\r\n"
                 )
                 await writer.drain()
                 headers = await reader.readuntil(b"\r\n\r\n")
@@ -85,6 +88,11 @@ servers:
                 elif 200 <= status < 300:
                     # This proxy generates its own successful CONNECT response.
                     assert actual == 200, headers
+                    assert b"x-tunnel: retained" in headers.lower(), headers
+                    assert b"1.0 peer-hop" in headers.lower(), headers
+                    assert (
+                        b"3 neoproxy" if kind == "http3" else b"1.1 neoproxy"
+                    ) in headers.lower(), headers
                     # Preserve bytes already buffered when the upgrade occurs.
                     assert await reader.readexactly(len(GREETING)) == GREETING
                     for payload in PAYLOADS:
@@ -118,7 +126,10 @@ async def _check_http_upstream(
         try:
             async with asyncio.timeout(5):
                 received.put_nowait(await reader.readuntil(b"\r\n\r\n"))
-                writer.write(f"HTTP/1.1 {status} Test\r\n\r\n".encode())
+                writer.write(
+                    f"HTTP/1.1 {status} Test\r\n".encode()
+                    + b"Via: 1.0 peer-hop\r\nX-Tunnel: retained\r\n\r\n"
+                )
                 if 200 <= status < 300:
                     writer.write(GREETING)
                     if status == 204:
@@ -153,6 +164,11 @@ async def _check_http_upstream(
             await _check_entry(directory, upstream, kind, ca, status)
             headers = received.get_nowait()
             assert headers.startswith(b"CONNECT target.example:443 HTTP/1.1\r\n")
+            assert b"x-end-to-end: retained" in headers.lower(), headers
+            assert b"1.0 previous" in headers.lower(), headers
+            assert b"1.1 neoproxy" in headers.lower(), headers
+            assert b"x-private:" not in headers.lower(), headers
+            assert b"proxy-authorization:" not in headers.lower(), headers
 
 
 @pytest.mark.parametrize("status", [200, 201, 299, 300, 407, 502])
@@ -194,7 +210,11 @@ async def _check_h3_upstream(directory: Path, status: int) -> None:
                     # records rejection by a strict peer; no dependency is patched.
                     self.http.send_headers(
                         message.stream_id,
-                        [(b":status", str(status).encode())],
+                        [
+                            (b":status", str(status).encode()),
+                            (b"via", b"1.0 peer-hop"),
+                            (b"x-tunnel", b"retained"),
+                        ],
                         end_stream=not 200 <= status < 300,
                     )
                     if 200 <= status < 300:
@@ -214,9 +234,16 @@ async def _check_h3_upstream(directory: Path, status: int) -> None:
     )
     try:
         await _check_entry(directory, upstream, "http3", ca, status)
-        fields = dict(received.get_nowait())
+        received_fields = received.get_nowait()
+        fields = dict(received_fields)
         assert fields[b":method"] == b"CONNECT"
         assert fields[b":authority"] == b"target.example:443"
+        assert fields[b"x-end-to-end"] == b"retained"
+        via = b", ".join(value for name, value in received_fields if name == b"via")
+        assert b"1.0 previous" in via
+        assert b"1.1 neoproxy" in via
+        assert b"x-private" not in fields
+        assert b"proxy-authorization" not in fields
     finally:
         server.close()
 

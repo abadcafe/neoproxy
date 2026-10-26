@@ -12,12 +12,13 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use http::Uri;
-use hyper_util::rt::TokioIo;
 use tower::Service;
 
 use super::super::address_resolution::{
   dns_io_error, resolve_addresses,
 };
+use super::super::observation::ConnectionObservation;
+use super::transport::ProxyTransport;
 
 /// Connects to a pre-configured upstream proxy address.
 /// The owning proxy pool defines connection identity; each request
@@ -46,7 +47,7 @@ impl Service<Uri> for ProxyConnector {
       dyn Future<Output = Result<Self::Response, Self::Error>> + Send,
     >,
   >;
-  type Response = TokioIo<tokio::net::TcpStream>;
+  type Response = ProxyTransport<tokio::net::TcpStream>;
 
   fn poll_ready(
     &mut self,
@@ -60,21 +61,47 @@ impl Service<Uri> for ProxyConnector {
     let timeout = self.connect_timeout;
     let dns_timeout = self.dns_resolve_timeout;
     Box::pin(async move {
-      let addresses = tokio::time::timeout(
-        dns_timeout,
-        resolve_addresses(&proxy_addr),
-      )
-      .await
-      .map_err(|_| {
-        dns_io_error(std::io::Error::new(
-          std::io::ErrorKind::TimedOut,
-          format!("DNS resolve for '{proxy_addr}' timed out"),
-        ))
-      })?
-      .map_err(std::io::Error::other)?;
-      let stream =
-        super::super::tcp_connect::connect(addresses, timeout).await?;
-      Ok(TokioIo::new(stream))
+      let observation = ConnectionObservation::new();
+      let started = std::time::Instant::now();
+      let result = async {
+        let addresses = tokio::time::timeout(
+          dns_timeout,
+          resolve_addresses(&proxy_addr),
+        )
+        .await
+        .map_err(|_| {
+          dns_io_error(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("DNS resolve for '{proxy_addr}' timed out"),
+          ))
+        })
+        .and_then(|result| result.map_err(std::io::Error::other));
+        observation.dns(
+          &proxy_addr,
+          started.elapsed(),
+          dns_timeout,
+          addresses.as_deref().unwrap_or_default(),
+        );
+        let addresses = addresses?;
+        let result =
+          super::super::tcp_connect::connect(addresses, timeout).await;
+        observation.tcp(
+          result
+            .as_ref()
+            .ok()
+            .and_then(|stream| stream.peer_addr().ok()),
+          result
+            .as_ref()
+            .ok()
+            .and_then(|stream| stream.local_addr().ok()),
+          started.elapsed(),
+        );
+        let stream = result?;
+        observation.protocol("http/1.1");
+        Ok(ProxyTransport::new(stream, observation.clone()))
+      }
+      .await;
+      result.map_err(|error| observation.error(error))
     })
   }
 }
@@ -108,8 +135,9 @@ impl Service<Uri> for TlsProxyConnector {
       dyn Future<Output = Result<Self::Response, Self::Error>> + Send,
     >,
   >;
-  type Response =
-    TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
+  type Response = ProxyTransport<
+    tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+  >;
 
   fn poll_ready(
     &mut self,
@@ -130,8 +158,9 @@ impl Service<Uri> for TlsProxyConnector {
           |e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e),
         )?;
       let connector = tokio_rustls::TlsConnector::from(tls_config);
-      let tcp_stream = tcp_io.into_inner();
-      let tls_stream = tokio::time::timeout(
+      let (tcp_stream, observation) = tcp_io.into_parts();
+      let started = std::time::Instant::now();
+      let result = tokio::time::timeout(
         tls_handshake_timeout,
         connector.connect(server_name, tcp_stream),
       )
@@ -141,21 +170,18 @@ impl Service<Uri> for TlsProxyConnector {
           std::io::ErrorKind::TimedOut,
           "TLS handshake timed out",
         )
-      })??;
-      Ok(TokioIo::new(tls_stream))
+      })
+      .and_then(std::convert::identity);
+      observation.tls(
+        started.elapsed(),
+        result
+          .as_ref()
+          .ok()
+          .and_then(|stream| stream.get_ref().1.alpn_protocol()),
+      );
+      let tls_stream =
+        result.map_err(|error| observation.error(error))?;
+      Ok(ProxyTransport::new(tls_stream, observation))
     })
-  }
-}
-
-impl super::ProxyIo for TokioIo<tokio::net::TcpStream> {
-  fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {
-    self.inner().peer_addr()
-  }
-}
-impl super::ProxyIo
-  for TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>
-{
-  fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {
-    self.inner().get_ref().0.peer_addr()
   }
 }

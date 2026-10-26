@@ -20,7 +20,7 @@ use anyhow::Result;
 use hyper::{body as hyper_body, service as hyper_svc};
 use tower::util as tower_util;
 
-use crate::context::build_request_context;
+use crate::context::{RequestContext, build_request_context};
 use crate::http_message::{
   BytesBufBodyWrapper, Request, RequestBody, Response,
 };
@@ -96,11 +96,29 @@ impl HttpService {
     &self,
     mut req: Request,
   ) -> Pin<Box<dyn Future<Output = Result<Response>>>> {
+    let id = match crate::request_id::RequestId::read_or_generate(
+      req.headers(),
+    ) {
+      Ok(id) => id,
+      Err(error) => {
+        return Box::pin(async move {
+          Err(anyhow::anyhow!("generating request ID: {error}"))
+        });
+      }
+    };
+    let ctx =
+      build_request_context(&self.client_addr, &self.local_addr, "")
+        .with_request_id(id);
+    req.extensions_mut().insert(ctx.clone());
     // Validate headers and route to correct server
     let routing_entry =
       match validate_and_route(&req, &self.server_router) {
         Ok(entry) => entry,
-        Err(resp) => return Box::pin(async { Ok(*resp) }),
+        Err(resp) => {
+          return Box::pin(async move {
+            Ok(identify_response(*resp, &ctx))
+          });
+        }
       };
 
     // TLS already authenticated any presented certificate against
@@ -112,9 +130,10 @@ impl HttpService {
     if routing_entry.requires_client_cert()
       && self.client_cert_policy.is_absent()
     {
-      return Box::pin(async {
-        Ok(build_403_forbidden(
-          "Forbidden: client certificate required",
+      return Box::pin(async move {
+        Ok(identify_response(
+          build_403_forbidden("Forbidden: client certificate required"),
+          &ctx,
         ))
       });
     }
@@ -122,17 +141,35 @@ impl HttpService {
     // Build RequestContext with connection-level keys and
     // insert into request extensions. Auth and access logging are
     // now handled by the plugin layer in the service pipeline.
-    req.extensions_mut().insert(build_request_context(
-      &self.client_addr,
-      &self.local_addr,
-      &routing_entry.service_name,
-    ));
+    let ctx = ctx.with_service(&routing_entry.service_name);
+    req.extensions_mut().insert(ctx.clone());
     crate::hop_headers::join_cookie_headers(req.headers_mut());
 
     // Call service (auth/access_log handled by layers)
     let s = routing_entry.service.clone();
-    Box::pin(async move { tower_util::Oneshot::new(s, req).await })
+    Box::pin(async move {
+      let response = match tower_util::Oneshot::new(s, req).await {
+        Ok(response) => response,
+        Err(_) => crate::http_message::build_error_response(
+          http::StatusCode::INTERNAL_SERVER_ERROR,
+          "Internal Server Error",
+        ),
+      };
+      Ok(identify_response(response, &ctx))
+    })
   }
+}
+
+fn identify_response(
+  mut response: Response,
+  ctx: &RequestContext,
+) -> Response {
+  ctx
+    .request_id()
+    .expect("ingress established request identity")
+    .apply(response.headers_mut());
+  response.extensions_mut().insert(ctx.clone());
+  response
 }
 
 impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>

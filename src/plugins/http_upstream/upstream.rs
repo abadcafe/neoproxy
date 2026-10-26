@@ -38,12 +38,18 @@ mod forward;
 #[cfg(test)]
 mod forward_tests;
 mod http;
+mod http1_framing;
+#[cfg(test)]
+mod http1_framing_tests;
 mod http3;
 #[cfg(test)]
 mod http3_tests;
 mod http_pool;
 #[cfg(test)]
 mod http_tests;
+mod observation;
+#[cfg(test)]
+mod observation_tests;
 mod origin_connector;
 #[cfg(test)]
 mod origin_connector_tests;
@@ -116,6 +122,10 @@ impl Upstream {
     )
     .await
     .map_err(|_| {
+      ctx.set(
+        crate::context::fields::upstream::ERROR_PHASE,
+        std::sync::Arc::from("response_headers"),
+      );
       UpstreamError::ConnectionTimeout(
         "upstream response header deadline exceeded".into(),
       )
@@ -125,12 +135,15 @@ impl Upstream {
   pub(crate) async fn connect_for_tunnel(
     &self,
     target: &ConnectTarget,
+    request: &::http::request::Parts,
     tls_config: &Option<Arc<rustls::ClientConfig>>,
     tracker: &Rc<StreamTracker>,
   ) -> Result<ConnectResult, UpstreamError> {
     tokio::time::timeout(
       self.request_timeout,
-      self.client()?.connect_for_tunnel(target, tls_config, tracker),
+      self
+        .client()?
+        .connect_for_tunnel(target, request, tls_config, tracker),
     )
     .await
     .map_err(|_| {
@@ -164,14 +177,11 @@ fn build_root_cert_store(
     tracing::error!("couldn't load default trust roots: {e}");
   }
   if let Some(path) = server_ca_path {
-    let file = fs::File::open(path)
-      .with_context(|| format!("opening server CA file: {path}"))?;
-    let mut reader = BufReader::new(file);
-    let certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut reader)
-      .collect::<Result<Vec<_>, _>>()?;
-    for cert in certs {
-      roots.add(cert)?;
-    }
+    roots.roots.extend(
+      crate::certificate::load_root_file(path)
+        .context("server_ca_path")?
+        .roots,
+    );
   }
   Ok(roots)
 }

@@ -3,7 +3,18 @@ use hickory_resolver::proto::rr::rdata::svcb::{
   Alpn, Mandatory, SVCB, SvcParamKey, SvcParamValue,
 };
 
-use super::dns_https::service_routes;
+use super::origin::Route;
+use super::service_binding::ServiceBinding;
+
+fn service_routes(
+  record: &SVCB,
+  origin: &Origin,
+  owner: &str,
+) -> Vec<Route> {
+  ServiceBinding::from_record(record, origin, owner)
+    .map(|binding| binding.routes())
+    .unwrap_or_default()
+}
 use super::origin::{Origin, WireProtocol};
 
 fn origin() -> Origin {
@@ -12,7 +23,7 @@ fn origin() -> Origin {
 }
 
 #[test]
-fn test_service_routes_selects_supported_transports_and_target_port() {
+fn test_from_record_selects_supported_transports_and_target_port() {
   let record = SVCB::new(
     1,
     Name::from_ascii("alt.example.").unwrap(),
@@ -33,7 +44,7 @@ fn test_service_routes_selects_supported_transports_and_target_port() {
 }
 
 #[test]
-fn test_service_routes_uses_default_origin_and_default_alpn() {
+fn test_from_record_uses_default_origin_and_default_alpn() {
   let record = SVCB::new(1, Name::root(), vec![]);
   let routes = service_routes(&record, &origin(), "example.com");
   assert_eq!(routes.len(), 1);
@@ -42,7 +53,7 @@ fn test_service_routes_uses_default_origin_and_default_alpn() {
 }
 
 #[test]
-fn test_service_routes_honors_no_default_and_mandatory_keys() {
+fn test_from_record_honors_no_default_and_mandatory_keys() {
   let mut params = vec![
     (SvcParamKey::Alpn, SvcParamValue::Alpn(Alpn(vec!["h3".into()]))),
     (SvcParamKey::NoDefaultAlpn, SvcParamValue::NoDefaultAlpn),
@@ -87,7 +98,7 @@ fn test_service_routes_honors_no_default_and_mandatory_keys() {
 }
 
 #[test]
-fn test_service_routes_root_target_uses_record_owner_after_alias() {
+fn test_from_record_root_target_uses_record_owner_after_alias() {
   let record = SVCB::new(1, Name::root(), vec![]);
   let routes = service_routes(&record, &origin(), "alias.example.");
   assert_eq!(routes[0].host, "alias.example");

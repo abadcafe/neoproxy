@@ -32,7 +32,7 @@ rustls-native-certs = "0.8.2"
 tokio-rustls = "0.26"
 rustls-openssl = { version = "0.3", optional = true }
 # Allow future 0.0.x releases; update this pair together in Cargo.lock.
-h3 = "~0.0.8"
+h3 = { version = "~0.0.8", features = ["tracing"] }
 h3-quinn = { version = "~0.0.10", features = ["datagram"] }
 quinn = { version = "0.11.9", features = ["qlog", "rustls", "rustls-log"] }
 socket2 = { version = "0.6.3", features = ["all"] }
@@ -41,6 +41,8 @@ futures-core = "0.3.31"
 futures-util = "0.3.31"
 local-channel = "0.1.5"
 libc = "0.2"
+getrandom = "0.3.4"
+siphasher = "1.0.1"
 base64 = "0.22"
 fast-socks5 = "1.0.0"
 subtle = "2"

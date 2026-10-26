@@ -15,7 +15,7 @@ fn test_strip_connection_headers() {
   headers
     .insert(http::header::CONTENT_TYPE, "text/plain".parse().unwrap());
 
-  strip_connection_headers(&mut headers);
+  drop(strip_connection_headers(&mut headers));
 
   assert!(headers.get(http::header::CONNECTION).is_none());
   assert!(
@@ -45,7 +45,7 @@ fn test_strip_connection_headers_connection_tokens() {
   headers
     .insert(http::header::CONTENT_TYPE, "text/plain".parse().unwrap());
 
-  strip_connection_headers(&mut headers);
+  drop(strip_connection_headers(&mut headers));
 
   assert!(headers.get(http::header::CONNECTION).is_none());
   assert!(
@@ -63,7 +63,7 @@ fn test_strip_connection_headers_all_connection_lines() {
   headers.append(http::header::CONNECTION, "x-second".parse().unwrap());
   headers.insert("x-first", "secret".parse().unwrap());
   headers.insert("x-second", "secret".parse().unwrap());
-  strip_connection_headers(&mut headers);
+  drop(strip_connection_headers(&mut headers));
   assert!(headers.is_empty());
 }
 
@@ -79,7 +79,7 @@ fn test_strip_connection_headers_preserves_proxy_auth_challenges() {
     "Digest realm=\"proxy\", nonce=\"test\"".parse().unwrap(),
   );
   headers.insert(http::header::CONNECTION, "close".parse().unwrap());
-  strip_connection_headers(&mut headers);
+  drop(strip_connection_headers(&mut headers));
   assert_eq!(
     headers.get_all(http::header::PROXY_AUTHENTICATE).iter().count(),
     2
@@ -142,4 +142,31 @@ fn test_strip_trailer_headers_removes_framing_routing_and_authentication()
   crate::hop_headers::strip_trailer_headers(&mut trailers);
   assert_eq!(trailers.len(), 1);
   assert!(trailers.contains_key("digest"));
+}
+
+#[test]
+fn test_strip_connection_headers_keeps_legal_trailer_declarations() {
+  let mut headers = http::HeaderMap::new();
+  headers.insert("connection", "x-private".parse().unwrap());
+  headers.insert(
+    "trailer",
+    "x-checksum, X-Private, content-length".parse().unwrap(),
+  );
+  drop(strip_connection_headers(&mut headers));
+  assert_eq!(headers["trailer"], "x-checksum");
+}
+
+#[test]
+fn test_trailer_policy_removes_initial_connection_options_from_later_frames()
+ {
+  let mut headers = http::HeaderMap::new();
+  headers.insert("connection", "x-private".parse().unwrap());
+  let policy = strip_connection_headers(&mut headers);
+  let mut trailers = http::HeaderMap::new();
+  trailers.insert("x-private", "secret".parse().unwrap());
+  trailers.insert("x-checksum", "complete".parse().unwrap());
+  trailers.insert("content-length", "7".parse().unwrap());
+  policy.apply(&mut trailers);
+  assert_eq!(trailers.len(), 1);
+  assert_eq!(trailers["x-checksum"], "complete");
 }

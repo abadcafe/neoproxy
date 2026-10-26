@@ -26,6 +26,7 @@ pub(crate) fn init(
   tracing_subscriber::fmt()
     .with_writer(writer)
     .with_env_filter(filter)
+    .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
     .compact()
     .with_ansi(false)
     .with_file(true)

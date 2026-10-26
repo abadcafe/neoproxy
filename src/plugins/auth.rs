@@ -186,10 +186,13 @@ impl tower::Service<Request> for AuthMiddleware {
     if let Some(credentials) = credentials {
       let (username, password) = credentials.parts();
       if self.auth.verify_credentials(username, password).is_ok() {
-        ctx.insert("basic_auth.user", username);
-        ctx.insert(
-          "basic_auth.auth_type",
-          AuthType::Password.to_string(),
+        ctx.set(
+          crate::context::fields::auth::USER,
+          std::sync::Arc::from(username),
+        );
+        ctx.set(
+          crate::context::fields::auth::AUTH_TYPE,
+          std::sync::Arc::from(AuthType::Password.to_string()),
         );
         return self.inner.call(req);
       }

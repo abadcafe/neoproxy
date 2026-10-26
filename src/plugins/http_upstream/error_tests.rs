@@ -50,7 +50,10 @@ fn test_upstream_error_proxy_status_error() {
 #[test]
 fn test_to_response() {
   let ctx = RequestContext::new();
-  ctx.insert("proxy_id", "test-proxy");
+  ctx.set(
+    crate::context::fields::auth::PROXY_ID,
+    std::sync::Arc::from("test-proxy"),
+  );
   let resp = UpstreamError::ConnectionRefused("conn refused".into())
     .to_response(&ctx);
   assert_eq!(resp.status(), http::StatusCode::BAD_GATEWAY);
@@ -176,4 +179,34 @@ fn test_classify_tls_handshake_protocol_error() {
     classify_tls_handshake_error(err),
     UpstreamError::TlsProtocolError(_)
   ));
+}
+
+#[test]
+fn test_classify_errors_preserve_diagnostic_source_chain() {
+  let dns = || {
+    anyhow::Error::from(DnsResolveError(std::io::Error::other(
+      "resolver returned temporary failure",
+    )))
+    .context("connector failed")
+  };
+  for error in [
+    classify_connect_error(dns()),
+    classify_http_client_error(dns()),
+    classify_quic_error(dns()),
+  ] {
+    let message = error.to_string();
+    assert!(message.contains("connector failed"), "{message}");
+    assert!(
+      message.contains("resolver returned temporary failure"),
+      "{message}"
+    );
+  }
+  let tls = anyhow::Error::from(rustls::Error::InvalidCertificate(
+    rustls::CertificateError::UnknownIssuer,
+  ))
+  .context("TLS connector failed");
+  let error = classify_tls_handshake_error(tls);
+  let message = error.to_string();
+  assert!(message.contains("TLS connector failed"), "{message}");
+  assert!(message.contains("UnknownIssuer"), "{message}");
 }

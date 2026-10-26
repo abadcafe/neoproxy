@@ -19,7 +19,14 @@ async fn test_run_tunnel_idle_timeout_on_no_data() {
   let idle_timeout = Duration::from_millis(200);
 
   let start = std::time::Instant::now();
-  run_tunnel(client, server, shutdown, idle_timeout, "test").await;
+  run_tunnel(
+    client,
+    server,
+    shutdown,
+    idle_timeout,
+    crate::stream::TransferProgress::new(),
+  )
+  .await;
   let elapsed = start.elapsed();
 
   assert!(
@@ -73,7 +80,14 @@ async fn test_run_tunnel_no_timeout_with_active_data() {
   let idle_timeout = Duration::from_millis(200);
 
   let start = std::time::Instant::now();
-  run_tunnel(client, target, shutdown, idle_timeout, "test").await;
+  run_tunnel(
+    client,
+    target,
+    shutdown,
+    idle_timeout,
+    crate::stream::TransferProgress::new(),
+  )
+  .await;
   let elapsed = start.elapsed();
 
   assert!(
@@ -103,7 +117,14 @@ async fn test_run_tunnel_completes_on_eof() {
   drop(_drain);
 
   let start = std::time::Instant::now();
-  run_tunnel(client, target, shutdown, idle_timeout, "test").await;
+  run_tunnel(
+    client,
+    target,
+    shutdown,
+    idle_timeout,
+    crate::stream::TransferProgress::new(),
+  )
+  .await;
   let elapsed = start.elapsed();
 
   assert!(
@@ -126,8 +147,14 @@ async fn test_run_tunnel_shutdown_notification() {
   let idle_timeout = Duration::from_secs(60);
 
   let tunnel_task = tokio::spawn(async move {
-    run_tunnel(client, server, shutdown_clone, idle_timeout, "test")
-      .await;
+    run_tunnel(
+      client,
+      server,
+      shutdown_clone,
+      idle_timeout,
+      crate::stream::TransferProgress::new(),
+    )
+    .await;
   });
 
   tokio::time::sleep(Duration::from_millis(50)).await;

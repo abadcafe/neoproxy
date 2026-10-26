@@ -18,6 +18,9 @@ use tokio::time::Instant;
 use tower::{Service, ServiceExt};
 
 use super::forward::ForwardClient;
+use super::http::ProxyIo;
+use super::observation::ConnectionObservation;
+use crate::context::RequestContext;
 use crate::http_message::{
   BytesBufBodyWrapper, Request, RequestBody, Response, ResponseBody,
 };
@@ -26,8 +29,25 @@ use crate::plugins::http_upstream::error::{
 };
 use crate::tracker::StreamTracker;
 
-struct IdleSender {
+struct PooledSender {
   sender: SendRequest<RequestBody>,
+  observation: ConnectionObservation,
+}
+impl std::ops::Deref for PooledSender {
+  type Target = SendRequest<RequestBody>;
+
+  fn deref(&self) -> &Self::Target {
+    &self.sender
+  }
+}
+impl std::ops::DerefMut for PooledSender {
+  fn deref_mut(&mut self) -> &mut Self::Target {
+    &mut self.sender
+  }
+}
+
+struct IdleSender {
+  sender: PooledSender,
   expires: Instant,
 }
 
@@ -92,7 +112,7 @@ impl<C> ProxyPool<C> {
     }
   }
 
-  fn checkout(&self) -> Option<SendRequest<RequestBody>> {
+  fn checkout(&self) -> Option<PooledSender> {
     let mut state = self.state.borrow_mut();
     while let Some(entry) = state.idle.pop() {
       if entry.expires > Instant::now() && entry.sender.is_ready() {
@@ -106,72 +126,85 @@ impl<C> ProxyPool<C> {
 impl<C> ProxyPool<C>
 where
   C: Service<http::Uri, Error = std::io::Error> + Clone,
-  C::Response:
-    hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+  C::Response: ProxyIo,
 {
   pub(super) async fn connect(
     &self,
     uri: http::Uri,
+    ctx: Option<&RequestContext>,
   ) -> Result<C::Response, UpstreamError> {
     if self.state.borrow().stopped {
       return Err(UpstreamError::ProxyInternalError(
         "proxy pool stopped".into(),
       ));
     }
-    self
-      .connector
-      .clone()
-      .oneshot(uri)
-      .await
-      .map_err(|error| classify_http_client_error(error.into()))
+    let result = self.connector.clone().oneshot(uri).await;
+    if let (Err(error), Some(ctx)) = (&result, ctx) {
+      ConnectionObservation::record_error(error, ctx);
+    }
+    result.map_err(|error| classify_http_client_error(error.into()))
   }
 
   async fn open(
     &self,
     uri: http::Uri,
-  ) -> Result<SendRequest<RequestBody>, UpstreamError> {
-    let io = self.connect(uri).await?;
-    let (mut sender, connection) = http1::handshake(io)
-      .await
-      .map_err(|error| classify_http_client_error(error.into()))?;
+    ctx: Option<&RequestContext>,
+  ) -> Result<PooledSender, UpstreamError> {
+    let io = self.connect(uri, ctx).await?;
+    let observation = io.observation();
+    let (mut sender, connection) =
+      http1::handshake(io).await.map_err(|error| {
+        if let Some(ctx) = ctx {
+          observation.record(ctx);
+        }
+        classify_http_client_error(error.into())
+      })?;
     self.tracker.register_connection(async move {
       if let Err(error) = connection.await {
         tracing::debug!("upstream HTTP connection ended: {error}");
       }
     });
-    sender
-      .ready()
-      .await
-      .map_err(|error| classify_http_client_error(error.into()))?;
-    Ok(sender)
+    sender.ready().await.map_err(|error| {
+      if let Some(ctx) = ctx {
+        observation.record(ctx);
+      }
+      classify_http_client_error(error.into())
+    })?;
+    Ok(PooledSender { sender, observation })
   }
 }
 
 impl<C> ForwardClient for ProxyPool<C>
 where
   C: Service<http::Uri, Error = std::io::Error> + Clone,
-  C::Response:
-    hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+  C::Response: ProxyIo,
 {
   async fn send(
     &self,
     mut request: Request,
   ) -> Result<Response, UpstreamError> {
-    *request.version_mut() = http::Version::HTTP_11;
+    super::http1_framing::prepare_request(&mut request);
+    let ctx = request.extensions().get::<RequestContext>().cloned();
     let uri = request.uri().clone();
     let cached = self.checkout();
     let reused = cached.is_some();
     let mut sender = match cached {
       Some(sender) => sender,
-      None => self.open(uri.clone()).await?,
+      None => self.open(uri.clone(), ctx.as_ref()).await?,
     };
+    if let Some(ctx) = &ctx {
+      sender.observation.record(ctx);
+    }
     let response = match sender.try_send_request(request).await {
       Ok(response) => response,
       Err(mut error) => {
         // Retry only when Hyper returns the unsent message. Never
         // replay a body/method whose bytes may have reached the peer.
         if reused && let Some(request) = error.take_message() {
-          sender = self.open(uri).await?;
+          sender = self.open(uri, ctx.as_ref()).await?;
+          if let Some(ctx) = &ctx {
+            sender.observation.record(ctx);
+          }
           sender
             .send_request(request)
             .await
@@ -183,7 +216,8 @@ where
         }
       }
     };
-    let (parts, inner) = response.into_parts();
+    let (mut parts, inner) = response.into_parts();
+    parts.extensions.insert(sender.observation.clone());
     let (recycle, completed) = tokio::sync::oneshot::channel();
     return_when_complete(
       completed,
@@ -207,9 +241,8 @@ where
 
 struct PooledBody {
   inner: hyper::body::Incoming,
-  sender: Option<SendRequest<RequestBody>>,
-  recycle:
-    Option<tokio::sync::oneshot::Sender<SendRequest<RequestBody>>>,
+  sender: Option<PooledSender>,
+  recycle: Option<tokio::sync::oneshot::Sender<PooledSender>>,
 }
 
 impl PooledBody {
@@ -225,7 +258,7 @@ impl PooledBody {
 }
 
 fn return_when_complete(
-  completed: tokio::sync::oneshot::Receiver<SendRequest<RequestBody>>,
+  completed: tokio::sync::oneshot::Receiver<PooledSender>,
   state: Weak<RefCell<PoolState>>,
   tracker: Rc<StreamTracker>,
 ) {

@@ -1,8 +1,8 @@
 //! module: dns_https
 //! responsibility: discover origin endpoints through TTL-cached DNS
-//! HTTPS records public operations: DnsHttps::{new,routes,addresses},
-//! service_routes data entities: DnsHttps; tests: dns_https_tests.rs,
-//! origin discovery process tests
+//! HTTPS records public operations:
+//! DnsHttps::{new,routes,alternatives,addresses} data entities:
+//! DnsHttps; tests: origin discovery process tests
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
@@ -12,13 +12,11 @@ use hickory_resolver::config::{
   ConnectionConfig, NameServerConfig, ResolverConfig,
 };
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use hickory_resolver::proto::rr::rdata::svcb::{
-  SVCB, SvcParamKey, SvcParamValue,
-};
 use hickory_resolver::proto::rr::{RData, RecordType};
 use hickory_resolver::{Resolver, TokioResolver};
 
-use super::origin::{Origin, Route, WireProtocol};
+use super::origin::{Origin, Route};
+use super::service_binding::ServiceBinding;
 
 pub(super) struct DnsHttps {
   resolver: TokioResolver,
@@ -54,6 +52,15 @@ impl DnsHttps {
   }
 
   pub(super) async fn routes(&self, origin: &Origin) -> Vec<Route> {
+    self
+      .bindings(origin)
+      .await
+      .iter()
+      .flat_map(ServiceBinding::routes)
+      .collect()
+  }
+
+  async fn bindings(&self, origin: &Origin) -> Vec<ServiceBinding> {
     if !origin.is_https() || origin.host().parse::<IpAddr>().is_ok() {
       return Vec::new();
     }
@@ -78,38 +85,28 @@ impl DnsHttps {
       let Some(origin) = Origin::from_uri(&uri) else {
         continue;
       };
-      let bindings = self.routes(&origin).await;
+      let bindings = self.bindings(&origin).await;
       if bindings.is_empty() {
         routes.push(alternative);
         continue;
       }
-      for mut binding in bindings {
-        let compatible = match alternative.protocol {
-          WireProtocol::Http3 => {
-            binding.protocol == WireProtocol::Http3
-          }
-          WireProtocol::Http2
-          | WireProtocol::Http1
-          | WireProtocol::Negotiated => {
-            binding.protocol == WireProtocol::Negotiated
-          }
-        };
-        if compatible {
-          binding.protocol = alternative.protocol;
-          routes.push(binding);
-        }
-      }
+      routes.extend(
+        bindings
+          .iter()
+          .filter_map(|binding| binding.alternative(&alternative)),
+      );
     }
     routes
   }
 
-  async fn discover(&self, origin: &Origin) -> Vec<Route> {
+  async fn discover(&self, origin: &Origin) -> Vec<ServiceBinding> {
     let mut name = if origin.port() == 443 {
       format!("{}.", origin.host())
     } else {
       format!("_{}._https.{}.", origin.port(), origin.host())
     };
     let mut visited = HashSet::new();
+    let mut alias_fallback = None;
     for _ in 0..8 {
       if !visited.insert(name.clone()) {
         break;
@@ -138,16 +135,23 @@ impl DnsHttps {
           break;
         }
         name = alias.target_name.to_ascii();
+        // RFC 9460 §3: an SVCB-optional client must try the final
+        // alias's address even if that name has no HTTPS records.
+        alias_fallback = Some(ServiceBinding::fallback(
+          name.trim_end_matches('.').to_owned(),
+          origin.port(),
+        ));
         continue;
       }
       return records
         .into_iter()
         .flat_map(|(owner, record)| {
-          service_routes(record, origin, &owner)
+          ServiceBinding::from_record(record, origin, &owner)
         })
+        .chain(alias_fallback)
         .collect();
     }
-    Vec::new()
+    alias_fallback.into_iter().collect()
   }
 
   pub(super) async fn addresses(
@@ -170,72 +174,4 @@ impl DnsHttps {
       _ => Vec::new(),
     }
   }
-}
-
-pub(super) fn service_routes(
-  record: &SVCB,
-  origin: &Origin,
-  owner: &str,
-) -> Vec<Route> {
-  let params = &record.svc_params;
-  for (_, value) in params {
-    if let SvcParamValue::Mandatory(keys) = value
-      && keys.0.iter().any(|key| {
-        !matches!(
-          key,
-          SvcParamKey::Alpn
-            | SvcParamKey::NoDefaultAlpn
-            | SvcParamKey::Port
-        ) || !params.iter().any(|(present, _)| present == key)
-      })
-    {
-      return Vec::new();
-    }
-  }
-  let no_default = params
-    .iter()
-    .any(|(_, value)| matches!(value, SvcParamValue::NoDefaultAlpn));
-  let alpn = params.iter().find_map(|(_, value)| {
-    if let SvcParamValue::Alpn(alpn) = value {
-      Some(&alpn.0)
-    } else {
-      None
-    }
-  });
-  if no_default && alpn.is_none() {
-    return Vec::new();
-  }
-  let supports = |protocol: &str| {
-    alpn
-      .is_some_and(|protocols| protocols.iter().any(|p| p == protocol))
-  };
-  let port = params
-    .iter()
-    .find_map(|(_, value)| {
-      if let SvcParamValue::Port(port) = value {
-        Some(*port)
-      } else {
-        None
-      }
-    })
-    .unwrap_or(origin.port());
-  if port == 0 {
-    return Vec::new();
-  }
-  let host = if record.target_name.is_root() {
-    owner.trim_end_matches('.').to_owned()
-  } else {
-    record.target_name.to_ascii().trim_end_matches('.').to_owned()
-  };
-  let mut protocols = Vec::new();
-  if supports("h3") {
-    protocols.push(WireProtocol::Http3);
-  }
-  if !no_default || supports("h2") || supports("http/1.1") {
-    protocols.push(WireProtocol::Negotiated);
-  }
-  protocols
-    .into_iter()
-    .map(|protocol| Route { host: host.clone(), port, protocol })
-    .collect()
 }

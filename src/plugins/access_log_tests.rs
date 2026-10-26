@@ -65,7 +65,10 @@ fn request_with_context() -> crate::http_message::Request {
     &"127.0.0.1:8080".parse().unwrap(),
     "access-log-test",
   );
-  ctx.insert("basic_auth.user", "alice");
+  ctx.set(
+    crate::context::fields::auth::USER,
+    std::sync::Arc::from("alice"),
+  );
   req.extensions_mut().insert(ctx);
   req
 }

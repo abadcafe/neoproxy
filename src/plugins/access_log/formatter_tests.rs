@@ -55,7 +55,7 @@ fn test_format_text_with_extensions() {
   let mut entry = make_entry();
   entry
     .extensions
-    .insert("basic_auth.user".to_string(), "admin".to_string());
+    .insert("basic_auth.user".to_string(), "admin".to_string().into());
   let output = crate::plugins::access_log::formatter::format_entry(
     &entry,
     LogFormat::Text,
@@ -73,11 +73,21 @@ fn test_format_text_extensions_are_sorted() {
   for _ in 0..100 {
     let mut entry = make_entry();
     // Use keys whose hash order differs from alphabetical order
-    entry.extensions.insert("key_c".to_string(), "3".to_string());
-    entry.extensions.insert("key_a".to_string(), "1".to_string());
-    entry.extensions.insert("key_b".to_string(), "2".to_string());
-    entry.extensions.insert("key_e".to_string(), "5".to_string());
-    entry.extensions.insert("key_d".to_string(), "4".to_string());
+    entry
+      .extensions
+      .insert("key_c".to_string(), "3".to_string().into());
+    entry
+      .extensions
+      .insert("key_a".to_string(), "1".to_string().into());
+    entry
+      .extensions
+      .insert("key_b".to_string(), "2".to_string().into());
+    entry
+      .extensions
+      .insert("key_e".to_string(), "5".to_string().into());
+    entry
+      .extensions
+      .insert("key_d".to_string(), "4".to_string().into());
 
     let output = crate::plugins::access_log::formatter::format_entry(
       &entry,
@@ -119,9 +129,56 @@ fn test_format_json_basic() {
 }
 
 #[test]
+fn test_format_entry_native_extension_types() {
+  let mut entry = make_entry();
+  entry.extensions.insert("bytes".into(), 123_u64.into());
+  entry.extensions.insert("reused".into(), true.into());
+  entry.extensions.insert(
+    "elapsed_ms".into(),
+    std::time::Duration::from_millis(42).into(),
+  );
+  let output = crate::plugins::access_log::formatter::format_entry(
+    &entry,
+    LogFormat::Json,
+  );
+  let value: serde_json::Value =
+    serde_json::from_slice(&output).unwrap();
+  assert_eq!(value["extensions"]["bytes"], 123);
+  assert_eq!(value["extensions"]["reused"], true);
+  assert_eq!(value["extensions"]["elapsed_ms"], 42);
+  let text = String::from_utf8(
+    crate::plugins::access_log::formatter::format_entry(
+      &entry,
+      LogFormat::Text,
+    ),
+  )
+  .unwrap();
+  assert!(text.contains("bytes=123 elapsed_ms=42 reused=true"));
+}
+
+#[test]
+fn test_format_json_preserves_large_duration_as_an_exact_number() {
+  let mut entry = make_entry();
+  entry
+    .extensions
+    .insert("elapsed_ms".into(), std::time::Duration::MAX.into());
+  let output = crate::plugins::access_log::formatter::format_entry(
+    &entry,
+    LogFormat::Json,
+  );
+  let text = String::from_utf8(output).unwrap();
+  assert!(text.contains(&format!(
+    "\"elapsed_ms\":{}",
+    std::time::Duration::MAX.as_millis()
+  )));
+}
+
+#[test]
 fn test_format_json_with_extensions() {
   let mut entry = make_entry();
-  entry.extensions.insert("user".to_string(), "admin".to_string());
+  entry
+    .extensions
+    .insert("user".to_string(), "admin".to_string().into());
   let output = crate::plugins::access_log::formatter::format_entry(
     &entry,
     LogFormat::Json,
@@ -142,11 +199,21 @@ fn test_format_json_extensions_are_sorted() {
   for _ in 0..100 {
     let mut entry = make_entry();
     // Use keys whose hash order differs from alphabetical order
-    entry.extensions.insert("key_c".to_string(), "3".to_string());
-    entry.extensions.insert("key_a".to_string(), "1".to_string());
-    entry.extensions.insert("key_b".to_string(), "2".to_string());
-    entry.extensions.insert("key_e".to_string(), "5".to_string());
-    entry.extensions.insert("key_d".to_string(), "4".to_string());
+    entry
+      .extensions
+      .insert("key_c".to_string(), "3".to_string().into());
+    entry
+      .extensions
+      .insert("key_a".to_string(), "1".to_string().into());
+    entry
+      .extensions
+      .insert("key_b".to_string(), "2".to_string().into());
+    entry
+      .extensions
+      .insert("key_e".to_string(), "5".to_string().into());
+    entry
+      .extensions
+      .insert("key_d".to_string(), "4".to_string().into());
 
     let output = crate::plugins::access_log::formatter::format_entry(
       &entry,
@@ -208,8 +275,12 @@ fn test_format_json_extensions_under_dedicated_key() {
   // field producing a key that matches "status" would overwrite
   // the HTTP status code).
   let mut entry = make_entry();
-  entry.extensions.insert("user".to_string(), "admin".to_string());
-  entry.extensions.insert("role".to_string(), "superuser".to_string());
+  entry
+    .extensions
+    .insert("user".to_string(), "admin".to_string().into());
+  entry
+    .extensions
+    .insert("role".to_string(), "superuser".to_string().into());
   let output = crate::plugins::access_log::formatter::format_entry(
     &entry,
     LogFormat::Json,
@@ -259,7 +330,9 @@ fn test_format_json_extension_key_collides_with_builtin() {
   // The extension goes under "extensions" while the built-in
   // stays at the top level.
   let mut entry = make_entry();
-  entry.extensions.insert("status".to_string(), "ok".to_string());
+  entry
+    .extensions
+    .insert("status".to_string(), "ok".to_string().into());
   let output = crate::plugins::access_log::formatter::format_entry(
     &entry,
     LogFormat::Json,
@@ -308,7 +381,9 @@ fn test_format_text_extensions_at_top_level() {
   // key=value pairs (visually distinguishable). This test verifies
   // text format is NOT changed by the JSON fix.
   let mut entry = make_entry();
-  entry.extensions.insert("user".to_string(), "admin".to_string());
+  entry
+    .extensions
+    .insert("user".to_string(), "admin".to_string().into());
   let output = crate::plugins::access_log::formatter::format_entry(
     &entry,
     LogFormat::Text,

@@ -13,6 +13,7 @@ use anyhow::{Context, Result, anyhow};
 use hyper_util::client::legacy::connect::dns::Name;
 use tower::Service;
 
+use super::observation::ConnectionObservation;
 use crate::plugins::http_upstream::error::DnsResolveError;
 
 /// Preserve the DNS phase through connector APIs restricted to
@@ -73,11 +74,20 @@ pub(crate) async fn resolve_addresses(
 #[derive(Clone, Debug)]
 pub(crate) struct TimeoutResolver {
   timeout: Duration,
+  observation: Option<ConnectionObservation>,
 }
 
 impl TimeoutResolver {
   pub(crate) fn new(timeout: Duration) -> Self {
-    Self { timeout }
+    Self { timeout, observation: None }
+  }
+
+  pub(super) fn observe(
+    mut self,
+    observation: ConnectionObservation,
+  ) -> Self {
+    self.observation = Some(observation);
+    self
   }
 }
 
@@ -102,15 +112,27 @@ impl Service<Name> for TimeoutResolver {
   fn call(&mut self, name: Name) -> Self::Future {
     let timeout = self.timeout;
     let host = name.to_string();
+    let observation = self.observation.clone();
     Box::pin(async move {
+      let started = std::time::Instant::now();
       let result =
-        match tokio::time::timeout(timeout, lookup((host, 0))).await {
+        match tokio::time::timeout(timeout, lookup((host.clone(), 0)))
+          .await
+        {
           Ok(result) => result,
           Err(_) => Err(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
             "DNS resolve timed out",
           )),
         };
+      if let Some(observation) = &observation {
+        observation.dns(
+          &host,
+          started.elapsed(),
+          timeout,
+          result.as_deref().unwrap_or_default(),
+        );
+      }
       result
         .map(|addresses| addresses.into_iter())
         .map_err(dns_io_error)

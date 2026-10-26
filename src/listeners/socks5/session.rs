@@ -182,6 +182,19 @@ pub(super) async fn serve(
     &local_addr,
     &service_name,
   );
+  let id = match crate::request_id::RequestId::read_or_generate(
+    request.headers(),
+  ) {
+    Ok(id) => id,
+    Err(error) => {
+      tracing::error!("generating SOCKS5 request ID: {error}");
+      let _ = trigger
+        .send_error(fast_socks5::ReplyError::GeneralFailure)
+        .await;
+      return;
+    }
+  };
+  let ctx = ctx.with_request_id(id);
   request.extensions_mut().insert(ctx);
 
   // Step 5: Call the associated Service

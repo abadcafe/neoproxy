@@ -12,6 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from tests.fixtures.access_log_configuration import enable_access_log
 from tests.fixtures.certificates import generate_client_cert, generate_test_certificates
 from tests.fixtures.chain_configuration import (
     create_entry_http_password_config,
@@ -21,14 +22,13 @@ from tests.fixtures.chain_configuration import (
     create_upstream_password_config,
     create_upstream_tls_cert_config,
 )
+from tests.fixtures.chain_diagnostics import record_chain
 from tests.fixtures.configuration import StringMap
-from tests.fixtures.curl import get_curl_env_without_no_proxy
 from tests.fixtures.http_echo import http_echo_handler
 from tests.fixtures.ports import (
     wait_for_proxy,
     wait_for_udp_port_bound,
 )
-from tests.fixtures.proxy_process import BytesProcess, start_proxy
 from tests.fixtures.tcp_peer import create_target_server
 
 type EntryKind = Literal["http", "socks5"]
@@ -93,8 +93,6 @@ def run_proxy_chain_test(
         shared_client_cert: Optional session-scoped client cert dict for cert reuse
         case: Method, target scheme and forwarding/tunneling mode.
     """
-    upstream_proc: BytesProcess | None = None
-    entry_proc: BytesProcess | None = None
     target_socket: socket.socket | None = None
     request = case or (
         ChainRequest()
@@ -104,204 +102,233 @@ def run_proxy_chain_test(
     assert entry_type == "http" or request.mode == "tunnel"
 
     try:
-        if shared_test_certs:
-            cert_path = shared_test_certs["cert_path"]
-            key_path = shared_test_certs["key_path"]
-            ca_path = shared_test_certs["ca_path"]
-            ca_key_path = shared_test_certs["ca_key_path"]
-        else:
-            cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(
-                temp_dir1
-            )
-
-        # Get client certificate for TLS cert auth
-        client_cert_path = None
-        client_key_path = None
-        if upstream_auth == "tls_cert":
-            if shared_client_cert:
-                client_cert_path = shared_client_cert["client_cert_path"]
-                client_key_path = shared_client_cert["client_key_path"]
+        with record_chain(
+            {"upstream": Path(temp_dir1), "entry": Path(temp_dir2)},
+            {
+                "entry": entry_type,
+                "upstream_auth": upstream_auth,
+                "target": target_type,
+                "request": request.model_dump_json(),
+            },
+        ) as diagnostics:
+            if shared_test_certs:
+                cert_path = shared_test_certs["cert_path"]
+                key_path = shared_test_certs["key_path"]
+                ca_path = shared_test_certs["ca_path"]
+                ca_key_path = shared_test_certs["ca_key_path"]
             else:
-                client_cert_path, client_key_path = generate_client_cert(
-                    temp_dir1, ca_path, ca_key_path
+                cert_path, key_path, ca_path, ca_key_path = generate_test_certificates(
+                    temp_dir1
                 )
 
-        # Create upstream config
-        if upstream_auth == "password":
-            upstream_config = create_upstream_password_config(
-                h3_port,
-                cert_path,
-                key_path,
-                temp_dir1,
-                target_ca_path=ca_path
-                if target_type == "mock" and request.scheme == "https"
-                else None,
-            )
-        else:
-            upstream_config = create_upstream_tls_cert_config(
-                h3_port,
-                cert_path,
-                key_path,
-                ca_path,
-                temp_dir1,
-                target_ca_path=ca_path
-                if target_type == "mock" and request.scheme == "https"
-                else None,
-            )
+            # Get client certificate for TLS cert auth
+            client_cert_path = None
+            client_key_path = None
+            if upstream_auth == "tls_cert":
+                if shared_client_cert:
+                    client_cert_path = shared_client_cert["client_cert_path"]
+                    client_key_path = shared_client_cert["client_key_path"]
+                else:
+                    client_cert_path, client_key_path = generate_client_cert(
+                        temp_dir1, ca_path, ca_key_path
+                    )
 
-        upstream_proc = start_proxy(upstream_config)
-        assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
-            "Upstream HTTP/3 listener failed to start"
-        )
-
-        # Create entry config
-        if entry_type == "http":
+            # Create upstream config
             if upstream_auth == "password":
-                entry_config = create_entry_http_password_config(
-                    http_port, h3_port, ca_path, temp_dir2
-                )
-            else:
-                assert client_cert_path is not None and client_key_path is not None
-                entry_config = create_entry_http_tls_cert_config(
-                    http_port,
+                upstream_config = create_upstream_password_config(
                     h3_port,
-                    ca_path,
-                    client_cert_path,
-                    client_key_path,
-                    temp_dir2,
-                )
-        else:  # socks5
-            if upstream_auth == "password":
-                entry_config = create_entry_socks5_password_config(
-                    http_port, h3_port, ca_path, temp_dir2
+                    cert_path,
+                    key_path,
+                    temp_dir1,
+                    target_ca_path=ca_path
+                    if target_type == "mock" and request.scheme == "https"
+                    else None,
                 )
             else:
-                assert client_cert_path is not None and client_key_path is not None
-                entry_config = create_entry_socks5_tls_cert_config(
-                    http_port,
+                upstream_config = create_upstream_tls_cert_config(
                     h3_port,
+                    cert_path,
+                    key_path,
                     ca_path,
-                    client_cert_path,
-                    client_key_path,
-                    temp_dir2,
+                    temp_dir1,
+                    target_ca_path=ca_path
+                    if target_type == "mock" and request.scheme == "https"
+                    else None,
                 )
 
-        entry_proc = start_proxy(entry_config)
-        assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
-            "Entry listener failed to start"
-        )
-
-        # Create target server for mock tests
-        if target_type == "mock":
-            assert target_port is not None
-            if request.scheme == "https":
-                context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-                context.load_cert_chain(cert_path, key_path)
-
-                def tls_echo(conn: socket.socket) -> None:
-                    with conn:
-                        with context.wrap_socket(conn, server_side=True) as stream:
-                            http_echo_handler(stream)
-
-                _, target_socket = create_target_server(
-                    "127.0.0.1", target_port, tls_echo
-                )
-            else:
-                _, target_socket = create_echo_target_server("127.0.0.1", target_port)
-
-        host = "www.baidu.com" if target_type == "baidu" else "127.0.0.1"
-        authority = host if target_type == "baidu" else f"{host}:{target_port}"
-        url = f"{request.scheme}://{authority}/"
-        trace_path = Path(temp_dir2) / "curl.trace"
-        body_path = Path(temp_dir2) / "curl.body"
-        curl_cmd = [
-            "curl",
-            "--http1.1",
-            "--silent",
-            "--show-error",
-            "--connect-timeout",
-            "10",
-            "--max-time",
-            "20",
-            "--noproxy",
-            "",
-            "--trace-ascii",
-            str(trace_path),
-            "--output",
-            str(body_path),
-            "--write-out",
-            "%{http_code} %{http_connect}",
-        ]
-
-        # Run curl
-        if entry_type == "http":
-            curl_proxy = f"http://user1:pass1@127.0.0.1:{http_port}"
-            curl_cmd.extend(["--proxy", curl_proxy])
-            if request.mode == "tunnel":
-                curl_cmd.append("--proxytunnel")
-            else:
-                curl_cmd.extend(["--request-target", url])
-        else:  # socks5
-            curl_cmd.extend(
+            enable_access_log(
+                upstream_config,
                 [
-                    "--socks5-basic",
-                    "--socks5-hostname",
-                    f"127.0.0.1:{http_port}",
-                    "--proxy-user",
-                    "user1:pass1",
-                ]
+                    "request.id",
+                    "upstream.connection.peer",
+                    "upstream.connection.reused",
+                    "upstream.dns.host",
+                    "upstream.dns.duration_ms",
+                    "upstream.dns.addresses",
+                    "upstream.tcp.connect_ms",
+                    "upstream.tls.handshake_ms",
+                    "upstream.tls.alpn",
+                    "upstream.error.phase",
+                    "upstream.error.kind",
+                    "upstream.error.message",
+                ],
+            )
+            _ = diagnostics.start_proxy("upstream", upstream_config)
+            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
+                "Upstream HTTP/3 listener failed to start"
             )
 
-        if request.method == "HEAD":
-            curl_cmd.append("--head")
-        elif request.method == "POST":
-            assert target_type == "mock"
-            curl_cmd.extend(["--data-binary", "test_data_chain"])
-        if target_type == "mock" and request.scheme == "https":
-            curl_cmd.extend(["--cacert", ca_path])
-        # curl normally turns an HTTPS URL into CONNECT. For forwarding,
-        # use an HTTP transfer URL and put the real target in the request line.
-        curl_cmd.append(
-            url.replace("https://", "http://", 1)
-            if entry_type == "http" and request.mode == "forward"
-            else url
-        )
-        result = subprocess.run(
-            curl_cmd,
-            capture_output=True,
-            text=True,
-            timeout=25,
-            env=get_curl_env_without_no_proxy(),
-        )
-        assert result.returncode == 0, result.stderr
-        connect_status = (
-            "200" if entry_type == "http" and request.mode == "tunnel" else "000"
-        )
-        assert result.stdout == f"200 {connect_status}", (
-            f"Expected 200, got {result.stdout}. stderr: {result.stderr}"
-        )
-        trace = trace_path.read_text()
-        if entry_type == "http" and request.mode == "forward":
-            assert f"{request.method} {url} HTTP/1.1" in trace, trace
-        else:
+            # Create entry config
             if entry_type == "http":
-                port = (
-                    target_port
-                    if target_type == "mock"
-                    else (443 if request.scheme == "https" else 80)
+                if upstream_auth == "password":
+                    entry_config = create_entry_http_password_config(
+                        http_port, h3_port, ca_path, temp_dir2
+                    )
+                else:
+                    assert client_cert_path is not None and client_key_path is not None
+                    entry_config = create_entry_http_tls_cert_config(
+                        http_port,
+                        h3_port,
+                        ca_path,
+                        client_cert_path,
+                        client_key_path,
+                        temp_dir2,
+                    )
+            else:  # socks5
+                if upstream_auth == "password":
+                    entry_config = create_entry_socks5_password_config(
+                        http_port, h3_port, ca_path, temp_dir2
+                    )
+                else:
+                    assert client_cert_path is not None and client_key_path is not None
+                    entry_config = create_entry_socks5_tls_cert_config(
+                        http_port,
+                        h3_port,
+                        ca_path,
+                        client_cert_path,
+                        client_key_path,
+                        temp_dir2,
+                    )
+
+            enable_access_log(
+                entry_config,
+                [
+                    "request.id",
+                    "upstream.connection.peer",
+                    "upstream.connection.reused",
+                    "upstream.tcp.connect_ms",
+                    "upstream.tls.handshake_ms",
+                    "upstream.error.phase",
+                    "upstream.error.kind",
+                    "upstream.error.message",
+                ],
+            )
+            _ = diagnostics.start_proxy("entry", entry_config)
+            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
+                "Entry listener failed to start"
+            )
+
+            # Create target server for mock tests
+            if target_type == "mock":
+                assert target_port is not None
+                if request.scheme == "https":
+                    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                    context.load_cert_chain(cert_path, key_path)
+
+                    def tls_echo(conn: socket.socket) -> None:
+                        with conn:
+                            with context.wrap_socket(conn, server_side=True) as stream:
+                                http_echo_handler(stream)
+
+                    _, target_socket = create_target_server(
+                        "127.0.0.1", target_port, tls_echo
+                    )
+                else:
+                    _, target_socket = create_echo_target_server(
+                        "127.0.0.1", target_port
+                    )
+
+            host = "www.baidu.com" if target_type == "baidu" else "127.0.0.1"
+            authority = host if target_type == "baidu" else f"{host}:{target_port}"
+            url = f"{request.scheme}://{authority}/"
+            trace_path = Path(temp_dir2) / "curl.trace"
+            body_path = Path(temp_dir2) / "curl.body"
+            curl_cmd = [
+                "curl",
+                "--http1.1",
+                "--silent",
+                "--show-error",
+                "--connect-timeout",
+                "10",
+                "--max-time",
+                "20",
+                "--noproxy",
+                "",
+                "--trace-ascii",
+                str(trace_path),
+                "--output",
+                str(body_path),
+                "--write-out",
+                "%{http_code} %{http_connect}",
+            ]
+
+            # Run curl
+            if entry_type == "http":
+                curl_proxy = f"http://user1:pass1@127.0.0.1:{http_port}"
+                curl_cmd.extend(["--proxy", curl_proxy])
+                if request.mode == "tunnel":
+                    curl_cmd.append("--proxytunnel")
+                else:
+                    curl_cmd.extend(["--request-target", url])
+            else:  # socks5
+                curl_cmd.extend(
+                    [
+                        "--socks5-basic",
+                        "--socks5-hostname",
+                        f"127.0.0.1:{http_port}",
+                        "--proxy-user",
+                        "user1:pass1",
+                    ]
                 )
-                assert f"CONNECT {host}:{port} HTTP/1.1" in trace, trace
-            assert f"{request.method} / HTTP/1.1" in trace, trace
-        if request.method == "POST":
-            assert body_path.read_bytes() == b"test_data_chain"
+
+            if request.method == "HEAD":
+                curl_cmd.append("--head")
+            elif request.method == "POST":
+                assert target_type == "mock"
+                curl_cmd.extend(["--data-binary", "test_data_chain"])
+            if target_type == "mock" and request.scheme == "https":
+                curl_cmd.extend(["--cacert", ca_path])
+            # curl normally turns an HTTPS URL into CONNECT. For forwarding,
+            # use an HTTP transfer URL and put the real target in the request line.
+            curl_cmd.append(
+                url.replace("https://", "http://", 1)
+                if entry_type == "http" and request.mode == "forward"
+                else url
+            )
+            result = diagnostics.run_curl(curl_cmd)
+            assert result.returncode == 0, result.stderr
+            connect_status = (
+                "200" if entry_type == "http" and request.mode == "tunnel" else "000"
+            )
+            assert result.stdout == f"200 {connect_status}", (
+                f"Expected 200, got {result.stdout}. stderr: {result.stderr}"
+            )
+            trace = trace_path.read_text()
+            if entry_type == "http" and request.mode == "forward":
+                assert f"{request.method} {url} HTTP/1.1" in trace, trace
+            else:
+                if entry_type == "http":
+                    port = (
+                        target_port
+                        if target_type == "mock"
+                        else (443 if request.scheme == "https" else 80)
+                    )
+                    assert f"CONNECT {host}:{port} HTTP/1.1" in trace, trace
+                assert f"{request.method} / HTTP/1.1" in trace, trace
+            if request.method == "POST":
+                assert body_path.read_bytes() == b"test_data_chain"
 
     finally:
-        if entry_proc:
-            entry_proc.kill()
-            _ = entry_proc.wait(timeout=5)
-        if upstream_proc:
-            upstream_proc.kill()
-            _ = upstream_proc.wait(timeout=5)
         if target_socket:
             target_socket.close()
         shutil.rmtree(temp_dir1, ignore_errors=True)

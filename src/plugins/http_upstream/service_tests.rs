@@ -30,7 +30,12 @@ fn make_request(method: http::Method, uri: &str) -> Request {
       ),
     ))
     .unwrap();
-  req.extensions_mut().insert(RequestContext::new());
+  let id =
+    crate::request_id::RequestId::read_or_generate(req.headers())
+      .unwrap();
+  req
+    .extensions_mut()
+    .insert(RequestContext::new().with_request_id(id));
   req
 }
 

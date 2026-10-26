@@ -7,11 +7,15 @@
 mod idle;
 #[cfg(test)]
 mod idle_tests;
+mod transfer;
 mod tunnel;
 mod upgrade;
 #[cfg(test)]
 mod upgrade_tests;
 
+pub(crate) use transfer::{
+  IoSide, TransferEnd, TransferProgress, TransferTotals,
+};
 pub(crate) use tunnel::run_tunnel;
 pub(crate) use upgrade::{
   OnUpgrade, UpgradeFuture, UpgradeTrigger, extract_upgrade,

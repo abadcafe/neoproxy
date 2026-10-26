@@ -831,6 +831,7 @@ dependencies = [
  "http",
  "pin-project-lite",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1483,6 +1484,7 @@ dependencies = [
  "futures",
  "futures-core",
  "futures-util",
+ "getrandom 0.3.4",
  "h3",
  "h3-quinn",
  "hickory-resolver",
@@ -1506,6 +1508,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "serial_test",
+ "siphasher",
  "socket2 0.6.3",
  "subtle",
  "tempfile",

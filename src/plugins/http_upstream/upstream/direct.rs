@@ -71,6 +71,7 @@ impl ClientProtocol for DirectClient {
   fn connect_for_tunnel<'a>(
     &'a self,
     target: &'a ConnectTarget,
+    request: &'a ::http::request::Parts,
     _tls: &'a Option<Arc<rustls::ClientConfig>>,
     _tracker: &'a Rc<StreamTracker>,
   ) -> Pin<
@@ -80,6 +81,9 @@ impl ClientProtocol for DirectClient {
     let tunnel_idle_timeout = self.tunnel_idle_timeout;
     Box::pin(async move {
       let dns_timeout = self.dns_resolve_timeout;
+      let observation =
+        super::observation::ConnectionObservation::new();
+      let started = std::time::Instant::now();
       let resolved = tokio::time::timeout(
         dns_timeout,
         resolve_addresses(target.authority()),
@@ -89,21 +93,47 @@ impl ClientProtocol for DirectClient {
         UpstreamError::DnsError(format!(
           "DNS resolve for '{target}' timed out"
         ))
-      })?
-      .map_err(classify_connect_error)?;
-
-      // Direct mode: raw TCP connect to target
-      let stream =
-        super::tcp_connect::connect(resolved, connect_timeout)
-          .await
-          .map_err(|e| classify_connect_error(e.into()))?;
-
+      })
+      .and_then(|result| result.map_err(classify_connect_error));
+      observation.dns(
+        target.authority(),
+        started.elapsed(),
+        dns_timeout,
+        resolved.as_deref().unwrap_or_default(),
+      );
+      let result = match resolved {
+        Ok(addresses) => {
+          super::tcp_connect::connect(addresses, connect_timeout)
+            .await
+            .map_err(|error| classify_connect_error(error.into()))
+        }
+        Err(error) => {
+          if let Some(ctx) = request.extensions.get::<RequestContext>()
+          {
+            observation.record(ctx);
+          }
+          return Err(error);
+        }
+      };
+      observation.tcp(
+        result.as_ref().ok().and_then(|stream| stream.peer_addr().ok()),
+        result
+          .as_ref()
+          .ok()
+          .and_then(|stream| stream.local_addr().ok()),
+        started.elapsed(),
+      );
+      observation.protocol("tcp");
+      if let Some(ctx) = request.extensions.get::<RequestContext>() {
+        observation.record(ctx);
+      }
+      let stream = result?;
       let upstream_addr = stream.peer_addr().ok();
 
       Ok(ConnectResult {
         transport: Box::new(stream),
         upstream_addr,
-        upstream_proxy_status: None,
+        upstream_response: None,
         tunnel_idle_timeout,
       })
     })
@@ -119,6 +149,10 @@ mod alt_svc;
 mod alt_svc_tests;
 mod client;
 mod dns_https;
-#[cfg(test)]
-mod dns_https_tests;
 mod origin;
+#[cfg(test)]
+mod service_binding_record_tests;
+
+mod service_binding;
+#[cfg(test)]
+mod service_binding_tests;

@@ -71,9 +71,10 @@ async fn test_http3_client_tunnel_without_tls_config_is_rejected() {
     .uri("example.com:443")
     .body(())
     .unwrap();
-  let target = parse_connect_target(&request.into_parts().0).unwrap();
+  let (parts, ()) = request.into_parts();
+  let target = parse_connect_target(&parts).unwrap();
   let result =
-    client.connect_for_tunnel(&target, &None, &tracker).await;
+    client.connect_for_tunnel(&target, &parts, &None, &tracker).await;
 
   assert!(matches!(result, Err(UpstreamError::TlsCertificateError(_))));
 }

@@ -1,7 +1,7 @@
 //! module: certificate
 //! responsibility: compile TLS certificate candidates and trust roots
 //! public operations: Candidates::{load, validate_names, choose},
-//! load_roots data entities: Candidates, Identity
+//! load_roots, load_root_file data entities: Candidates, Identity
 //! tests: certificate_tests.rs and TLS process contracts
 
 use std::fs::File;
@@ -167,22 +167,27 @@ fn leaf_names(cert: &CertificateDer<'_>) -> Result<Vec<String>> {
 pub(crate) fn load_roots(paths: &[String]) -> Result<RootCertStore> {
   let mut roots = RootCertStore::empty();
   for (index, path) in paths.iter().enumerate() {
-    let mut load = || -> Result<()> {
-      let mut reader =
-        BufReader::new(File::open(path).context("read CA file")?);
-      let mut count = 0;
-      for cert in rustls_pemfile::certs(&mut reader) {
-        roots
-          .add(cert.context("parse CA certificate")?)
-          .context("invalid CA certificate")?;
-        count += 1;
-      }
-      ensure!(count > 0, "client CA file contains no certificates");
-      Ok(())
-    };
-    load().with_context(|| {
-      format!("client_ca_certs[{index}] file '{path}'")
-    })?;
+    let loaded = load_root_file(path)
+      .with_context(|| format!("client_ca_certs[{index}]"))?;
+    roots.roots.extend(loaded.roots);
   }
   Ok(roots)
+}
+
+/// An explicitly configured trust file must contribute certificates.
+/// Unrelated system or listener roots cannot conceal an empty file.
+pub(crate) fn load_root_file(path: &str) -> Result<RootCertStore> {
+  let load = || -> Result<RootCertStore> {
+    let mut roots = RootCertStore::empty();
+    let mut reader =
+      BufReader::new(File::open(path).context("read CA file")?);
+    for cert in rustls_pemfile::certs(&mut reader) {
+      roots
+        .add(cert.context("parse CA certificate")?)
+        .context("invalid CA certificate")?;
+    }
+    ensure!(!roots.is_empty(), "CA file contains no certificates");
+    Ok(roots)
+  };
+  load().with_context(|| format!("CA file '{path}'"))
 }

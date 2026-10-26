@@ -106,26 +106,31 @@ fn test_build_log_entry_extracts_service_name() {
 #[test]
 fn test_build_log_entry_extracts_extensions() {
   let ctx = RequestContext::new();
-  ctx.insert("basic_auth.user", "admin");
-  ctx.insert("connect_tcp.connect_ms", "42");
+  ctx.set(
+    crate::context::fields::auth::USER,
+    std::sync::Arc::from("admin"),
+  );
+  ctx.set(
+    crate::context::fields::upstream::CONNECT_TIME,
+    std::time::Duration::from_millis(42),
+  );
   let entry = build_log_entry(
     &make_ok_result(),
     Instant::now(),
     ctx,
-    &[
-      "basic_auth.user".to_string(),
-      "connect_tcp.connect_ms".to_string(),
-    ],
+    &["basic_auth.user".to_string(), "upstream.connect_ms".to_string()],
     "GET",
     "/",
   );
   assert_eq!(
     entry.extensions.get("basic_auth.user"),
-    Some(&"admin".to_string())
+    Some(&crate::context::value::ContextValue::from("admin"))
   );
   assert_eq!(
-    entry.extensions.get("connect_tcp.connect_ms"),
-    Some(&"42".to_string())
+    entry.extensions.get("upstream.connect_ms"),
+    Some(&crate::context::value::ContextValue::from(
+      std::time::Duration::from_millis(42)
+    ))
   );
 }
 
@@ -166,8 +171,14 @@ fn test_build_log_entry_preserves_method_and_target() {
 #[test]
 fn test_build_log_entry_extensions_only_includes_requested_keys() {
   let ctx = RequestContext::new();
-  ctx.insert("basic_auth.user", "admin");
-  ctx.insert("other.key", "value");
+  ctx.set(
+    crate::context::fields::auth::USER,
+    std::sync::Arc::from("admin"),
+  );
+  ctx.set(
+    crate::context::fields::auth::AUTH_TYPE,
+    std::sync::Arc::from("password"),
+  );
   let entry = build_log_entry(
     &make_ok_result(),
     Instant::now(),
@@ -178,19 +189,25 @@ fn test_build_log_entry_extensions_only_includes_requested_keys() {
   );
   assert_eq!(entry.extensions.len(), 1);
   assert!(entry.extensions.contains_key("basic_auth.user"));
-  assert!(!entry.extensions.contains_key("other.key"));
+  assert!(!entry.extensions.contains_key("basic_auth.auth_type"));
 }
 
 #[test]
 fn test_build_log_entry_preserves_full_key_no_stripping() {
   let ctx = RequestContext::new();
-  ctx.insert("auth.user", "admin");
-  ctx.insert("audit.user", "auditor");
+  ctx.set(
+    crate::context::fields::auth::USER,
+    std::sync::Arc::from("admin"),
+  );
+  ctx.set(
+    crate::context::fields::auth::PROXY_ID,
+    std::sync::Arc::from("auditor"),
+  );
   let entry = build_log_entry(
     &make_ok_result(),
     Instant::now(),
     ctx,
-    &["auth.user".to_string(), "audit.user".to_string()],
+    &["basic_auth.user".to_string(), "proxy_id".to_string()],
     "GET",
     "/",
   );
@@ -200,13 +217,13 @@ fn test_build_log_entry_preserves_full_key_no_stripping() {
     "Both extension entries must be preserved"
   );
   assert_eq!(
-    entry.extensions.get("auth.user"),
-    Some(&"admin".to_string()),
+    entry.extensions.get("basic_auth.user"),
+    Some(&crate::context::value::ContextValue::from("admin")),
     "auth.user must map to 'admin'"
   );
   assert_eq!(
-    entry.extensions.get("audit.user"),
-    Some(&"auditor".to_string()),
+    entry.extensions.get("proxy_id"),
+    Some(&crate::context::value::ContextValue::from("auditor")),
     "audit.user must map to 'auditor'"
   );
 }
@@ -214,19 +231,22 @@ fn test_build_log_entry_preserves_full_key_no_stripping() {
 #[test]
 fn test_build_log_entry_no_dot_key_preserved_as_is() {
   let ctx = RequestContext::new();
-  ctx.insert("custom_field", "value");
+  ctx.set(
+    crate::context::fields::auth::PROXY_ID,
+    std::sync::Arc::from("value"),
+  );
   let entry = build_log_entry(
     &make_ok_result(),
     Instant::now(),
     ctx,
-    &["custom_field".to_string()],
+    &["proxy_id".to_string()],
     "GET",
     "/",
   );
   assert_eq!(entry.extensions.len(), 1);
   assert_eq!(
-    entry.extensions.get("custom_field"),
-    Some(&"value".to_string())
+    entry.extensions.get("proxy_id"),
+    Some(&crate::context::value::ContextValue::from("value"))
   );
 }
 

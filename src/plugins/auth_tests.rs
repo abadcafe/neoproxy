@@ -281,10 +281,13 @@ fn test_valid_credentials_sets_context() {
     let _ = svc.call(req).await;
 
     // Check that auth info was written to the context
-    assert_eq!(ctx.get("basic_auth.user"), Some("admin".to_string()));
     assert_eq!(
-      ctx.get("basic_auth.auth_type"),
-      Some("password".to_string())
+      ctx.get(crate::context::fields::auth::USER).as_deref(),
+      Some("admin")
+    );
+    assert_eq!(
+      ctx.get(crate::context::fields::auth::AUTH_TYPE).as_deref(),
+      Some("password")
     );
   });
 }

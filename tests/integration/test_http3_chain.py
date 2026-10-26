@@ -8,8 +8,6 @@ This test module covers:
 - 7.2 Proxy chain complete scenarios
 - 7.4 Graceful Shutdown scenarios (http3_chain specific)
 
-NOTE: Some tests are skipped due to missing CryptoProvider initialization
-in the main binary. This is a known issue in the implementation.
 """
 
 import os
@@ -19,7 +17,11 @@ import socket
 import subprocess
 import tempfile
 import time
+from pathlib import Path
 
+from pydantic import BaseModel, Field
+
+from tests.fixtures.access_log_configuration import enable_access_log
 from tests.fixtures.binary import NEOPROXY_BINARY
 from tests.fixtures.configuration import StringMap
 from tests.fixtures.h3_configuration import (
@@ -34,9 +36,6 @@ from tests.fixtures.ports import (
 )
 from tests.fixtures.proxy_process import BytesProcess, start_proxy
 from tests.fixtures.tcp_peer import create_target_server
-
-# Alias for backward compatibility in this file
-
 
 # ==============================================================================
 # Test cases - 7.2 Proxy chain complete scenarios
@@ -790,6 +789,17 @@ class TestWRRLoadBalancing:
             shutil.rmtree(temp_dir3, ignore_errors=True)
 
 
+class ReuseFields(BaseModel):
+    request_id: str = Field(alias="request.id")
+    peer: str = Field(alias="upstream.connection.peer")
+    reused: bool = Field(alias="upstream.connection.reused")
+    handshake_ms: int | None = Field(default=None, alias="upstream.tls.handshake_ms")
+
+
+class ReuseAccessEntry(BaseModel):
+    extensions: ReuseFields
+
+
 class TestConnectionReuse:
     """Test connection reuse in HTTP/3 chain."""
 
@@ -843,6 +853,15 @@ class TestConnectionReuse:
                 ca_path=ca_path,
                 temp_dir=temp_dir2,
             )
+            enable_access_log(
+                chain_config,
+                [
+                    "request.id",
+                    "upstream.connection.peer",
+                    "upstream.connection.reused",
+                    "upstream.tls.handshake_ms",
+                ],
+            )
             chain_proc = start_proxy(chain_config)
             assert wait_for_proxy(
                 "127.0.0.1", http_port, timeout=5.0, proc=chain_proc
@@ -877,24 +896,25 @@ class TestConnectionReuse:
             return_code = chain_proc.wait(timeout=10)
             assert return_code == 0, f"Chain exit code: {return_code}"
 
-            # Read log file and count QUIC connection establishments
-            # Note: log file name uses UTC date, not local date, so we find
-            # it by listing the directory rather than hardcoding today's date.
-            log_dir = os.path.join(temp_dir2, "logs")
-            log_files = sorted(
-                f for f in os.listdir(log_dir) if f.startswith("neoproxy.log.")
+            access = [
+                ReuseAccessEntry.model_validate_json(line)
+                for path in (Path(temp_dir2) / "logs").glob("access*")
+                for line in path.read_text().splitlines()
+            ]
+            assert len(access) == 5
+            assert [entry.extensions.reused for entry in access] == [
+                False,
+                True,
+                True,
+                True,
+                True,
+            ]
+            assert all(
+                entry.extensions.peer == f"127.0.0.1:{h3_port}" for entry in access
             )
-            assert log_files, f"No log files found in {log_dir}"
-            log_content = ""
-            for lf in log_files:
-                with open(os.path.join(log_dir, lf), "r") as f:
-                    log_content += f.read()
-
-            quic_count = log_content.count("QUIC connection established")
-            assert quic_count == 1, (
-                "Expected exactly 1 'QUIC connection established', got"
-                + f" {quic_count}.\nLog tail:\n{log_content[-2000:]}"
-            )
+            assert len({entry.extensions.request_id for entry in access}) == 5
+            assert access[0].extensions.handshake_ms is not None
+            assert all(entry.extensions.handshake_ms is None for entry in access[1:])
 
         finally:
             if chain_proc and chain_proc.poll() is None:

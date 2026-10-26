@@ -49,6 +49,7 @@ pub(crate) trait ClientProtocol {
   fn connect_for_tunnel<'a>(
     &'a self,
     target: &'a ConnectTarget,
+    request: &'a ::http::request::Parts,
     tls_config: &'a Option<Arc<rustls::ClientConfig>>,
     tracker: &'a Rc<StreamTracker>,
   ) -> Pin<
@@ -62,6 +63,6 @@ pub(crate) trait ClientProtocol {
 pub(crate) struct ConnectResult {
   pub(crate) transport: Box<dyn crate::stream::Io>,
   pub(crate) upstream_addr: Option<std::net::SocketAddr>,
-  pub(crate) upstream_proxy_status: Option<::http::HeaderValue>,
+  pub(crate) upstream_response: Option<::http::response::Parts>,
   pub(crate) tunnel_idle_timeout: Duration,
 }

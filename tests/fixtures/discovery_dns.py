@@ -30,6 +30,7 @@ class DiscoveryDns:
     port: int
     queries: list[tuple[str, int]] = field(default_factory=list)
     addresses: tuple[str, ...] = ("127.0.0.1",)
+    unanswered: set[str] = field(default_factory=set)
 
 
 def encode_name(name: str) -> bytes:
@@ -90,6 +91,8 @@ async def discovery_dns(records: list[DnsRecord]) -> AsyncGenerator[DiscoveryDns
             name = ".".join(labels).lower()
             kind = int.from_bytes(data[cursor : cursor + 2])
             dns.queries.append((name, kind))
+            if name in dns.unanswered:
+                return
             answers: list[bytes] = []
             if kind == 65:
                 for record in records:

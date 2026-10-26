@@ -114,6 +114,10 @@ pub(crate) struct AccessLogConfig {
   /// Writer path prefix to log to (matches `writers[].path_prefix`).
   pub(crate) writer: String,
   /// Context fields to include in log entries.
-  #[serde(default)]
+  #[serde(default = "default_context_fields")]
   pub(crate) context_fields: Vec<String>,
+}
+
+fn default_context_fields() -> Vec<String> {
+  vec!["request.id".into()]
 }

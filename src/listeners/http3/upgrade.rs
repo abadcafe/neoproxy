@@ -55,8 +55,11 @@ where
     if status.is_success() {
       let (mut parts, body) = response.into_parts();
       drop(body);
-      crate::hop_headers::strip_connection_headers(&mut parts.headers);
+      drop(crate::hop_headers::strip_connection_headers(
+        &mut parts.headers,
+      ));
       parts.headers.remove(http::header::CONTENT_LENGTH);
+      parts.headers.remove(http::header::TRAILER);
       parts.version = http::Version::HTTP_3;
       self
         .stream

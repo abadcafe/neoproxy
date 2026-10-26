@@ -64,7 +64,7 @@ async fn assert_stalled_tunnel_times_out<S: H3Send>(
     target,
     ShutdownHandle::new(),
     Duration::from_millis(100),
-    "stalled-h3",
+    crate::stream::TransferProgress::new(),
   ));
   assert!(futures::poll!(&mut tunnel).is_pending());
   tokio::time::advance(Duration::from_millis(99)).await;
@@ -98,7 +98,7 @@ async fn test_run_tunnel_progress_in_either_direction_extends_shared_deadline()
     target,
     ShutdownHandle::new(),
     Duration::from_millis(100),
-    "active",
+    crate::stream::TransferProgress::new(),
   ));
   assert!(futures::poll!(&mut tunnel).is_pending());
   tokio::time::advance(Duration::from_millis(90)).await;
@@ -129,7 +129,7 @@ async fn test_run_tunnel_eof_does_not_refresh_activity_deadline() {
     target,
     ShutdownHandle::new(),
     Duration::from_millis(100),
-    "eof",
+    crate::stream::TransferProgress::new(),
   ));
   assert!(futures::poll!(&mut tunnel).is_pending());
   tokio::time::advance(Duration::from_millis(90)).await;

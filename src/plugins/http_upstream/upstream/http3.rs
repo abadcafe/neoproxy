@@ -77,10 +77,24 @@ pub(super) async fn exchange(
   req_body: RequestBody,
   tracker: &Rc<StreamTracker>,
 ) -> Result<Response, UpstreamError> {
+  let request_id = request
+    .extensions()
+    .get::<RequestContext>()
+    .and_then(RequestContext::request_id)
+    .cloned();
   let (stream, lease) = session.open(request, tls, tracker).await?;
+  // Snapshot immutable metadata before receiving. h3-quinn 0.0.10
+  // temporarily moves its RecvStream into a pending read future;
+  // asking recv_id() during that read panics in the dependency.
+  let stream_id = stream.id();
 
   let (send_stream, mut stream) = stream.split();
-  let mut upload = Some(Upload::start(send_stream, req_body, tracker));
+  let mut upload = Some(Upload::start(
+    send_stream,
+    req_body,
+    tracker,
+    request_id.clone(),
+  ));
   let response = {
     let response = receive_final_response(&mut stream);
     tokio::pin!(response);
@@ -98,7 +112,9 @@ pub(super) async fn exchange(
   let (parts, ()) = proxy_resp.into_parts();
   Ok(Response::from_parts(
     parts,
-    ResponseBody::new(H3ResponseBody::new(stream, upload, lease)),
+    ResponseBody::new(H3ResponseBody::new(
+      stream, stream_id, request_id, upload, lease,
+    )),
   ))
 }
 
@@ -113,6 +129,8 @@ enum H3ResponseBodyState {
 
 struct H3ResponseBody {
   stream: H3ClientRequestStream,
+  stream_id: h3::quic::StreamId,
+  request_id: Option<crate::request_id::RequestId>,
   state: H3ResponseBodyState,
   upload: Option<Upload>,
   _lease: SessionLease,
@@ -121,11 +139,15 @@ struct H3ResponseBody {
 impl H3ResponseBody {
   fn new(
     stream: H3ClientRequestStream,
+    stream_id: h3::quic::StreamId,
+    request_id: Option<crate::request_id::RequestId>,
     upload: Option<Upload>,
     lease: SessionLease,
   ) -> Self {
     Self {
       stream,
+      stream_id,
+      request_id,
       state: H3ResponseBodyState::Data,
       upload,
       _lease: lease,
@@ -160,9 +182,11 @@ impl Body for H3ResponseBody {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Ok(Some(mut chunk))) => {
               let bytes = chunk.copy_to_bytes(chunk.remaining());
+              tracing::trace!(request_id = this.request_id.as_ref().map(tracing::field::display), stream_id = %this.stream_id, bytes = bytes.len(), "H3 response content received");
               return Poll::Ready(Some(Ok(Frame::data(bytes))));
             }
             Poll::Ready(Ok(None)) => {
+              tracing::trace!(request_id = this.request_id.as_ref().map(tracing::field::display), stream_id = %this.stream_id, "H3 response content ended");
               this.state = H3ResponseBodyState::Trailers;
             }
             Poll::Ready(Err(e)) => {
@@ -258,6 +282,7 @@ impl ClientProtocol for Http3Client {
   fn connect_for_tunnel<'a>(
     &'a self,
     target: &'a ConnectTarget,
+    request: &'a ::http::request::Parts,
     tls_config: &'a Option<Arc<rustls::ClientConfig>>,
     tracker: &'a Rc<StreamTracker>,
   ) -> Pin<
@@ -273,7 +298,7 @@ impl ClientProtocol for Http3Client {
         )
       })?;
 
-      let mut req = build_connect_request(target, &self.user);
+      let mut req = build_connect_request(target, &self.user, request);
       *req.version_mut() = http::Version::HTTP_3;
 
       let (mut stream, lease) =
@@ -281,14 +306,13 @@ impl ClientProtocol for Http3Client {
 
       let mut resp = receive_final_response(&mut stream).await?;
 
-      let upstream_proxy_status =
-        crate::proxy_status::take_proxy_status(resp.headers_mut());
-
       // RFC 9110 §9.3.6: every 2xx establishes a CONNECT tunnel.
       if !resp.status().is_success() {
         return Err(UpstreamError::UpstreamConnectError {
           status: resp.status(),
-          upstream_proxy_status,
+          upstream_proxy_status: crate::proxy_status::take_proxy_status(
+            resp.headers_mut(),
+          ),
         });
       }
 
@@ -301,7 +325,7 @@ impl ClientProtocol for Http3Client {
           ),
         )),
         upstream_addr: None,
-        upstream_proxy_status,
+        upstream_response: Some(resp.into_parts().0),
         tunnel_idle_timeout,
       })
     })

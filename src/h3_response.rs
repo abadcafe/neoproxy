@@ -71,6 +71,11 @@ impl<S: ResponseSink> ResponseWriter<S> {
     response: Response,
     method: &http::Method,
   ) -> anyhow::Result<()> {
+    let request_id = response
+      .extensions()
+      .get::<crate::context::RequestContext>()
+      .and_then(crate::context::RequestContext::request_id)
+      .cloned();
     let (mut parts, mut body) = response.into_parts();
     let body_allowed = method != http::Method::HEAD
       && !parts.status.is_informational()
@@ -85,7 +90,8 @@ impl<S: ResponseSink> ResponseWriter<S> {
     {
       parts.headers.remove(http::header::CONTENT_LENGTH);
     }
-    crate::hop_headers::strip_connection_headers(&mut parts.headers);
+    let trailer_policy =
+      crate::hop_headers::strip_connection_headers(&mut parts.headers);
     parts.version = http::Version::HTTP_3;
     self.stream.headers(http::Response::from_parts(parts, ())).await?;
     if body_allowed {
@@ -93,12 +99,25 @@ impl<S: ResponseSink> ResponseWriter<S> {
         match frame?.into_data() {
           Ok(data) => {
             if !data.is_empty() {
+              let bytes = data.len();
+              tracing::trace!(
+                request_id =
+                  request_id.as_ref().map(tracing::field::display),
+                bytes,
+                "H3 response content sending"
+              );
               self.stream.data(data).await?;
+              tracing::trace!(
+                request_id =
+                  request_id.as_ref().map(tracing::field::display),
+                bytes,
+                "H3 response content sent"
+              );
             }
           }
           Err(frame) => {
             if let Ok(mut trailers) = frame.into_trailers() {
-              crate::hop_headers::strip_trailer_headers(&mut trailers);
+              trailer_policy.apply(&mut trailers);
               self.stream.trailers(trailers).await?;
               break;
             }

@@ -10,7 +10,7 @@ use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::{runtime, task};
+use tokio::task;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
@@ -136,14 +136,8 @@ pub(crate) fn run_server_thread(
   mut worker: WorkerShutdown,
   thread_id: usize,
 ) -> Result<()> {
-  let local_set = task::LocalSet::new();
   let shutdown = worker.shutdown_handle();
-  let rt = runtime::Builder::new_current_thread()
-    .enable_all()
-    .thread_name(format!("neoproxy-server-{}", thread_id))
-    .build()?;
-
-  rt.block_on(local_set.run_until(async {
+  crate::worker_runtime::run(async {
     // Each thread builds its own PluginManager and listeners
     let (mut plugin_manager, plugin_errors) =
       PluginManager::new(config.plugins().clone(), log_registry);
@@ -243,5 +237,5 @@ pub(crate) fn run_server_thread(
       }
       None => Ok(()),
     }
-  }))
+  })?
 }

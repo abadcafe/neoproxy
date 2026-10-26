@@ -17,9 +17,10 @@ use std::time::Duration;
 use bytes::Bytes;
 use h3::client as h3_cli;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tracing::info;
 
+use super::super::observation::ConnectionObservation;
 use super::quic_connect;
+use crate::context::RequestContext;
 use crate::plugins::http_upstream::config::protocol::PoolConfig;
 use crate::plugins::http_upstream::error::{
   UpstreamError, classify_quic_error,
@@ -32,6 +33,7 @@ use crate::tracker::StreamTracker;
 struct State {
   connection: Option<quinn::Connection>,
   sender: Option<h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>>,
+  observation: Option<ConnectionObservation>,
 }
 
 pub(crate) struct SessionPool {
@@ -110,6 +112,7 @@ impl SessionPool {
       state: Rc::new(tokio::sync::Mutex::new(State {
         connection: None,
         sender: None,
+        observation: None,
       })),
       activity: Arc::new(Activity {
         active: AtomicUsize::new(0),
@@ -165,7 +168,11 @@ impl SessionPool {
     tls: &rustls::ClientConfig,
     tracker: &Rc<StreamTracker>,
   ) -> Result<
-    (usize, h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>),
+    (
+      usize,
+      h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>,
+      ConnectionObservation,
+    ),
     UpstreamError,
   > {
     if self.pool.max_idle_per_host != 0
@@ -179,22 +186,25 @@ impl SessionPool {
       (&state.connection, &state.sender)
       && connection.close_reason().is_none()
     {
-      return Ok((connection.stable_id(), sender.clone()));
+      return Ok((
+        connection.stable_id(),
+        sender.clone(),
+        state
+          .observation
+          .as_ref()
+          .expect("connected session observation")
+          .clone(),
+      ));
     }
-    let (connection, sender) = establish_http3_connection(
-      &self.address,
-      self.hostname.as_deref(),
-      &self.quic,
-      self.handshake_timeout,
-      self.dns_timeout,
-      tls,
-      tracker,
-    )
-    .await?;
+    let observation = ConnectionObservation::new();
+    state.observation = Some(observation.clone());
+    let (connection, sender) =
+      establish_http3_connection(self, tls, tracker, &observation)
+        .await?;
     let id = connection.stable_id();
     state.connection = Some(connection);
     state.sender = Some(sender.clone());
-    Ok((id, sender))
+    Ok((id, sender, observation))
   }
 
   pub(super) async fn open(
@@ -210,7 +220,18 @@ impl SessionPool {
     UpstreamError,
   > {
     let activity = ActivityLease::new(&self.activity);
-    let (id, mut sender) = self.checkout(tls, tracker).await?;
+    let ctx = request.extensions().get::<RequestContext>().cloned();
+    let result = self.checkout(tls, tracker).await;
+    if result.is_err()
+      && let Some(ctx) = &ctx
+      && let Some(observation) = &self.state.lock().await.observation
+    {
+      observation.record(ctx);
+    }
+    let (id, mut sender, observation) = result?;
+    if let Some(ctx) = &ctx {
+      observation.record(ctx);
+    }
     match sender.send_request(request.clone()).await {
       Ok(stream) => {
         return Ok((
@@ -239,7 +260,11 @@ impl SessionPool {
     }
     // RemoteClosing is returned before a stream/request is sent. This
     // single retry cannot replay a method or body accepted by a peer.
-    let (_, mut sender) = self.checkout(tls, tracker).await?;
+    let (_, mut sender, observation) =
+      self.checkout(tls, tracker).await?;
+    if let Some(ctx) = &ctx {
+      observation.record(ctx);
+    }
     let stream =
       sender.send_request(request).await.map_err(|error| {
         UpstreamError::ConnectionTerminated(error.to_string())
@@ -252,10 +277,15 @@ impl SessionPool {
     tls: &rustls::ClientConfig,
     tracker: &Rc<StreamTracker>,
   ) -> Result<
-    (usize, h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>),
+    (
+      usize,
+      h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>,
+      ConnectionObservation,
+    ),
     UpstreamError,
   > {
-    let (id, sender) = self.connection(tls, tracker).await?;
+    let (id, sender, observation) =
+      self.connection(tls, tracker).await?;
     if self.pool.max_idle_per_host == 0 {
       // Transfer the session to the exchange lease on every checkout,
       // including a retry after GOAWAY. No idle sender stays cached.
@@ -269,7 +299,7 @@ impl SessionPool {
         state.sender = None;
       }
     }
-    Ok((id, sender))
+    Ok((id, sender, observation))
   }
 
   pub(crate) fn close(&self) {
@@ -333,13 +363,10 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for LeasedIo<T> {
 }
 
 async fn establish_http3_connection(
-  address: &str,
-  hostname: Option<&str>,
-  quic: &QuicConfig,
-  tls_handshake_timeout: Duration,
-  dns_timeout: Duration,
+  pool: &SessionPool,
   tls_config: &rustls::ClientConfig,
-  tracker: &Rc<StreamTracker>,
+  tracker: &StreamTracker,
+  observation: &ConnectionObservation,
 ) -> Result<
   (
     quinn::Connection,
@@ -347,16 +374,9 @@ async fn establish_http3_connection(
   ),
   UpstreamError,
 > {
-  let quinn_conn = create_quic_connection(
-    address,
-    hostname,
-    quic,
-    tls_config,
-    tls_handshake_timeout,
-    dns_timeout,
-  )
-  .await?;
-
+  let address = &pool.address;
+  let quinn_conn =
+    create_quic_connection(pool, tls_config, observation).await?;
   let (mut h3_conn, send_request) =
     h3::client::new(h3_quinn::Connection::new(quinn_conn.clone()))
       .await
@@ -370,18 +390,19 @@ async fn establish_http3_connection(
     let _ = std::future::poll_fn(|cx| h3_conn.poll_close(cx)).await;
   });
 
-  info!("HTTP/3 connection established to {address}");
   Ok((quinn_conn, send_request))
 }
 
 async fn create_quic_connection(
-  address: &str,
-  hostname: Option<&str>,
-  quic: &QuicConfig,
+  pool: &SessionPool,
   tls_config: &rustls::ClientConfig,
-  tls_handshake_timeout: Duration,
-  dns_timeout: Duration,
+  observation: &ConnectionObservation,
 ) -> Result<quinn::Connection, UpstreamError> {
+  let address = &pool.address;
+  let hostname = pool.hostname.as_deref();
+  let quic = &pool.quic;
+  let tls_handshake_timeout = pool.handshake_timeout;
+  let dns_timeout = pool.dns_timeout;
   let mut tls_config = tls_config.clone();
   tls_config.enable_early_data = true;
   tls_config.alpn_protocols = vec![b"h3".to_vec()];
@@ -439,6 +460,7 @@ async fn create_quic_connection(
   }
   cli_config.transport_config(Arc::new(transport));
 
+  let started = std::time::Instant::now();
   let addresses =
     tokio::time::timeout(dns_timeout, resolve_addresses(address))
       .await
@@ -446,20 +468,30 @@ async fn create_quic_connection(
         UpstreamError::DnsError(format!(
           "DNS resolve for '{address}' timed out"
         ))
-      })?
-      .map_err(classify_quic_error)?;
+      })
+      .and_then(|result| result.map_err(classify_quic_error));
+  observation.dns(
+    address,
+    started.elapsed(),
+    dns_timeout,
+    addresses.as_deref().unwrap_or_default(),
+  );
+  let addresses = addresses?;
   let host: &str = hostname.unwrap_or_else(|| {
     address.split_at(address.rfind(':').unwrap_or(address.len())).0
   });
   let host = host.trim_start_matches('[').trim_end_matches(']');
-  let conn = quic_connect::connect(
+  let tls_started = std::time::Instant::now();
+  let result = quic_connect::connect(
     addresses,
     host,
     cli_config,
     tls_handshake_timeout,
   )
-  .await?;
-
-  info!("QUIC connection established to {address}");
+  .await;
+  observation.tls(tls_started.elapsed(), Some(b"h3"));
+  observation.protocol("h3");
+  let conn = result?;
+  observation.endpoint(Some(conn.remote_address()), None);
   Ok(conn)
 }

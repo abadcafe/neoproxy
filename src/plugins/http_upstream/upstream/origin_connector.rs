@@ -23,13 +23,15 @@ use tokio_rustls::client::TlsStream;
 use tower::{Service, ServiceExt};
 
 use super::address_resolution::TimeoutResolver;
+use super::observation::ConnectionObservation;
 use crate::io_stream::Io;
 use crate::plugins::http_upstream::config::Upstream;
 
 #[derive(Clone)]
 pub(super) struct OriginConnector {
-  http: HttpConnector<TimeoutResolver>,
-  https: HttpConnector<TimeoutResolver>,
+  connect_timeout: Duration,
+  https_connect_timeout: Duration,
+  dns_resolve_timeout: Duration,
   tls: tokio_rustls::TlsConnector,
   tls_handshake_timeout: Duration,
   endpoint: Option<Uri>,
@@ -43,17 +45,10 @@ impl OriginConnector {
     config: &Upstream,
     tls: Arc<rustls::ClientConfig>,
   ) -> Self {
-    let mut http = HttpConnector::new_with_resolver(
-      TimeoutResolver::new(config.dns_resolve_timeout),
-    );
-    http.set_connect_timeout(Some(config.connect_timeout));
-    http.set_nodelay(true);
-    let mut https = http.clone();
-    https.enforce_http(false);
-    https.set_connect_timeout(Some(config.https_connect_timeout));
     Self {
-      http,
-      https,
+      connect_timeout: config.connect_timeout,
+      https_connect_timeout: config.https_connect_timeout,
+      dns_resolve_timeout: config.dns_resolve_timeout,
       tls: tokio_rustls::TlsConnector::from(tls),
       tls_handshake_timeout: config.tls_handshake_timeout,
       endpoint: None,
@@ -106,68 +101,109 @@ impl Service<Uri> for OriginConnector {
       return Box::pin(async { Ok(connection) });
     }
     let https = uri.scheme() == Some(&http::uri::Scheme::HTTPS);
-    let connector =
-      if https { self.https.clone() } else { self.http.clone() };
+    let observation = ConnectionObservation::new();
+    let mut connector = HttpConnector::new_with_resolver(
+      TimeoutResolver::new(self.dns_resolve_timeout)
+        .observe(observation.clone()),
+    );
+    connector.enforce_http(!https);
+    connector.set_nodelay(true);
+    connector.set_connect_timeout(Some(if https {
+      self.https_connect_timeout
+    } else {
+      self.connect_timeout
+    }));
     let tls = self.tls.clone();
     let timeout = self.tls_handshake_timeout;
     let endpoint = self.endpoint.clone();
     let expected_alpn = self.expected_alpn;
     Box::pin(async move {
-      let host = uri
-        .host()
-        .ok_or_else(|| {
-          io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "missing origin host",
-          )
-        })?
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_owned();
-      let stream = connector
-        .oneshot(endpoint.unwrap_or(uri))
-        .await
-        .map_err(|error| {
-          let mut source: Option<&(dyn StdError + 'static)> =
-            Some(&error);
-          let mut kind = io::ErrorKind::Other;
-          while let Some(current) = source {
-            if let Some(error) = current.downcast_ref::<io::Error>() {
-              kind = error.kind();
-              break;
-            }
-            source = current.source();
-          }
-          io::Error::new(kind, error)
-        })?
-        .into_inner();
-      let transport = if https {
-        let name = rustls::pki_types::ServerName::try_from(host)
+      let result = async {
+        let started = std::time::Instant::now();
+        let host = uri
+          .host()
+          .ok_or_else(|| {
+            io::Error::new(
+              io::ErrorKind::InvalidInput,
+              "missing origin host",
+            )
+          })?
+          .trim_start_matches('[')
+          .trim_end_matches(']')
+          .to_owned();
+        let stream = connector
+          .oneshot(endpoint.unwrap_or(uri))
+          .await
           .map_err(|error| {
-            io::Error::new(io::ErrorKind::InvalidInput, error)
-          })?;
-        let stream =
-          tokio::time::timeout(timeout, tls.connect(name, stream))
-            .await
-            .map_err(|_| {
-              io::Error::new(
-                io::ErrorKind::TimedOut,
-                "origin TLS handshake timed out",
-              )
-            })??;
-        if expected_alpn.is_some_and(|expected| {
-          stream.get_ref().1.alpn_protocol() != Some(expected)
-        }) {
-          return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "origin did not negotiate advertised ALPN",
-          ));
-        }
-        Transport::Tls(Box::new(stream))
-      } else {
-        Transport::Tcp(stream)
-      };
-      Ok(TokioIo::new(OriginConnection { transport }))
+            let mut source: Option<&(dyn StdError + 'static)> =
+              Some(&error);
+            let mut kind = io::ErrorKind::Other;
+            while let Some(current) = source {
+              if let Some(error) = current.downcast_ref::<io::Error>() {
+                kind = error.kind();
+                break;
+              }
+              source = current.source();
+            }
+            io::Error::new(kind, error)
+          })?
+          .into_inner();
+        observation.tcp(
+          stream.peer_addr().ok(),
+          stream.local_addr().ok(),
+          started.elapsed(),
+        );
+        let transport = if https {
+          let name = rustls::pki_types::ServerName::try_from(host)
+            .map_err(|error| {
+              io::Error::new(io::ErrorKind::InvalidInput, error)
+            })?;
+          let tls_started = std::time::Instant::now();
+          let result =
+            tokio::time::timeout(timeout, tls.connect(name, stream))
+              .await
+              .map_err(|_| {
+                io::Error::new(
+                  io::ErrorKind::TimedOut,
+                  "origin TLS handshake timed out",
+                )
+              })
+              .and_then(std::convert::identity);
+          observation.tls(
+            tls_started.elapsed(),
+            result
+              .as_ref()
+              .ok()
+              .and_then(|stream| stream.get_ref().1.alpn_protocol()),
+          );
+          let stream = result?;
+          observation.protocol(
+            if stream.get_ref().1.alpn_protocol() == Some(b"h2") {
+              "h2"
+            } else {
+              "http/1.1"
+            },
+          );
+          if expected_alpn.is_some_and(|expected| {
+            stream.get_ref().1.alpn_protocol() != Some(expected)
+          }) {
+            return Err(io::Error::new(
+              io::ErrorKind::InvalidData,
+              "origin did not negotiate advertised ALPN",
+            ));
+          }
+          Transport::Tls(Box::new(stream))
+        } else {
+          observation.protocol("http/1.1");
+          Transport::Tcp(stream)
+        };
+        Ok(TokioIo::new(OriginConnection {
+          transport,
+          observation: observation.clone(),
+        }))
+      }
+      .await;
+      result.map_err(|error| observation.error(error))
     })
   }
 }
@@ -179,6 +215,7 @@ enum Transport {
 
 pub(super) struct OriginConnection {
   transport: Transport,
+  observation: ConnectionObservation,
 }
 
 impl OriginConnection {
@@ -192,7 +229,7 @@ impl OriginConnection {
 
 impl Connection for OriginConnection {
   fn connected(&self) -> Connected {
-    match &self.transport {
+    let connected = match &self.transport {
       Transport::Tcp(stream) => stream.connected(),
       Transport::Tls(stream) => {
         let connected = stream.get_ref().0.connected();
@@ -202,7 +239,8 @@ impl Connection for OriginConnection {
           connected
         }
       }
-    }
+    };
+    connected.extra(self.observation.clone())
   }
 }
 

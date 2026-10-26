@@ -7,6 +7,7 @@
 pub(super) mod connector;
 #[cfg(test)]
 mod connector_tests;
+mod transport;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -38,6 +39,7 @@ pub(super) trait ProxyIo:
   hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static
 {
   fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr>;
+  fn observation(&self) -> super::observation::ConnectionObservation;
 }
 
 pub(super) struct HttpProxyClient<C> {
@@ -89,17 +91,23 @@ where
   fn connect_for_tunnel<'a>(
     &'a self,
     target: &'a ConnectTarget,
+    request: &'a ::http::request::Parts,
     _tls_config: &'a Option<Arc<rustls::ClientConfig>>,
     tracker: &'a Rc<StreamTracker>,
   ) -> Pin<
     Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
   > {
     Box::pin(async move {
-      let io = self.client.connect(target.uri()).await?;
+      let ctx = request.extensions.get::<RequestContext>();
+      let io = self.client.connect(target.uri(), ctx).await?;
+      if let Some(ctx) = ctx {
+        io.observation().record(ctx);
+      }
       let peer = io.peer_addr().ok();
       negotiate_tunnel(
         io,
         target,
+        request,
         &self.user,
         tracker,
         peer,
@@ -117,6 +125,7 @@ where
 async fn negotiate_tunnel<I>(
   io: I,
   target: &ConnectTarget,
+  request: &::http::request::Parts,
   user: &Option<crate::config::UserCredential>,
   tracker: &StreamTracker,
   upstream_addr: Option<std::net::SocketAddr>,
@@ -131,7 +140,7 @@ where
     ))
   })?;
 
-  let mut req = build_connect_request(target, user);
+  let mut req = build_connect_request(target, user, request);
   *req.version_mut() = http::Version::HTTP_11;
   let req = req.map(|()| {
     RequestBody::new(BytesBufBodyWrapper::new(
@@ -154,14 +163,13 @@ where
     .await
     .map_err(|e| UpstreamError::ConnectionTerminated(e.to_string()))?;
 
-  let upstream_proxy_status =
-    crate::proxy_status::take_proxy_status(resp.headers_mut());
-
   // RFC 9110 §9.3.6: every 2xx establishes a CONNECT tunnel.
   if !resp.status().is_success() {
     return Err(UpstreamError::UpstreamConnectError {
       status: resp.status(),
-      upstream_proxy_status,
+      upstream_proxy_status: crate::proxy_status::take_proxy_status(
+        resp.headers_mut(),
+      ),
     });
   }
 
@@ -177,7 +185,7 @@ where
   Ok(ConnectResult {
     transport: Box::new(TokioIo::new(upgraded)),
     upstream_addr,
-    upstream_proxy_status,
+    upstream_response: Some(resp.into_parts().0),
     tunnel_idle_timeout,
   })
 }

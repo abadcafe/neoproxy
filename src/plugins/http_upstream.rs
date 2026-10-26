@@ -27,6 +27,9 @@ mod error;
 mod inherit;
 mod service;
 mod target_parser;
+mod tunnel_log;
+#[cfg(test)]
+mod tunnel_log_tests;
 mod upstream;
 
 #[cfg(test)]

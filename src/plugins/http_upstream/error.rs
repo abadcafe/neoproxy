@@ -81,10 +81,33 @@ impl UpstreamError {
   }
 
   pub(crate) fn to_response(&self, ctx: &RequestContext) -> Response {
+    use crate::context::fields::upstream;
+    let phase = match self {
+      Self::DnsError(_) => "dns",
+      Self::TlsCertificateError(_) | Self::TlsProtocolError(_) => "tls",
+      Self::ConnectionRefused(_)
+      | Self::ConnectionTimeout(_)
+      | Self::DestinationUnavailable(_) => "connect",
+      Self::ConnectionTerminated(_)
+      | Self::UpstreamConnectError { .. } => "response",
+      Self::ProxyInternalError(_) => "internal",
+    };
+    if ctx.get(upstream::ERROR_PHASE).is_none() {
+      ctx.set(upstream::ERROR_PHASE, std::sync::Arc::from(phase));
+    }
+    ctx.set(
+      upstream::ERROR_KIND,
+      std::sync::Arc::from(self.proxy_status_error()),
+    );
+    ctx.set(
+      upstream::ERROR_MESSAGE,
+      std::sync::Arc::from(self.to_string()),
+    );
     let status = self.http_status();
     let mut resp = build_empty_response(status);
-    let id =
-      ctx.get("proxy_id").unwrap_or_else(|| "neoproxy".to_string());
+    let id = ctx
+      .get(crate::context::fields::auth::PROXY_ID)
+      .unwrap_or_else(|| std::sync::Arc::from("neoproxy"));
 
     if let Self::UpstreamConnectError {
       status,
@@ -180,7 +203,7 @@ pub(crate) fn classify_connect_error(
   if e.downcast_ref::<DnsResolveError>().is_some()
     || error_chain_contains::<DnsResolveError>(&e)
   {
-    return UpstreamError::DnsError(e.to_string());
+    return UpstreamError::DnsError(format!("{e:#}"));
   }
 
   if let Some(io_err) = e
@@ -189,24 +212,24 @@ pub(crate) fn classify_connect_error(
   {
     return match io_err.kind() {
       std::io::ErrorKind::ConnectionRefused => {
-        UpstreamError::ConnectionRefused(e.to_string())
+        UpstreamError::ConnectionRefused(format!("{e:#}"))
       }
       std::io::ErrorKind::TimedOut => {
-        UpstreamError::ConnectionTimeout(e.to_string())
+        UpstreamError::ConnectionTimeout(format!("{e:#}"))
       }
       std::io::ErrorKind::ConnectionReset => {
-        UpstreamError::ConnectionTerminated(e.to_string())
+        UpstreamError::ConnectionTerminated(format!("{e:#}"))
       }
       std::io::ErrorKind::HostUnreachable
       | std::io::ErrorKind::NetworkUnreachable
       | std::io::ErrorKind::AddrNotAvailable => {
-        UpstreamError::DestinationUnavailable(e.to_string())
+        UpstreamError::DestinationUnavailable(format!("{e:#}"))
       }
-      _ => UpstreamError::ProxyInternalError(e.to_string()),
+      _ => UpstreamError::ProxyInternalError(format!("{e:#}")),
     };
   }
 
-  UpstreamError::ProxyInternalError(e.to_string())
+  UpstreamError::ProxyInternalError(format!("{e:#}"))
 }
 
 /// Classify an HTTP client request error into an `UpstreamError`.
@@ -219,7 +242,7 @@ pub(crate) fn classify_http_client_error(
   if e.downcast_ref::<DnsResolveError>().is_some()
     || error_chain_contains::<DnsResolveError>(&e)
   {
-    return UpstreamError::DnsError(e.to_string());
+    return UpstreamError::DnsError(format!("{e:#}"));
   }
 
   if let Some(io_err) = e
@@ -228,26 +251,26 @@ pub(crate) fn classify_http_client_error(
   {
     return match io_err.kind() {
       std::io::ErrorKind::ConnectionRefused => {
-        UpstreamError::ConnectionRefused(e.to_string())
+        UpstreamError::ConnectionRefused(format!("{e:#}"))
       }
       std::io::ErrorKind::TimedOut => {
-        UpstreamError::ConnectionTimeout(e.to_string())
+        UpstreamError::ConnectionTimeout(format!("{e:#}"))
       }
       std::io::ErrorKind::ConnectionReset
       | std::io::ErrorKind::BrokenPipe
       | std::io::ErrorKind::UnexpectedEof => {
-        UpstreamError::ConnectionTerminated(e.to_string())
+        UpstreamError::ConnectionTerminated(format!("{e:#}"))
       }
       std::io::ErrorKind::HostUnreachable
       | std::io::ErrorKind::NetworkUnreachable
       | std::io::ErrorKind::AddrNotAvailable => {
-        UpstreamError::DestinationUnavailable(e.to_string())
+        UpstreamError::DestinationUnavailable(format!("{e:#}"))
       }
-      _ => UpstreamError::ProxyInternalError(e.to_string()),
+      _ => UpstreamError::ProxyInternalError(format!("{e:#}")),
     };
   }
 
-  UpstreamError::ConnectionTerminated(e.to_string())
+  UpstreamError::ConnectionTerminated(format!("{e:#}"))
 }
 
 /// Classify an anyhow error from QUIC connection establishment into an
@@ -258,21 +281,21 @@ pub(crate) fn classify_quic_error(e: anyhow::Error) -> UpstreamError {
   if e.downcast_ref::<DnsResolveError>().is_some()
     || error_chain_contains::<DnsResolveError>(&e)
   {
-    return UpstreamError::DnsError(e.to_string());
+    return UpstreamError::DnsError(format!("{e:#}"));
   }
 
   if let Some(conn_err) = e.downcast_ref::<quinn::ConnectionError>() {
     return match conn_err {
       quinn::ConnectionError::TimedOut => {
-        UpstreamError::ConnectionTimeout(e.to_string())
+        UpstreamError::ConnectionTimeout(format!("{e:#}"))
       }
       quinn::ConnectionError::ConnectionClosed(_)
       | quinn::ConnectionError::ApplicationClosed(_)
       | quinn::ConnectionError::Reset
       | quinn::ConnectionError::LocallyClosed => {
-        UpstreamError::ConnectionTerminated(e.to_string())
+        UpstreamError::ConnectionTerminated(format!("{e:#}"))
       }
-      _ => UpstreamError::DestinationUnavailable(e.to_string()),
+      _ => UpstreamError::DestinationUnavailable(format!("{e:#}")),
     };
   }
 
@@ -280,9 +303,9 @@ pub(crate) fn classify_quic_error(e: anyhow::Error) -> UpstreamError {
     return match connect_err {
       quinn::ConnectError::InvalidServerName(_)
       | quinn::ConnectError::InvalidRemoteAddress(_) => {
-        UpstreamError::DnsError(e.to_string())
+        UpstreamError::DnsError(format!("{e:#}"))
       }
-      _ => UpstreamError::DestinationUnavailable(e.to_string()),
+      _ => UpstreamError::DestinationUnavailable(format!("{e:#}")),
     };
   }
 
@@ -292,23 +315,23 @@ pub(crate) fn classify_quic_error(e: anyhow::Error) -> UpstreamError {
   {
     return match io_err.kind() {
       std::io::ErrorKind::ConnectionRefused => {
-        UpstreamError::ConnectionRefused(e.to_string())
+        UpstreamError::ConnectionRefused(format!("{e:#}"))
       }
       std::io::ErrorKind::TimedOut => {
-        UpstreamError::ConnectionTimeout(e.to_string())
+        UpstreamError::ConnectionTimeout(format!("{e:#}"))
       }
       std::io::ErrorKind::HostUnreachable
       | std::io::ErrorKind::NetworkUnreachable => {
-        UpstreamError::DestinationUnavailable(e.to_string())
+        UpstreamError::DestinationUnavailable(format!("{e:#}"))
       }
       std::io::ErrorKind::InvalidInput => {
-        UpstreamError::DnsError(e.to_string())
+        UpstreamError::DnsError(format!("{e:#}"))
       }
-      _ => UpstreamError::DestinationUnavailable(e.to_string()),
+      _ => UpstreamError::DestinationUnavailable(format!("{e:#}")),
     };
   }
 
-  UpstreamError::DestinationUnavailable(e.to_string())
+  UpstreamError::DestinationUnavailable(format!("{e:#}"))
 }
 
 fn find_error_in_chain<T>(e: &anyhow::Error) -> Option<&T>
@@ -345,11 +368,11 @@ pub(crate) fn classify_tls_handshake_error(
       rustls::Error::InvalidCertificate(_)
       | rustls::Error::NoCertificatesPresented
       | rustls::Error::InvalidCertRevocationList(_) => {
-        UpstreamError::TlsCertificateError(e.to_string())
+        UpstreamError::TlsCertificateError(format!("{e:#}"))
       }
-      _ => UpstreamError::TlsProtocolError(e.to_string()),
+      _ => UpstreamError::TlsProtocolError(format!("{e:#}")),
     };
   }
 
-  UpstreamError::TlsProtocolError(e.to_string())
+  UpstreamError::TlsProtocolError(format!("{e:#}"))
 }

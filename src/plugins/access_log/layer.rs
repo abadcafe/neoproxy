@@ -8,7 +8,6 @@
 
 //! Tower layer and middleware for access logging.
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -160,17 +159,7 @@ pub(crate) fn build_log_entry(
     ctx.server_addr().map(|address| address.port()).unwrap_or(0);
   let service = ctx.service_name().unwrap_or_default().to_owned();
 
-  // CR-002 fix: Preserve full context field keys (no stripping).
-  // Previously, the first dot-separated segment was stripped from keys
-  // (e.g., "auth.user" became "user"). This caused silent data loss
-  // when different prefixes shared the same suffix (e.g., "auth.user"
-  // and "audit.user" both became "user", and the HashMap silently
-  // dropped one value). Using the full key preserves uniqueness since
-  // RequestContext keys are already unique.
-  let extensions: HashMap<String, String> = context_fields
-    .iter()
-    .filter_map(|key| ctx.get(key).map(|v| (key.clone(), v)))
-    .collect();
+  let extensions = ctx.snapshot(context_fields);
 
   match result {
     Ok(response) => AccessLogEntry {

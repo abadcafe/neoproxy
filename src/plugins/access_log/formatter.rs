@@ -1,12 +1,13 @@
 //! module: plugins::access_log::formatter
 //! responsibility: serialize escaped access log records
 //! public operations: format_entry
-//! data entities: none
+//! data entities: JsonRecord, JsonExtensions
 //! tests: formatter_tests.rs
 
 //! Access log entry formatting.
 
-use serde_json::json;
+use serde::ser::SerializeMap;
+use serde::{Serialize, Serializer};
 
 use super::context::{AccessLogEntry, LogFormat};
 
@@ -56,63 +57,79 @@ fn format_text(entry: &AccessLogEntry) -> Vec<u8> {
   let mut sorted_exts: Vec<_> = entry.extensions.iter().collect();
   sorted_exts.sort_by_key(|(key, _)| *key);
   for (key, value) in &sorted_exts {
-    let _ = write!(buf, " {}={}", escape(key), escape(value));
+    let _ =
+      write!(buf, " {}={}", escape(key), escape(&value.to_string()));
   }
 
   buf.push('\n');
   buf.into_bytes()
 }
 
-fn format_json(entry: &AccessLogEntry) -> Vec<u8> {
-  use time::format_description::well_known::Iso8601;
-  let time_str = entry
-    .time
-    .format(&Iso8601::DEFAULT)
-    .unwrap_or_else(|_| "???".to_string());
+struct JsonRecord<'a>(&'a AccessLogEntry);
+struct JsonExtensions<'a>(
+  &'a std::collections::HashMap<
+    String,
+    crate::context::value::ContextValue,
+  >,
+);
 
-  let mut obj = serde_json::Map::new();
-  obj.insert("time".to_string(), json!(time_str));
-  obj.insert(
-    "client".to_string(),
-    json!(endpoint(&entry.client_ip, entry.client_port)),
-  );
-  obj.insert(
-    "server".to_string(),
-    json!(endpoint(&entry.server_ip, entry.server_port)),
-  );
-  obj.insert("method".to_string(), json!(entry.method));
-  obj.insert("target".to_string(), json!(entry.target));
-  obj.insert("status".to_string(), json!(entry.status));
-  obj.insert("duration_ms".to_string(), json!(entry.duration_ms));
-
-  if !entry.service.is_empty() {
-    obj.insert("service".to_string(), json!(entry.service));
-  }
-
-  if let Some(err) = &entry.err {
-    obj.insert("error".to_string(), json!(err));
-  }
-
-  // CR-001 fix: Place extensions under a dedicated "extensions" key
-  // instead of inserting them at the top level. This prevents extension
-  // keys from silently overwriting built-in keys (e.g., a context field
-  // producing a display_key that matches "status" would overwrite the
-  // HTTP status code with an arbitrary string).
-  if !entry.extensions.is_empty() {
-    let mut ext_obj = serde_json::Map::new();
-    let mut sorted_exts: Vec<_> = entry.extensions.iter().collect();
-    sorted_exts.sort_by_key(|(key, _)| *key);
-    for (key, value) in sorted_exts {
-      ext_obj.insert(key.clone(), json!(value));
+impl Serialize for JsonRecord<'_> {
+  fn serialize<S: Serializer>(
+    &self,
+    serializer: S,
+  ) -> Result<S::Ok, S::Error> {
+    use time::format_description::well_known::Iso8601;
+    let entry = self.0;
+    let mut output = serializer.serialize_map(None)?;
+    // Keep the established deterministic field order while serializing
+    // native values directly, without an intermediate JSON value tree.
+    output.serialize_entry(
+      "client",
+      &endpoint(&entry.client_ip, entry.client_port),
+    )?;
+    output.serialize_entry("duration_ms", &entry.duration_ms)?;
+    if let Some(error) = &entry.err {
+      output.serialize_entry("error", error)?;
     }
-    obj.insert(
-      "extensions".to_string(),
-      serde_json::Value::Object(ext_obj),
-    );
+    if !entry.extensions.is_empty() {
+      output.serialize_entry(
+        "extensions",
+        &JsonExtensions(&entry.extensions),
+      )?;
+    }
+    output.serialize_entry("method", &entry.method)?;
+    output.serialize_entry(
+      "server",
+      &endpoint(&entry.server_ip, entry.server_port),
+    )?;
+    if !entry.service.is_empty() {
+      output.serialize_entry("service", &entry.service)?;
+    }
+    output.serialize_entry("status", &entry.status)?;
+    output.serialize_entry("target", &entry.target)?;
+    output.serialize_entry(
+      "time",
+      &entry
+        .time
+        .format(&Iso8601::DEFAULT)
+        .unwrap_or_else(|_| "???".into()),
+    )?;
+    output.end()
   }
-
-  let mut bytes =
-    serde_json::to_string(&obj).unwrap_or_default().into_bytes();
+}
+impl Serialize for JsonExtensions<'_> {
+  fn serialize<S: Serializer>(
+    &self,
+    serializer: S,
+  ) -> Result<S::Ok, S::Error> {
+    let mut fields: Vec<_> = self.0.iter().collect();
+    fields.sort_by_key(|(key, _)| *key);
+    serializer.collect_map(fields)
+  }
+}
+fn format_json(entry: &AccessLogEntry) -> Vec<u8> {
+  let mut bytes = serde_json::to_vec(&JsonRecord(entry))
+    .expect("native access records must serialize to JSON");
   bytes.push(b'\n');
   bytes
 }

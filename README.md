@@ -413,11 +413,17 @@ Service 按方法处理请求：`CONNECT host:port` 建立透明隧道；其他�
 
 H1/H2/H3 连接池由直连客户端统一管理，按原始 origin、实际端点和协议隔离；并发首次请求共享初始化，H3 响应流持有连接租约，空闲连接按 `pool.idle_timeout` 回收。H3 建连探测预算取 `http3.tls_handshake_timeout`、`request_timeout` 的三分之一和 1 秒中的最小值；建连失败后短暂避开该端点并回退 TCP。请求一旦提交给 H3，不因后续响应错误重放请求体。直连 upstream 允许配置 `http3` 来调整握手和 QUIC 参数。
 
+所有可选发现及提交请求之前的替代端点探测，共用 `request_timeout` 三分之一的预算；多个慢候选不会挤占原始端点的全部回退时间。DNS HTTPS 别名最终目标即使没有 HTTPS 记录，也会先尝试其地址。Alt-Svc 与 DNS 求交使用具体的广告协议集合；普通 DNS 建连仍可按 RFC 9460 §7.1.2 提供本地支持的完整 ALPN 列表。
+
 发现端点的多个 IP 地址按地址族交错竞速，首选地址握手停滞时，250ms 后开始后续候选；只有选定连接后才提交请求体。HTTP/HTTPS 链式转发及 CONNECT 使用同一连接器策略，所有 TCP 监听和上游连接均启用 `TCP_NODELAY`。
 
 链式 H3 上游同样遵守 `pool`：`max_idle_per_host: 0` 禁用跨请求连接复用，非零值允许复用一个多路复用会话，`idle_timeout` 从最后一个活跃响应或隧道释放后计算。池销毁会立即取消自己的维护任务；池索引不会因一个响应持续时间较长而淘汰仍活跃的 H3 会话。日志 writer 的活动文件和轮转归档必须拥有互不重叠的路径命名空间。
 
 普通转发响应在末端读取发现信息后移除 `Alt-Svc`，中继同样不保留该响应头；响应 trailers 也会移除该字段。CONNECT 保持字节透传，不解析隧道内的 TLS 或 HTTP。
+
+链式 CONNECT 在建立隧道前保留请求与成功响应的端到端头，并追加 `Via`；连接专属字段、上一跳代理凭据和成功 CONNECT 的 HTTP 内容长度不会转发。H3 上游提前给出最终响应并用 `H3_NO_ERROR` 停止上传时，上传方向结束，响应继续传输；其他传输错误仍会终止对应交换。
+
+转为 HTTP/1 时，长度未知的 GET/HEAD 内容使用显式分块定界，保持流式上传。合法的 `Trailer` 声明会保留；初始 `Connection` 点名的逐跳字段及不允许延后的字段会同时从后续 trailer 帧中移除。带 trailer 的 HTTP/1 输出使用分块定界，包括正文长度已知的消息。
 
 #### 配置参数
 
@@ -426,6 +432,8 @@ H1/H2/H3 连接池由直连客户端统一管理，按原始 origin、实际端�
 | `upstream` | `String` | 是 | 上游名称，引用 `plugins.http_upstream.upstreams[].name` |
 
 直连模式的超时和连接池配置在 upstream 定义中设置：`http.connect_timeout` 用于 HTTP 目标和 CONNECT；`https.connect_timeout`、`https.tls_handshake_timeout` 用于 HTTPS 目标；`request_timeout` 限制响应头或隧道建立的等待时间。普通转发的连接池按 scheme、目标主机和端口区分，配置项为 `pool`；隧道使用 `tunnel_idle_timeout`。HTTPS 目标使用系统信任库，并可通过 `plugins.http_upstream.certificates.server_ca_path` 添加 CA，客户端证书沿用该配置中的 `client_cert_path` 和 `client_key_path`。
+
+显式 CA 文件必须包含有效证书；空文件、只有私钥或无证书内容会导致配置失败，系统信任库不会掩盖该错误。
 
 `dns_servers` 可在插件或 upstream 配置，例如 `["127.0.0.1:5353", "[::1]:5353"]`，upstream 覆盖插件。它指定直连客户端进行 HTTPS 发现和替代端点地址解析时使用的 DNS 服务器；默认读取系统 DNS 配置。普通 HTTP 和 CONNECT 的地址解析保持使用系统解析器。
 
@@ -598,7 +606,7 @@ services:
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `writer` | `String` | 是 | writer 路径前缀（匹配 `plugins.access_log.writers[].path_prefix`） |
-| `context_fields` | `[String]` | 否 | 要记录的请求上下文字段 |
+| `context_fields` | `[String]` | 否 | 要记录的请求上下文字段；省略时为 `["request.id"]`，显式列表按所列字段输出 |
 
 ```yaml
 services:
@@ -611,9 +619,39 @@ services:
         args:
           writer: "logs/access.log"
           context_fields:
+            - "request.id"
             - "basic_auth.user"
             - "upstream.connect_ms"
 ```
+
+请求入口从 `X-Request-ID` 读取已有值；缺失时使用 worker 本地随机密钥和递增计数器，
+通过两次 SipHash-2-4 生成 128 位、32 字符小写十六进制 request ID。
+已有值作为不透明标识原样沿用。入口只把 ID 保存到 request context，保持入站请求头原样。
+向上游发送普通请求或 CONNECT 时，在逐跳头清理后从 context 写入 `X-Request-ID`；
+响应出口也从同一 context 写入该头，覆盖上游同名值。路由拒绝、认证拒绝和本地错误响应
+同样携带 ID。SOCKS5 在转换成内部 CONNECT 请求时建立 ID。
+
+context 使用受类型约束的字段键保存原生值，耗时保存为 `Duration`、计数保存为整数、
+复用标志保存为布尔值，地址和解析结果保存为地址类型。只有选中的日志字段才会被提取和
+格式化；JSON 扩展字段保留数字、布尔和数组类型，文本格式在输出时转换并转义。
+
+| 可选 context 字段 | 输出含义 |
+|------|------|
+| `upstream.dns.host`、`upstream.dns.addresses` | 本次解析主机与地址数组 |
+| `upstream.dns.duration_ms`、`upstream.dns.timeout_ms` | 解析耗时与期限，毫秒整数 |
+| `upstream.connection.peer`、`upstream.connection.local` | 实际连接端点（可用时） |
+| `upstream.connection.reused` | 连接复用布尔值 |
+| `upstream.tcp.connect_ms`、`upstream.tls.handshake_ms` | 本次连接建立阶段耗时；H3 的后者包含 QUIC/TLS 握手 |
+| `upstream.tls.alpn`、`upstream.protocol` | 协商协议及实际传输协议 |
+| `upstream.forward_ms`、`upstream.forward_status` | 等待上游响应头的耗时与状态码 |
+| `upstream.error.phase`、`upstream.error.kind`、`upstream.error.message` | 请求失败阶段、分类和完整错误信息 |
+
+连接池保存连接观测信息，不保存请求 context。复用连接会记录实际地址与协议，
+本次未发生的解析、TCP 建连和 TLS 握手耗时留空。
+access log 继续在 service 返回响应头时生成；完整正文或 tunnel 的最终传输统计不会
+事后回写这条记录。tunnel 结束后另有一条带相同 `request_id` 的 `tunnel_finished`
+业务日志，记录目标、端点、持续时间、双向字节数和结束原因；取消时也保留部分进度。
+字节数按 I/O 层成功接受的写入统计，不计入尚未写出的预读数据。
 
 ---
 
@@ -868,6 +906,18 @@ export NEOPROXY_LOG=debug
 支持的日志级别：`trace`, `debug`, `info`, `warn`, `error`
 
 默认日志输出包含：时间戳、日志级别、文件名、行号、线程名。
+启用 debug/trace 后还会记录已启用 span 的结束事件及忙碌、等待耗时。
+业务 DNS、TCP/TLS 摘要进入 request context，经配置选择后写入 access log，
+不再单独输出这些阶段的业务运行日志或 span。
+H3 内容块 TRACE 保留发送前后事件、字节数和请求 ID，用于按需观察传输进展。
+
+代理链集测每次运行都会保留诊断目录，默认位于
+`tmp/test-artifacts/proxy-chain/chain-*/`，可通过 `NEOPROXY_TEST_ARTIFACTS` 指定根目录。
+目录包含用例与进程清单、配置、两级代理运行日志、access log 与标准输出、带时间戳的 curl trace、
+响应头和完整或部分响应体、curl JSON 计时与收发统计，以及每 250 ms 按代理 PID
+过滤的 TCP/UDP 内核状态。采集失败会写明原因；测试失败时显示诊断目录。
+原有公网和受控源站用例的目标、断言、连接及总超时不变，诊断不会重试请求。
+这些产物在测试临时目录清理后仍保留，成功运行的产物也保留，按需清理。
 
 启动日志及配置对象的 `Debug` 保留完整字段，按黑名单将密码、token 的值显示为一个 `*`，字段名仍保留。原始插件参数递归处理嵌套映射、列表和 YAML 标签；字段名不区分大小写，匹配 `password`、`token` 及以 `_password`、`-password`、`_token`、`-token` 结尾的字段，例如 `access_token`。其他字段保持正常输出，用户名、地址、文件路径和 `token_count` 等均不隐藏。认证器的用户表保留用户名，每个密码显示为 `*`；格式化不改写实际配置或凭据。访问日志的文本/JSON 转义仅维护日志格式，不属于脱敏。
 
@@ -891,6 +941,8 @@ neoproxy 支持优雅关闭：
 6. 退出程序
 
 同一工作线程内，前两段任务等待预算均为 `3 + 2` 秒，合计 10 秒；H3 驱动与上游插件并行收尾，没有第三段独立等待预算。第二阶段的 3 秒常量由插件和 H3 驱动共用。worker 之间的释放协调等待其他 worker 已有的收尾流程；日志刷新及其他退出步骤不包含在这 10 秒中，目前没有进程级全局硬超时。
+
+worker 退出时先销毁本地异步任务，再关闭运行时。无法取消的系统 DNS 阻塞调用可以在后台结束，并持续占用已有的 DNS 并发许可；它们不会延长 worker 的运行时析构等待。
 
 ### 退出码
 

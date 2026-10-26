@@ -24,7 +24,8 @@ pub(crate) struct AccessLogEntry {
   pub(crate) duration_ms: u64,
   pub(crate) service: String,
   pub(crate) err: Option<String>,
-  pub(crate) extensions: HashMap<String, String>,
+  pub(crate) extensions:
+    HashMap<String, crate::context::value::ContextValue>,
 }
 
 /// Log format type.

@@ -36,14 +36,15 @@ async fn test_http_client_direct_tunnel_connects_to_target() {
     .uri(addr.to_string())
     .body(())
     .unwrap();
-  let target = parse_connect_target(&request.into_parts().0).unwrap();
+  let (parts, ()) = request.into_parts();
+  let target = parse_connect_target(&parts).unwrap();
   let (result, peer) = tokio::join!(
-    http_client.connect_for_tunnel(&target, &None, &tracker),
+    http_client.connect_for_tunnel(&target, &parts, &None, &tracker),
     accept
   );
   let result = result.unwrap();
 
   assert_eq!(result.upstream_addr.map(|a| a.ip()), Some(peer.ip()));
-  assert!(result.upstream_proxy_status.is_none());
+  assert!(result.upstream_response.is_none());
   assert_eq!(result.tunnel_idle_timeout, Duration::from_secs(30));
 }

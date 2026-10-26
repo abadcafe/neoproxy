@@ -1,12 +1,21 @@
 //! module: context
 //! responsibility: carry typed connection metadata and plugin fields
 //! public operations: RequestContext, build_request_context,
-//! get_server_id data entities: RequestContext, ConnectionMetadata
+//! snapshot data entities: RequestContext, ConnectionMetadata
 //! tests: context_tests.rs
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+pub(crate) mod fields;
+mod key;
+pub(crate) mod value;
+#[cfg(test)]
+mod value_tests;
+use key::ContextKey;
+use value::{ContextType, ContextValue};
+
+use crate::request_id::RequestId;
 
 /// Connection metadata is immutable and typed. Plugin fields are the
 /// only mutable part of a context; reading an address or service name
@@ -24,39 +33,67 @@ struct ConnectionMetadata {
 #[derive(Clone)]
 pub(crate) struct RequestContext {
   connection: Option<Arc<ConnectionMetadata>>,
-  inner: Arc<Mutex<HashMap<String, String>>>,
+  request_id: Option<RequestId>,
+  inner: Arc<Mutex<HashMap<&'static str, ContextValue>>>,
 }
 
 impl RequestContext {
   pub(crate) fn new() -> Self {
     Self {
       connection: None,
+      request_id: None,
       inner: Arc::new(Mutex::new(HashMap::new())),
     }
   }
 
-  pub(crate) fn insert(
+  pub(crate) fn set<T: ContextType>(
     &self,
-    key: impl Into<String>,
-    value: impl ToString,
+    key: ContextKey<T>,
+    value: T,
   ) {
-    let key = key.into();
-    assert!(
-      !matches!(
-        key.as_str(),
-        "client.ip"
-          | "client.port"
-          | "server.ip"
-          | "server.port"
-          | "service.name"
-      ),
-      "connection metadata must be constructed with typed addresses"
-    );
     self
       .inner
       .lock()
       .expect("request context lock poisoned")
-      .insert(key, value.to_string());
+      .insert(key.name, value.into_value());
+  }
+
+  pub(crate) fn get<T: ContextType>(
+    &self,
+    key: ContextKey<T>,
+  ) -> Option<T> {
+    self
+      .inner
+      .lock()
+      .expect("request context lock poisoned")
+      .get(key.name)
+      .map(|value| {
+        T::from_value(value)
+          .expect("declared key must retain its value type")
+      })
+  }
+
+  pub(crate) fn with_request_id(mut self, id: RequestId) -> Self {
+    assert!(self.request_id.is_none(), "request identity is immutable");
+    self.request_id = Some(id);
+    self
+  }
+
+  pub(crate) fn request_id(&self) -> Option<&RequestId> {
+    self.request_id.as_ref()
+  }
+
+  pub(crate) fn with_service(mut self, service: &str) -> Self {
+    let previous = self
+      .connection
+      .as_ref()
+      .expect("routing requires connection metadata");
+    self.connection = Some(Arc::new(ConnectionMetadata {
+      client: previous.client,
+      server: previous.server,
+      service: service.to_owned(),
+    }));
+    self
   }
 
   pub(crate) fn client_addr(&self) -> Option<SocketAddr> {
@@ -74,38 +111,39 @@ impl RequestContext {
       .map(|connection| connection.service.as_str())
   }
 
-  /// Render metadata only when a configured log field asks for it.
-  pub(crate) fn get(&self, key: &str) -> Option<String> {
-    match key {
-      "client.ip" => {
-        return self
-          .client_addr()
-          .map(|address| address.ip().to_string());
-      }
-      "client.port" => {
-        return self
-          .client_addr()
-          .map(|address| address.port().to_string());
-      }
-      "server.ip" => {
-        return self
-          .server_addr()
-          .map(|address| address.ip().to_string());
-      }
-      "server.port" => {
-        return self
-          .server_addr()
-          .map(|address| address.port().to_string());
-      }
-      "service.name" => return self.service_name().map(str::to_owned),
-      _ => {}
-    }
-    self
-      .inner
-      .lock()
-      .expect("request context lock poisoned")
-      .get(key)
-      .cloned()
+  /// Snapshot only selected values under one lock; formatting is
+  /// deferred.
+  pub(crate) fn snapshot(
+    &self,
+    keys: &[String],
+  ) -> HashMap<String, ContextValue> {
+    let fields =
+      self.inner.lock().expect("request context lock poisoned");
+    keys
+      .iter()
+      .filter_map(|key| {
+        let value = match key.as_str() {
+          "client.ip" => {
+            self.client_addr().map(|v| ContextValue::from(v.ip()))
+          }
+          "client.port" => self
+            .client_addr()
+            .map(|v| ContextValue::from(u64::from(v.port()))),
+          "server.ip" => {
+            self.server_addr().map(|v| ContextValue::from(v.ip()))
+          }
+          "server.port" => self
+            .server_addr()
+            .map(|v| ContextValue::from(u64::from(v.port()))),
+          "service.name" => self.service_name().map(ContextValue::from),
+          "request.id" => {
+            self.request_id().cloned().map(ContextValue::from)
+          }
+          _ => fields.get(key.as_str()).cloned(),
+        }?;
+        Some((key.clone(), value))
+      })
+      .collect()
   }
 }
 
@@ -127,17 +165,9 @@ pub(crate) fn build_request_context(
       server: *local_addr,
       service: service_name.to_owned(),
     })),
+    request_id: None,
     inner: Arc::new(Mutex::new(HashMap::new())),
   }
-}
-
-/// Extract the server identifier (`"ip:port"`) from a `RequestContext`.
-///
-/// Returns the typed server address, or `None` without a connection.
-/// Used for the `Proxy-Status` header
-/// (RFC 9209).
-pub(crate) fn get_server_id(ctx: &RequestContext) -> Option<String> {
-  ctx.server_addr().map(|address| address.to_string())
 }
 
 impl Default for RequestContext {

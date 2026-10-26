@@ -16,7 +16,7 @@ fn test_log_format_deserializes_lowercase_variants() {
 #[test]
 fn test_access_log_entry_preserves_request_context_fields() {
   let mut extensions = HashMap::new();
-  extensions.insert("trace_id".to_string(), "abc".to_string());
+  extensions.insert("trace_id".to_string(), "abc".to_string().into());
   let entry = AccessLogEntry {
     time: OffsetDateTime::UNIX_EPOCH,
     client_ip: "127.0.0.1".to_string(),
@@ -34,5 +34,5 @@ fn test_access_log_entry_preserves_request_context_fields() {
 
   assert_eq!(entry.method, "GET");
   assert_eq!(entry.target, "/health");
-  assert_eq!(entry.extensions["trace_id"], "abc");
+  assert_eq!(entry.extensions["trace_id"].to_string(), "abc");
 }

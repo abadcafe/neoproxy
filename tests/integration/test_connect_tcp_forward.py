@@ -10,7 +10,7 @@ Expected behavior:
 - GET http://target/ -> forwarded to target, response returned
 - POST http://target/ with body -> forwarded with body
 - GET / HTTP/1.1 (origin-form) -> 400 Bad Request
-- GET https://target/ -> 400 Bad Request (only http:// supported)
+- GET ftp://target/ -> 400 Bad Request (unsupported scheme)
 - GET http://unreachable/ -> 502 Bad Gateway
 - Proxy-Status header present in responses
 """
@@ -134,11 +134,11 @@ class TestConnectTcpForwardProxy:
                 terminate_process(proxy_proc)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_https_scheme_returns_400(self) -> None:
+    def test_unsupported_scheme_returns_400(self) -> None:
         """
-        TC-FWD-002: https:// scheme returns 400.
+        TC-FWD-002: ftp:// scheme returns 400.
 
-        The forward proxy only supports http:// URIs. https:// is rejected
+        The forward proxy supports http:// and https:// URIs. ftp:// is rejected
         with 400 Bad Request.
         """
         temp_dir = tempfile.mkdtemp()
@@ -152,11 +152,11 @@ class TestConnectTcpForwardProxy:
                 "Proxy failed to start"
             )
 
-            request = b"GET https://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n"
+            request = b"GET ftp://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n"
             response = send_raw_request("127.0.0.1", proxy_port, request)
 
             assert parse_http_status(response) == 400, (
-                "Expected 400 for https:// scheme, got:"
+                "Expected 400 for ftp:// scheme, got:"
                 + f" {response.decode(errors='ignore')}"
             )
         finally:

@@ -121,10 +121,19 @@ async def _check_http_upstream(
                 writer.write(f"HTTP/1.1 {status} Test\r\n\r\n".encode())
                 if 200 <= status < 300:
                     writer.write(GREETING)
-                    await writer.drain()
-                    while data := await reader.read(4096):
-                        writer.write(data)
+                    if status == 204:
+                        # Hyper rejects the upgrade and closes with unread bytes.
+                        # Depending on the OS, this peer observes EOF or reset.
+                        try:
+                            await writer.drain()
+                            assert await reader.read(1) == b""
+                        except ConnectionResetError, BrokenPipeError:
+                            pass
+                    else:
                         await writer.drain()
+                        while data := await reader.read(4096):
+                            writer.write(data)
+                            await writer.drain()
                 else:
                     await writer.drain()
         finally:

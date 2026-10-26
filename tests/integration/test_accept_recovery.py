@@ -1,7 +1,6 @@
-"""Linux process tests for accept recovery under child-only FD exhaustion."""
+"""Process contracts for accept recovery under child-only FD exhaustion."""
 
 import errno
-import resource
 import signal
 import socket
 import ssl
@@ -41,12 +40,12 @@ def running_proxy(
             + f"      key_path: {key}\n"
         )
     _ = config.write_text(content)
-    process = start_proxy(str(config))
+    process = start_proxy(str(config), nofile_limit=64)
     try:
         assert wait_for_proxy("127.0.0.1", port, timeout=3, proc=process)
         yield process, port
     finally:
-        # Every limit change is restricted to this disposable child.
+        # The descriptor limit is restricted to this disposable child.
         terminate_process(process, timeout=2, force=True)
 
 
@@ -64,27 +63,37 @@ def wait_for_accept_failure(directory: Path, process: BytesProcess) -> str:
     assert False, f"accept did not report FD exhaustion: {output}"
 
 
+@contextmanager
+def exhausted_connections(port: int) -> Generator[None]:
+    # Leave protocol handshakes incomplete so accepted sockets occupy the
+    # child's descriptor table. Additional sockets wait in its listen backlog.
+    with ExitStack() as connections:
+        for _ in range(128):
+            _ = connections.enter_context(
+                socket.create_connection(("127.0.0.1", port), timeout=3)
+            )
+        yield
+
+
 @pytest.mark.parametrize("listener_kind", ["http", "https", "socks5"])
 @pytest.mark.parametrize("retry_delay", [None, "250ms"])
-def test_accept_recovers_after_file_descriptor_limit_is_restored(
+def test_accept_recovers_after_file_descriptors_are_released(
     tmp_path: Path, listener_kind: ListenerKind, retry_delay: str | None
 ) -> None:
     with running_proxy(tmp_path, listener_kind, retry_delay) as (process, port):
-        original = resource.prlimit(process.pid, resource.RLIMIT_NOFILE)
-        # stdin/stdout/stderr occupy 0..2. Existing descriptors remain
-        # usable, but this child cannot allocate a descriptor for accept.
-        _ = resource.prlimit(process.pid, resource.RLIMIT_NOFILE, (3, original[1]))
-        with ExitStack() as sockets:
-            connection = sockets.enter_context(
-                socket.create_connection(("127.0.0.1", port), timeout=3)
-            )
+        with exhausted_connections(port):
             output = wait_for_accept_failure(tmp_path, process)
             assert "ERROR" in output
             assert f"address=0.0.0.0:{port}" in output
             assert f"os error {errno.EMFILE}" in output
             assert f"retry_delay={retry_delay or '1s'}" in output
             assert process.poll() is None
-            _ = resource.prlimit(process.pid, resource.RLIMIT_NOFILE, original)
+        # Closing the accepted sessions releases descriptors without needing
+        # Linux-only APIs to change another process's limits.
+        with ExitStack() as sockets:
+            connection = sockets.enter_context(
+                socket.create_connection(("127.0.0.1", port), timeout=3)
+            )
             if listener_kind == "https":
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
                 context.check_hostname = False
@@ -107,10 +116,8 @@ def test_accept_shutdown_interrupts_resource_backoff(
     tmp_path: Path, listener_kind: ListenerKind
 ) -> None:
     with running_proxy(tmp_path, listener_kind, "30s") as (process, port):
-        original = resource.prlimit(process.pid, resource.RLIMIT_NOFILE)
-        _ = resource.prlimit(process.pid, resource.RLIMIT_NOFILE, (3, original[1]))
-        with socket.create_connection(("127.0.0.1", port), timeout=3):
+        with exhausted_connections(port):
             output = wait_for_accept_failure(tmp_path, process)
             assert "retry_delay=30s" in output
-            process.send_signal(signal.SIGTERM)
-            assert process.wait(timeout=2) == 0
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=2) == 0

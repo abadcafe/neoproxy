@@ -180,9 +180,60 @@ pub(crate) fn merge_chain_config(
     upstreams.insert(
       upstream.name.clone(),
       Upstream {
+        dns_servers: upstream
+          .dns_servers
+          .clone()
+          .or_else(|| plugin.dns_servers.clone()),
+        http3_handshake_timeout: resolve_field_with_default(
+          upstream
+            .http3
+            .as_ref()
+            .and_then(|c| c.tls_handshake_timeout)
+            .as_ref(),
+          plugin
+            .http3
+            .as_ref()
+            .and_then(|c| c.tls_handshake_timeout)
+            .as_ref(),
+          None,
+          default_tls_handshake_timeout(),
+        ),
+        quic: merge_quic_field_level(
+          None,
+          upstream.http3.as_ref().and_then(|c| c.quic.as_ref()),
+          plugin.http3.as_ref().and_then(|c| c.quic.as_ref()),
+        ),
         addresses,
         pool_config,
         connect_timeout,
+        https_connect_timeout: resolve_field_with_default(
+          upstream
+            .https
+            .as_ref()
+            .and_then(|c| c.connect_timeout)
+            .as_ref(),
+          plugin
+            .https
+            .as_ref()
+            .and_then(|c| c.connect_timeout)
+            .as_ref(),
+          None,
+          default_connect_timeout(),
+        ),
+        tls_handshake_timeout: resolve_field_with_default(
+          upstream
+            .https
+            .as_ref()
+            .and_then(|c| c.tls_handshake_timeout)
+            .as_ref(),
+          plugin
+            .https
+            .as_ref()
+            .and_then(|c| c.tls_handshake_timeout)
+            .as_ref(),
+          None,
+          default_tls_handshake_timeout(),
+        ),
         tunnel_idle_timeout,
         dns_resolve_timeout,
         request_timeout: resolve_field_with_default(

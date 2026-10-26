@@ -145,7 +145,23 @@ fn test_parse_forward_target_https_scheme() {
   let parts =
     make_request_parts(http::Method::GET, "https://example.com/path");
   let result = parse_forward_target(&parts);
-  assert_eq!(result, Err(ForwardTargetError::UnsupportedScheme));
+  let target = result.unwrap();
+  assert_eq!(
+    target.absolute_uri().to_string(),
+    "https://example.com/path"
+  );
+  assert_eq!(target.host_header_value().unwrap(), "example.com");
+}
+
+#[test]
+fn test_parse_forward_target_rejects_non_http_schemes() {
+  for uri in ["ftp://example.com/path", "ws://example.com/path"] {
+    let parts = make_request_parts(http::Method::GET, uri);
+    assert_eq!(
+      parse_forward_target(&parts),
+      Err(ForwardTargetError::UnsupportedScheme)
+    );
+  }
 }
 
 #[test]
@@ -165,15 +181,12 @@ fn test_parse_forward_target_port_zero() {
 
 #[test]
 fn test_parse_forward_target_default_port() {
-  let parts =
-    make_request_parts(http::Method::GET, "http://example.com/");
-  let result = parse_forward_target(&parts);
-  assert!(result.is_ok());
-  let target = result.unwrap();
-  assert_eq!(
-    target.host_header_value().unwrap().to_str().unwrap(),
-    "example.com"
-  );
+  for uri in ["http://example.com/", "https://example.com/"] {
+    let parts = make_request_parts(http::Method::GET, uri);
+    let target = parse_forward_target(&parts).unwrap();
+    assert_eq!(target.host_header_value().unwrap(), "example.com");
+    assert_eq!(target.absolute_uri().to_string(), uri);
+  }
 }
 
 #[test]
@@ -192,11 +205,11 @@ fn test_forward_target_error_display() {
   );
   assert_eq!(
     format!("{}", ForwardTargetError::NotAbsoluteForm),
-    "URI must be absolute-form (http://host/path)"
+    "URI must be absolute-form (http://host/path or https://host/path)"
   );
   assert_eq!(
     format!("{}", ForwardTargetError::UnsupportedScheme),
-    "only http:// scheme supported for forward proxy"
+    "only http:// and https:// schemes supported for forward proxy"
   );
 }
 

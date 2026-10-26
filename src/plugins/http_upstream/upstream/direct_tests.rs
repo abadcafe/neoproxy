@@ -15,7 +15,16 @@ async fn test_http_client_direct_tunnel_connects_to_target() {
   let upstreams =
     crate::plugins::http_upstream::config::merge_chain_config(&config)
       .unwrap();
-  let http_client = DirectClient::new(&upstreams["direct"]);
+  let tls = rustls::ClientConfig::builder_with_provider(
+    std::sync::Arc::new(rustls::crypto::ring::default_provider()),
+  )
+  .with_safe_default_protocol_versions()
+  .unwrap()
+  .with_root_certificates(rustls::RootCertStore::empty())
+  .with_no_client_auth();
+  let http_client =
+    DirectClient::new(&upstreams["direct"], std::sync::Arc::new(tls))
+      .unwrap();
   let tracker = Rc::new(StreamTracker::new());
 
   let accept = async {

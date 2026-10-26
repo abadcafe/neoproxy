@@ -75,6 +75,7 @@ def test_proxy_pool_reuses_one_connection_across_origin_authorities(
 ) -> None:
     port = get_unique_port()
     connections: list[socket.socket] = []
+    request_lines: list[bytes] = []
     lock = threading.Lock()
     cert, key, ca, _ = generate_test_certificates(str(tmp_path))
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -94,6 +95,8 @@ def test_proxy_pool_reuses_one_connection_across_origin_authorities(
                         if not data:
                             return
                         request += data
+                    with lock:
+                        request_lines.append(request.split(b"\r\n", 1)[0])
                     conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
 
     _ = target_server(port, upstream)
@@ -130,12 +133,20 @@ def test_proxy_pool_reuses_one_connection_across_origin_authorities(
     with running_proxy(tmp_path, config) as proxy:
         client = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=3)
         try:
-            for host in ["first.example", "second.example", "third.example"]:
-                client.request("GET", f"http://{host}/")
+            targets = [
+                "http://first.example/",
+                "https://second.example:8443/",
+                "https://third.example/",
+            ]
+            for target in targets:
+                client.request("GET", target)
                 response = client.getresponse()
                 assert response.status == 200
                 assert response.read() == b"OK"
             with lock:
+                assert request_lines == [
+                    f"GET {target} HTTP/1.1".encode() for target in targets
+                ]
                 assert len(connections) == 1, (
                     "pool was keyed by origin instead of proxy transport"
                 )

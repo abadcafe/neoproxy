@@ -22,7 +22,6 @@ use bytes::{Buf, Bytes};
 use http_body::{Body, Frame, SizeHint};
 use session::SessionLease;
 pub(super) use session::SessionPool;
-use tracing::warn;
 use upload::Upload;
 
 use super::protocol::{ClientProtocol, ConnectResult};
@@ -71,14 +70,35 @@ async fn chain_forward_http3(
   apply_proxy_auth(&client.user, &mut fwd_req);
 
   let forward_start = Instant::now();
-  let (stream, lease) =
-    match client.session.open(fwd_req, tls, tracker).await {
-      Ok(opened) => opened,
-      Err(e) => {
-        warn!("http_upstream: H3 forward request failed: {e}");
-        return e.to_response(ctx);
-      }
+  let response =
+    match exchange(&client.session, tls, fwd_req, req_body, tracker)
+      .await
+    {
+      Ok(response) => response,
+      Err(error) => return error.to_response(ctx),
     };
+  ctx.insert(
+    "upstream.forward_ms",
+    forward_start.elapsed().as_millis().to_string(),
+  );
+  ctx.insert(
+    "upstream.forward_status",
+    response.status().as_str().to_string(),
+  );
+  let (parts, body) = response.into_parts();
+  forward_response(parts, body, ctx)
+}
+
+/// Exchange a request without applying proxy or origin discovery
+/// policy.
+pub(super) async fn exchange(
+  session: &SessionPool,
+  tls: &rustls::ClientConfig,
+  request: http::Request<()>,
+  req_body: RequestBody,
+  tracker: &Rc<StreamTracker>,
+) -> Result<Response, UpstreamError> {
+  let (stream, lease) = session.open(request, tls, tracker).await?;
 
   let (send_stream, mut stream) = stream.split();
   let mut upload = Some(Upload::start(send_stream, req_body, tracker));
@@ -89,30 +109,18 @@ async fn chain_forward_http3(
       biased;
       response = &mut response => response,
       result = upload.as_mut().expect("upload started") => {
-        if let Err(error) = result { return error.to_response(ctx); }
+        result?;
         upload = None;
         response.await
       }
     }
   };
-  let proxy_resp = match response {
-    Ok(response) => response,
-    Err(error) => return error.to_response(ctx),
-  };
-  let forward_ms = forward_start.elapsed().as_millis() as u64;
-
-  ctx.insert("upstream.forward_ms", forward_ms.to_string());
-  ctx.insert(
-    "upstream.forward_status",
-    proxy_resp.status().as_str().to_string(),
-  );
-
+  let proxy_resp = response?;
   let (parts, ()) = proxy_resp.into_parts();
-  forward_response(
+  Ok(Response::from_parts(
     parts,
     ResponseBody::new(H3ResponseBody::new(stream, upload, lease)),
-    ctx,
-  )
+  ))
 }
 
 type H3ClientRequestStream =

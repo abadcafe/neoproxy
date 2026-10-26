@@ -330,7 +330,7 @@ SOCKS5 监听器，兼容 RFC 1928 和 RFC 1929。
 | `handshake_timeout` | `Duration` | 否 | `3s` | 协议握手、后续命令读取各自的超时 |
 | `accept_retry_delay` | `Duration` | 否 | `1s` | accept 资源耗尽或未知 I/O 错误后的重试退避，必须大于零且能安全计时 |
 
-认证策略由所关联服务的 `auth.basic_auth` 层声明，监听器不接受独立的 `users` 参数。服务组合时显式合并认证要求，并通过传输无关的只读接口提供给 SOCKS5 握手。配置认证后只接受用户名/密码方法；凭据必须满足所有认证层，才发送 RFC 1929 成功应答。凭据错误时先发送认证失败应答并关闭连接，不读取 CONNECT 目标。成功后再将 SOCKS5 CONNECT 转成 HTTP CONNECT，执行服务中间件和访问日志；凭据通过类型化扩展传递，保留用户名中的冒号。
+认证策略由所关联服务的 `auth.basic_auth` 层声明，监听器不接受独立的 `users` 参数。服务组合时显式合并认证要求，并通过传输无关的只读接口提供给 SOCKS5 握手。未配置认证时只接受无认证方法（`0x00`），配置认证后只接受用户名/密码方法（`0x02`）；客户端同时提供两种方法时也按此策略选择，与客户端排列顺序无关。客户端未提供所需方法时返回 `0xFF` 并关闭连接。凭据必须满足所有认证层，才发送 RFC 1929 成功应答。凭据错误时先发送认证失败应答并关闭连接，不读取 CONNECT 目标。成功后再将 SOCKS5 CONNECT 转成 HTTP CONNECT，执行服务中间件和访问日志；凭据通过类型化扩展传递，保留用户名中的冒号。
 
 服务层 `users` 条目格式：
 
@@ -405,13 +405,23 @@ curl --socks5 127.0.0.1:1080 --proxy-user user1:pass1 https://example.com
 
 支持 HTTP CONNECT、SOCKS5 CONNECT、HTTP/3 CONNECT 和 HTTP 正向代理。
 
+Service 按方法处理请求：`CONNECT host:port` 建立透明隧道；其他方法统一转发完整的 HTTP 请求，目标 URL 支持 `http://` 和 `https://`。直连时，HTTP 目标使用 TCP，HTTPS 目标使用 TLS 并校验证书和目标主机名；链式模式将目标 scheme、authority、path、方法和消息体交给下一跳，不在中继节点建立目标 TLS。到 proxy 的连接地址、TLS 主机名与请求目标独立。GET/POST 的响应保留 HTTP 消息语义，CONNECT 成功后才转入双向字节传输。
+
+末端直连客户端负责 HTTPS 源站的协议选择：TCP/TLS 通过 ALPN 协商 H2/H1；通过源站响应的 `Alt-Svc` 或 DNS HTTPS 记录发现 H3 时，可建立 QUIC/H3 连接。Alt-Svc 按原始 origin 缓存，处理 `ma`、`Age`、`clear` 和过期；DNS HTTPS 使用 DNS TTL，支持别名、优先级、目标端口、ALPN 和 mandatory 参数检查。两者同时存在时，替代端点仍受其 DNS HTTPS 绑定约束。实际连接地址可以改变，HTTP authority、TLS SNI 和证书校验始终使用原始源站身份。
+
+H1/H2/H3 连接池由直连客户端统一管理，按原始 origin、实际端点和协议隔离；并发首次请求共享初始化，H3 响应流持有连接租约，空闲连接按 `pool.idle_timeout` 回收。H3 建连探测预算取 `http3.tls_handshake_timeout`、`request_timeout` 的三分之一和 1 秒中的最小值；建连失败后短暂避开该端点并回退 TCP。请求一旦提交给 H3，不因后续响应错误重放请求体。直连 upstream 允许配置 `http3` 来调整握手和 QUIC 参数。
+
+普通转发响应在末端读取发现信息后移除 `Alt-Svc`，中继同样不保留该响应头；响应 trailers 也会移除该字段。CONNECT 保持字节透传，不解析隧道内的 TLS 或 HTTP。
+
 #### 配置参数
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `upstream` | `String` | 是 | 上游名称，引用 `plugins.http_upstream.upstreams[].name` |
 
-直连模式的超时和连接池配置在 upstream 定义中设置（`http.connect_timeout`、`tunnel_idle_timeout`、`pool`）。
+直连模式的超时和连接池配置在 upstream 定义中设置：`http.connect_timeout` 用于 HTTP 目标和 CONNECT；`https.connect_timeout`、`https.tls_handshake_timeout` 用于 HTTPS 目标；`request_timeout` 限制响应头或隧道建立的等待时间。普通转发的连接池按 scheme、目标主机和端口区分，配置项为 `pool`；隧道使用 `tunnel_idle_timeout`。HTTPS 目标使用系统信任库，并可通过 `plugins.http_upstream.certificates.server_ca_path` 添加 CA，客户端证书沿用该配置中的 `client_cert_path` 和 `client_key_path`。
+
+`dns_servers` 可在插件或 upstream 配置，例如 `["127.0.0.1:5353", "[::1]:5353"]`，upstream 覆盖插件。它指定直连客户端进行 HTTPS 发现和替代端点地址解析时使用的 DNS 服务器；默认读取系统 DNS 配置。普通 HTTP 和 CONNECT 的地址解析保持使用系统解析器。
 
 `tunnel_idle_timeout` 按整个隧道的双向字节进展计时，任一方向成功读取或接受写入新字节都会刷新期限；EOF、空读写和反复轮询不算活动。一个独立计时器覆盖整个传输过程，包括双方读到 EOF 后仍在等待的 H3 `flush`/`finish`。单向半关闭会继续传输另一方向的数据，直到正常完成、空闲超时或服务关闭。H3 适配器每次最多缓冲 64 KiB，接受数据后立即确认本次字节数，`flush`/`shutdown` 推进发送并传播错误。
 
@@ -425,6 +435,9 @@ plugins:
         tunnel_idle_timeout: "60s"
         http:
           connect_timeout: "10s"
+        https:
+          connect_timeout: "10s"
+          tls_handshake_timeout: "5s"
 
 services:
   - name: tunnel

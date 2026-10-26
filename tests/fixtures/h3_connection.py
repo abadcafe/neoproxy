@@ -1,6 +1,6 @@
 """module: h3_connection; responsibility: probe H3 TLS authentication.
 Public operations: perform_h3_connection_test, perform_h3_tls_client_cert_test.
-Data entities: none. Tests: TLS process contracts.
+Data entities: none. Tests: h3_connection_tests.py, TLS process contracts.
 """
 
 import asyncio
@@ -13,7 +13,11 @@ async def _probe(client: H3Client, timeout: float) -> tuple[bool, int, str]:
         async with asyncio.timeout(timeout):
             if not await client.connect():
                 return False, 0, client.connection_error
-            response = await client.send_request("GET", "/")
+            # Stop at the authenticated proxy; upstream reachability is a
+            # separate contract from TLS and certificate authentication.
+            response = await client.send_request(
+                "OPTIONS", "/", headers=[("max-forwards", "0")]
+            )
             return (
                 response.status_code != 0,
                 response.status_code,

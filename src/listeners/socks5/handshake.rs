@@ -9,6 +9,10 @@
 
 use std::time::Duration;
 
+use fast_socks5::server::{
+  NoAuthentication, PasswordAuthentication, StandardAuthentication,
+};
+
 use crate::authentication::Authentication;
 
 /// Default handshake timeout.
@@ -128,13 +132,16 @@ pub(super) async fn perform_handshake(
     let proto =
       fast_socks5::server::Socks5ServerProtocol::start(stream);
 
-    let auth_state = proto
-      .negotiate_auth(
-        fast_socks5::server::StandardAuthentication::allow_no_auth(
-          !authentication.requires_credentials(),
-        ),
-      )
-      .await?;
+    // Advertise exactly the method required by the service policy.
+    // allow_no_auth(true) would also enable and prefer password auth.
+    let methods = if authentication.requires_credentials() {
+      [StandardAuthentication::PasswordAuthentication(
+        PasswordAuthentication,
+      )]
+    } else {
+      [StandardAuthentication::NoAuthentication(NoAuthentication)]
+    };
+    let auth_state = proto.negotiate_auth(&methods).await?;
 
     match auth_state {
       fast_socks5::server::StandardAuthenticationStarted::NoAuthentication(

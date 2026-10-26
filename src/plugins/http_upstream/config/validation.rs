@@ -46,6 +46,7 @@ pub(crate) fn validate_address_format(s: &str) -> Result<()> {
 pub(crate) fn validate_plugin_config(
   plugin: &HttpUpstreamPluginConfig,
 ) -> Result<()> {
+  validate_dns_servers(plugin.dns_servers.as_deref())?;
   let mut upstream_names: HashSet<&str> = HashSet::new();
 
   validate_duration_positive(
@@ -94,6 +95,7 @@ pub(crate) fn validate_plugin_config(
 }
 
 fn validate_upstream_config(upstream: &UpstreamConfig) -> Result<()> {
+  validate_dns_servers(upstream.dns_servers.as_deref())?;
   validate_duration_positive(
     upstream.tunnel_idle_timeout,
     &upstream.name,
@@ -143,12 +145,6 @@ fn validate_upstream_config(upstream: &UpstreamConfig) -> Result<()> {
   )?;
 
   if upstream.addresses.is_empty() {
-    if upstream.https.is_some() || upstream.http3.is_some() {
-      bail!(
-        "direct upstream '{}' must not configure https or http3",
-        upstream.name
-      );
-    }
     if upstream.user.is_some() {
       bail!(
         "direct upstream '{}' must not configure upstream proxy user",
@@ -162,6 +158,21 @@ fn validate_upstream_config(upstream: &UpstreamConfig) -> Result<()> {
     validate_address_config(&upstream.name, addr)?;
   }
 
+  Ok(())
+}
+
+fn validate_dns_servers(
+  servers: Option<&[std::net::SocketAddr]>,
+) -> Result<()> {
+  if let Some(servers) = servers
+    && (servers.is_empty()
+      || servers.iter().any(|server| server.port() == 0))
+  {
+    bail!(
+      "dns_servers must contain at least one IP address with a \
+       nonzero port"
+    );
+  }
   Ok(())
 }
 

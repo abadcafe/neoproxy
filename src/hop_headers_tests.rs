@@ -131,6 +131,7 @@ fn test_strip_trailer_headers_removes_framing_routing_and_authentication()
     "content-encoding",
     "content-type",
     "content-range",
+    "alt-svc",
   ] {
     trailers.insert(
       http::HeaderName::from_static(name),

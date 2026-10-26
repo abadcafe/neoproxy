@@ -2,6 +2,19 @@ use super::error::*;
 use crate::context::RequestContext;
 
 #[test]
+fn test_classify_http_client_error_preserves_nested_certificate_error()
+{
+  let tls = rustls::Error::InvalidCertificate(
+    rustls::CertificateError::UnknownIssuer,
+  );
+  let error = std::io::Error::new(std::io::ErrorKind::InvalidData, tls);
+  assert!(matches!(
+    classify_http_client_error(error.into()),
+    UpstreamError::TlsCertificateError(_)
+  ));
+}
+
+#[test]
 fn test_upstream_error_http_status() {
   assert_eq!(
     UpstreamError::DnsError("x".into()).http_status(),

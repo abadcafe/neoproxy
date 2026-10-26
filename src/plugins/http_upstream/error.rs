@@ -213,6 +213,9 @@ pub(crate) fn classify_connect_error(
 pub(crate) fn classify_http_client_error(
   e: anyhow::Error,
 ) -> UpstreamError {
+  if error_chain_contains::<rustls::Error>(&e) {
+    return classify_tls_handshake_error(e);
+  }
   if e.downcast_ref::<DnsResolveError>().is_some()
     || error_chain_contains::<DnsResolveError>(&e)
   {
@@ -312,7 +315,16 @@ fn find_error_in_chain<T>(e: &anyhow::Error) -> Option<&T>
 where
   T: std::error::Error + 'static,
 {
-  e.chain().find_map(|err| err.downcast_ref::<T>())
+  e.chain().find_map(|err| {
+    err.downcast_ref::<T>().or_else(|| {
+      // io::Error can hold a TLS/DNS error whose own source is empty.
+      // Inspect that payload as well as the standard source chain.
+      err
+        .downcast_ref::<std::io::Error>()?
+        .get_ref()?
+        .downcast_ref::<T>()
+    })
+  })
 }
 
 fn error_chain_contains<T>(e: &anyhow::Error) -> bool
@@ -328,7 +340,7 @@ where
 pub(crate) fn classify_tls_handshake_error(
   e: anyhow::Error,
 ) -> UpstreamError {
-  if let Some(tls_err) = e.downcast_ref::<rustls::Error>() {
+  if let Some(tls_err) = find_error_in_chain::<rustls::Error>(&e) {
     return match tls_err {
       rustls::Error::InvalidCertificate(_)
       | rustls::Error::NoCertificatesPresented

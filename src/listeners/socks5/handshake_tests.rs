@@ -1,8 +1,59 @@
-//! Tests for HandshakeError Display and From implementations.
+//! Tests for SOCKS5 handshake method selection and error conversion.
 
 use std::io;
+use std::time::Duration;
 
-use super::handshake::HandshakeError;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+
+use super::handshake::{HandshakeError, perform_handshake};
+use crate::authentication::Authentication;
+
+async fn handshake_streams() -> (TcpStream, TcpStream) {
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let address = listener.local_addr().unwrap();
+  let (client, server) =
+    tokio::join!(TcpStream::connect(address), listener.accept());
+  (client.unwrap(), server.unwrap().0)
+}
+
+#[tokio::test]
+async fn test_perform_handshake_selects_no_auth_for_tsocks_offer() {
+  let (mut client, server) = handshake_streams().await;
+  let authentication = Authentication::default();
+  let (result, ()) = tokio::join!(
+    perform_handshake(server, Duration::from_secs(2), &authentication),
+    async {
+      client.write_all(&[5, 2, 0, 2]).await.unwrap();
+      let mut reply = [0; 2];
+      client.read_exact(&mut reply).await.unwrap();
+      assert_eq!(reply, [5, 0]);
+    }
+  );
+  let result = result.unwrap();
+  assert_eq!(result.username, None);
+  assert_eq!(result.password, None);
+}
+
+#[tokio::test]
+async fn test_perform_handshake_rejects_password_without_auth() {
+  let (mut client, server) = handshake_streams().await;
+  let authentication = Authentication::default();
+  let (result, ()) = tokio::join!(
+    perform_handshake(server, Duration::from_secs(2), &authentication),
+    async {
+      client.write_all(&[5, 1, 2]).await.unwrap();
+      let mut reply = [0; 2];
+      client.read_exact(&mut reply).await.unwrap();
+      assert_eq!(reply, [5, 0xff]);
+      assert_eq!(client.read(&mut [0]).await.unwrap(), 0);
+    }
+  );
+  assert!(matches!(
+    result,
+    Err(HandshakeError::MethodNotAcceptable(methods)) if methods == [2]
+  ));
+}
 
 // ========== Display ==========
 

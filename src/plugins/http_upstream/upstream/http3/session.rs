@@ -8,6 +8,7 @@
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -31,7 +32,8 @@ struct State {
 }
 
 pub(crate) struct SessionPool {
-  state: tokio::sync::Mutex<State>,
+  state: Rc<tokio::sync::Mutex<State>>,
+  activity: Arc<Activity>,
   address: String,
   hostname: Option<String>,
   quic: QuicConfig,
@@ -44,9 +46,40 @@ pub(crate) struct SessionPool {
 /// entry cannot close streams which have already been accepted.
 pub(super) struct SessionLease {
   _sender: h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>,
+  _activity: ActivityLease,
+}
+
+struct Activity {
+  active: AtomicUsize,
+  used: std::sync::Mutex<tokio::time::Instant>,
+}
+struct ActivityLease(Arc<Activity>);
+impl ActivityLease {
+  fn new(activity: &Arc<Activity>) -> Self {
+    activity.active.fetch_add(1, Ordering::AcqRel);
+    Self(activity.clone())
+  }
+}
+impl Drop for ActivityLease {
+  fn drop(&mut self) {
+    *self.0.used.lock().expect("activity lock poisoned") =
+      tokio::time::Instant::now();
+    self.0.active.fetch_sub(1, Ordering::AcqRel);
+  }
 }
 
 impl SessionPool {
+  /// Prepare QUIC and H3 before a request can be committed to this
+  /// peer.
+  pub(crate) async fn prepare(
+    &self,
+    tls: &rustls::ClientConfig,
+    tracker: &Rc<StreamTracker>,
+  ) -> Result<(), UpstreamError> {
+    let _activity = ActivityLease::new(&self.activity);
+    self.connection(tls, tracker).await.map(|_| ())
+  }
+
   pub(crate) fn new(
     address: String,
     hostname: Option<String>,
@@ -55,9 +88,13 @@ impl SessionPool {
     dns_timeout: Duration,
   ) -> Self {
     Self {
-      state: tokio::sync::Mutex::new(State {
+      state: Rc::new(tokio::sync::Mutex::new(State {
         connection: None,
         sender: None,
+      })),
+      activity: Arc::new(Activity {
+        active: AtomicUsize::new(0),
+        used: std::sync::Mutex::new(tokio::time::Instant::now()),
       }),
       address,
       hostname,
@@ -65,6 +102,48 @@ impl SessionPool {
       handshake_timeout,
       dns_timeout,
     }
+  }
+
+  /// Retire genuinely idle sessions while response leases keep active
+  /// streams alive. The task does not keep the pool itself alive.
+  pub(crate) fn monitor_idle(
+    &self,
+    timeout: Duration,
+    tracker: &StreamTracker,
+  ) {
+    let state = Rc::downgrade(&self.state);
+    let activity = Arc::downgrade(&self.activity);
+    let shutdown = tracker.shutdown_handle();
+    tracker.register_connection(async move {
+      loop {
+        tokio::select! {
+          () = tokio::time::sleep(timeout) => {},
+          () = shutdown.notified() => break,
+        }
+        let (Some(state), Some(activity)) =
+          (state.upgrade(), activity.upgrade())
+        else {
+          break;
+        };
+        let mut state = state.lock().await;
+        if activity.active.load(Ordering::Acquire) == 0
+          && activity
+            .used
+            .lock()
+            .expect("activity lock poisoned")
+            .elapsed()
+            >= timeout
+        {
+          if let Some(connection) = state.connection.take() {
+            connection.close(
+              quinn::VarInt::from_u32(0x100),
+              b"idle origin pool",
+            );
+          }
+          state.sender = None;
+        }
+      }
+    });
   }
 
   async fn connection(
@@ -110,10 +189,14 @@ impl SessionPool {
     ),
     UpstreamError,
   > {
+    let activity = ActivityLease::new(&self.activity);
     let (id, mut sender) = self.connection(tls, tracker).await?;
     match sender.send_request(request.clone()).await {
       Ok(stream) => {
-        return Ok((stream, SessionLease { _sender: sender }));
+        return Ok((
+          stream,
+          SessionLease { _sender: sender, _activity: activity },
+        ));
       }
       Err(h3::error::StreamError::RemoteClosing) => {
         let mut state = self.state.lock().await;
@@ -141,10 +224,10 @@ impl SessionPool {
       sender.send_request(request).await.map_err(|error| {
         UpstreamError::ConnectionTerminated(error.to_string())
       })?;
-    Ok((stream, SessionLease { _sender: sender }))
+    Ok((stream, SessionLease { _sender: sender, _activity: activity }))
   }
 
-  pub(super) fn close(&self) {
+  pub(crate) fn close(&self) {
     if let Ok(state) = self.state.try_lock()
       && let Some(connection) = &state.connection
     {

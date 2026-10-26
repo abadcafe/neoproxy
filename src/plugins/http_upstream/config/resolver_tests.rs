@@ -16,6 +16,40 @@ fn test_merge_chain_config_resolves_direct_upstream() {
 }
 
 #[test]
+fn test_merge_chain_config_inherits_direct_discovery_and_quic_policy() {
+  let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
+    "dns_servers: ['127.0.0.1:5353']\nhttp3:\n  \
+     tls_handshake_timeout: 2s\n  quic:\n    keep_alive_interval: \
+     7s\nupstreams:\n- name: inherited\n- name: overridden\n  \
+     dns_servers: ['[::1]:5454']\n  http3:\n    \
+     tls_handshake_timeout: 1s\n    quic:\n      initial_mtu: 1400\n",
+  )
+  .unwrap();
+  let upstreams = merge_chain_config(&config).unwrap();
+  assert_eq!(
+    upstreams["inherited"].dns_servers.as_ref().unwrap()[0],
+    "127.0.0.1:5353".parse::<std::net::SocketAddr>().unwrap()
+  );
+  assert_eq!(
+    upstreams["overridden"].dns_servers.as_ref().unwrap()[0],
+    "[::1]:5454".parse::<std::net::SocketAddr>().unwrap()
+  );
+  assert_eq!(
+    upstreams["inherited"].http3_handshake_timeout,
+    Duration::from_secs(2)
+  );
+  assert_eq!(
+    upstreams["overridden"].http3_handshake_timeout,
+    Duration::from_secs(1)
+  );
+  assert_eq!(
+    upstreams["overridden"].quic.keep_alive_interval,
+    Duration::from_secs(7)
+  );
+  assert_eq!(upstreams["overridden"].quic.initial_mtu, Some(1400));
+}
+
+#[test]
 fn test_merge_chain_config_prefers_address_level_timeout() {
   let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
     r#"
@@ -91,6 +125,33 @@ fn test_merge_chain_config_inherits_request_deadline() {
   .unwrap();
   assert_eq!(
     merge_chain_config(&config).unwrap()["direct"].request_timeout,
+    Duration::from_secs(2)
+  );
+}
+
+#[test]
+fn test_merge_chain_config_resolves_direct_https_policy() {
+  let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
+    "https:\n  connect_timeout: 3s\n  tls_handshake_timeout: \
+     4s\nupstreams:\n- name: inherited\n- name: overridden\n  \
+     https:\n    connect_timeout: 1s\n    tls_handshake_timeout: 2s",
+  )
+  .unwrap();
+  let resolved = merge_chain_config(&config).unwrap();
+  assert_eq!(
+    resolved["inherited"].https_connect_timeout,
+    Duration::from_secs(3)
+  );
+  assert_eq!(
+    resolved["inherited"].tls_handshake_timeout,
+    Duration::from_secs(4)
+  );
+  assert_eq!(
+    resolved["overridden"].https_connect_timeout,
+    Duration::from_secs(1)
+  );
+  assert_eq!(
+    resolved["overridden"].tls_handshake_timeout,
     Duration::from_secs(2)
   );
 }

@@ -9,11 +9,19 @@ Test matrix:
 - HTTP(Password) -> HTTP/3(TLS Cert) -> Target
 - SOCKS5(Password) -> HTTP/3(Password) -> Target
 - SOCKS5(Password) -> HTTP/3(TLS Cert) -> Target
+
+HTTP entries cover absolute-form HTTP/HTTPS GET and HEAD plus CONNECT to
+HTTP/HTTPS origins. Local HTTP/HTTPS echo peers verify POST bodies in both
+forwarding and tunneling modes. curl trace and http_connect verify the actual
+request path; SOCKS5 entries exercise tunnels only.
 """
 
 import shutil
 import subprocess
 import tempfile
+from typing import Literal
+
+import pytest
 
 from tests.fixtures.chain_configuration import (
     create_entry_http_no_upstream_auth_config,
@@ -22,7 +30,11 @@ from tests.fixtures.chain_configuration import (
     create_upstream_no_auth_config,
     create_upstream_password_config,
 )
-from tests.fixtures.chain_scenario import is_proxy_auth_response, run_proxy_chain_test
+from tests.fixtures.chain_scenario import (
+    ChainRequest,
+    is_proxy_auth_response,
+    run_proxy_chain_test,
+)
 from tests.fixtures.configuration import StringMap
 from tests.fixtures.ports import (
     get_unique_port,
@@ -30,6 +42,42 @@ from tests.fixtures.ports import (
     wait_for_udp_port_bound,
 )
 from tests.fixtures.proxy_process import BytesProcess, start_proxy
+
+type TargetScheme = Literal["http", "https"]
+
+_BAIDU_HTTP_REQUESTS = [
+    pytest.param(ChainRequest(mode="forward", scheme="http"), id="forward-http-get"),
+    pytest.param(ChainRequest(mode="forward", scheme="https"), id="forward-https-get"),
+    pytest.param(
+        ChainRequest(mode="forward", scheme="http", method="HEAD"),
+        id="forward-http-head",
+    ),
+    pytest.param(
+        ChainRequest(mode="forward", scheme="https", method="HEAD"),
+        id="forward-https-head",
+    ),
+    pytest.param(ChainRequest(mode="tunnel", scheme="http"), id="connect-http-get"),
+    pytest.param(ChainRequest(mode="tunnel", scheme="https"), id="connect-https-get"),
+]
+
+_MOCK_HTTP_REQUESTS = [
+    pytest.param(
+        ChainRequest(mode="forward", scheme="http", method="POST"),
+        id="forward-http-post",
+    ),
+    pytest.param(
+        ChainRequest(mode="forward", scheme="https", method="POST"),
+        id="forward-https-post",
+    ),
+    pytest.param(
+        ChainRequest(mode="tunnel", scheme="http", method="POST"),
+        id="connect-http-post",
+    ),
+    pytest.param(
+        ChainRequest(mode="tunnel", scheme="https", method="POST"),
+        id="connect-https-post",
+    ),
+]
 
 # ==============================================================================
 # Configuration helper functions
@@ -54,7 +102,8 @@ from tests.fixtures.proxy_process import BytesProcess, start_proxy
 class TestProxyChainHTTPToHTTP3Password:
     """HTTP(Password) -> HTTP/3(Password) -> Target"""
 
-    def test_to_baidu(self, shared_test_certs: StringMap) -> None:
+    @pytest.mark.parametrize("case", _BAIDU_HTTP_REQUESTS)
+    def test_to_baidu(self, shared_test_certs: StringMap, case: ChainRequest) -> None:
         """TC-CHAIN-PWD-001: HTTP(password)->HTTP/3(password)->baidu.com."""
         run_proxy_chain_test(
             entry_type="http",
@@ -66,9 +115,11 @@ class TestProxyChainHTTPToHTTP3Password:
             temp_dir1=tempfile.mkdtemp(),
             temp_dir2=tempfile.mkdtemp(),
             shared_test_certs=shared_test_certs,
+            case=case,
         )
 
-    def test_to_mock(self, shared_test_certs: StringMap) -> None:
+    @pytest.mark.parametrize("case", _MOCK_HTTP_REQUESTS)
+    def test_to_mock(self, shared_test_certs: StringMap, case: ChainRequest) -> None:
         """TC-CHAIN-PWD-002: HTTP(password)->HTTP/3(password)->mock echo."""
         run_proxy_chain_test(
             entry_type="http",
@@ -80,6 +131,7 @@ class TestProxyChainHTTPToHTTP3Password:
             temp_dir1=tempfile.mkdtemp(),
             temp_dir2=tempfile.mkdtemp(),
             shared_test_certs=shared_test_certs,
+            case=case,
         )
 
 
@@ -91,8 +143,12 @@ class TestProxyChainHTTPToHTTP3Password:
 class TestProxyChainHTTPToHTTP3TlsCert:
     """HTTP(Password) -> HTTP/3(TLS Cert) -> Target"""
 
+    @pytest.mark.parametrize("case", _BAIDU_HTTP_REQUESTS)
     def test_to_baidu(
-        self, shared_test_certs: StringMap, shared_client_cert: StringMap
+        self,
+        shared_test_certs: StringMap,
+        shared_client_cert: StringMap,
+        case: ChainRequest,
     ) -> None:
         """TC-CHAIN-TLS-001: HTTP(password)->HTTP/3(TLS cert)->baidu.com."""
         run_proxy_chain_test(
@@ -106,10 +162,15 @@ class TestProxyChainHTTPToHTTP3TlsCert:
             temp_dir2=tempfile.mkdtemp(),
             shared_test_certs=shared_test_certs,
             shared_client_cert=shared_client_cert,
+            case=case,
         )
 
+    @pytest.mark.parametrize("case", _MOCK_HTTP_REQUESTS)
     def test_to_mock(
-        self, shared_test_certs: StringMap, shared_client_cert: StringMap
+        self,
+        shared_test_certs: StringMap,
+        shared_client_cert: StringMap,
+        case: ChainRequest,
     ) -> None:
         """TC-CHAIN-TLS-002: HTTP(password)->HTTP/3(TLS cert)->mock echo."""
         run_proxy_chain_test(
@@ -123,6 +184,7 @@ class TestProxyChainHTTPToHTTP3TlsCert:
             temp_dir2=tempfile.mkdtemp(),
             shared_test_certs=shared_test_certs,
             shared_client_cert=shared_client_cert,
+            case=case,
         )
 
 
@@ -134,14 +196,9 @@ class TestProxyChainHTTPToHTTP3TlsCert:
 class TestProxyChainSocks5ToHTTP3Password:
     """SOCKS5(Password) -> HTTP/3(Password) -> Target"""
 
-    def test_to_baidu(self, shared_test_certs: StringMap) -> None:
-        """TC-CHAIN-S5-PWD-001: SOCKS5(password)->HTTP/3(password)->baidu.com.
-
-        NOTE: Target is www.baidu.com. This is NOT a network/DNS issue —
-        the upstream HTTP/3 proxy rejects the connection with 407 because
-        the entry proxy's http3_chain service does not forward the
-        Proxy-Authorization header over the QUIC tunnel.
-        """
+    @pytest.mark.parametrize("scheme", ["http", "https"])
+    def test_to_baidu(self, shared_test_certs: StringMap, scheme: TargetScheme) -> None:
+        """SOCKS5 tunnel carries an HTTP or HTTPS GET through authenticated H3."""
         run_proxy_chain_test(
             entry_type="socks5",
             upstream_auth="password",
@@ -152,9 +209,11 @@ class TestProxyChainSocks5ToHTTP3Password:
             temp_dir1=tempfile.mkdtemp(),
             temp_dir2=tempfile.mkdtemp(),
             shared_test_certs=shared_test_certs,
+            case=ChainRequest(scheme=scheme),
         )
 
-    def test_to_mock(self, shared_test_certs: StringMap) -> None:
+    @pytest.mark.parametrize("scheme", ["http", "https"])
+    def test_to_mock(self, shared_test_certs: StringMap, scheme: TargetScheme) -> None:
         """TC-CHAIN-S5-PWD-002: SOCKS5(password)->HTTP/3(password)->mock echo."""
         run_proxy_chain_test(
             entry_type="socks5",
@@ -166,6 +225,7 @@ class TestProxyChainSocks5ToHTTP3Password:
             temp_dir1=tempfile.mkdtemp(),
             temp_dir2=tempfile.mkdtemp(),
             shared_test_certs=shared_test_certs,
+            case=ChainRequest(scheme=scheme, method="POST"),
         )
 
 
@@ -177,8 +237,12 @@ class TestProxyChainSocks5ToHTTP3Password:
 class TestProxyChainSocks5ToHTTP3TlsCert:
     """SOCKS5(Password) -> HTTP/3(TLS Cert) -> Target"""
 
+    @pytest.mark.parametrize("scheme", ["http", "https"])
     def test_to_baidu(
-        self, shared_test_certs: StringMap, shared_client_cert: StringMap
+        self,
+        shared_test_certs: StringMap,
+        shared_client_cert: StringMap,
+        scheme: TargetScheme,
     ) -> None:
         """TC-CHAIN-S5-TLS-001: SOCKS5(password)->HTTP/3(TLS cert)->baidu.com."""
         run_proxy_chain_test(
@@ -192,10 +256,15 @@ class TestProxyChainSocks5ToHTTP3TlsCert:
             temp_dir2=tempfile.mkdtemp(),
             shared_test_certs=shared_test_certs,
             shared_client_cert=shared_client_cert,
+            case=ChainRequest(scheme=scheme),
         )
 
+    @pytest.mark.parametrize("scheme", ["http", "https"])
     def test_to_mock(
-        self, shared_test_certs: StringMap, shared_client_cert: StringMap
+        self,
+        shared_test_certs: StringMap,
+        shared_client_cert: StringMap,
+        scheme: TargetScheme,
     ) -> None:
         """TC-CHAIN-S5-TLS-002: SOCKS5(password)->HTTP/3(TLS cert)->mock echo."""
         run_proxy_chain_test(
@@ -209,6 +278,7 @@ class TestProxyChainSocks5ToHTTP3TlsCert:
             temp_dir2=tempfile.mkdtemp(),
             shared_test_certs=shared_test_certs,
             shared_client_cert=shared_client_cert,
+            case=ChainRequest(scheme=scheme, method="POST"),
         )
 
 

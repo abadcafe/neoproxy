@@ -9,6 +9,7 @@ Tests: proxy_process_tests.py and public fixture consumers.
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Generator
 from contextlib import ExitStack, contextmanager
@@ -24,19 +25,34 @@ type ProcessFactory = Callable[[str], BytesProcess]
 MAX_SHUTDOWN_TIME = 10
 
 
-def start_proxy(config_path: str) -> BytesProcess:
+def start_proxy(config_path: str, *, nofile_limit: int | None = None) -> BytesProcess:
     """
     Start proxy server process.
 
     Args:
         config_path: Path to configuration file
+        nofile_limit: Optional soft descriptor limit for this child only.
 
     Returns:
         subprocess.Popen: Proxy server process
     """
     binary = os.path.abspath(NEOPROXY_BINARY)
+    command = [binary, "--config", config_path]
+    if nofile_limit is not None:
+        # Set the limit in a fresh interpreter before exec. This avoids changing
+        # the parent or running preexec_fn in a fork of a multithreaded test.
+        launcher = """import os
+import resource
+import sys
+
+limit: int = int(sys.argv[1])
+limits: tuple[int, int] = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (limit, limits[1]))
+os.execv(sys.argv[2], sys.argv[2:])
+"""
+        command = [sys.executable, "-c", launcher, str(nofile_limit), *command]
     proc = subprocess.Popen(
-        [binary, "--config", config_path],
+        command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=False,

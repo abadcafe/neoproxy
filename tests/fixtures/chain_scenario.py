@@ -4,8 +4,13 @@ Tests: process and protocol consumers.
 
 import shutil
 import socket
+import ssl
 import subprocess
 import threading
+from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel
 
 from tests.fixtures.certificates import generate_client_cert, generate_test_certificates
 from tests.fixtures.chain_configuration import (
@@ -17,6 +22,7 @@ from tests.fixtures.chain_configuration import (
     create_upstream_tls_cert_config,
 )
 from tests.fixtures.configuration import StringMap
+from tests.fixtures.curl import get_curl_env_without_no_proxy
 from tests.fixtures.http_echo import http_echo_handler
 from tests.fixtures.ports import (
     wait_for_proxy,
@@ -24,6 +30,16 @@ from tests.fixtures.ports import (
 )
 from tests.fixtures.proxy_process import BytesProcess, start_proxy
 from tests.fixtures.tcp_peer import create_target_server
+
+type EntryKind = Literal["http", "socks5"]
+type UpstreamAuth = Literal["password", "tls_cert"]
+type TargetKind = Literal["baidu", "mock"]
+
+
+class ChainRequest(BaseModel):
+    mode: Literal["forward", "tunnel"] = "tunnel"
+    scheme: Literal["http", "https"] = "https"
+    method: Literal["GET", "HEAD", "POST"] = "GET"
 
 
 def create_echo_target_server(
@@ -47,9 +63,9 @@ def create_echo_target_server(
 
 
 def run_proxy_chain_test(
-    entry_type: str,  # "http" or "socks5"
-    upstream_auth: str,  # "password" or "tls_cert"
-    target_type: str,  # "baidu" or "mock"
+    entry_type: EntryKind,
+    upstream_auth: UpstreamAuth,
+    target_type: TargetKind,
     http_port: int,
     h3_port: int,
     target_port: int | None,
@@ -57,6 +73,7 @@ def run_proxy_chain_test(
     temp_dir2: str,
     shared_test_certs: StringMap | None = None,
     shared_client_cert: StringMap | None = None,
+    case: ChainRequest | None = None,
 ) -> None:
     """
     Run a proxy chain test with the specified configuration.
@@ -74,10 +91,17 @@ def run_proxy_chain_test(
         temp_dir2: Temp dir for entry
         shared_test_certs: Optional session-scoped cert dict for cert reuse
         shared_client_cert: Optional session-scoped client cert dict for cert reuse
+        case: Method, target scheme and forwarding/tunneling mode.
     """
     upstream_proc: BytesProcess | None = None
     entry_proc: BytesProcess | None = None
     target_socket: socket.socket | None = None
+    request = case or (
+        ChainRequest()
+        if target_type == "baidu"
+        else ChainRequest(scheme="http", method="POST")
+    )
+    assert entry_type == "http" or request.mode == "tunnel"
 
     try:
         if shared_test_certs:
@@ -105,11 +129,24 @@ def run_proxy_chain_test(
         # Create upstream config
         if upstream_auth == "password":
             upstream_config = create_upstream_password_config(
-                h3_port, cert_path, key_path, temp_dir1
+                h3_port,
+                cert_path,
+                key_path,
+                temp_dir1,
+                target_ca_path=ca_path
+                if target_type == "mock" and request.scheme == "https"
+                else None,
             )
         else:
             upstream_config = create_upstream_tls_cert_config(
-                h3_port, cert_path, key_path, ca_path, temp_dir1
+                h3_port,
+                cert_path,
+                key_path,
+                ca_path,
+                temp_dir1,
+                target_ca_path=ca_path
+                if target_type == "mock" and request.scheme == "https"
+                else None,
             )
 
         upstream_proc = start_proxy(upstream_config)
@@ -155,54 +192,108 @@ def run_proxy_chain_test(
         )
 
         # Create target server for mock tests
-        if target_type == "mock" and target_port:
-            _, target_socket = create_echo_target_server("127.0.0.1", target_port)
+        if target_type == "mock":
+            assert target_port is not None
+            if request.scheme == "https":
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context.load_cert_chain(cert_path, key_path)
+
+                def tls_echo(conn: socket.socket) -> None:
+                    with conn:
+                        with context.wrap_socket(conn, server_side=True) as stream:
+                            http_echo_handler(stream)
+
+                _, target_socket = create_target_server(
+                    "127.0.0.1", target_port, tls_echo
+                )
+            else:
+                _, target_socket = create_echo_target_server("127.0.0.1", target_port)
+
+        host = "www.baidu.com" if target_type == "baidu" else "127.0.0.1"
+        authority = host if target_type == "baidu" else f"{host}:{target_port}"
+        url = f"{request.scheme}://{authority}/"
+        trace_path = Path(temp_dir2) / "curl.trace"
+        body_path = Path(temp_dir2) / "curl.body"
+        curl_cmd = [
+            "curl",
+            "--http1.1",
+            "--silent",
+            "--show-error",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "20",
+            "--noproxy",
+            "",
+            "--trace-ascii",
+            str(trace_path),
+            "--output",
+            str(body_path),
+            "--write-out",
+            "%{http_code} %{http_connect}",
+        ]
 
         # Run curl
         if entry_type == "http":
             curl_proxy = f"http://user1:pass1@127.0.0.1:{http_port}"
-            curl_cmd = ["curl", "-p", "-x", curl_proxy]
+            curl_cmd.extend(["--proxy", curl_proxy])
+            if request.mode == "tunnel":
+                curl_cmd.append("--proxytunnel")
+            else:
+                curl_cmd.extend(["--request-target", url])
         else:  # socks5
-            curl_cmd = [
-                "curl",
-                "--socks5-basic",
-                "--socks5-hostname",
-                f"127.0.0.1:{http_port}",
-                "--proxy-user",
-                "user1:pass1",
-            ]
+            curl_cmd.extend(
+                [
+                    "--socks5-basic",
+                    "--socks5-hostname",
+                    f"127.0.0.1:{http_port}",
+                    "--proxy-user",
+                    "user1:pass1",
+                ]
+            )
 
-        if target_type == "baidu":
-            curl_cmd.extend(
-                [
-                    "https://www.baidu.com",
-                    "-s",
-                    "-o",
-                    "/dev/null",
-                    "-w",
-                    "%{http_code}",
-                    "--connect-timeout",
-                    "30",
-                ]
-            )
-            result = subprocess.run(curl_cmd, capture_output=True, text=True)
-            assert result.stdout == "200", (
-                f"Expected 200, got {result.stdout}. stderr: {result.stderr}"
-            )
-        else:  # mock
-            curl_cmd.extend(
-                [
-                    f"http://127.0.0.1:{target_port}",
-                    "-d",
-                    "test_data_chain",
-                    "--connect-timeout",
-                    "5",
-                ]
-            )
-            result = subprocess.run(curl_cmd, capture_output=True, text=True)
-            assert "test_data_chain" in result.stdout, (
-                f"Expected echo, got stdout: {result.stdout}, stderr: {result.stderr}"
-            )
+        if request.method == "HEAD":
+            curl_cmd.append("--head")
+        elif request.method == "POST":
+            assert target_type == "mock"
+            curl_cmd.extend(["--data-binary", "test_data_chain"])
+        if target_type == "mock" and request.scheme == "https":
+            curl_cmd.extend(["--cacert", ca_path])
+        # curl normally turns an HTTPS URL into CONNECT. For forwarding,
+        # use an HTTP transfer URL and put the real target in the request line.
+        curl_cmd.append(
+            url.replace("https://", "http://", 1)
+            if entry_type == "http" and request.mode == "forward"
+            else url
+        )
+        result = subprocess.run(
+            curl_cmd,
+            capture_output=True,
+            text=True,
+            timeout=25,
+            env=get_curl_env_without_no_proxy(),
+        )
+        assert result.returncode == 0, result.stderr
+        connect_status = (
+            "200" if entry_type == "http" and request.mode == "tunnel" else "000"
+        )
+        assert result.stdout == f"200 {connect_status}", (
+            f"Expected 200, got {result.stdout}. stderr: {result.stderr}"
+        )
+        trace = trace_path.read_text()
+        if entry_type == "http" and request.mode == "forward":
+            assert f"{request.method} {url} HTTP/1.1" in trace, trace
+        else:
+            if entry_type == "http":
+                port = (
+                    target_port
+                    if target_type == "mock"
+                    else (443 if request.scheme == "https" else 80)
+                )
+                assert f"CONNECT {host}:{port} HTTP/1.1" in trace, trace
+            assert f"{request.method} / HTTP/1.1" in trace, trace
+        if request.method == "POST":
+            assert body_path.read_bytes() == b"test_data_chain"
 
     finally:
         if entry_proc:

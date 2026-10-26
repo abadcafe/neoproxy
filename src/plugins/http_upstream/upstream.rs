@@ -44,6 +44,9 @@ mod http3_tests;
 mod http_pool;
 #[cfg(test)]
 mod http_tests;
+mod origin_connector;
+#[cfg(test)]
+mod origin_connector_tests;
 pub(super) mod protocol;
 mod proxy_auth;
 #[cfg(test)]
@@ -222,12 +225,13 @@ impl UpstreamRegistry {
     tracker: Rc<StreamTracker>,
   ) -> Result<Self> {
     let requires_tls = upstreams.values().any(|upstream| {
-      upstream.addresses.iter().any(|address| {
-        !matches!(
-          address.protocol,
-          super::config::Protocol::Http { .. }
-        )
-      })
+      upstream.addresses.is_empty()
+        || upstream.addresses.iter().any(|address| {
+          !matches!(
+            address.protocol,
+            super::config::Protocol::Http { .. }
+          )
+        })
     });
     let tls_config = if !requires_tls && certificates.is_none() {
       None
@@ -265,7 +269,12 @@ impl UpstreamRegistry {
             request_timeout: upstream.request_timeout,
             clients: vec![ScheduledClient::new(
               1,
-              Box::new(DirectClient::new(&upstream)),
+              Box::new(DirectClient::new(
+                &upstream,
+                tls_config.clone().ok_or_else(|| {
+                  anyhow!("direct upstream requires TLS configuration")
+                })?,
+              )?),
             )],
           }),
         );

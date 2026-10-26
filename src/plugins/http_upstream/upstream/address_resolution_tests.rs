@@ -13,21 +13,18 @@ async fn test_resolve_addresses_invalid() {
 }
 
 #[tokio::test]
-async fn test_resolve_addresses_localhost_preserves_port() {
-  let addresses = resolve_addresses("localhost:8123").await.unwrap();
-  assert!(!addresses.is_empty());
-  assert!(addresses.iter().all(
-    |address| address.ip().is_loopback() && address.port() == 8123
-  ));
+async fn test_resolve_addresses_ipv6_preserves_port() {
+  let addresses = resolve_addresses("[::1]:8123").await.unwrap();
+  assert_eq!(addresses, vec!["[::1]:8123".parse().unwrap()]);
 }
 
 #[tokio::test]
-async fn test_timeout_resolver_localhost_resolves_within_deadline() {
+async fn test_timeout_resolver_numeric_host_resolves_within_deadline() {
   use tower::Service;
   let mut resolver = super::address_resolution::TimeoutResolver::new(
     std::time::Duration::from_secs(1),
   );
-  let name = "localhost".parse().unwrap();
+  let name = "127.0.0.1".parse().unwrap();
   let addresses: Vec<_> = resolver.call(name).await.unwrap().collect();
   assert!(!addresses.is_empty());
   assert!(addresses.iter().all(|address| address.ip().is_loopback()));

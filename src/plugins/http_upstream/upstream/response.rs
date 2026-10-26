@@ -18,6 +18,8 @@ pub(super) fn forward_response(
   ctx: &RequestContext,
 ) -> Response {
   crate::hop_headers::strip_connection_headers(&mut parts.headers);
+  // Origin transport discovery belongs to the terminal direct client.
+  parts.headers.remove("alt-svc");
   crate::via::append(&mut parts.headers, parts.version);
   consume_proxy_auth_headers(&mut parts.headers);
   let upstream = take_proxy_status(&mut parts.headers);

@@ -161,7 +161,7 @@ class TestSocks5UpgradeConnectTcp:
         sock.connect(("127.0.0.1", proxy_port))
 
         assert socks5_handshake_no_auth(sock) == MethodReply(AuthMethod.NONE)
-        rep = socks5_connect_domain(sock, "localhost", target_port)
+        rep = socks5_connect_domain(sock, "127.0.0.1", target_port)
         assert isinstance(rep, CommandReply)
         assert rep.code is ReplyCode.SUCCESS, f"Expected success, got REP={rep}"
 

@@ -305,7 +305,7 @@ async fn chain_forward(
     Err(ForwardTargetError::UnsupportedScheme) => {
       return Ok(build_error_response(
         http::StatusCode::BAD_REQUEST,
-        "Only http:// scheme supported for forward proxy",
+        "Only http:// and https:// schemes supported for forward proxy",
       ));
     }
     Err(_) => {

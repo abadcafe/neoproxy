@@ -48,9 +48,21 @@ fn test_quic_resolved_preserves_optional_transport_fields() {
 #[test]
 fn test_upstream_preserves_direct_mode_defaults() {
   let upstream = Upstream {
+    dns_servers: None,
+    http3_handshake_timeout: Duration::from_secs(10),
+    quic: QuicResolved {
+      max_idle_timeout: None,
+      keep_alive_interval: Duration::from_secs(15),
+      max_concurrent_bidi_streams: None,
+      initial_mtu: None,
+      send_window: None,
+      receive_window: None,
+    },
     addresses: vec![],
     pool_config: PoolConfig::default(),
     connect_timeout: Duration::from_secs(10),
+    https_connect_timeout: Duration::from_secs(10),
+    tls_handshake_timeout: Duration::from_secs(10),
     tunnel_idle_timeout: Duration::from_secs(60),
     dns_resolve_timeout: Duration::from_secs(5),
     request_timeout: Duration::from_secs(30),

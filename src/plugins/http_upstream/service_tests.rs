@@ -111,9 +111,9 @@ async fn test_direct_forward_origin_form_returns_400() {
 }
 
 #[tokio::test]
-async fn test_direct_forward_https_scheme_returns_400() {
+async fn test_direct_forward_unsupported_scheme_returns_400() {
   let mut svc = make_direct_service();
-  let req = make_request(http::Method::GET, "https://example.com/");
+  let req = make_request(http::Method::GET, "ftp://example.com/");
   let resp = svc.call(req).await.unwrap();
   assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
 }

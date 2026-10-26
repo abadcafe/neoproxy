@@ -56,6 +56,7 @@ pub(crate) fn strip_trailer_headers(headers: &mut http::HeaderMap) {
     http::header::CONTENT_ENCODING,
     http::header::CONTENT_TYPE,
     http::header::CONTENT_RANGE,
+    http::header::HeaderName::from_static("alt-svc"),
   ] {
     headers.remove(name);
   }

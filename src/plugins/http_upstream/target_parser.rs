@@ -112,10 +112,14 @@ impl fmt::Display for ForwardTargetError {
         write!(f, "CONNECT method not allowed for forward proxy")
       }
       ForwardTargetError::NotAbsoluteForm => {
-        write!(f, "URI must be absolute-form (http://host/path)")
+        write!(f, "URI must be absolute-form (http://host/path or https://host/path)")
       }
       ForwardTargetError::UnsupportedScheme => {
-        write!(f, "only http:// scheme supported for forward proxy")
+        write!(
+          f,
+          "only http:// and https:// schemes supported for forward \
+           proxy"
+        )
       }
       ForwardTargetError::NoAuthority => {
         write!(f, "no authority in URI")
@@ -172,7 +176,7 @@ pub(crate) fn parse_connect_target(
 /// Parse forward proxy request target address
 ///
 /// Validate an absolute-form request and normalize its authority.
-/// This service supports http:// forwarding; HTTPS targets use CONNECT.
+/// HTTP and HTTPS targets share the same message forwarding contract.
 ///
 /// # Parameters
 /// - `parts`: HTTP request Parts
@@ -191,7 +195,9 @@ pub(crate) fn parse_forward_target(
 
   let scheme =
     uri.scheme().ok_or(ForwardTargetError::NotAbsoluteForm)?;
-  if scheme != &http::uri::Scheme::HTTP {
+  if scheme != &http::uri::Scheme::HTTP
+    && scheme != &http::uri::Scheme::HTTPS
+  {
     return Err(ForwardTargetError::UnsupportedScheme);
   }
 

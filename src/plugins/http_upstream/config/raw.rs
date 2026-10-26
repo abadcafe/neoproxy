@@ -105,6 +105,8 @@ impl UpstreamAddressConfig {
 pub(super) struct UpstreamConfig {
   pub(super) name: String,
   #[serde(default)]
+  pub(super) dns_servers: Option<Vec<std::net::SocketAddr>>,
+  #[serde(default)]
   pub(super) addresses: Vec<UpstreamAddressConfig>,
   #[serde(default)]
   pub(super) pool: Option<PoolConfig>,
@@ -128,6 +130,8 @@ pub(super) struct UpstreamConfig {
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HttpUpstreamPluginConfig {
+  #[serde(default)]
+  pub(super) dns_servers: Option<Vec<std::net::SocketAddr>>,
   #[serde(default)]
   pub(crate) certificates: Option<CertificateConfig>,
   #[serde(with = "humantime_serde", default)]

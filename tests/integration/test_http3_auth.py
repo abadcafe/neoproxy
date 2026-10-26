@@ -498,7 +498,7 @@ servers:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                success, _status_code, message = loop.run_until_complete(
+                success, status_code, message = loop.run_until_complete(
                     do_client_cert_connect()
                 )
             finally:
@@ -507,6 +507,7 @@ servers:
             assert success, (
                 f"Connection with valid client cert should succeed: {message}"
             )
+            assert status_code == 204, message
 
         finally:
             if proxy_proc:

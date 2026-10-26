@@ -517,9 +517,9 @@ class TestSocks5TargetAddressTypes:
 
     def test_domain_target_address(self) -> None:
         """
-        TC-S5-012: Domain target address with DNS resolution
+        TC-S5-012: Domain address type carrying a numeric loopback target
 
-        Test connection to domain target address (localhost).
+        Test the domain wire format without depending on system DNS.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
@@ -557,8 +557,7 @@ class TestSocks5TargetAddressTypes:
                     "Handshake failed"
                 )
 
-                # Use localhost domain
-                reply = socks5_connect_domain(sock, "localhost", target_port)
+                reply = socks5_connect_domain(sock, "127.0.0.1", target_port)
                 assert isinstance(reply, CommandReply)
                 assert reply.code is ReplyCode.SUCCESS, (
                     f"Connect failed with reply code {reply}"

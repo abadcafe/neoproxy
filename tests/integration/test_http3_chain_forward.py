@@ -8,7 +8,7 @@ Test nature: Black-box testing through external interface (HTTP)
 
 Expected behavior:
 - GET / HTTP/1.1 (origin-form) -> 400 Bad Request
-- GET https://target/ -> 400 Bad Request (only http:// supported)
+- GET ftp://target/ -> 400 Bad Request (unsupported scheme)
 - GET http://target/ with unreachable upstream -> fails gracefully (no crash)
 - CONNECT method still works alongside forward proxy
 - Proxy does not crash on any of the above
@@ -130,23 +130,23 @@ class TestHTTP3ChainForwardProxy:
                 + f" {response.decode(errors='ignore')}"
             )
 
-    def test_https_scheme_returns_400(self, shared_test_certs: StringMap) -> None:
+    def test_unsupported_scheme_returns_400(self, shared_test_certs: StringMap) -> None:
         """
-        TC-CHAIN-FWD-002: https:// scheme returns 400.
+        TC-CHAIN-FWD-002: ftp:// scheme returns 400.
 
-        The forward proxy only supports http:// URIs. https:// is rejected
+        The forward proxy supports http:// and https:// URIs. ftp:// is rejected
         with 400 Bad Request (UnsupportedScheme).
         """
         http_port = get_unique_port()
         h3_port = get_unique_port()
 
         with chain_service_context(http_port, h3_port, shared_test_certs) as (_, _proc):
-            request = b"GET https://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n"
+            request = b"GET ftp://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n"
             response = send_raw_request("127.0.0.1", http_port, request)
             status_code, _, _, _ = parse_http_response(response)
 
             assert status_code == 400, (
-                f"Expected 400 for https:// scheme, got {status_code}. Response:"
+                f"Expected 400 for ftp:// scheme, got {status_code}. Response:"
                 + f" {response.decode(errors='ignore')}"
             )
 
@@ -204,7 +204,7 @@ class TestHTTP3ChainForwardProxy:
         TC-CHAIN-FWD-004: Proxy stays alive after receiving both forward and CONNECT
         requests.
 
-        Sends an origin-form GET (→ 400) and an https-scheme GET (→ 400) and
+        Sends an origin-form GET (→ 400) and an ftp-scheme GET (→ 400) and
         verifies the proxy process is still running after each. This confirms
         the forward proxy path does not panic or crash on validation errors.
         """
@@ -214,7 +214,7 @@ class TestHTTP3ChainForwardProxy:
         with chain_service_context(http_port, h3_port, shared_test_certs) as (_, proc):
             for request in [
                 b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
-                b"GET https://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n",
+                b"GET ftp://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n",
             ]:
                 response = send_raw_request("127.0.0.1", http_port, request)
                 status_code, _, _, _ = parse_http_response(response)

@@ -52,10 +52,15 @@ pub(crate) struct Address {
 /// Resolved upstream after three-level inheritance.
 #[derive(Clone, Debug)]
 pub(crate) struct Upstream {
+  pub(crate) dns_servers: Option<Vec<std::net::SocketAddr>>,
+  pub(crate) http3_handshake_timeout: Duration,
+  pub(crate) quic: QuicResolved,
   pub(crate) addresses: Vec<Address>,
   pub(crate) pool_config: PoolConfig,
   /// Direct-mode fields (used when addresses is empty):
   pub(crate) connect_timeout: Duration,
+  pub(crate) https_connect_timeout: Duration,
+  pub(crate) tls_handshake_timeout: Duration,
   pub(crate) tunnel_idle_timeout: Duration,
   pub(crate) dns_resolve_timeout: Duration,
   pub(crate) request_timeout: Duration,

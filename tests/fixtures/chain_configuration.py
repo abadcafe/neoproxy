@@ -6,13 +6,23 @@ import os
 
 
 def create_upstream_password_config(
-    h3_port: int, cert_path: str, key_path: str, temp_dir: str
+    h3_port: int,
+    cert_path: str,
+    key_path: str,
+    temp_dir: str,
+    *,
+    target_ca_path: str | None = None,
 ) -> str:
     """Create upstream HTTP/3 config with password auth."""
+    trust = (
+        f'\n    certificates:\n      server_ca_path: "{target_ca_path}"'
+        if target_ca_path is not None
+        else ""
+    )
     config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  http_upstream:{trust}
     upstreams:
       - name: direct
   auth:
@@ -55,12 +65,19 @@ def create_upstream_tls_cert_config(
     key_path: str,
     client_ca_path: str,
     temp_dir: str,
+    *,
+    target_ca_path: str | None = None,
 ) -> str:
     """Create upstream HTTP/3 config with TLS client cert auth."""
+    trust = (
+        f'\n    certificates:\n      server_ca_path: "{target_ca_path}"'
+        if target_ca_path is not None
+        else ""
+    )
     config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  http_upstream:{trust}
     upstreams:
       - name: direct
 

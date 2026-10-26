@@ -548,18 +548,19 @@ class TestFullHTTP3ProxyChain:
 class TestHTTP3ErrorHandling:
     """Test 7.5: HTTP/3 error handling scenarios with real client."""
 
-    def test_non_connect_request_returns_400(
+    def test_non_connect_request_reaches_refused_target(
         self, shared_test_certs: StringMap
     ) -> None:
         """
-        TC-H3-ERR-004: Non-CONNECT origin-form request returns 400.
+        TC-H3-ERR-004: A valid H3 GET reaches its HTTPS target.
 
-        Target: Verify HTTP/3 listener returns 400 for origin-form GET requests.
-        The connect_tcp forward proxy requires absolute-form http:// URIs;
-        origin-form (GET /) is rejected with 400 Bad Request.
+        H3's scheme, authority and path describe an absolute target, even
+        when :path is just '/'. A refused target must return 502 rather
+        than rejecting this valid request as an unsupported scheme.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
+        target_port = get_unique_port()
         proxy_proc: BytesProcess | None = None
 
         try:
@@ -584,7 +585,10 @@ class TestHTTP3ErrorHandling:
                     return False, 0, "Connection failed"
 
                 response = await asyncio.wait_for(
-                    client.send_request("GET", "/"), timeout=15.0
+                    client.send_request(
+                        "GET", "/", authority=f"127.0.0.1:{target_port}"
+                    ),
+                    timeout=15.0,
                 )
                 await client.close()
                 return True, response.status_code, response.body
@@ -598,8 +602,8 @@ class TestHTTP3ErrorHandling:
                 loop.close()
 
             assert success, "HTTP/3 connection failed"
-            assert status_code == 400, (
-                f"Expected 400 Bad Request for origin-form GET, got {status_code}"
+            assert status_code == 502, (
+                f"Expected 502 for a refused HTTPS target, got {status_code}"
             )
 
         finally:

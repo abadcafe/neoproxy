@@ -9,10 +9,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
-
-use super::address_resolution::{TimeoutResolver, resolve_addresses};
+use super::address_resolution::resolve_addresses;
 use super::forward::chain_forward_http;
 use super::protocol::{ClientProtocol, ConnectResult};
 use crate::context::RequestContext;
@@ -27,47 +24,39 @@ use crate::plugins::http_upstream::target_parser::{
 use crate::tracker::StreamTracker;
 
 pub(super) struct DirectClient {
-  client: Client<HttpConnector<TimeoutResolver>, RequestBody>,
+  client: client::OriginClient,
   connect_timeout: Duration,
   tunnel_idle_timeout: Duration,
   dns_resolve_timeout: Duration,
 }
 impl DirectClient {
-  pub(super) fn new(config: &config::Upstream) -> Self {
-    let mut connector = HttpConnector::new_with_resolver(
-      TimeoutResolver::new(config.dns_resolve_timeout),
-    );
-    connector.set_connect_timeout(Some(config.connect_timeout));
-    let client = Client::builder(hyper_util::rt::TokioExecutor::new())
-      .pool_timer(hyper_util::rt::TokioTimer::new())
-      .pool_max_idle_per_host(config.pool_config.max_idle_per_host)
-      .pool_idle_timeout(config.pool_config.idle_timeout)
-      .build(connector);
-    Self {
-      client,
+  pub(super) fn new(
+    config: &config::Upstream,
+    tls: Arc<rustls::ClientConfig>,
+  ) -> anyhow::Result<Self> {
+    Ok(Self {
+      client: client::OriginClient::new(config, tls)?,
       connect_timeout: config.connect_timeout,
       tunnel_idle_timeout: config.tunnel_idle_timeout,
       dns_resolve_timeout: config.dns_resolve_timeout,
-    }
+    })
   }
 }
 impl ClientProtocol for DirectClient {
   fn forward<'a>(
     &'a self,
     _tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    _tracker: &'a Rc<StreamTracker>,
+    tracker: &'a Rc<StreamTracker>,
     target: &'a ForwardTarget,
     req_headers: ::http::request::Parts,
     req_body: RequestBody,
     ctx: &'a RequestContext,
   ) -> Pin<Box<dyn Future<Output = Result<Response, UpstreamError>> + 'a>>
   {
-    let client = self.client.clone();
-
     Box::pin(async move {
       Ok(
         chain_forward_http(
-          client,
+          client::Sender { client: &self.client, tracker },
           None,
           target,
           req_headers,
@@ -119,4 +108,17 @@ impl ClientProtocol for DirectClient {
       })
     })
   }
+
+  fn close(&self) {
+    self.client.close();
+  }
 }
+
+mod alt_svc;
+#[cfg(test)]
+mod alt_svc_tests;
+mod client;
+mod dns_https;
+#[cfg(test)]
+mod dns_https_tests;
+mod origin;

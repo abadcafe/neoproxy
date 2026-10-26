@@ -76,7 +76,7 @@ upstreams:
 }
 
 #[test]
-fn test_validate_plugin_config_rejects_direct_http3_config() {
+fn test_validate_plugin_config_accepts_direct_http3_config() {
   let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
     r#"
 upstreams:
@@ -86,7 +86,20 @@ upstreams:
   )
   .unwrap();
 
-  assert!(validate_plugin_config(&config).is_err());
+  assert!(validate_plugin_config(&config).is_ok());
+}
+
+#[test]
+fn test_validate_plugin_config_rejects_empty_or_zero_port_dns_servers()
+{
+  for value in [
+    "dns_servers: []\nupstreams: [{name: direct}]",
+    "upstreams: [{name: direct, dns_servers: ['127.0.0.1:0']}]",
+  ] {
+    let config: HttpUpstreamPluginConfig =
+      serde_yaml::from_str(value).unwrap();
+    assert!(validate_plugin_config(&config).is_err());
+  }
 }
 
 #[test]

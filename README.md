@@ -163,6 +163,8 @@ plugins:
 
 ## Listener 详解
 
+HTTP、HTTPS、HTTP/3 使用 `args.header_read_timeout` 限制请求头读取时间（默认 `30s`，必须为正且可表示的时长）。HTTP/3 超时只取消对应请求流，其他流继续处理。
+
 HTTP、HTTPS、SOCKS5 共用 TCP accept 恢复策略：连接中止、信号中断及待接收连接的网络错误立即继续，不做定时退避；文件描述符或内存资源耗尽时记 ERROR 日志，并按 `args.accept_retry_delay` 退避后重试（默认 `1s`）。监听描述符无效、不是 socket 或已不处于监听状态时，返回原始错误，由监督层停止服务并以非零状态退出。其他未知 I/O 错误记 ERROR 并退避，避免忙循环；所有等待均可被 shutdown 打断。
 
 ### 1. http (HTTP/1.1)
@@ -328,7 +330,7 @@ SOCKS5 监听器，兼容 RFC 1928 和 RFC 1929。
 | `handshake_timeout` | `Duration` | 否 | `3s` | 协议握手、后续命令读取各自的超时 |
 | `accept_retry_delay` | `Duration` | 否 | `1s` | accept 资源耗尽或未知 I/O 错误后的重试退避，必须大于零且能安全计时 |
 
-认证由所关联服务的 `auth.basic_auth` 层处理，监听器不接受 `users` 参数，也不提取服务认证策略。SOCKS5 客户端先等待认证子协商回复，随后才发送 CONNECT 目标；HTTP Service 则需要目标与凭据齐备的一次完整请求。因此，转换器先完成子协商并保存凭据，再将 SOCKS5 CONNECT 转成 HTTP CONNECT，按配置的中间件顺序统一处理认证和访问日志。错误或缺失的凭据由认证层返回 HTTP `407`，转换为 SOCKS5 CONNECT 的 `REP=0x02` 并关闭该连接，不建立隧道。这与 RFC 1929 §2“验证凭据后才报告认证成功”的阶段语义存在明确差异；握手阶段的成功回复不能代表凭据已通过服务校验。配置用户名列表必须非空且不重复。凭据通过类型化请求扩展传递，保留 SOCKS5 用户名中允许的冒号，不转成可能丢失边界的 Basic 字符串。
+认证策略由所关联服务的 `auth.basic_auth` 层声明，监听器不接受独立的 `users` 参数。服务组合时显式合并认证要求，并通过传输无关的只读接口提供给 SOCKS5 握手。配置认证后只接受用户名/密码方法；凭据必须满足所有认证层，才发送 RFC 1929 成功应答。凭据错误时先发送认证失败应答并关闭连接，不读取 CONNECT 目标。成功后再将 SOCKS5 CONNECT 转成 HTTP CONNECT，执行服务中间件和访问日志；凭据通过类型化扩展传递，保留用户名中的冒号。
 
 服务层 `users` 条目格式：
 

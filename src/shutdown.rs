@@ -1,12 +1,17 @@
 //! module: shutdown
 //! responsibilities: persistent cancellation shared by tasks and worker
 //! threads public operations: ShutdownHandle::{new, shutdown, notified,
-//! is_shutdown}, SERVICE_SHUTDOWN_TIMEOUT data entities: ShutdownHandle
+//! is_shutdown}, LISTENER_SHUTDOWN_TIMEOUT, SERVICE_SHUTDOWN_TIMEOUT
+//! data entities: ShutdownHandle
 //! tests: shutdown_tests.rs
 
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
+
+/// First-phase grace for listener-owned requests and ordinary I/O.
+pub(crate) const LISTENER_SHUTDOWN_TIMEOUT: Duration =
+  Duration::from_secs(3);
 
 /// Second-phase grace shared by Service cleanup and retained protocol
 /// drivers. They run concurrently; cancellation cleanup uses the

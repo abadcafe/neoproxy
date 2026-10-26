@@ -28,7 +28,7 @@ pub(crate) trait LogSink: Send + Sync {
 /// Layer that creates AccessLogMiddleware instances.
 pub(crate) struct AccessLogLayer {
   sink: Arc<dyn LogSink>,
-  context_fields: Vec<String>,
+  context_fields: Arc<[String]>,
 }
 
 impl AccessLogLayer {
@@ -36,7 +36,7 @@ impl AccessLogLayer {
     sink: Arc<dyn LogSink>,
     context_fields: Vec<String>,
   ) -> Self {
-    Self { sink, context_fields }
+    Self { sink, context_fields: context_fields.into() }
   }
 }
 
@@ -56,7 +56,7 @@ impl tower::Layer<Service> for AccessLogLayer {
 struct AccessLogMiddleware {
   inner: Service,
   sink: Arc<dyn LogSink>,
-  context_fields: Vec<String>,
+  context_fields: Arc<[String]>,
 }
 
 impl Clone for AccessLogMiddleware {
@@ -104,7 +104,7 @@ impl tower::Service<Request> for AccessLogMiddleware {
         &result,
         start,
         ctx,
-        context_fields,
+        &context_fields,
         &method,
         &target,
       );
@@ -134,7 +134,7 @@ pub(crate) fn build_log_entry(
   result: &anyhow::Result<Response>,
   start: Instant,
   ctx: RequestContext,
-  context_fields: Vec<String>,
+  context_fields: &[String],
   method: &str,
   target: &str,
 ) -> AccessLogEntry {

@@ -1,137 +1,45 @@
-"""
-HTTP/3 client utilities for integration testing.
-
-This module provides HTTP/3 client functionality using aioquic library.
-
-Test target: Verify neoproxy HTTP/3 Listener behavior
-Test nature: Black-box testing through external interface (HTTP/3)
+"""module: http3_client; responsibility: exchange requests over one H3 session.
+Public operations: H3Client connect, send_request, send_connect_request,
+transfer_tunnel, close; H3Response.
+Data entities: H3Client, H3Response.
+Tests: http3_client_tests.py and process integration contracts.
 """
 
 import asyncio
 import base64
 import ipaddress
 import ssl
-from collections import defaultdict
-from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass, field
-from typing import override
+from contextlib import AsyncExitStack
+from dataclasses import dataclass
 
 import aioquic.asyncio.client as quic_client
-from aioquic.asyncio.protocol import QuicConnectionProtocol, QuicStreamHandler
-from aioquic.h3.connection import H3Connection
-from aioquic.h3.events import (
-    DataReceived,
-    H3Event,
-    HeadersReceived,
-)
+from aioquic.h3.events import DataReceived, HeadersReceived
 from aioquic.quic.configuration import QuicConfiguration
-from aioquic.quic.connection import QuicConnection, QuicConnectionError
-from aioquic.quic.events import (
-    ConnectionTerminated,
-    QuicEvent,
-    StreamDataReceived,
-    StreamReset,
-)
+from aioquic.quic.connection import QuicConnectionError
+from aioquic.quic.events import ConnectionTerminated, StreamDataReceived, StreamReset
 
-
-class H3ProtocolBase(QuicConnectionProtocol):
-    """Protocol base that exposes the connection state used by these tests."""
-
-    def __init__(
-        self,
-        quic: QuicConnection,
-        stream_handler: QuicStreamHandler | None = None,
-    ) -> None:
-        super().__init__(quic, stream_handler)
-        self._h3: H3Connection | None = None
-
-    @property
-    def quic_connection(self) -> QuicConnection:
-        return self._quic
-
-    @property
-    def h3_connection(self) -> H3Connection | None:
-        return self._h3
-
-    @h3_connection.setter
-    def h3_connection(self, value: H3Connection) -> None:
-        self._h3 = value
-
-
-H3_RECOVERABLE_ERRORS: tuple[type[BaseException], ...] = (
-    asyncio.TimeoutError,
-    OSError,
-    ssl.SSLError,
-    QuicConnectionError,
-)
-
-
-def _resolve_sni_hostname(
-    host: str,
-    server_hostname: str | None = None,
-) -> str:
-    """
-    Resolve the SNI hostname for QUIC connections.
-
-    SNI (Server Name Indication) requires a DNS hostname, not an IP address.
-    When connecting to an IP address (e.g. 127.0.0.1), we cannot use it as SNI
-    because the server's SNI resolver matches against DNS SAN entries in
-    certificates (e.g. "localhost"). This function returns the server_hostname
-    if provided, otherwise returns host if it's a DNS name, or "localhost"
-    as a fallback for IP addresses (matching common test certificate SANs).
-
-    Args:
-        host: The connection target (IP or hostname)
-        server_hostname: Optional explicit SNI hostname override
-
-    Returns:
-        str: The hostname to use for SNI
-    """
-    if server_hostname:
-        return server_hostname
-    try:
-        _ = ipaddress.ip_address(host)
-        # host is an IP address - use "localhost" as SNI fallback
-        # since test certificates typically have SAN DNS:localhost
-        return "localhost"
-    except ValueError:
-        # host is already a DNS name - use it directly
-        return host
+from .h3_protocol import EventProtocol
 
 
 @dataclass
 class H3Response:
-    """HTTP/3 response object."""
-
     status_code: int
     headers: dict[str, str]
     body: bytes
     stream_id: int
 
 
-def _empty_headers() -> dict[str, str]:
-    return {}
-
-
-@dataclass
-class H3ConnectResult:
-    """Result of HTTP/3 CONNECT request."""
-
-    success: bool
-    status_code: int
-    message: str
-    stream_id: int = 0
-    response_headers: dict[str, str] = field(default_factory=_empty_headers)
+def _server_name(host: str, override: str | None) -> str:
+    if override is not None:
+        return override
+    try:
+        _ = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    return "localhost"
 
 
 class H3Client:
-    """
-    HTTP/3 client for testing neoproxy HTTP/3 listener.
-
-    This client uses aioquic to establish QUIC connections and
-    send HTTP/3 requests.
-    """
-
     def __init__(
         self,
         host: str,
@@ -139,122 +47,47 @@ class H3Client:
         ca_path: str | None = None,
         cert_path: str | None = None,
         key_path: str | None = None,
-        verify_mode: int = ssl.CERT_REQUIRED,
+        verify_mode: ssl.VerifyMode | None = None,
         server_hostname: str | None = None,
     ) -> None:
-        """
-        Initialize H3Client.
-
-        Args:
-            host: Server hostname or IP
-            port: Server port
-            ca_path: Path to CA certificate for server verification
-            cert_path: Path to client certificate (for mTLS)
-            key_path: Path to client private key (for mTLS)
-            verify_mode: SSL verification mode
-            server_hostname: Hostname to use for SNI (defaults to host if not set)
-        """
         self.host: str = host
         self.port: int = port
         self.ca_path: str | None = ca_path
         self.cert_path: str | None = cert_path
         self.key_path: str | None = key_path
-        self.verify_mode: int = verify_mode
-        self.server_hostname: str | None = server_hostname
-        self._protocol: H3ProtocolBase | None = None
-        self._h3_connection: H3Connection | None = None
-        self._configuration: QuicConfiguration | None = None
-        self._connection_context: (
-            AbstractAsyncContextManager[QuicConnectionProtocol] | None
-        ) = None
-        self._h3_events: dict[int, list[H3Event]] = defaultdict(list)
-        self._h3_events_received: dict[int, asyncio.Event] = defaultdict(asyncio.Event)
+        self.verify_mode: ssl.VerifyMode = (
+            verify_mode
+            if verify_mode is not None
+            else (ssl.CERT_REQUIRED if ca_path else ssl.CERT_NONE)
+        )
+        self.server_hostname: str = _server_name(host, server_hostname)
+        self.connection_error: str = ""
+        self._protocol: EventProtocol | None = None
+        self._resources: AsyncExitStack = AsyncExitStack()
 
     async def connect(self) -> bool:
-        """
-        Establish QUIC connection and HTTP/3 session.
-
-        Returns:
-            bool: True if connection succeeded
-        """
-        self._configuration = QuicConfiguration(
-            is_client=True,
-            alpn_protocols=["h3"],
-        )
-
-        # Configure certificate verification
+        configuration = QuicConfiguration(is_client=True, alpn_protocols=["h3"])
+        configuration.verify_mode = self.verify_mode
+        configuration.server_name = self.server_hostname
         if self.ca_path:
-            self._configuration.load_verify_locations(self.ca_path)
-        else:
-            # For self-signed certs, disable verification
-            self._configuration.verify_mode = ssl.CERT_NONE
-
-        # Load client certificate if provided
+            configuration.load_verify_locations(self.ca_path)
         if self.cert_path and self.key_path:
-            self._configuration.load_cert_chain(
-                certfile=self.cert_path,
-                keyfile=self.key_path,
-            )
-
-        # Set timeout
-        self._configuration.idle_timeout = 30.0
-
-        # Set server_name for SNI (required for certificate resolution)
-        # Use server_hostname if provided, otherwise use host
-        self._configuration.server_name = _resolve_sni_hostname(
-            self.host, self.server_hostname
-        )
-
-        # Create a custom protocol class for this connection
-        h3_events_store = self._h3_events
-        h3_events_received = self._h3_events_received
-
-        class H3ClientProtocol(H3ProtocolBase):
-            """Custom protocol for this H3Client instance."""
-
-            def __init__(
-                self,
-                quic: QuicConnection,
-                stream_handler: QuicStreamHandler | None = None,
-            ) -> None:
-                super().__init__(quic, stream_handler)
-                self._h3: H3Connection | None = None
-
-            @override
-            def quic_event_received(self, event: QuicEvent) -> None:
-                if isinstance(event, StreamDataReceived):
-                    reader = self._stream_readers.get(event.stream_id, None)
-                    if reader is not None:
-                        reader.feed_data(event.data)
-                        if event.end_stream:
-                            reader.feed_eof()
-
-                if self._h3 is not None:
-                    events = self._h3.handle_event(event)
-                    for h3_event in events:
-                        stream_id = getattr(h3_event, "stream_id", 0)
-                        h3_events_store[stream_id].append(h3_event)
-                        h3_events_received[stream_id].set()
-
+            configuration.load_cert_chain(self.cert_path, self.key_path)
         try:
-            self._connection_context = quic_client.connect(
-                host=self.host,
-                port=self.port,
-                configuration=self._configuration,
-                create_protocol=H3ClientProtocol,
+            protocol = await self._resources.enter_async_context(
+                quic_client.connect(
+                    self.host,
+                    self.port,
+                    configuration=configuration,
+                    create_protocol=EventProtocol,
+                )
             )
-            protocol = await self._connection_context.__aenter__()
-            assert isinstance(protocol, H3ProtocolBase)
-            self._protocol = protocol
-            # Wait for connection to be established
-            await self._protocol.wait_connected()
-            # Create H3 connection
-            self._h3_connection = H3Connection(self._protocol.quic_connection)
-            self._protocol.h3_connection = self._h3_connection
-            return True
-        except H3_RECOVERABLE_ERRORS as e:
-            print(f"Connection failed: {type(e).__name__}: {e}")
+        except (OSError, QuicConnectionError) as error:
+            self.connection_error = str(error) or type(error).__name__
             return False
+        assert isinstance(protocol, EventProtocol)
+        self._protocol = protocol
+        return True
 
     async def send_connect_request(
         self,
@@ -263,55 +96,22 @@ class H3Client:
         username: str | None = None,
         password: str | None = None,
     ) -> H3Response:
-        """
-        Send HTTP/3 CONNECT request.
-
-        Args:
-            target_host: Target host to connect to
-            target_port: Target port
-            username: Optional username for proxy auth
-            password: Optional password for proxy auth
-
-        Returns:
-            H3Response: The response from the proxy
-        """
-        if self._h3_connection is None or self._protocol is None:
-            raise RuntimeError("Not connected")
-
-        # Build headers
-        headers: list[tuple[bytes, bytes]] = [
+        protocol = self._protocol
+        assert protocol is not None, "connect must succeed before sending a request"
+        host = (
+            f"[{target_host}]"
+            if ":" in target_host and not target_host.startswith("[")
+            else target_host
+        )
+        headers = [
             (b":method", b"CONNECT"),
-            (b":authority", f"{target_host}:{target_port}".encode()),
-            (b":scheme", b"https"),
-            (b":path", b"/"),
+            (b":authority", f"{host}:{target_port}".encode()),
         ]
-
-        # Add proxy authorization if credentials provided
-        if username and password:
-            credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
-            headers.append(
-                (
-                    b"proxy-authorization",
-                    f"Basic {credentials}".encode(),
-                )
-            )
-
-        # Get stream ID from quic connection
-        stream_id = self._protocol.quic_connection.get_next_available_stream_id()
-
-        # Clear any previous events for this stream
-        self._h3_events[stream_id] = []
-        self._h3_events_received[stream_id].clear()
-
-        # Send headers (end_stream=True for CONNECT)
-        self._h3_connection.send_headers(stream_id, headers, end_stream=True)
-
-        # Transmit the data
-        self._protocol.transmit()
-
-        # Collect response
-        response = await self._receive_response(stream_id, wait_for_body=False)
-        return response
+        if username is not None and password is not None:
+            credentials = base64.b64encode(f"{username}:{password}".encode())
+            headers.append((b"proxy-authorization", b"Basic " + credentials))
+        stream = protocol.request(headers, end_stream=False)
+        return await self._receive_response(stream, headers_only=True)
 
     async def send_request(
         self,
@@ -319,1366 +119,90 @@ class H3Client:
         path: str,
         headers: list[tuple[str, str]] | None = None,
         body: bytes | None = None,
+        *,
+        authority: str | None = None,
     ) -> H3Response:
-        """
-        Send generic HTTP/3 request.
-
-        Args:
-            method: HTTP method
-            path: Request path
-            headers: Additional headers
-            body: Request body
-
-        Returns:
-            H3Response: The response
-        """
-        configuration = self._configuration
-        if (
-            self._h3_connection is None
-            or self._protocol is None
-            or configuration is None
-        ):
-            raise RuntimeError("Not connected")
-
-        # Build headers
-        # Use SNI hostname in :authority to avoid SNI/authority mismatch
-        h3_headers: list[tuple[bytes, bytes]] = [
+        protocol = self._protocol
+        assert protocol is not None, "connect must succeed before sending a request"
+        fields = [
             (b":method", method.encode()),
             (b":scheme", b"https"),
             (
                 b":authority",
-                f"{configuration.server_name}:{self.port}".encode(),
+                (
+                    authority
+                    if authority is not None
+                    else f"{self.server_hostname}:{self.port}"
+                ).encode(),
             ),
             (b":path", path.encode()),
         ]
-
-        if headers:
-            for name, value in headers:
-                h3_headers.append((name.encode(), value.encode()))
-
-        # Get stream ID
-        stream_id = self._protocol.quic_connection.get_next_available_stream_id()
-
-        # Clear any previous events for this stream
-        self._h3_events[stream_id] = []
-        self._h3_events_received[stream_id].clear()
-
-        # Send headers
-        self._h3_connection.send_headers(stream_id, h3_headers)
-
-        # Send body if provided
+        fields.extend((name.encode(), value.encode()) for name, value in headers or [])
+        stream = protocol.request(fields, end_stream=not body)
         if body:
-            self._h3_connection.send_data(stream_id, body, end_stream=True)
-        else:
-            self._h3_connection.send_data(stream_id, b"", end_stream=True)
+            protocol.send_data(stream, body, end_stream=True)
+        return await self._receive_response(stream, headers_only=False)
 
-        # Transmit the data
-        self._protocol.transmit()
-
-        # Collect response
-        response = await self._receive_response(stream_id)
-        return response
-
-    async def _receive_response(
-        self, stream_id: int, *, wait_for_body: bool = True
-    ) -> H3Response:
-        """
-        Receive response for a stream using proper event handling.
-
-        Args:
-            stream_id: The stream ID to receive response for
-            wait_for_body: If True, wait for body data.
-                If False, HeadersReceived is sufficient (e.g. CONNECT responses
-                where the stream stays open for tunnelling).
-
-        Returns:
-            H3Response: The received response
-
-        Note: aioquic's H3 stream_ended flag is unreliable when the server
-        sends GREASE frames (h3 crate's finish() sends a GREASE frame before
-        the QUIC FIN). Since HEADERS+DATA+GREASE arrive in one QUIC STREAM
-        frame, aioquic computes stream_ended = receiving_ended and buf.eof(),
-        which is False until the GREASE frame is consumed. But GREASE frames
-        produce no H3 events, so the last DataReceived has stream_ended=False.
-        We work around this by considering the response complete when we have
-        a status code and no new events arrive within a poll interval.
-        """
-        status_code: int = 0
+    async def _receive_response(self, stream: int, *, headers_only: bool) -> H3Response:
+        protocol = self._protocol
+        assert protocol is not None
+        status = 0
         headers: dict[str, str] = {}
-        body: bytes = b""
-
-        event_timeout: float = 10.0
-        start_time = asyncio.get_event_loop().time()
-        response_received: bool = False
-        headers_received: bool = False
-        processed_count: int = 0
-
-        while asyncio.get_event_loop().time() - start_time < event_timeout:
-            # Get accumulated events, only process new ones
-            events = self._h3_events.get(stream_id, [])
-
-            for h3_event in events[processed_count:]:
-                processed_count += 1
-                if isinstance(h3_event, HeadersReceived):
-                    # Parse headers
-                    for name, value in h3_event.headers:
-                        if name == b":status":
-                            status_code = int(value)
-                        else:
-                            headers[name.decode()] = value.decode()
-
-                    headers_received = True
-
-                    if not wait_for_body:
-                        response_received = True
-                        break
-
-                    if h3_event.stream_ended:
-                        response_received = True
-                        break
-
-                elif isinstance(h3_event, DataReceived):
-                    # Accumulate body data
-                    body += h3_event.data
-
-                    if h3_event.stream_ended:
-                        response_received = True
-                        break
-
-            if response_received:
-                break
-
-            # If we have headers (and possibly body) but stream_ended was
-            # never True (aioquic GREASE bug), one more poll cycle for late
-            # DataReceived events, then consider the response complete.
-            if headers_received and status_code > 0:
-                try:
-                    _ = await asyncio.wait_for(
-                        self._h3_events_received[stream_id].wait(),
-                        timeout=0.2,
-                    )
-                    self._h3_events_received[stream_id].clear()
-                except asyncio.TimeoutError:
-                    # No new events arrived — response is complete
-                    response_received = True
-                    break
-                continue
-
-            # Wait for more events
-            try:
-                _ = await asyncio.wait_for(
-                    self._h3_events_received[stream_id].wait(),
-                    timeout=0.5,
-                )
-                self._h3_events_received[stream_id].clear()
-            except asyncio.TimeoutError:
-                pass
-
-        return H3Response(
-            status_code=status_code,
-            headers=headers,
-            body=body,
-            stream_id=stream_id,
-        )
-
-    async def close(self) -> None:
-        """Close the connection."""
-        if self._connection_context:
-            _ = await self._connection_context.__aexit__(None, None, None)
-
-
-async def perform_h3_connection_test(
-    host: str,
-    port: int,
-    ca_path: str | None = None,
-    timeout: float = 10.0,
-    server_hostname: str | None = None,
-) -> tuple[bool, int, str]:
-    """
-    Perform HTTP/3 connection test.
-
-    This function establishes a QUIC connection and verifies TLS handshake
-    by sending an HTTP/3 request after the connection is established.
-
-    Args:
-        host: Server host
-        port: Server port
-        ca_path: CA certificate path
-        timeout: Connection timeout
-
-    Returns:
-        tuple[bool, int, str]: (success, status_code, message)
-        status_code is 0 if no HTTP response was received.
-    """
-    configuration = QuicConfiguration(
-        is_client=True,
-        alpn_protocols=["h3"],
-    )
-
-    # Configure certificate verification
-    if ca_path:
-        configuration.load_verify_locations(ca_path)
-    else:
-        # For self-signed certs, disable verification
-        configuration.verify_mode = ssl.CERT_NONE
-
-    configuration.idle_timeout = 30.0
-
-    # Set server_name for SNI (required for certificate resolution)
-    # Use server_hostname if provided, otherwise use host
-    sni_hostname = _resolve_sni_hostname(host, server_hostname)
-    configuration.server_name = sni_hostname
-
-    h3_events_store: dict[int, list[H3Event]] = defaultdict(list)
-    h3_events_received: dict[int, asyncio.Event] = defaultdict(asyncio.Event)
-
-    class H3ConnTestProtocol(H3ProtocolBase):
-        """Protocol for HTTP/3 connection testing."""
-
-        def __init__(
-            self,
-            quic: QuicConnection,
-            stream_handler: QuicStreamHandler | None = None,
-        ) -> None:
-            super().__init__(quic, stream_handler)
-            self._h3: H3Connection | None = None
-
-        @override
-        def quic_event_received(self, event: QuicEvent) -> None:
-            if isinstance(event, StreamDataReceived):
-                reader = self._stream_readers.get(event.stream_id, None)
-                if reader is not None:
-                    reader.feed_data(event.data)
-                    if event.end_stream:
-                        reader.feed_eof()
-
-            if self._h3 is not None:
-                events = self._h3.handle_event(event)
-                for h3_event in events:
-                    stream_id = getattr(h3_event, "stream_id", 0)
-                    h3_events_store[stream_id].append(h3_event)
-                    h3_events_received[stream_id].set()
-
-    try:
-        async with asyncio.timeout(timeout):
-            async with quic_client.connect(
-                host=host,
-                port=port,
-                configuration=configuration,
-                create_protocol=H3ConnTestProtocol,
-            ) as protocol:
-                assert isinstance(protocol, H3ProtocolBase)
-                await protocol.wait_connected()
-
-                # Create H3 connection and send a simple GET request
-                # to verify TLS handshake completed successfully
-                quic_connection = protocol.quic_connection
-                h3_conn = H3Connection(quic_connection)
-                protocol.h3_connection = h3_conn
-
-                # Send a simple GET request
-                # Use SNI hostname in :authority to avoid SNI/authority mismatch
-                headers: list[tuple[bytes, bytes]] = [
-                    (b":method", b"GET"),
-                    (b":scheme", b"https"),
-                    (b":authority", f"{sni_hostname}:{port}".encode()),
-                    (b":path", b"/"),
-                ]
-
-                stream_id = quic_connection.get_next_available_stream_id()
-                h3_conn.send_headers(stream_id, headers, end_stream=True)
-                protocol.transmit()
-
-                # Wait for response
-                status_code: int = 0
-                response_received: bool = False
-                start_time = asyncio.get_event_loop().time()
-                event_timeout: float = 5.0
-
-                while asyncio.get_event_loop().time() - start_time < event_timeout:
-                    events = h3_events_store.get(stream_id, [])
-                    for h3_event in events:
-                        if isinstance(h3_event, HeadersReceived):
-                            for name, value in h3_event.headers:
-                                if name == b":status":
-                                    status_code = int(value)
-                            response_received = True
+        body = bytearray()
+        try:
+            async with asyncio.timeout(10):
+                while True:
+                    event = await protocol.next_event(stream)
+                    if isinstance(event, (StreamReset, ConnectionTerminated)):
+                        return H3Response(0, {}, str(event).encode(), stream)
+                    if isinstance(event, HeadersReceived):
+                        fields = dict(event.headers)
+                        if b":status" in fields:
+                            status = int(fields[b":status"])
+                            if status < 200:
+                                continue
+                        for name, value in event.headers:
+                            if not name.startswith(b":"):
+                                headers[name.decode()] = value.decode()
+                        if headers_only and status:
                             break
-                        elif isinstance(h3_event, DataReceived):
-                            response_received = True
-                            break
-                    if response_received:
-                        break
-                    try:
-                        _ = await asyncio.wait_for(
-                            h3_events_received[stream_id].wait(),
-                            timeout=0.5,
-                        )
-                        h3_events_received[stream_id].clear()
-                    except asyncio.TimeoutError:
-                        pass
-
-                if response_received:
-                    return (
-                        True,
-                        status_code,
-                        "QUIC handshake and HTTP/3 request successful",
-                    )
-                else:
-                    return (
-                        False,
-                        0,
-                        "No response received - TLS handshake may have failed",
-                    )
-
-    except asyncio.TimeoutError:
-        return False, 0, "Connection timeout"
-    except H3_RECOVERABLE_ERRORS as e:
-        return False, 0, f"Connection error: {str(e)}"
-
-
-async def perform_h3_connect_test(
-    host: str,
-    port: int,
-    target_host: str,
-    target_port: int,
-    ca_path: str | None = None,
-    username: str | None = None,
-    password: str | None = None,
-    timeout: float = 10.0,
-) -> tuple[bool, int, str]:
-    """
-    Perform HTTP/3 CONNECT request test.
-
-    Args:
-        host: Proxy host
-        port: Proxy port
-        target_host: Target host
-        target_port: Target port
-        ca_path: CA certificate path
-        username: Optional username
-        password: Optional password
-        timeout: Request timeout
-
-    Returns:
-        tuple[bool, int, str]: (success, status_code, message)
-    """
-    result = await perform_h3_connect_test_full(
-        host,
-        port,
-        target_host,
-        target_port,
-        ca_path,
-        username,
-        password,
-        timeout,
-    )
-    return result.success, result.status_code, result.message
-
-
-async def perform_h3_connect_test_full(
-    host: str,
-    port: int,
-    target_host: str,
-    target_port: int,
-    ca_path: str | None = None,
-    username: str | None = None,
-    password: str | None = None,
-    timeout: float = 10.0,
-    server_hostname: str | None = None,
-) -> H3ConnectResult:
-    """
-    Perform HTTP/3 CONNECT request test with full result.
-
-    This function properly handles HTTP/3 events to receive the response.
-
-    Args:
-        host: Proxy host
-        port: Proxy port
-        target_host: Target host
-        target_port: Target port
-        ca_path: CA certificate path
-        username: Optional username
-        password: Optional password
-        timeout: Request timeout
-
-    Returns:
-        H3ConnectResult: Full result with status code and headers
-    """
-    configuration = QuicConfiguration(
-        is_client=True,
-        alpn_protocols=["h3"],
-    )
-
-    # Configure certificate verification
-    if ca_path:
-        configuration.load_verify_locations(ca_path)
-    else:
-        configuration.verify_mode = ssl.CERT_NONE
-
-    configuration.idle_timeout = 30.0
-
-    # Set server_name for SNI (required for certificate resolution)
-    # Use server_hostname if provided, otherwise use host
-    sni_hostname = _resolve_sni_hostname(host, server_hostname)
-    configuration.server_name = sni_hostname
-
-    h3_events_store: dict[int, list[H3Event]] = defaultdict(list)
-    h3_events_received: dict[int, asyncio.Event] = defaultdict(asyncio.Event)
-
-    class H3TestProtocol(H3ProtocolBase):
-        """Custom protocol for HTTP/3 testing."""
-
-        def __init__(
-            self,
-            quic: QuicConnection,
-            stream_handler: QuicStreamHandler | None = None,
-        ) -> None:
-            super().__init__(quic, stream_handler)
-            self._h3: H3Connection | None = None
-
-        @override
-        def quic_event_received(self, event: QuicEvent) -> None:
-            # First, let the parent class handle stream data for readers
-            if isinstance(event, StreamDataReceived):
-                reader = self._stream_readers.get(event.stream_id, None)
-                if reader is not None:
-                    reader.feed_data(event.data)
-                    if event.end_stream:
-                        reader.feed_eof()
-
-            # Then, handle HTTP/3 events
-            if self._h3 is not None:
-                events = self._h3.handle_event(event)
-                for h3_event in events:
-                    stream_id = getattr(h3_event, "stream_id", 0)
-                    h3_events_store[stream_id].append(h3_event)
-                    h3_events_received[stream_id].set()
-
-    try:
-        async with asyncio.timeout(timeout):
-            async with quic_client.connect(
-                host=host,
-                port=port,
-                configuration=configuration,
-                create_protocol=H3TestProtocol,
-            ) as protocol:
-                assert isinstance(protocol, H3ProtocolBase)
-                # Wait for connection to be established
-                await protocol.wait_connected()
-
-                # Get the QuicConnection from the protocol
-                quic_connection = protocol.quic_connection
-                # Create H3 connection
-                h3_conn = H3Connection(quic_connection)
-                protocol.h3_connection = h3_conn
-
-                # Build CONNECT request headers
-                headers: list[tuple[bytes, bytes]] = [
-                    (b":method", b"CONNECT"),
-                    (
-                        b":authority",
-                        f"{target_host}:{target_port}".encode(),
-                    ),
-                    (b":scheme", b"https"),
-                    (b":path", b"/"),
-                ]
-
-                # Add proxy authorization if credentials provided
-                if username and password:
-                    credentials = base64.b64encode(
-                        f"{username}:{password}".encode()
-                    ).decode()
-                    headers.append(
-                        (
-                            b"proxy-authorization",
-                            f"Basic {credentials}".encode(),
-                        )
-                    )
-
-                # Create a new stream
-                stream_id = quic_connection.get_next_available_stream_id()
-
-                # Send request headers (end_stream=True for CONNECT)
-                h3_conn.send_headers(stream_id, headers, end_stream=True)
-
-                # Transmit the data
-                protocol.transmit()
-
-                # Wait for response using proper event handling
-                status_code: int = 0
-                response_headers: dict[str, str] = {}
-                response_received: bool = False
-
-                event_timeout: float = 10.0
-                start_time = asyncio.get_event_loop().time()
-
-                while asyncio.get_event_loop().time() - start_time < event_timeout:
-                    # Get accumulated events
-                    events = h3_events_store.get(stream_id, [])
-
-                    for h3_event in events:
-                        if isinstance(h3_event, HeadersReceived):
-                            # Parse response headers
-                            for name, value in h3_event.headers:
-                                if name == b":status":
-                                    status_code = int(value)
-                                else:
-                                    response_headers[name.decode()] = value.decode()
-
-                            # HeadersReceived means we got the response.
-                            # Don't require stream_ended: CONNECT tunnels never end.
-                            response_received = True
-                            break
-
-                        elif isinstance(h3_event, DataReceived):
-                            # Handle data if present
-                            if h3_event.stream_ended:
-                                response_received = True
-                                break
-
-                    if response_received and status_code > 0:
-                        break
-
-                    # Wait for more events
-                    try:
-                        _ = await asyncio.wait_for(
-                            h3_events_received[stream_id].wait(),
-                            timeout=0.5,
-                        )
-                        h3_events_received[stream_id].clear()
-                    except asyncio.TimeoutError:
-                        pass
-
-                success = status_code == 200
-                return H3ConnectResult(
-                    success=success,
-                    status_code=status_code,
-                    message=f"Status: {status_code}",
-                    stream_id=stream_id,
-                    response_headers=response_headers,
-                )
-
-    except asyncio.TimeoutError:
-        return H3ConnectResult(success=False, status_code=0, message="Request timeout")
-    except H3_RECOVERABLE_ERRORS as e:
-        return H3ConnectResult(
-            success=False,
-            status_code=0,
-            message=f"Request error: {str(e)}",
-        )
-
-
-async def perform_h3_request_test(
-    host: str,
-    port: int,
-    method: str,
-    path: str,
-    ca_path: str | None = None,
-    headers: list[tuple[str, str]] | None = None,
-    body: bytes | None = None,
-    timeout: float = 10.0,
-    server_hostname: str | None = None,
-) -> H3Response:
-    """
-    Perform HTTP/3 request test.
-
-    This function properly handles HTTP/3 events to receive the response.
-
-    Args:
-        host: Proxy host
-        port: Proxy port
-        method: HTTP method (GET, POST, etc.)
-        path: Request path
-        ca_path: CA certificate path
-        headers: Additional headers
-        body: Request body
-        timeout: Request timeout
-
-    Returns:
-        H3Response: The response from the server
-    """
-    configuration = QuicConfiguration(
-        is_client=True,
-        alpn_protocols=["h3"],
-    )
-
-    if ca_path:
-        configuration.load_verify_locations(ca_path)
-    else:
-        configuration.verify_mode = ssl.CERT_NONE
-
-    configuration.idle_timeout = 30.0
-
-    # Set server_name for SNI (required for certificate resolution)
-    # Use server_hostname if provided, otherwise use host
-    sni_hostname = _resolve_sni_hostname(host, server_hostname)
-    configuration.server_name = sni_hostname
-
-    h3_events_store: dict[int, list[H3Event]] = defaultdict(list)
-    h3_events_received: dict[int, asyncio.Event] = defaultdict(asyncio.Event)
-
-    class H3TestProtocol(H3ProtocolBase):
-        """Custom protocol for HTTP/3 testing."""
-
-        def __init__(
-            self,
-            quic: QuicConnection,
-            stream_handler: QuicStreamHandler | None = None,
-        ) -> None:
-            super().__init__(quic, stream_handler)
-            self._h3: H3Connection | None = None
-
-        @override
-        def quic_event_received(self, event: QuicEvent) -> None:
-            if isinstance(event, StreamDataReceived):
-                reader = self._stream_readers.get(event.stream_id, None)
-                if reader is not None:
-                    reader.feed_data(event.data)
-                    if event.end_stream:
-                        reader.feed_eof()
-
-            if self._h3 is not None:
-                events = self._h3.handle_event(event)
-                for h3_event in events:
-                    stream_id = getattr(h3_event, "stream_id", 0)
-                    h3_events_store[stream_id].append(h3_event)
-                    h3_events_received[stream_id].set()
-
-    try:
-        async with asyncio.timeout(timeout):
-            async with quic_client.connect(
-                host=host,
-                port=port,
-                configuration=configuration,
-                create_protocol=H3TestProtocol,
-            ) as protocol:
-                assert isinstance(protocol, H3ProtocolBase)
-                # Wait for connection
-                await protocol.wait_connected()
-
-                quic_connection = protocol.quic_connection
-                h3_conn = H3Connection(quic_connection)
-                protocol.h3_connection = h3_conn
-
-                # Build request headers
-                # Use SNI hostname in :authority to avoid SNI/authority mismatch
-                h3_headers: list[tuple[bytes, bytes]] = [
-                    (b":method", method.encode()),
-                    (b":scheme", b"https"),
-                    (b":authority", f"{sni_hostname}:{port}".encode()),
-                    (b":path", path.encode()),
-                ]
-
-                if headers:
-                    for name, value in headers:
-                        h3_headers.append((name.encode(), value.encode()))
-
-                stream_id = quic_connection.get_next_available_stream_id()
-                h3_conn.send_headers(stream_id, h3_headers)
-
-                if body:
-                    h3_conn.send_data(stream_id, body, end_stream=True)
-                else:
-                    h3_conn.send_data(stream_id, b"", end_stream=True)
-
-                # Transmit
-                protocol.transmit()
-
-                # Receive response with proper event handling
-                status_code: int = 0
-                response_headers: dict[str, str] = {}
-                response_body: bytes = b""
-                response_received: bool = False
-                headers_received: bool = False
-                processed_count: int = 0
-
-                event_timeout: float = 10.0
-                start_time = asyncio.get_event_loop().time()
-
-                while asyncio.get_event_loop().time() - start_time < event_timeout:
-                    events = h3_events_store.get(stream_id, [])
-
-                    for h3_event in events[processed_count:]:
-                        processed_count += 1
-                        if isinstance(h3_event, HeadersReceived):
-                            for name, value in h3_event.headers:
-                                if name == b":status":
-                                    status_code = int(value)
-                                else:
-                                    response_headers[name.decode()] = value.decode()
-                            headers_received = True
-                            if h3_event.stream_ended:
-                                response_received = True
-                                break
-                        elif isinstance(h3_event, DataReceived):
-                            response_body += h3_event.data
-                            if h3_event.stream_ended:
-                                response_received = True
-                                break
-
-                    if response_received and status_code > 0:
-                        break
-
-                    # GREASE workaround: if headers received but stream_ended
-                    # never True (aioquic bug with GREASE frames), poll once
-                    # more then consider the response complete.
-                    if headers_received and status_code > 0:
-                        try:
-                            _ = await asyncio.wait_for(
-                                h3_events_received[stream_id].wait(),
-                                timeout=0.2,
-                            )
-                            h3_events_received[stream_id].clear()
-                        except asyncio.TimeoutError:
-                            response_received = True
-                            break
-                        continue
-
-                    try:
-                        _ = await asyncio.wait_for(
-                            h3_events_received[stream_id].wait(),
-                            timeout=0.5,
-                        )
-                        h3_events_received[stream_id].clear()
-                    except asyncio.TimeoutError:
-                        pass
-
-                return H3Response(
-                    status_code=status_code,
-                    headers=response_headers,
-                    body=response_body,
-                    stream_id=stream_id,
-                )
-
-    except asyncio.TimeoutError:
-        return H3Response(status_code=0, headers={}, body=b"Timeout", stream_id=0)
-    except H3_RECOVERABLE_ERRORS as e:
-        return H3Response(status_code=0, headers={}, body=str(e).encode(), stream_id=0)
-
-
-@dataclass
-class H3TunnelResult:
-    """Result of HTTP/3 CONNECT tunnel test with data transfer."""
-
-    success: bool
-    status_code: int
-    data_sent: int
-    data_received: int
-    message: str
-
-
-async def perform_h3_tunnel_data_transfer(
-    proxy_host: str,
-    proxy_port: int,
-    target_host: str,
-    target_port: int,
-    ca_path: str | None = None,
-    client_cert_path: str | None = None,
-    client_key_path: str | None = None,
-    test_data: bytes = b"HELLO_FROM_H3_CLIENT",
-    timeout: float = 15.0,
-    server_hostname: str | None = None,
-) -> H3TunnelResult:
-    """
-    Perform HTTP/3 CONNECT tunnel test with actual data transfer.
-
-    This function establishes an HTTP/3 tunnel and verifies bidirectional
-    data transfer by sending test data and expecting an echo response.
-
-    Args:
-        proxy_host: Proxy server host
-        proxy_port: Proxy server port
-        target_host: Target host
-        target_port: Target port
-        ca_path: CA certificate path for server verification
-        client_cert_path: Client certificate path for mTLS
-        client_key_path: Client private key path for mTLS
-        test_data: Data to send through the tunnel
-        timeout: Request timeout
-        server_hostname: Optional SNI hostname override (defaults to "localhost"
-            for IP addresses)
-
-    Returns:
-        H3TunnelResult: Full result with data transfer statistics
-    """
-    configuration = QuicConfiguration(
-        is_client=True,
-        alpn_protocols=["h3"],
-    )
-
-    if ca_path:
-        configuration.load_verify_locations(ca_path)
-    else:
-        configuration.verify_mode = ssl.CERT_NONE
-
-    if client_cert_path and client_key_path:
-        configuration.load_cert_chain(
-            certfile=client_cert_path,
-            keyfile=client_key_path,
-        )
-
-    configuration.idle_timeout = 30.0
-
-    # Set server_name for SNI (required for certificate resolution)
-    sni_hostname = _resolve_sni_hostname(proxy_host, server_hostname)
-    configuration.server_name = sni_hostname
-
-    h3_events_store: dict[int, list[H3Event]] = defaultdict(list)
-    h3_events_received: dict[int, asyncio.Event] = defaultdict(asyncio.Event)
-    stream_readers: dict[int, asyncio.StreamReader] = {}
-
-    class H3TunnelProtocol(H3ProtocolBase):
-        """Protocol for HTTP/3 tunnel with data transfer."""
-
-        def __init__(
-            self,
-            quic: QuicConnection,
-            stream_handler: QuicStreamHandler | None = None,
-        ) -> None:
-            super().__init__(quic, stream_handler)
-            self._h3: H3Connection | None = None
-
-        @override
-        def quic_event_received(self, event: QuicEvent) -> None:
-            if isinstance(event, StreamDataReceived):
-                reader = stream_readers.get(event.stream_id, None)
-                if reader is not None:
-                    reader.feed_data(event.data)
-                    if event.end_stream:
-                        reader.feed_eof()
-
-            if self._h3 is not None:
-                events = self._h3.handle_event(event)
-                for h3_event in events:
-                    stream_id = getattr(h3_event, "stream_id", 0)
-                    h3_events_store[stream_id].append(h3_event)
-                    h3_events_received[stream_id].set()
-
-    try:
-        async with asyncio.timeout(timeout):
-            async with quic_client.connect(
-                host=proxy_host,
-                port=proxy_port,
-                configuration=configuration,
-                create_protocol=H3TunnelProtocol,
-            ) as protocol:
-                assert isinstance(protocol, H3ProtocolBase)
-                await protocol.wait_connected()
-
-                quic_connection = protocol.quic_connection
-                h3_conn = H3Connection(quic_connection)
-                protocol.h3_connection = h3_conn
-
-                # Build CONNECT request
-                headers: list[tuple[bytes, bytes]] = [
-                    (b":method", b"CONNECT"),
-                    (
-                        b":authority",
-                        f"{target_host}:{target_port}".encode(),
-                    ),
-                    (b":scheme", b"https"),
-                    (b":path", b"/"),
-                ]
-
-                stream_id = quic_connection.get_next_available_stream_id()
-                h3_conn.send_headers(stream_id, headers, end_stream=False)
-                protocol.transmit()
-
-                # Wait for response headers
-                status_code: int = 0
-                response_received: bool = False
-                start_time = asyncio.get_event_loop().time()
-
-                while asyncio.get_event_loop().time() - start_time < 10.0:
-                    events = h3_events_store.get(stream_id, [])
-                    for h3_event in events:
-                        if isinstance(h3_event, HeadersReceived):
-                            for name, value in h3_event.headers:
-                                if name == b":status":
-                                    status_code = int(value)
-                            response_received = True
-                            break
-                    if response_received:
-                        break
-                    try:
-                        _ = await asyncio.wait_for(
-                            h3_events_received[stream_id].wait(),
-                            timeout=0.5,
-                        )
-                        h3_events_received[stream_id].clear()
-                    except asyncio.TimeoutError:
-                        pass
-
-                if status_code != 200:
-                    return H3TunnelResult(
-                        success=False,
-                        status_code=status_code,
-                        data_sent=0,
-                        data_received=0,
-                        message=f"CONNECT failed with status {status_code}",
-                    )
-
-                # Send test data through the tunnel
-                h3_conn.send_data(stream_id, test_data, end_stream=False)
-                protocol.transmit()
-
-                # Wait for echo response
-                received_data: bytes = b""
-                start_time = asyncio.get_event_loop().time()
-
-                while asyncio.get_event_loop().time() - start_time < 5.0:
-                    events = h3_events_store.get(stream_id, [])
-                    for h3_event in events:
-                        if isinstance(h3_event, DataReceived):
-                            received_data += h3_event.data
-                            if h3_event.stream_ended:
-                                break
-                    if len(received_data) > 0:
-                        break
-                    try:
-                        _ = await asyncio.wait_for(
-                            h3_events_received[stream_id].wait(),
-                            timeout=0.5,
-                        )
-                        h3_events_received[stream_id].clear()
-                    except asyncio.TimeoutError:
-                        pass
-
-                # Close the stream
-                h3_conn.send_data(stream_id, b"", end_stream=True)
-                protocol.transmit()
-
-                return H3TunnelResult(
-                    success=True,
-                    status_code=200,
-                    data_sent=len(test_data),
-                    data_received=len(received_data),
-                    message=(
-                        f"Transferred {len(test_data)} bytes, received"
-                        + f" {len(received_data)} bytes"
-                    ),
-                )
-
-    except asyncio.TimeoutError:
-        return H3TunnelResult(
-            success=False,
-            status_code=0,
-            data_sent=0,
-            data_received=0,
-            message="Request timeout",
-        )
-    except H3_RECOVERABLE_ERRORS as e:
-        return H3TunnelResult(
-            success=False,
-            status_code=0,
-            data_sent=0,
-            data_received=0,
-            message=f"Connection error: {str(e)}",
-        )
-
-
-async def perform_h3_tls_client_cert_test(
-    proxy_host: str,
-    proxy_port: int,
-    ca_path: str,
-    client_cert_path: str,
-    client_key_path: str,
-    timeout: float = 10.0,
-    server_hostname: str | None = None,
-) -> tuple[bool, int, str]:
-    """
-    Test TLS client certificate authentication with HTTP/3.
-
-    This function attempts to connect to an HTTP/3 listener with
-    a client certificate and verifies whether the TLS handshake succeeds
-    by sending an HTTP/3 request after the QUIC connection is established.
-
-    Args:
-        proxy_host: Proxy server host
-        proxy_port: Proxy server port
-        ca_path: CA certificate path for server verification
-        client_cert_path: Client certificate path
-        client_key_path: Client private key path
-        timeout: Connection timeout
-
-    Returns:
-        tuple[bool, int, str]: (success, status_code, message)
-        status_code is 0 if no HTTP response was received.
-    """
-    configuration = QuicConfiguration(
-        is_client=True,
-        alpn_protocols=["h3"],
-    )
-
-    configuration.load_verify_locations(ca_path)
-    configuration.load_cert_chain(
-        certfile=client_cert_path,
-        keyfile=client_key_path,
-    )
-    configuration.idle_timeout = 30.0
-
-    # Set server_name for SNI (required for certificate resolution)
-    sni_hostname = _resolve_sni_hostname(proxy_host, server_hostname)
-    configuration.server_name = sni_hostname
-
-    h3_events_store: dict[int, list[H3Event]] = defaultdict(list)
-    h3_events_received: dict[int, asyncio.Event] = defaultdict(asyncio.Event)
-
-    class H3ClientCertProtocol(H3ProtocolBase):
-        """Protocol for TLS client cert testing with HTTP/3."""
-
-        def __init__(
-            self,
-            quic: QuicConnection,
-            stream_handler: QuicStreamHandler | None = None,
-        ) -> None:
-            super().__init__(quic, stream_handler)
-            self._h3: H3Connection | None = None
-            self.termination_reason: str = ""
-            self.terminated: asyncio.Event = asyncio.Event()
-
-        @override
-        def quic_event_received(self, event: QuicEvent) -> None:
-            if isinstance(event, ConnectionTerminated):
-                self.termination_reason = (
-                    event.reason_phrase or f"error_code={event.error_code}"
-                )
-                self.terminated.set()
-
-            if isinstance(event, StreamDataReceived):
-                reader = self._stream_readers.get(event.stream_id, None)
-                if reader is not None:
-                    reader.feed_data(event.data)
-                    if event.end_stream:
-                        reader.feed_eof()
-
-            if self._h3 is not None:
-                events = self._h3.handle_event(event)
-                for h3_event in events:
-                    stream_id = getattr(h3_event, "stream_id", 0)
-                    h3_events_store[stream_id].append(h3_event)
-                    h3_events_received[stream_id].set()
-
-    try:
-        async with asyncio.timeout(timeout):
-            async with quic_client.connect(
-                host=proxy_host,
-                port=proxy_port,
-                configuration=configuration,
-                create_protocol=H3ClientCertProtocol,
-            ) as protocol:
-                assert isinstance(protocol, H3ClientCertProtocol)
-                await protocol.wait_connected()
-
-                # Create H3 connection immediately
-                quic_connection = protocol.quic_connection
-                h3_conn = H3Connection(quic_connection)
-                protocol.h3_connection = h3_conn
-
-                # Send a simple GET request
-                # Use SNI hostname in :authority to avoid SNI/authority mismatch
-                headers: list[tuple[bytes, bytes]] = [
-                    (b":method", b"GET"),
-                    (b":scheme", b"https"),
-                    (
-                        b":authority",
-                        f"{sni_hostname}:{proxy_port}".encode(),
-                    ),
-                    (b":path", b"/"),
-                ]
-
-                stream_id = quic_connection.get_next_available_stream_id()
-                h3_conn.send_headers(stream_id, headers, end_stream=True)
-                protocol.transmit()
-
-                # Wait for either HTTP response or connection termination
-                # In QUIC/TLS 1.3, server verifies client certs AFTER
-                # HandshakeCompleted. If cert is invalid, we'll receive
-                # ConnectionTerminated event instead of HTTP response.
-                status_code: int = 0
-                response_received: bool = False
-                start_time = asyncio.get_event_loop().time()
-                event_timeout: float = 5.0
-
-                while asyncio.get_event_loop().time() - start_time < event_timeout:
-                    # Check for connection termination first (cert rejected)
-                    if protocol.terminated.is_set():
-                        return (
-                            False,
-                            0,
-                            f"TLS handshake failed: {protocol.termination_reason}",
-                        )
-
-                    # Check for HTTP response
-                    events = h3_events_store.get(stream_id, [])
-                    for h3_event in events:
-                        if isinstance(h3_event, HeadersReceived):
-                            for name, value in h3_event.headers:
-                                if name == b":status":
-                                    status_code = int(value)
-                            response_received = True
-                            break
-                        elif isinstance(h3_event, DataReceived):
-                            response_received = True
-                            break
-                    if response_received:
-                        break
-
-                    # Wait for either response event or termination
-                    try:
-                        _ = await asyncio.wait_for(
-                            h3_events_received[stream_id].wait(),
-                            timeout=0.1,
-                        )
-                        h3_events_received[stream_id].clear()
-                    except asyncio.TimeoutError:
-                        pass
-
-                if response_received:
-                    return (
-                        True,
-                        status_code,
-                        "TLS client certificate authentication successful",
-                    )
-                else:
-                    return (
-                        False,
-                        0,
-                        "No response received - TLS handshake may have failed",
-                    )
-
-    except asyncio.TimeoutError:
-        return False, 0, "Connection timeout"
-    except H3_RECOVERABLE_ERRORS as e:
-        return False, 0, f"Connection failed: {str(e)}"
-
-
-async def perform_h3_request_with_custom_authority(
-    host: str,
-    port: int,
-    custom_authority: str,
-    path: str = "/",
-    method: str = "GET",
-    ca_path: str | None = None,
-    additional_headers: list[tuple[str, str]] | None = None,
-    timeout: float = 10.0,
-    server_hostname: str | None = None,
-) -> H3Response:
-    """
-    Perform HTTP/3 request with a custom :authority pseudo-header.
-
-    This function allows sending requests with a different :authority
-    than the actual connection target, useful for testing authority
-    validation behavior.
-
-    Args:
-        host: Actual server host to connect to
-        port: Actual server port to connect to
-        custom_authority: Custom value for :authority pseudo-header
-        path: Request path
-        method: HTTP method
-        ca_path: CA certificate path
-        additional_headers: Additional headers (e.g., custom Host header)
-        timeout: Request timeout
-        server_hostname: Optional SNI hostname override
-
-    Returns:
-        H3Response: The response from the server
-    """
-    configuration = QuicConfiguration(
-        is_client=True,
-        alpn_protocols=["h3"],
-    )
-
-    if ca_path:
-        configuration.load_verify_locations(ca_path)
-    else:
-        configuration.verify_mode = ssl.CERT_NONE
-
-    configuration.idle_timeout = max(0.1, timeout)
-
-    # Set server_name for SNI (required for certificate resolution)
-    configuration.server_name = _resolve_sni_hostname(host, server_hostname)
-
-    h3_events_store: dict[int, list[H3Event]] = defaultdict(list)
-    h3_events_received: dict[int, asyncio.Event] = defaultdict(asyncio.Event)
-    stream_reset: dict[int, int] = {}  # stream_id -> error_code
-    connection_terminated: list[str] = []
-
-    class H3CustomAuthProtocol(H3ProtocolBase):
-        """Protocol for HTTP/3 with custom authority."""
-
-        def __init__(
-            self,
-            quic: QuicConnection,
-            stream_handler: QuicStreamHandler | None = None,
-        ) -> None:
-            super().__init__(quic, stream_handler)
-            self._h3: H3Connection | None = None
-
-        @override
-        def quic_event_received(self, event: QuicEvent) -> None:
-            if isinstance(event, StreamReset):
-                stream_reset[event.stream_id] = event.error_code
-                h3_events_received[event.stream_id].set()
-            elif isinstance(event, ConnectionTerminated):
-                connection_terminated.append(
-                    event.reason_phrase or f"error_code={event.error_code}"
-                )
-            elif isinstance(event, StreamDataReceived):
-                reader = self._stream_readers.get(event.stream_id, None)
-                if reader is not None:
-                    reader.feed_data(event.data)
-                    if event.end_stream:
-                        reader.feed_eof()
-
-            if self._h3 is not None:
-                events = self._h3.handle_event(event)
-                for h3_event in events:
-                    stream_id = getattr(h3_event, "stream_id", 0)
-                    h3_events_store[stream_id].append(h3_event)
-                    h3_events_received[stream_id].set()
-
-    try:
-        async with asyncio.timeout(timeout):
-            async with quic_client.connect(
-                host=host,
-                port=port,
-                configuration=configuration,
-                create_protocol=H3CustomAuthProtocol,
-            ) as protocol:
-                assert isinstance(protocol, H3ProtocolBase)
-                await protocol.wait_connected()
-
-                quic_connection = protocol.quic_connection
-                h3_conn = H3Connection(quic_connection)
-                protocol.h3_connection = h3_conn
-
-                # Build request headers with CUSTOM authority
-                h3_headers: list[tuple[bytes, bytes]] = [
-                    (b":method", method.encode()),
-                    (b":scheme", b"https"),
-                    (
-                        b":authority",
-                        custom_authority.encode(),
-                    ),  # Custom authority
-                    (b":path", path.encode()),
-                ]
-
-                if additional_headers:
-                    for name, value in additional_headers:
-                        h3_headers.append((name.encode(), value.encode()))
-
-                stream_id = quic_connection.get_next_available_stream_id()
-                h3_conn.send_headers(stream_id, h3_headers)
-                h3_conn.send_data(stream_id, b"", end_stream=True)
-                protocol.transmit()
-
-                # Receive response
-                status_code: int = 0
-                response_headers: dict[str, str] = {}
-                response_body: bytes = b""
-                response_received: bool = False
-                headers_received: bool = False
-                data_received: bool = False
-                processed_event_count: int = 0
-
-                event_timeout: float = 10.0
-                start_time = asyncio.get_event_loop().time()
-
-                while asyncio.get_event_loop().time() - start_time < event_timeout:
-                    # Check for stream reset (protocol error, malformed request, etc.)
-                    if stream_id in stream_reset:
-                        return H3Response(
-                            status_code=0,
-                            headers={},
-                            body=(
-                                (
-                                    "Stream reset with"
-                                    + f" error_code={stream_reset[stream_id]}"
-                                ).encode()
-                            ),
-                            stream_id=stream_id,
-                        )
-
-                    # Check for connection termination
-                    if connection_terminated:
-                        return H3Response(
-                            status_code=0,
-                            headers={},
-                            body=(
-                                (
-                                    "Connection terminated: " + connection_terminated[0]
-                                ).encode()
-                            ),
-                            stream_id=stream_id,
-                        )
-
-                    events = h3_events_store.get(stream_id, [])
-
-                    # Only process new events
-                    for h3_event in events[processed_event_count:]:
-                        processed_event_count += 1
-                        if isinstance(h3_event, HeadersReceived):
-                            headers_received = True
-                            for name, value in h3_event.headers:
-                                if name == b":status":
-                                    status_code = int(value)
-                                else:
-                                    response_headers[name.decode()] = value.decode()
-                            if h3_event.stream_ended:
-                                response_received = True
-                                break
-                        elif isinstance(h3_event, DataReceived):
-                            data_received = True
-                            response_body += h3_event.data
-                            if h3_event.stream_ended:
-                                response_received = True
-                                break
-
-                    # Response is complete if:
-                    # 1. stream_ended was set, OR
-                    # 2. We have status code and received both headers and data
-                    if response_received or (
-                        status_code > 0 and headers_received and data_received
+                    elif isinstance(event, DataReceived):
+                        body.extend(event.data)
+                    if (
+                        isinstance(event, (HeadersReceived, DataReceived))
+                        and event.stream_ended
                     ):
                         break
+                    if isinstance(event, StreamDataReceived) and event.end_stream:
+                        break
+        except TimeoutError:
+            return H3Response(0, {}, b"Timeout", stream)
+        return H3Response(status, headers, bytes(body), stream)
 
-                    # GREASE workaround: if headers received but stream_ended
-                    # never True (aioquic bug with GREASE frames), poll once
-                    # more then consider the response complete.
-                    if headers_received and status_code > 0:
-                        try:
-                            _ = await asyncio.wait_for(
-                                h3_events_received[stream_id].wait(),
-                                timeout=0.2,
-                            )
-                            h3_events_received[stream_id].clear()
-                        except asyncio.TimeoutError:
-                            response_received = True
-                            break
-                        continue
+    async def transfer_tunnel(self, stream: int, data: bytes) -> bytes | None:
+        protocol = self._protocol
+        assert protocol is not None
+        protocol.send_data(stream, data, end_stream=True)
+        received = bytearray()
+        try:
+            async with asyncio.timeout(10):
+                while True:
+                    event = await protocol.next_event(stream)
+                    if isinstance(event, (StreamReset, ConnectionTerminated)):
+                        return None
+                    if isinstance(event, DataReceived):
+                        received.extend(event.data)
+                    if (
+                        isinstance(event, (HeadersReceived, DataReceived))
+                        and event.stream_ended
+                    ):
+                        break
+                    if isinstance(event, StreamDataReceived) and event.end_stream:
+                        break
+        except TimeoutError:
+            return None
+        return bytes(received)
 
-                    try:
-                        _ = await asyncio.wait_for(
-                            h3_events_received[stream_id].wait(),
-                            timeout=0.5,
-                        )
-                        h3_events_received[stream_id].clear()
-                    except asyncio.TimeoutError:
-                        if status_code > 0:
-                            break
-                        pass
-
-                return H3Response(
-                    status_code=status_code,
-                    headers=response_headers,
-                    body=response_body,
-                    stream_id=stream_id,
-                )
-
-    except asyncio.TimeoutError:
-        return H3Response(status_code=0, headers={}, body=b"Timeout", stream_id=0)
-    except H3_RECOVERABLE_ERRORS as e:
-        return H3Response(status_code=0, headers={}, body=str(e).encode(), stream_id=0)
+    async def close(self) -> None:
+        await self._resources.aclose()
+        self._protocol = None

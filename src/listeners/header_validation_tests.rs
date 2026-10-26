@@ -46,6 +46,19 @@ fn test_authority_host_mismatch_case_insensitive() {
 }
 
 #[test]
+fn test_authority_host_mismatch_compares_canonical_ip_addresses() {
+  assert!(!authority_host_mismatch(
+    "[2001:db8::1]:443",
+    "[2001:0db8:0:0::1]:443"
+  ));
+  assert!(!authority_host_mismatch(
+    "api.example.com.",
+    "api.example.com"
+  ));
+  assert!(authority_host_mismatch("[::1]:443", "[::1]:8443"));
+}
+
+#[test]
 fn test_authority_host_mismatch_mismatching() {
   assert!(authority_host_mismatch(
     "api.example.com",
@@ -109,8 +122,8 @@ fn test_validate_and_route_without_host_returns_bad_request() {
 }
 
 #[test]
-fn test_authority_host_mismatch_both_empty() {
-  assert!(!authority_host_mismatch("", ""));
+fn test_authority_host_mismatch_rejects_missing_authorities() {
+  assert!(authority_host_mismatch("", ""));
 }
 
 #[test]

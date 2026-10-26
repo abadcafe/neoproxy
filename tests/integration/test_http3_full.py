@@ -29,16 +29,16 @@ from tests.fixtures.h3_configuration import (
     create_http3_chain_config,
     create_http3_listener_config,
 )
-
-# Alias for convenience
-from tests.fixtures.http3_client import (
-    H3Client,
+from tests.fixtures.h3_connection import perform_h3_connection_test
+from tests.fixtures.h3_tunnel import (
     H3ConnectResult,
     H3TunnelResult,
     perform_h3_connect_test,
-    perform_h3_connection_test,
     perform_h3_tunnel_data_transfer,
 )
+
+# Alias for convenience
+from tests.fixtures.http3_client import H3Client
 from tests.fixtures.ports import (
     get_unique_port,
     wait_for_proxy,
@@ -262,6 +262,7 @@ class TestHTTP3FullConnection:
 
             # Verify CONNECT request succeeded
             assert result.success, f"Data transfer failed: {result.message}"
+            assert result.response_data == b"ECHO:" + test_data
             assert result.status_code == 200, (
                 f"Expected status 200, got {result.status_code}"
             )
@@ -725,7 +726,7 @@ servers:
             # CONNECT to an unreachable target
             # Use TEST-NET-2 (198.51.100.0/24) which is non-routable
             async def do_connect() -> H3ConnectResult:
-                from tests.fixtures.http3_client import perform_h3_connect_test_full
+                from tests.fixtures.h3_tunnel import perform_h3_connect_test_full
 
                 result = await perform_h3_connect_test_full(
                     "127.0.0.1",

@@ -27,14 +27,14 @@ from tests.fixtures.h3_configuration import (
     create_http3_listener_config_with_password_auth,
     create_http3_listener_config_with_tls_client_cert,
 )
-
-# Alias for convenience
-from tests.fixtures.http3_client import (
-    H3Client,
-    perform_h3_connect_test,
+from tests.fixtures.h3_connection import (
     perform_h3_connection_test,
     perform_h3_tls_client_cert_test,
 )
+from tests.fixtures.h3_tunnel import perform_h3_connect_test
+
+# Alias for convenience
+from tests.fixtures.http3_client import H3Client
 from tests.fixtures.ports import get_unique_port, wait_for_udp_port_bound
 from tests.fixtures.proxy_process import BytesProcess, start_proxy
 from tests.fixtures.tcp_peer import create_target_server, echo_handler

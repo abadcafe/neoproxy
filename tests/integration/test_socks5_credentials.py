@@ -1,4 +1,4 @@
-"""Wire contracts for SOCKS5 credentials evaluated by the HTTP service chain."""
+"""Wire contracts for SOCKS5 authentication before command admission."""
 
 import socket
 from pathlib import Path
@@ -38,7 +38,7 @@ def _receive_exact(client: socket.socket, size: int) -> bytes:
 @pytest.mark.parametrize(
     "credentials", ["valid", "wrong", "unknown", "missing", "colon"]
 )
-def test_socks5_authentication_result_is_reported_by_connect_and_access_log(
+def test_socks5_verifies_credentials_before_authentication_success(
     tmp_path: Path, credentials: Credentials
 ) -> None:
     proxy_port = get_unique_port()
@@ -93,7 +93,7 @@ servers:
             ) as client:
                 if credentials == "missing":
                     assert socks5_handshake_no_auth(client) == MethodReply(
-                        AuthMethod.NONE
+                        AuthMethod.NO_ACCEPTABLE
                     )
                 else:
                     username = "unknown" if credentials == "unknown" else "user"
@@ -102,20 +102,13 @@ servers:
                         username, password = "user:with:colon", "pass:word"
                     status = socks5_handshake_password(client, username, password)
                     assert isinstance(status, AuthReply)
-                    assert status.status is AuthStatus.SUCCESS, (
-                        "Subnegotiation must finish before the converter receives "
-                        + "the target and asks the HTTP service to authenticate"
+                    assert status.status is (
+                        AuthStatus.SUCCESS if authorized else AuthStatus.FAILURE
                     )
-                reply = socks5_connect_ipv4(client, "127.0.0.1", target_port)
-                assert isinstance(reply, CommandReply)
-                assert (reply.code is ReplyCode.SUCCESS) == authorized
-                expected = (
-                    ReplyCode.SUCCESS
-                    if authorized
-                    else ReplyCode.CONNECTION_NOT_ALLOWED
-                )
-                assert reply.code is expected
                 if authorized:
+                    reply = socks5_connect_ipv4(client, "127.0.0.1", target_port)
+                    assert isinstance(reply, CommandReply)
+                    assert reply.code is ReplyCode.SUCCESS
                     origin = target.accept()[0]
                     with origin:
                         origin.settimeout(2)
@@ -124,7 +117,9 @@ servers:
                         origin.sendall(b"response")
                         assert _receive_exact(client, 8) == b"response"
                 else:
-                    assert client.recv(1) == b"", "rejected CONNECT remained open"
+                    assert client.recv(1) == b"", (
+                        "rejected authentication remained open"
+                    )
         finally:
             terminate_process(process)
         assert process.returncode == 0
@@ -136,11 +131,14 @@ servers:
         else:
             unexpected.close()
             pytest.fail("unauthorized or duplicate target connection")
-    entries = [
-        AccessEntry.model_validate_json(line)
-        for line in (tmp_path / "logs" / "access").read_text().splitlines()
-    ]
-    assert len(entries) == 1
-    assert entries[0].method == "CONNECT"
-    assert entries[0].target == f"127.0.0.1:{target_port}"
-    assert entries[0].status == (200 if authorized else 407)
+    log = tmp_path / "logs" / "access"
+    entries = (
+        [AccessEntry.model_validate_json(line) for line in log.read_text().splitlines()]
+        if log.exists()
+        else []
+    )
+    assert len(entries) == (1 if authorized else 0)
+    if authorized:
+        assert entries[0].method == "CONNECT"
+        assert entries[0].target == f"127.0.0.1:{target_port}"
+        assert entries[0].status == 200

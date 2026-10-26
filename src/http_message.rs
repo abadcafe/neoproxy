@@ -3,50 +3,57 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use anyhow::Result;
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use http_body::{Body, Frame, SizeHint};
 use http_body_util::combinators::UnsyncBoxBody;
 
-/// A wrapper for `Bytes` based `Body` types like `Full<Bytes>`,
-/// `Empty<Bytes>`, etc in crate `http_body_util`. Through this wrapper,
-/// different `Body` implements can be converted into `RequestBody` and
-/// `ResponseBody` handily.
-pub(crate) struct BytesBufBodyWrapper<B, E>(
-  Pin<Box<dyn Body<Data = B, Error = E> + Send>>,
-);
-
-impl<B, E> BytesBufBodyWrapper<B, E> {
-  pub(crate) fn new<T>(b: T) -> Self
-  where
-    T: Body<Data = B, Error = E> + Send + 'static,
-    B: Buf,
-    E: Error + Send + Sync,
-  {
-    Self(Box::pin(b))
+pin_project_lite::pin_project! {
+  /// Adapt a concrete streaming body without an intermediate allocation.
+  pub(crate) struct BytesBufBodyWrapper<B> {
+    #[pin]
+    inner: B,
   }
 }
 
-impl<B, E> Body for BytesBufBodyWrapper<B, E>
+impl<B> BytesBufBodyWrapper<B> {
+  pub(crate) fn new(inner: B) -> Self {
+    Self { inner }
+  }
+}
+
+impl<B> Body for BytesBufBodyWrapper<B>
 where
-  B: Buf,
-  E: Error + Send + Sync + 'static,
+  B: Body,
+  B::Error: Error + Send + Sync + 'static,
 {
-  type Data = B;
+  type Data = B::Data;
   type Error = anyhow::Error;
 
   fn poll_frame(
-    mut self: Pin<&mut Self>,
+    self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-    self.0.as_mut().poll_frame(cx).map_err(|e| e.into())
+    self.project().inner.poll_frame(cx).map(|frame| {
+      frame.map(|result| {
+        result
+          .map(|frame| match frame.into_trailers() {
+            Ok(mut trailers) => {
+              crate::hop_headers::strip_trailer_headers(&mut trailers);
+              Frame::trailers(trailers)
+            }
+            Err(frame) => frame,
+          })
+          .map_err(Into::into)
+      })
+    })
   }
 
   fn is_end_stream(&self) -> bool {
-    self.0.is_end_stream()
+    self.inner.is_end_stream()
   }
 
   fn size_hint(&self) -> SizeHint {
-    self.0.size_hint()
+    self.inner.size_hint()
   }
 }
 

@@ -24,6 +24,21 @@ fn config(
   }
 }
 
+#[test]
+fn test_new_rejects_writer_paths_with_the_same_canonical_parent_and_name()
+ {
+  let directory = tempfile::tempdir().unwrap();
+  let mut config = config(&directory, LogFormat::Text);
+  let mut alias = config.writers[0].clone();
+  alias.path_prefix =
+    directory.path().join(".").join("access").to_str().unwrap().into();
+  config.writers.push(alias);
+  assert!(
+    WriterRegistry::new(&config).is_err(),
+    "multiple writer threads would own one log path"
+  );
+}
+
 fn entry() -> AccessLogEntry {
   AccessLogEntry {
     time: time::OffsetDateTime::now_utc(),

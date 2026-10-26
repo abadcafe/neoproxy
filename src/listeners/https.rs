@@ -23,7 +23,7 @@ use crate::listener::{
 use crate::listeners::http_service::HttpServiceAdaptor;
 use crate::listeners::tcp_accept::{self, AcceptRetryDelay};
 use crate::listeners::tcp_listener_base::TcpListenerBase;
-use crate::server::Server;
+use crate::server::{Server, ServerRouter};
 use crate::tls::build_tls_server_config;
 
 /// Default TLS handshake timeout.
@@ -42,7 +42,7 @@ struct HttpsListenerArgs {
   )]
   tls_handshake_timeout: Duration,
   #[serde(default)]
-  header_read_timeout: super::http_connection::HeaderDeadline,
+  header_read_timeout: super::header_deadline::HeaderDeadline,
   #[serde(default)]
   accept_retry_delay: AcceptRetryDelay,
 }
@@ -80,10 +80,10 @@ struct HttpsListener {
   /// TLS configuration
   tls_config: Arc<rustls::ServerConfig>,
   /// Routing table for hostname-based routing
-  server_routing_table: Vec<Server>,
+  server_router: ServerRouter,
   /// TLS handshake timeout
   tls_handshake_timeout: Duration,
-  header_deadline: super::http_connection::HeaderDeadline,
+  header_deadline: super::header_deadline::HeaderDeadline,
   accept_retry_delay: AcceptRetryDelay,
   /// Shared TCP listener base for lifecycle management
   base: TcpListenerBase,
@@ -131,7 +131,7 @@ impl HttpsListener {
     Ok(Listener::new(Self {
       addresses,
       tls_config,
-      server_routing_table,
+      server_router: ServerRouter::build(server_routing_table),
       tls_handshake_timeout,
       header_deadline: _args.header_read_timeout,
       accept_retry_delay: _args.accept_retry_delay,
@@ -148,7 +148,7 @@ impl HttpsListener {
     let tls_config = self.tls_config.clone();
     let stream_tracker = self.base.stream_tracker();
     let shutdown_handle = self.base.shutdown_handle();
-    let server_routing_table = self.server_routing_table.clone();
+    let server_router = self.server_router.clone();
     let tls_handshake_timeout = self.tls_handshake_timeout;
     let header_deadline = self.header_deadline;
     let accept_retry_delay = self.accept_retry_delay;
@@ -176,7 +176,7 @@ impl HttpsListener {
               tokio_rustls::TlsAcceptor::from(tls_config.clone());
             let io = rt_util::TokioIo::new(stream);
 
-            let server_routing_table = server_routing_table.clone();
+            let server_router = server_router.clone();
             let connection_shutdown = shutdown_handle.clone();
             stream_tracker.register(async move {
               match timeout(
@@ -199,7 +199,7 @@ impl HttpsListener {
                     });
 
                   let svc = HttpServiceAdaptor::new_https(
-                    server_routing_table.clone(),
+                    server_router.clone(),
                     Some(raddr),
                     Some(local_addr),
                     client_cert_presented,

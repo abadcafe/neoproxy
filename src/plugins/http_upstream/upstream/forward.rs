@@ -8,17 +8,15 @@ use std::time::Instant;
 use hyper_util::client::legacy::Client;
 use tracing::warn;
 
-use super::proxy_auth::{apply_proxy_auth, consume_proxy_auth_headers};
-use crate::context::{RequestContext, get_server_id};
+use super::proxy_auth::apply_proxy_auth;
+use super::response::forward_response;
+use crate::context::RequestContext;
 use crate::http_message::{
   BytesBufBodyWrapper, RequestBody, Response, ResponseBody,
   build_error_response,
 };
 use crate::plugins::http_upstream::error::classify_http_client_error;
 use crate::plugins::http_upstream::target_parser::ForwardTarget;
-use crate::proxy_status::{
-  append_proxy_status, build_proxy_status_with_status,
-};
 
 /// Forward an HTTP request over HTTP/1.1 or HTTPS/1.1 to the upstream
 /// proxy. Uses hyper::Client which handles connection pooling
@@ -75,47 +73,10 @@ where
     upstream_resp.status().as_str().to_string(),
   );
 
-  let (resp_parts, resp_body) = upstream_resp.into_parts();
-  let mut resp_headers = resp_parts.headers;
-  crate::hop_headers::strip_connection_headers(&mut resp_headers);
-  consume_proxy_auth_headers(&mut resp_headers);
-
-  let upstream_ps = resp_headers
-    .get(http::header::HeaderName::from_static("proxy-status"))
-    .cloned();
-  resp_headers
-    .remove(http::header::HeaderName::from_static("proxy-status"));
-
-  let mut resp = http::Response::builder().status(resp_parts.status);
-  for (name, value) in resp_headers.iter() {
-    resp = resp.header(name, value);
-  }
-
-  if let Some(ref id) = get_server_id(ctx) {
-    let our_entry =
-      build_proxy_status_with_status(id, resp_parts.status.as_u16());
-    resp = resp.header(
-      http::header::HeaderName::from_static("proxy-status"),
-      append_proxy_status(upstream_ps.as_ref(), &our_entry),
-    );
-  } else if let Some(ps) = upstream_ps {
-    resp = resp.header(
-      http::header::HeaderName::from_static("proxy-status"),
-      ps,
-    );
-  }
-
-  let wrapped_body = BytesBufBodyWrapper::new(resp_body);
-  let boxed_resp_body = ResponseBody::new(wrapped_body);
-
-  match resp.body(boxed_resp_body) {
-    Ok(r) => r,
-    Err(e) => {
-      warn!("http_upstream: failed to build response: {e}");
-      build_error_response(
-        http::StatusCode::BAD_GATEWAY,
-        "Failed to build response",
-      )
-    }
-  }
+  let (parts, body) = upstream_resp.into_parts();
+  forward_response(
+    parts,
+    ResponseBody::new(BytesBufBodyWrapper::new(body)),
+    ctx,
+  )
 }

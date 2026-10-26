@@ -18,7 +18,7 @@ from aioquic.quic.events import (
     StreamReset,
 )
 
-from tests.fixtures.http3_client import H3ProtocolBase
+from tests.fixtures.h3_protocol import H3ProtocolBase
 
 type StreamEvent = H3Event | StreamReset | ConnectionTerminated | StreamDataReceived
 

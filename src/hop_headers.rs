@@ -28,6 +28,7 @@ pub(crate) fn strip_connection_headers(headers: &mut http::HeaderMap) {
     http::header::TRANSFER_ENCODING,
     http::header::UPGRADE,
     http::header::HeaderName::from_static("keep-alive"),
+    http::header::HeaderName::from_static("proxy-connection"),
   ];
 
   for name in hop_by_hop {
@@ -43,8 +44,21 @@ pub(crate) fn strip_connection_headers(headers: &mut http::HeaderMap) {
 /// of an upstream proxy's authentication policy.
 pub(crate) fn strip_trailer_headers(headers: &mut http::HeaderMap) {
   strip_connection_headers(headers);
-  headers.remove(http::header::PROXY_AUTHENTICATE);
-  headers.remove(http::header::PROXY_AUTHORIZATION);
+  // RFC 9110 §6.5.1: framing, routing, authentication and content
+  // interpretation cannot be deferred until after the body.
+  for name in [
+    http::header::CONTENT_LENGTH,
+    http::header::HOST,
+    http::header::AUTHORIZATION,
+    http::header::WWW_AUTHENTICATE,
+    http::header::PROXY_AUTHENTICATE,
+    http::header::PROXY_AUTHORIZATION,
+    http::header::CONTENT_ENCODING,
+    http::header::CONTENT_TYPE,
+    http::header::CONTENT_RANGE,
+  ] {
+    headers.remove(name);
+  }
 }
 
 /// RFC 9114 §4.2: HTTP/3 cookie lines must be joined with a semicolon

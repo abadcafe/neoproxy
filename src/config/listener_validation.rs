@@ -1,12 +1,8 @@
 //! Listener configuration validation functions.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 
-use super::listener::{
-  AddressUsage, ListenerConfig, ListenerPropertiesProvider,
-  TransportLayer,
-};
+use super::listener::{ListenerConfig, ListenerPropertiesProvider};
 use super::{Config, ConfigError, ConfigErrorCollector};
 
 /// Validate listener addresses.
@@ -160,173 +156,6 @@ pub(super) fn validate_hostname_routing_compatibility(
   }
 }
 
-/// Validate address conflicts across all servers and listeners.
-///
-/// Rules:
-/// - Different transport layer (TCP vs UDP): NO CONFLICT
-/// - Same transport layer, different kind: CONFLICT
-/// - Same kind, supports hostname routing: ALLOWED
-/// - Same kind, NO hostname routing support (socks5): CONFLICT
-/// - Multiple default servers (empty hostnames) on same address+kind:
-///   CONFLICT
-pub(super) fn validate_address_conflicts(
-  config: &Config,
-  collector: &mut ConfigErrorCollector,
-  listener_manager: &dyn ListenerPropertiesProvider,
-) {
-  use TransportLayer as TL;
-
-  let registry = listener_manager;
-
-  // Build a name -> ListenerConfig lookup map
-  let listener_map = build_listener_map(config);
-
-  let mut address_map: HashMap<SocketAddr, Vec<AddressUsage>> =
-    HashMap::new();
-
-  for server in config.servers() {
-    for listener_name in server.listeners() {
-      // Look up ListenerConfig by name
-      let lc = match listener_map.get(listener_name.as_str()) {
-        Some(lc) => lc,
-        None => continue, /* Unknown listener name -
-                           * validate_listener_references handles
-                           * this */
-      };
-
-      if registry.listener_props(lc.kind()).is_none() {
-        continue;
-      }
-
-      for addr_str in lc.addresses() {
-        if let Ok(addr) = addr_str.parse::<SocketAddr>() {
-          let usage = AddressUsage {
-            server_name: server.name().to_string(),
-            listener_kind: lc.kind().to_string(),
-            hostnames: server.hostnames().to_vec(),
-          };
-          address_map.entry(addr).or_default().push(usage);
-        }
-      }
-    }
-  }
-
-  // Check for conflicts
-  for (addr, usages) in address_map {
-    if usages.len() <= 1 {
-      continue;
-    }
-
-    use std::collections::HashSet;
-
-    // Single-pass classification by transport layer
-    let mut tcp_usages: Vec<&AddressUsage> = Vec::new();
-    let mut udp_usages: Vec<&AddressUsage> = Vec::new();
-    let mut other_usages: Vec<&AddressUsage> = Vec::new();
-
-    for u in &usages {
-      match registry
-        .listener_props(&u.listener_kind)
-        .map(|p| p.transport_layer())
-      {
-        Some(TL::Tcp) => tcp_usages.push(u),
-        Some(TL::Udp) => udp_usages.push(u),
-        _ => other_usages.push(u),
-      }
-    }
-
-    // Check TCP conflicts
-    if tcp_usages.len() > 1 {
-      let kinds: HashSet<_> =
-        tcp_usages.iter().map(|u| u.listener_kind.as_str()).collect();
-
-      if kinds.len() > 1 {
-        let details: Vec<_> = tcp_usages
-          .iter()
-          .map(|u| {
-            format!("{} (server: {})", u.listener_kind, u.server_name)
-          })
-          .collect();
-        collector.add(ConfigError::AddressConflict {
-          location: format!("address conflict on {}", addr),
-          message: format!(
-            "TCP address conflict: different listener kinds ({}) on \
-             same address",
-            details.join(", ")
-          ),
-        });
-      } else {
-        check_hostname_routing_conflicts(
-          &tcp_usages,
-          addr,
-          registry,
-          collector,
-        );
-      }
-    }
-
-    // Check UDP conflicts
-    if udp_usages.len() > 1 {
-      let kinds: HashSet<_> =
-        udp_usages.iter().map(|u| u.listener_kind.as_str()).collect();
-
-      if kinds.len() > 1 {
-        let details: Vec<_> = udp_usages
-          .iter()
-          .map(|u| {
-            format!("{} (server: {})", u.listener_kind, u.server_name)
-          })
-          .collect();
-        collector.add(ConfigError::AddressConflict {
-          location: format!("address conflict on {}", addr),
-          message: format!(
-            "UDP address conflict: different listener kinds ({}) on \
-             same address",
-            details.join(", ")
-          ),
-        });
-      } else {
-        check_hostname_routing_conflicts(
-          &udp_usages,
-          addr,
-          registry,
-          collector,
-        );
-      }
-    }
-
-    // Check other transport layers (future extensibility)
-    if other_usages.len() > 1 {
-      let kinds: HashSet<_> =
-        other_usages.iter().map(|u| u.listener_kind.as_str()).collect();
-
-      if kinds.len() > 1 {
-        let details: Vec<_> = other_usages
-          .iter()
-          .map(|u| {
-            format!("{} (server: {})", u.listener_kind, u.server_name)
-          })
-          .collect();
-        collector.add(ConfigError::AddressConflict {
-          location: format!("address conflict on {}", addr),
-          message: format!(
-            "address conflict: different listener kinds ({}) on same \
-             address",
-            details.join(", ")
-          ),
-        });
-      } else {
-        check_hostname_routing_conflicts(
-          &other_usages,
-          addr,
-          registry,
-          collector,
-        );
-      }
-    }
-  }
-}
-
 /// Collect hostname overlaps from a list of (server_name, hostnames)
 /// pairs.
 ///
@@ -344,7 +173,7 @@ fn collect_hostname_overlaps<'a>(
       default_servers.push(server_name);
     } else {
       for hostname in hostnames {
-        let normalized = hostname.to_lowercase();
+        let normalized = crate::hostname::normalize(hostname);
         hostname_map.entry(normalized).or_default().push(server_name);
       }
     }
@@ -384,71 +213,8 @@ fn report_hostname_overlaps(
   }
 }
 
-/// Check for hostname routing conflicts sharing the same address+kind.
-fn check_hostname_routing_conflicts(
-  usages: &[&AddressUsage],
-  addr: SocketAddr,
-  registry: &dyn ListenerPropertiesProvider,
-  collector: &mut ConfigErrorCollector,
-) {
-  let kind = usages[0].listener_kind.as_str();
-  let supports_hostname_routing = registry
-    .listener_props(kind)
-    .map(|p| p.supports_hostname_routing())
-    .unwrap_or(false);
-
-  if !supports_hostname_routing {
-    // Doesn't support hostname routing - multiple instances is a
-    // conflict
-    if usages.len() > 1 {
-      let servers: Vec<_> =
-        usages.iter().map(|u| u.server_name.as_str()).collect();
-      collector.add(ConfigError::AddressConflict {
-        location: format!("address conflict on {}", addr),
-        message: format!(
-          "multiple {} listeners on same address without hostname \
-           routing support (servers: {})",
-          kind,
-          servers.join(", ")
-        ),
-      });
-    }
-    return;
-  }
-
-  let entries = usages
-    .iter()
-    .map(|u| (u.server_name.as_str(), u.hostnames.as_slice()));
-  let (default_servers, hostname_map) =
-    collect_hostname_overlaps(entries);
-  let location = format!("address conflict on {}", addr);
-  report_hostname_overlaps(
-    &default_servers,
-    &hostname_map,
-    &location,
-    collector,
-  );
-}
-
-/// Validate hostname conflicts by grouping servers by listener name.
-///
-/// This function checks two things:
-/// 1. Non-hostname-routing listeners (e.g., socks5) can only have one
-///    server
-/// 2. Hostname-routing listeners cannot have overlapping hostnames
-///    between servers
-///
-/// This is different from [`validate_address_conflicts`] which groups
-/// by address+kind. This function groups by listener NAME, catching
-/// cases where multiple servers reference the same listener on
-/// different addresses.
-///
-/// **Intentional overlap:** When two servers reference the same
-/// listener on the same address, both `validate_address_conflicts` and
-/// `validate_hostname_conflicts` may detect the same hostname overlap.
-/// This overlap is intentional -- the two functions serve different
-/// primary purposes (address conflicts vs listener-level conflicts) and
-/// provide complementary error messages.
+/// Validate each listener's hostname index once, independently of its
+/// listening addresses. Socket ownership belongs to bindings::validate.
 pub(super) fn validate_hostname_conflicts(
   config: &Config,
   collector: &mut ConfigErrorCollector,
@@ -474,10 +240,6 @@ pub(super) fn validate_hostname_conflicts(
   }
 
   for (listener_name, servers) in listener_servers {
-    if servers.len() <= 1 {
-      continue;
-    }
-
     // Get listener kind and check supports_hostname_routing
     let supports_hostname_routing = listener_map
       .get(listener_name)
@@ -486,6 +248,9 @@ pub(super) fn validate_hostname_conflicts(
       .unwrap_or(false);
 
     if !supports_hostname_routing {
+      if servers.len() <= 1 {
+        continue;
+      }
       // Non-hostname-routing listener: only one server can reference it
       let server_names: Vec<_> =
         servers.iter().map(|s| s.name.as_str()).collect();

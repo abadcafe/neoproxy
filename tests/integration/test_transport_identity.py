@@ -242,7 +242,7 @@ class TestHTTP3ClientCert:
         """
         import asyncio
 
-        from tests.fixtures.http3_client import perform_h3_connection_test
+        from tests.fixtures.h3_connection import perform_h3_connection_test
 
         temp_dir = tempfile.mkdtemp(prefix="neoproxy_h3_mtls_")
         http3_port = get_unique_port()

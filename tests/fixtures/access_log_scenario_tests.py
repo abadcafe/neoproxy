@@ -4,12 +4,15 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
+from pydantic import TypeAdapter
 
 from tests.fixtures.access_log_scenario import (
     AccessLogTestEnv,
     wait_for_access_log,
     write_config,
 )
+from tests.fixtures.configuration import ConfigDict
 
 
 @pytest.mark.parametrize("jump", [-3600.0, 3600.0])
@@ -110,6 +113,13 @@ class TestWriteConfigHelper:
         )
         with open(config_path, "r") as f:
             content = f.read()
-        assert 'format: "json"' in content, (
-            f"Expected 'format: \"json\"' in config, got:\n{content}"
-        )
+        config = TypeAdapter(ConfigDict).validate_python(yaml.safe_load(content))
+        plugins = config["plugins"]
+        assert isinstance(plugins, dict)
+        access_log = plugins["access_log"]
+        assert isinstance(access_log, dict)
+        writers = access_log["writers"]
+        assert isinstance(writers, list) and len(writers) == 1
+        writer = writers[0]
+        assert isinstance(writer, dict)
+        assert writer["format"] == "json"

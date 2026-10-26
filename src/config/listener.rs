@@ -2,7 +2,6 @@
 //!
 //! This module provides:
 //! - `ListenerConfig` - Top-level listener configuration
-//! - `AddressUsage` - Address usage info for conflict detection
 //! - `TransportLayer` - Transport protocol type (TCP/UDP)
 //! - `ListenerPropertyValues` - Listener property values for validation
 //! - `ListenerPropertiesProvider` - Trait for querying listener props
@@ -108,12 +107,4 @@ impl ListenerConfig {
   pub(crate) fn args(&self) -> &SerializedArgs {
     &self.args
   }
-}
-
-/// Address usage info for conflict detection.
-pub(super) struct AddressUsage {
-  pub(super) server_name: String,
-  pub(super) listener_kind: String,
-  /// Hostnames for this server (empty = default server)
-  pub(super) hostnames: Vec<String>,
 }

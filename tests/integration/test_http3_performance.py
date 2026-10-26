@@ -11,10 +11,10 @@ from tests.fixtures.configuration import StringMap
 from tests.fixtures.h3_configuration import (
     create_http3_listener_config,
 )
-from tests.fixtures.http3_client import (
+from tests.fixtures.h3_connection import perform_h3_connection_test
+from tests.fixtures.h3_tunnel import (
     H3TunnelResult,
     perform_h3_connect_test,
-    perform_h3_connection_test,
     perform_h3_tunnel_data_transfer,
 )
 from tests.fixtures.ports import (
@@ -108,13 +108,9 @@ class TestHTTP3Performance:
             finally:
                 loop.close()
 
-            # Verify success rate
-            successful = [r for r in results if r[0] and r[1] == 200]
-            success_rate = len(successful) / num_connections
-
-            assert success_rate >= 0.8, (
-                f"Success rate {success_rate:.2%} is below 80% for concurrent"
-                + " connections"
+            assert len(results) == num_connections
+            assert all(success and status == 200 for success, status in results), (
+                results
             )
 
         finally:
@@ -173,15 +169,14 @@ class TestHTTP3Performance:
                     loop.close()
 
                 elapsed = time.monotonic() - start_time
-                if success:
-                    latencies.append(elapsed)
+                assert success, "latency probe failed"
+                latencies.append(elapsed)
 
-            if latencies:
-                avg_latency = sum(latencies) / len(latencies)
-                # Connection should be fast (under 1 second for localhost)
-                assert avg_latency < 1.0, (
-                    f"Average connection latency {avg_latency:.3f}s is too high"
-                )
+            assert len(latencies) == 5
+            avg_latency = sum(latencies) / len(latencies)
+            assert avg_latency < 1.0, (
+                f"Average connection latency {avg_latency:.3f}s is too high"
+            )
 
         finally:
             if proxy_proc:
@@ -260,14 +255,12 @@ class TestHTTP3Performance:
                 loop.close()
 
             # Verify data was transferred
-            if result.success:
-                throughput_kbps = (
-                    (result.data_sent + result.data_received) / elapsed / 1024
-                )
-                # Should achieve at least 10 KB/s on localhost
-                assert throughput_kbps >= 10.0, (
-                    f"Throughput {throughput_kbps:.1f} KB/s is too low"
-                )
+            assert result.success, result.message
+            assert result.response_data == large_data
+            throughput_kbps = (result.data_sent + result.data_received) / elapsed / 1024
+            assert throughput_kbps >= 10.0, (
+                f"Throughput {throughput_kbps:.1f} KB/s is too low"
+            )
 
         finally:
             if proxy_proc:

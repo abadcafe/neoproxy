@@ -29,12 +29,11 @@ use quinn::crypto::rustls::QuicServerConfig;
 use tracing::{info, warn};
 use transport::Transport;
 
-use super::LISTENER_SHUTDOWN_TIMEOUT;
 use crate::config::SerializedArgs;
 use crate::listener::{
   BuildListener, Listener, ListenerProps, Listening, TransportLayer,
 };
-use crate::shutdown::ShutdownHandle;
+use crate::shutdown::{LISTENER_SHUTDOWN_TIMEOUT, ShutdownHandle};
 use crate::tls::build_tls_server_config;
 use crate::tracker::{ABORT_DRAIN_TIMEOUT, StreamTracker};
 
@@ -53,8 +52,9 @@ struct Http3Listener {
   tls_config: Arc<rustls::ServerConfig>,
   /// QUIC configuration
   quic_config: QuicConfig,
+  header_deadline: super::header_deadline::HeaderDeadline,
   /// Routing table for hostname-based routing
-  server_routing_table: Vec<crate::server::Server>,
+  server_router: crate::server::ServerRouter,
   /// Stream tracker
   stream_tracker: Rc<StreamTracker>,
   /// Transport survives request draining and plugin uninstall.
@@ -108,7 +108,10 @@ impl Http3Listener {
       addresses,
       tls_config,
       quic_config,
-      server_routing_table,
+      header_deadline: args.header_read_timeout,
+      server_router: crate::server::ServerRouter::build(
+        server_routing_table,
+      ),
       stream_tracker: Rc::new(StreamTracker::new()),
       transport: Rc::new(Transport::new()),
       shutdown_handle: ShutdownHandle::new(),
@@ -121,10 +124,11 @@ impl Listening for Http3Listener {
     let addresses = self.addresses.clone();
     let tls_config = self.tls_config.clone();
     let quic_config = self.quic_config.clone();
+    let header_deadline = self.header_deadline;
     let stream_tracker = self.stream_tracker.clone();
     let transport = self.transport.clone();
     let shutdown_handle = self.shutdown_handle.clone();
-    let server_routing_table = self.server_routing_table.clone();
+    let server_router = self.server_router.clone();
 
     Box::pin(async move {
       // Create Quinn server config
@@ -219,7 +223,7 @@ impl Listening for Http3Listener {
 
         match accept_result {
           Some((local_addr, conn)) => {
-            let server_routing_table = server_routing_table.clone();
+            let server_router = server_router.clone();
             let tracker_for_handler = stream_tracker.clone();
             let stream_shutdown = tracker_for_handler.shutdown_handle();
 
@@ -237,10 +241,11 @@ impl Listening for Http3Listener {
                     });
                   handle_h3_connection(
                     quinn_conn,
-                    server_routing_table,
+                    server_router,
                     tracker_for_handler,
                     stream_shutdown,
                     local_addr,
+                    header_deadline,
                   )
                   .await;
                 }

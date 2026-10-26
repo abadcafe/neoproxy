@@ -44,7 +44,7 @@ pub(super) async fn handle_h3_stream(
     Ok(entry) => entry,
     Err(response) => {
       let mut stream = ResponseWriter::new(stream);
-      if let Err(error) = stream.send(*response).await {
+      if let Err(error) = stream.send(*response, &method).await {
         warn!("Failed to send routing error: {error}");
       }
       return;
@@ -62,7 +62,7 @@ pub(super) async fn handle_h3_stream(
       "Forbidden: client certificate required",
     );
     let mut stream = ResponseWriter::new(stream);
-    if let Err(e) = stream.send(resp).await {
+    if let Err(e) = stream.send(resp, &method).await {
       warn!("Failed to send 403 response: {e}");
     }
     return;
@@ -158,7 +158,7 @@ pub(super) async fn handle_h3_stream(
           }
         }
       } else if let Some(ref mut stream) = stream_holder
-        && let Err(e) = stream.send(resp).await
+        && let Err(e) = stream.send(resp, &method).await
       {
         warn!("H3 failed to send response: {e}");
       }
@@ -177,7 +177,7 @@ pub(super) async fn handle_h3_stream(
           http::StatusCode::BAD_GATEWAY,
           "Bad Gateway",
         );
-        if let Err(e) = stream.send(resp).await {
+        if let Err(e) = stream.send(resp, &method).await {
           warn!("H3 failed to send error response: {e}");
         }
       }
@@ -197,14 +197,37 @@ impl<S: h3::quic::SendStream<Bytes>> ResponseWriter<S> {
     Self { stream, finished: false }
   }
 
-  async fn send(&mut self, response: Response) -> anyhow::Result<()> {
+  async fn send(
+    &mut self,
+    response: Response,
+    method: &http::Method,
+  ) -> anyhow::Result<()> {
     let (mut parts, mut body) = response.into_parts();
+    let body_allowed = method != http::Method::HEAD
+      && !parts.status.is_informational()
+      && !matches!(
+        parts.status,
+        http::StatusCode::NO_CONTENT
+          | http::StatusCode::RESET_CONTENT
+          | http::StatusCode::NOT_MODIFIED
+      );
+    if parts.status.is_informational()
+      || parts.status == http::StatusCode::NO_CONTENT
+    {
+      parts.headers.remove(http::header::CONTENT_LENGTH);
+    }
     // Preserve this proxy's locally generated 407 challenge.
     crate::hop_headers::strip_connection_headers(&mut parts.headers);
     self
       .stream
       .send_response(http::Response::from_parts(parts, ()))
       .await?;
+    if !body_allowed {
+      drop(body);
+      self.stream.finish().await?;
+      self.finished = true;
+      return Ok(());
+    }
     while let Some(frame) = body.frame().await {
       let frame = frame?;
       match frame.into_data() {

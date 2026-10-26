@@ -85,11 +85,8 @@ pub(crate) fn http_status_to_socks5_error(
       fast_socks5::ReplyError::ConnectionNotAllowed
     }
     http::StatusCode::PROXY_AUTHENTICATION_REQUIRED => {
-      // Subnegotiation was already acknowledged to obtain the target
-      // needed by the HTTP CONNECT service. A 407 cannot be sent back
-      // as an earlier RFC 1929 auth failure or an HTTP retry
-      // challenge: reject this SOCKS5 CONNECT (REP=0x02);
-      // send_error closes it.
+      // Request-level policy can still deny an authenticated
+      // connection.
       fast_socks5::ReplyError::ConnectionNotAllowed
     }
     _ => fast_socks5::ReplyError::GeneralFailure,

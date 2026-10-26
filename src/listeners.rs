@@ -6,24 +6,20 @@
 //! - Shared infrastructure (tcp_bind, http_service, header_validation)
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use crate::config::{
   ListenerPropertiesProvider, ListenerPropertyValues,
 };
 use crate::listener::{BuildListener, ListenerProps};
 
-/// Shared listener shutdown timeout for all listener types.
-pub(crate) const LISTENER_SHUTDOWN_TIMEOUT: Duration =
-  Duration::from_secs(3);
-
 pub(crate) mod error_response;
+mod header_deadline;
+#[cfg(test)]
+mod header_deadline_tests;
 pub(crate) mod header_validation;
 pub(crate) mod http;
 pub(crate) mod http3;
 mod http_connection;
-#[cfg(test)]
-mod http_connection_tests;
 pub(crate) mod http_service;
 pub(crate) mod https;
 pub(crate) mod socks5;

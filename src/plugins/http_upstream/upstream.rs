@@ -39,6 +39,9 @@ pub(super) mod protocol;
 mod proxy_auth;
 #[cfg(test)]
 mod proxy_auth_tests;
+mod response;
+#[cfg(test)]
+mod response_tests;
 mod scheduler;
 #[cfg(test)]
 mod scheduler_tests;
@@ -274,6 +277,7 @@ impl UpstreamRegistry {
             );
             let client =
               Client::builder(hyper_util::rt::TokioExecutor::new())
+                .pool_timer(hyper_util::rt::TokioTimer::new())
                 .pool_max_idle_per_host(
                   upstream.pool_config.max_idle_per_host,
                 )
@@ -325,6 +329,7 @@ impl UpstreamRegistry {
             );
             let client =
               Client::builder(hyper_util::rt::TokioExecutor::new())
+                .pool_timer(hyper_util::rt::TokioTimer::new())
                 .pool_max_idle_per_host(
                   upstream.pool_config.max_idle_per_host,
                 )

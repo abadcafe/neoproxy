@@ -1,4 +1,4 @@
-use super::http_connection::HeaderDeadline;
+use super::header_deadline::HeaderDeadline;
 
 #[test]
 fn test_header_deadline_rejects_zero_and_accepts_finite_duration() {

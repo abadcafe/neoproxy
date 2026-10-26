@@ -82,6 +82,27 @@ servers:
 }
 
 #[test]
+fn test_validate_hostname_conflicts_canonical_dns_names() {
+  for names in [
+    "[api.example.com, API.EXAMPLE.COM.]",
+    "['*.example.com', '*.EXAMPLE.COM.']",
+  ] {
+    let collector = validate_yaml(&format!(
+      "listeners:\n- name: main\n  kind: http\n  addresses: \
+       [127.0.0.1:8080]\nservers:\n- name: api\n  hostnames: \
+       {names}\n  listeners: [main]\n  service: ''\n"
+    ));
+    assert!(
+      has_error(&collector, |error| matches!(
+        error,
+        ConfigError::HostnameConflict { .. }
+      )),
+      "ambiguous route was accepted: {names}"
+    );
+  }
+}
+
+#[test]
 fn test_validate_hostname_conflicts_http_multiple_defaults() {
   let collector = validate_yaml(
     r#"
@@ -143,5 +164,16 @@ servers:
 "#,
   );
 
+  assert!(!collector.has_errors(), "{:?}", collector.errors());
+}
+
+#[test]
+fn test_validate_allows_independent_ephemeral_bindings_for_one_listener()
+ {
+  let collector = validate_yaml(
+    "listeners:\n- name: main\n  kind: http\n  addresses: \
+     ['127.0.0.1:0', '127.0.0.1:0']\nservers:\n- name: api\n  \
+     service: ''\n  listeners: [main]\n",
+  );
   assert!(!collector.has_errors(), "{:?}", collector.errors());
 }

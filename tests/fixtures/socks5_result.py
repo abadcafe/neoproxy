@@ -33,8 +33,7 @@ class MethodReply:
 
 @dataclass(frozen=True)
 class AuthReply:
-    # This describes the received subnegotiation reply. NeoProxy's
-    # SOCKS-to-HTTP adapter still defers actual authentication to CONNECT.
+    # The actual RFC 1929 reply: every nonzero status means failure.
     status: AuthStatus
 
 

@@ -448,8 +448,8 @@ class TestNegativeAuthSOCKS5Entry:
                 text=True,
             )
 
-            # SOCKS5 auth failure: auth middleware rejects wrong credentials,
-            # SOCKS5 returns ConnectionNotAllowed, curl returns non-zero
+            # SOCKS5 rejects wrong credentials during RFC 1929 subnegotiation;
+            # curl reports authentication failure.
             # or a non-200 HTTP code depending on curl version.
             # The important thing is it does NOT return 200.
             assert result.stdout != "200", (

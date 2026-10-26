@@ -7,10 +7,12 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use anyhow::Result;
 
+use crate::authentication::{Authentication, CredentialVerifier};
 use crate::config::SerializedArgs;
 use crate::http_message::{Request, Response};
 
@@ -58,11 +60,13 @@ where
 /// the exchange: its body may still be streaming. The listener's HTTP
 /// driver owns transport shutdown until an upgrade transfers I/O to
 /// a separately managed tunnel task.
-/// Authentication is a request middleware concern. Protocol adapters
-/// submit complete HTTP requests instead of extracting policy from
-/// this type to execute middleware decisions before a request exists.
+/// Authentication layers explicitly contribute transport-independent
+/// credential requirements during composition. Protocol adapters use
+/// that public contract for authentication handshakes; complete
+/// requests still pass through the configured middleware.
 pub(crate) struct Service {
   inner: Box<dyn CloneService>,
+  authentication: Authentication,
 }
 
 impl Service {
@@ -77,7 +81,14 @@ impl Service {
       > + Clone
       + 'static,
   {
-    Self { inner: Box::new(inner) }
+    Self {
+      inner: Box::new(inner),
+      authentication: Authentication::default(),
+    }
+  }
+
+  pub(crate) fn authentication(&self) -> Authentication {
+    self.authentication.clone()
   }
 }
 
@@ -97,7 +108,10 @@ impl tower::Service<Request> for Service {
 
 impl Clone for Service {
   fn clone(&self) -> Self {
-    Self { inner: self.inner.clone_boxed() }
+    Self {
+      inner: self.inner.clone_boxed(),
+      authentication: self.authentication.clone(),
+    }
   }
 }
 
@@ -120,20 +134,38 @@ impl<F> BuildService for F where F: Fn(SerializedArgs) -> Result<Service>
 {}
 
 /// A layer that wraps a Service to produce another Service.
-pub(crate) struct Layer(
-  Box<dyn tower::Layer<Service, Service = Service> + 'static>,
-);
+pub(crate) struct Layer {
+  inner: Box<dyn tower::Layer<Service, Service = Service> + 'static>,
+  verifier: Option<Arc<dyn CredentialVerifier>>,
+}
 
 impl Layer {
   pub(crate) fn new<L>(layer: L) -> Self
   where
     L: tower::Layer<Service, Service = Service> + 'static,
   {
-    Self(Box::new(layer))
+    Self { inner: Box::new(layer), verifier: None }
+  }
+
+  pub(crate) fn with_authentication<L>(
+    layer: L,
+    verifier: Arc<dyn CredentialVerifier>,
+  ) -> Self
+  where
+    L: tower::Layer<Service, Service = Service> + 'static,
+  {
+    Self { inner: Box::new(layer), verifier: Some(verifier) }
   }
 
   pub(crate) fn layer(&self, inner: Service) -> Service {
-    self.0.layer(inner)
+    let authentication = inner.authentication();
+    let authentication = match &self.verifier {
+      Some(verifier) => authentication.require(verifier.clone()),
+      None => authentication,
+    };
+    let mut service = self.inner.layer(inner);
+    service.authentication = authentication;
+    service
   }
 }
 

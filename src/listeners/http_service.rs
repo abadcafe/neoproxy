@@ -18,7 +18,7 @@ use crate::http_message::{
 };
 use crate::listeners::error_response::build_403_forbidden;
 use crate::listeners::header_validation::validate_and_route;
-use crate::server::{Server, ServerRouter};
+use crate::server::ServerRouter;
 
 /// Connection authentication state supplied by the listener.
 pub(crate) enum ClientCertPolicy {
@@ -53,11 +53,10 @@ pub(crate) struct HttpServiceAdaptor {
 impl HttpServiceAdaptor {
   /// Create a new adaptor for HTTP (no TLS).
   pub(crate) fn new_http(
-    server_routing_table: Vec<Server>,
+    server_router: ServerRouter,
     client_addr: Option<SocketAddr>,
     local_addr: Option<SocketAddr>,
   ) -> Self {
-    let server_router = ServerRouter::build(server_routing_table);
     Self {
       server_router,
       client_addr,
@@ -68,12 +67,11 @@ impl HttpServiceAdaptor {
 
   /// Create a new adaptor for HTTPS (with TLS).
   pub(crate) fn new_https(
-    server_routing_table: Vec<Server>,
+    server_router: ServerRouter,
     client_addr: Option<SocketAddr>,
     local_addr: Option<SocketAddr>,
     client_cert_presented: bool,
   ) -> Self {
-    let server_router = ServerRouter::build(server_routing_table);
     Self {
       server_router,
       client_addr,
@@ -134,7 +132,7 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
       let ctx = build_request_context(
         &peer_addr,
         &local_addr,
-        &routing_entry.service_name(),
+        &routing_entry.service_name,
       );
 
       req.extensions_mut().insert(ctx);

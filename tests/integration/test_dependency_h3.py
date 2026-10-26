@@ -13,7 +13,7 @@ from aioquic.quic.connection import QuicConnection
 from aioquic.quic.events import QuicEvent
 
 from tests.fixtures.certificates import generate_test_certificates
-from tests.fixtures.http3_client import H3ProtocolBase
+from tests.fixtures.h3_protocol import H3ProtocolBase
 from tests.fixtures.ports import get_unique_port, wait_for_proxy
 from tests.fixtures.proxy_process import start_proxy, terminate_process
 

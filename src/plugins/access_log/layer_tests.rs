@@ -23,7 +23,7 @@ fn test_build_log_entry_success_status() {
     &make_ok_result(),
     Instant::now(),
     ctx,
-    vec![],
+    &[],
     "GET",
     "http://example.com/",
   );
@@ -38,7 +38,7 @@ fn test_build_log_entry_error_status_and_message() {
     &make_err_result(),
     Instant::now(),
     ctx,
-    vec![],
+    &[],
     "CONNECT",
     "example.com:443",
   );
@@ -56,7 +56,7 @@ fn test_build_log_entry_extracts_client_ip() {
     &make_ok_result(),
     Instant::now(),
     ctx,
-    vec![],
+    &[],
     "GET",
     "/",
   );
@@ -73,7 +73,7 @@ fn test_build_log_entry_extracts_server_ip() {
     &make_ok_result(),
     Instant::now(),
     ctx,
-    vec![],
+    &[],
     "GET",
     "/",
   );
@@ -89,7 +89,7 @@ fn test_build_log_entry_extracts_service_name() {
     &make_ok_result(),
     Instant::now(),
     ctx,
-    vec![],
+    &[],
     "CONNECT",
     "example.com:443",
   );
@@ -105,7 +105,7 @@ fn test_build_log_entry_extracts_extensions() {
     &make_ok_result(),
     Instant::now(),
     ctx,
-    vec![
+    &[
       "basic_auth.user".to_string(),
       "connect_tcp.connect_ms".to_string(),
     ],
@@ -129,7 +129,7 @@ fn test_build_log_entry_missing_context_defaults() {
     &make_ok_result(),
     Instant::now(),
     ctx,
-    vec![],
+    &[],
     "GET",
     "/",
   );
@@ -148,7 +148,7 @@ fn test_build_log_entry_preserves_method_and_target() {
     &make_ok_result(),
     Instant::now(),
     ctx,
-    vec![],
+    &[],
     "CONNECT",
     "example.com:443",
   );
@@ -165,7 +165,7 @@ fn test_build_log_entry_invalid_port_defaults_to_zero() {
     &make_ok_result(),
     Instant::now(),
     ctx,
-    vec![],
+    &[],
     "GET",
     "/",
   );
@@ -182,7 +182,7 @@ fn test_build_log_entry_extensions_only_includes_requested_keys() {
     &make_ok_result(),
     Instant::now(),
     ctx,
-    vec!["basic_auth.user".to_string()],
+    &["basic_auth.user".to_string()],
     "GET",
     "/",
   );
@@ -200,7 +200,7 @@ fn test_build_log_entry_preserves_full_key_no_stripping() {
     &make_ok_result(),
     Instant::now(),
     ctx,
-    vec!["auth.user".to_string(), "audit.user".to_string()],
+    &["auth.user".to_string(), "audit.user".to_string()],
     "GET",
     "/",
   );
@@ -229,7 +229,7 @@ fn test_build_log_entry_no_dot_key_preserved_as_is() {
     &make_ok_result(),
     Instant::now(),
     ctx,
-    vec!["custom_field".to_string()],
+    &["custom_field".to_string()],
     "GET",
     "/",
   );

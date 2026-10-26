@@ -1,7 +1,25 @@
 use crate::proxy_status::{
   append_proxy_status, build_proxy_status_error,
-  build_proxy_status_with_status,
+  build_proxy_status_with_status, take_proxy_status,
 };
+
+#[test]
+fn test_take_proxy_status_preserves_all_field_lines_in_order() {
+  let mut headers = http::HeaderMap::new();
+  headers.append(
+    "proxy-status",
+    "first; received-status=200".parse().unwrap(),
+  );
+  headers.append(
+    "proxy-status",
+    "second; received-status=200".parse().unwrap(),
+  );
+  assert_eq!(
+    take_proxy_status(&mut headers).unwrap(),
+    "first; received-status=200, second; received-status=200"
+  );
+  assert!(!headers.contains_key("proxy-status"));
+}
 
 #[test]
 fn test_build_proxy_status_quotes_non_token_identifiers() {

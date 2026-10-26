@@ -29,12 +29,10 @@ fn format_text(entry: &AccessLogEntry) -> Vec<u8> {
 
   let _ = write!(
     buf,
-    "[{}] {}:{} -> {}:{} {} {} {} {}ms",
+    "[{}] {} -> {} {} {} {} {}ms",
     time_str,
-    escape(&entry.client_ip),
-    entry.client_port,
-    escape(&entry.server_ip),
-    entry.server_port,
+    endpoint(&entry.client_ip, entry.client_port),
+    endpoint(&entry.server_ip, entry.server_port),
     escape(&entry.method),
     escape(&entry.target),
     entry.status,
@@ -70,11 +68,11 @@ fn format_json(entry: &AccessLogEntry) -> Vec<u8> {
   obj.insert("time".to_string(), json!(time_str));
   obj.insert(
     "client".to_string(),
-    json!(format!("{}:{}", entry.client_ip, entry.client_port)),
+    json!(endpoint(&entry.client_ip, entry.client_port)),
   );
   obj.insert(
     "server".to_string(),
-    json!(format!("{}:{}", entry.server_ip, entry.server_port)),
+    json!(endpoint(&entry.server_ip, entry.server_port)),
   );
   obj.insert("method".to_string(), json!(entry.method));
   obj.insert("target".to_string(), json!(entry.target));
@@ -115,4 +113,13 @@ fn format_json(entry: &AccessLogEntry) -> Vec<u8> {
 
 fn escape(value: &str) -> String {
   value.chars().flat_map(char::escape_debug).collect()
+}
+
+fn endpoint(ip: &str, port: u16) -> String {
+  let ip = escape(ip);
+  if ip.contains(':') {
+    format!("[{ip}]:{port}")
+  } else {
+    format!("{ip}:{port}")
+  }
 }

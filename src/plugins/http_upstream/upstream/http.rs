@@ -531,10 +531,8 @@ where
     .await
     .map_err(|e| UpstreamError::ConnectionTerminated(e.to_string()))?;
 
-  let upstream_proxy_status = resp
-    .headers()
-    .get(::http::header::HeaderName::from_static("proxy-status"))
-    .cloned();
+  let upstream_proxy_status =
+    crate::proxy_status::take_proxy_status(resp.headers_mut());
 
   // RFC 9110 §9.3.6: every 2xx establishes a CONNECT tunnel.
   if !resp.status().is_success() {

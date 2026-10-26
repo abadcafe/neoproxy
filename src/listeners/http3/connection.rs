@@ -16,10 +16,11 @@ use crate::tracker::StreamTracker;
 
 pub(super) async fn handle_h3_connection(
   connection: quinn::Connection,
-  servers: Vec<crate::server::Server>,
+  router: crate::server::ServerRouter,
   requests: Rc<StreamTracker>,
   shutdown: ShutdownHandle,
   local_addr: SocketAddr,
+  header_deadline: crate::listeners::header_deadline::HeaderDeadline,
 ) {
   let client_addr = connection.remote_address();
   // TLS has already checked any presented certificate against this
@@ -32,7 +33,6 @@ pub(super) async fn handle_h3_connection(
         .ok()
     })
     .is_some_and(|certificates| !certificates.is_empty());
-  let router = crate::server::ServerRouter::build(servers);
   let backend =
     AcceptingConnection::new(connection.clone(), shutdown.clone());
   let builder = h3::server::builder();
@@ -74,8 +74,13 @@ pub(super) async fn handle_h3_connection(
       Ok(Some(resolver)) => {
         let router = router.clone();
         requests.register(async move {
-          match resolver.resolve_request().await {
-            Ok((request, stream)) => {
+          match tokio::time::timeout(
+            header_deadline.duration(),
+            resolver.resolve_request(),
+          )
+          .await
+          {
+            Ok(Ok((request, stream))) => {
               handle_h3_stream(
                 request,
                 stream,
@@ -86,7 +91,12 @@ pub(super) async fn handle_h3_connection(
               )
               .await
             }
-            Err(error) => warn!("Failed to resolve request: {error}"),
+            Ok(Err(error)) => {
+              warn!("Failed to resolve request: {error}")
+            }
+            Err(_) => warn!(
+              "H3 request headers deadline exceeded from {client_addr}"
+            ),
           }
         });
       }

@@ -34,6 +34,23 @@ fn test_format_text_basic() {
 }
 
 #[test]
+fn test_format_entry_brackets_ipv6_endpoints() {
+  let mut entry = make_entry();
+  entry.client_ip = "::1".into();
+  entry.server_ip = "2001:db8::1".into();
+  for format in [LogFormat::Text, LogFormat::Json] {
+    let output = String::from_utf8(
+      crate::plugins::access_log::formatter::format_entry(
+        &entry, format,
+      ),
+    )
+    .unwrap();
+    assert!(output.contains("[::1]:12345"));
+    assert!(output.contains("[2001:db8::1]:8080"));
+  }
+}
+
+#[test]
 fn test_format_text_with_extensions() {
   let mut entry = make_entry();
   entry

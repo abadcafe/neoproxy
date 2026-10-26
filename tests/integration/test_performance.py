@@ -267,9 +267,9 @@ class TestPerformance:
                 except OSError:
                     failures += 1
 
-            # Allow some failures due to rapid cycling
-            failure_rate = failures / num_cycles
-            assert failure_rate < 0.1, f"Failure rate {failure_rate:.2%} is too high"
+            assert failures == 0, (
+                f"{failures}/{num_cycles} rapid connection cycles failed"
+            )
 
         finally:
             if proxy_proc:
@@ -374,14 +374,10 @@ class TestPerformance:
             )
 
             # Verify results
-            successful = [r for r in results if r[1]]
-            success_rate = len(successful) / num_connections
-
-            # All connections should succeed
-            assert success_rate >= 0.99, (
-                f"Success rate {success_rate:.2%} is below 99% for 1000 concurrent"
-                + " connections"
-            )
+            assert len(results) == num_connections
+            assert all(success for _, success in results), [
+                result for result in results if not result[1]
+            ]
 
         finally:
             if proxy_proc:

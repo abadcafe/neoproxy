@@ -1,8 +1,8 @@
 //! module: proxy_status
 //! responsibilities: serialize Proxy-Status fields at a proxy boundary
 //! public operations: build_proxy_status_error,
-//! build_proxy_status_with_status, append_proxy_status data entities:
-//! none tests: proxy_status_tests.rs
+//! build_proxy_status_with_status, append_proxy_status,
+//! take_proxy_status data entities: none tests: proxy_status_tests.rs
 
 /// Build a Proxy-Status header value with an error parameter.
 pub(crate) fn build_proxy_status_error(
@@ -55,6 +55,32 @@ pub(crate) fn append_proxy_status(
         .unwrap_or_else(|_| new_entry.clone())
     }
     _ => new_entry.clone(),
+  }
+}
+
+/// Consume every field line as one ordered Structured Fields list.
+pub(crate) fn take_proxy_status(
+  headers: &mut http::HeaderMap,
+) -> Option<http::HeaderValue> {
+  let mut combined = Vec::new();
+  for field in headers.get_all("proxy-status") {
+    if field.as_bytes().is_empty() {
+      continue;
+    }
+    if !combined.is_empty() {
+      combined.extend_from_slice(b", ");
+    }
+    combined.extend_from_slice(field.as_bytes());
+  }
+  headers.remove("proxy-status");
+  if combined.is_empty() {
+    None
+  } else {
+    Some(
+      http::HeaderValue::from_bytes(&combined).expect(
+        "joining valid field lines preserves field value syntax",
+      ),
+    )
   }
 }
 

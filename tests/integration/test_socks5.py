@@ -201,8 +201,7 @@ class TestSocks5BasicConnection:
         TC-S5-003: Password authentication failure
 
         Test that SOCKS5 connection fails with wrong credentials.
-        Subnegotiation finishes so the HTTP adapter can obtain the target.
-        The service rejects invalid credentials when processing CONNECT.
+        The server rejects credentials during RFC 1929 subnegotiation.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
@@ -229,11 +228,7 @@ class TestSocks5BasicConnection:
 
                 status = socks5_handshake_password(sock, "testuser", "wrongpass")
                 assert isinstance(status, AuthReply)
-                assert status.status is AuthStatus.SUCCESS
-                reply = socks5_connect_ipv4(sock, "127.0.0.1", get_unique_port())
-                assert isinstance(reply, CommandReply)
-                assert reply.code is not ReplyCode.SUCCESS
-                assert reply.code is ReplyCode.CONNECTION_NOT_ALLOWED
+                assert status.status is AuthStatus.FAILURE
                 assert sock.recv(1) == b""
 
             finally:

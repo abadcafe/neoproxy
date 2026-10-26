@@ -10,7 +10,13 @@ use crate::cli::CmdOpt;
 use crate::config::{Config, ConfigErrorCollector};
 use crate::shutdown::ShutdownHandle;
 
+mod address_race;
+#[cfg(test)]
+mod address_race_tests;
 mod auth;
+mod authentication;
+#[cfg(test)]
+mod authentication_tests;
 mod certificate;
 #[cfg(test)]
 mod certificate_tests;

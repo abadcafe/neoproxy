@@ -1,3 +1,6 @@
+mod quic_connect;
+#[cfg(test)]
+mod quic_connect_tests;
 mod upload;
 use std::future::Future;
 use std::pin::Pin;
@@ -13,7 +16,7 @@ use tracing::{info, warn};
 use upload::Upload;
 
 use super::protocol::{ClientProtocol, ConnectResult};
-use crate::context::{RequestContext, get_server_id};
+use crate::context::RequestContext;
 use crate::http_message::{
   RequestBody, Response, ResponseBody, build_error_response,
 };
@@ -22,9 +25,6 @@ use crate::plugins::http_upstream::error::{
 };
 use crate::plugins::http_upstream::target_parser::{
   ConnectTarget, ForwardTarget,
-};
-use crate::proxy_status::{
-  append_proxy_status, build_proxy_status_with_status,
 };
 use crate::tracker::StreamTracker;
 
@@ -55,9 +55,10 @@ impl Http3AddressState {
       && self.send_request.is_some()
   }
 }
-use super::address_resolution::resolve_address;
+use super::address_resolution::resolve_addresses;
 use super::protocol::QuicConfig;
-use super::proxy_auth::{apply_proxy_auth, consume_proxy_auth_headers};
+use super::proxy_auth::apply_proxy_auth;
+use super::response::forward_response;
 
 // ============================================================================
 // Connection Establishment (H3)
@@ -170,8 +171,8 @@ async fn create_quic_connection(
   }
   cli_config.transport_config(Arc::new(transport));
 
-  let addr =
-    tokio::time::timeout(dns_timeout, resolve_address(address))
+  let addresses =
+    tokio::time::timeout(dns_timeout, resolve_addresses(address))
       .await
       .map_err(|_| {
         UpstreamError::DnsError(format!(
@@ -179,37 +180,17 @@ async fn create_quic_connection(
         ))
       })?
       .map_err(classify_quic_error)?;
-  let bind = std::net::SocketAddr::new(
-    if addr.is_ipv4() {
-      std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
-    } else {
-      std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
-    },
-    0,
-  );
-  let mut cli_endpoint =
-    quinn::Endpoint::client(bind).map_err(|error| {
-      UpstreamError::ProxyInternalError(format!(
-        "failed to create QUIC endpoint: {error}"
-      ))
-    })?;
-  cli_endpoint.set_default_client_config(cli_config);
   let host: &str = hostname.unwrap_or_else(|| {
     address.split_at(address.rfind(':').unwrap_or(address.len())).0
   });
   let host = host.trim_start_matches('[').trim_end_matches(']');
-  let connecting = cli_endpoint
-    .connect(addr, host)
-    .map_err(|e| classify_quic_error(e.into()))?;
-  let conn = tokio::time::timeout(tls_handshake_timeout, async {
-    connecting.await.map_err(|e| classify_quic_error(e.into()))
-  })
-  .await
-  .map_err(|_| {
-    UpstreamError::ConnectionTimeout(format!(
-      "QUIC handshake with {address} timed out"
-    ))
-  })??;
+  let conn = quic_connect::connect(
+    addresses,
+    host,
+    cli_config,
+    tls_handshake_timeout,
+  )
+  .await?;
 
   info!("QUIC connection established to {address}");
   Ok(conn)
@@ -288,49 +269,12 @@ pub(super) async fn chain_forward_http3(
     proxy_resp.status().as_str().to_string(),
   );
 
-  let (resp_parts, _) = proxy_resp.into_parts();
-  let mut resp_headers = resp_parts.headers;
-  crate::hop_headers::strip_connection_headers(&mut resp_headers);
-  consume_proxy_auth_headers(&mut resp_headers);
-
-  let upstream_ps = resp_headers
-    .get(http::header::HeaderName::from_static("proxy-status"))
-    .cloned();
-  resp_headers
-    .remove(http::header::HeaderName::from_static("proxy-status"));
-
-  let mut resp = http::Response::builder().status(resp_parts.status);
-  for (name, value) in resp_headers.iter() {
-    resp = resp.header(name, value);
-  }
-
-  if let Some(ref id) = get_server_id(ctx) {
-    let our_entry =
-      build_proxy_status_with_status(id, resp_parts.status.as_u16());
-    resp = resp.header(
-      http::header::HeaderName::from_static("proxy-status"),
-      append_proxy_status(upstream_ps.as_ref(), &our_entry),
-    );
-  } else if let Some(ps) = upstream_ps {
-    resp = resp.header(
-      http::header::HeaderName::from_static("proxy-status"),
-      ps,
-    );
-  }
-
-  let resp_body =
-    ResponseBody::new(H3ResponseBody::new(stream, upload));
-
-  match resp.body(resp_body) {
-    Ok(r) => r,
-    Err(e) => {
-      warn!("http_upstream: failed to build H3 response: {e}");
-      build_error_response(
-        http::StatusCode::BAD_GATEWAY,
-        "Failed to build response",
-      )
-    }
-  }
+  let (parts, ()) = proxy_resp.into_parts();
+  forward_response(
+    parts,
+    ResponseBody::new(H3ResponseBody::new(stream, upload)),
+    ctx,
+  )
 }
 
 type H3ClientRequestStream =
@@ -400,7 +344,8 @@ impl Body for H3ResponseBody {
         H3ResponseBodyState::Trailers => {
           match this.stream.poll_recv_trailers(cx) {
             Poll::Pending => return Poll::Pending,
-            Poll::Ready(Ok(Some(trailers))) => {
+            Poll::Ready(Ok(Some(mut trailers))) => {
+              crate::hop_headers::strip_trailer_headers(&mut trailers);
               this.state = H3ResponseBodyState::Done;
               return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
             }
@@ -522,14 +467,12 @@ impl ClientProtocol for Http3Client {
           UpstreamError::ConnectionTerminated(e.to_string())
         })?;
 
-      let resp = stream.recv_response().await.map_err(|e| {
+      let mut resp = stream.recv_response().await.map_err(|e| {
         UpstreamError::ConnectionTerminated(e.to_string())
       })?;
 
-      let upstream_proxy_status = resp
-        .headers()
-        .get(::http::header::HeaderName::from_static("proxy-status"))
-        .cloned();
+      let upstream_proxy_status =
+        crate::proxy_status::take_proxy_status(resp.headers_mut());
 
       // RFC 9110 §9.3.6: every 2xx establishes a CONNECT tunnel.
       if !resp.status().is_success() {

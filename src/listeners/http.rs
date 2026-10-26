@@ -14,13 +14,13 @@ use crate::listener::{
 use crate::listeners::http_service::HttpServiceAdaptor;
 use crate::listeners::tcp_accept::{self, AcceptRetryDelay};
 use crate::listeners::tcp_listener_base::TcpListenerBase;
-use crate::server::Server;
+use crate::server::{Server, ServerRouter};
 
 /// HTTP Listener configuration arguments.
 #[derive(Deserialize, Default, Clone, Debug)]
 #[serde(default, deny_unknown_fields)]
 struct HttpListenerArgs {
-  header_read_timeout: super::http_connection::HeaderDeadline,
+  header_read_timeout: super::header_deadline::HeaderDeadline,
   accept_retry_delay: AcceptRetryDelay,
 }
 
@@ -29,10 +29,10 @@ struct HttpListener {
   /// Listening addresses
   addresses: Vec<SocketAddr>,
   /// Server routing table for hostname-based routing
-  server_routing_table: Vec<Server>,
+  server_router: ServerRouter,
   /// Shared TCP listener base for lifecycle management
   base: TcpListenerBase,
-  header_deadline: super::http_connection::HeaderDeadline,
+  header_deadline: super::header_deadline::HeaderDeadline,
   accept_retry_delay: AcceptRetryDelay,
 }
 
@@ -55,7 +55,7 @@ impl HttpListener {
 
     Ok(Self {
       addresses,
-      server_routing_table,
+      server_router: ServerRouter::build(server_routing_table),
       base: TcpListenerBase::new(),
       header_deadline: args.header_read_timeout,
       accept_retry_delay: args.accept_retry_delay,
@@ -82,7 +82,7 @@ impl HttpListener {
     let listener = super::tcp_bind::create_tcp_listener(addr)?;
     let stream_tracker = self.base.stream_tracker();
     let shutdown_handle = self.base.shutdown_handle();
-    let server_routing_table = self.server_routing_table.clone();
+    let server_router = self.server_router.clone();
     let header_deadline = self.header_deadline;
     let accept_retry_delay = self.accept_retry_delay;
     let accepting_fut = async move {
@@ -100,7 +100,7 @@ impl HttpListener {
           Ok((stream, raddr)) => {
             let local_addr = stream.local_addr().ok();
             let svc = HttpServiceAdaptor::new_http(
-              server_routing_table.clone(),
+              server_router.clone(),
               Some(raddr),
               local_addr,
             );

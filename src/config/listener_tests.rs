@@ -58,15 +58,3 @@ fn test_listener_property_values_construction() {
   assert_eq!(props.transport_layer(), TransportLayer::Tcp);
   assert!(props.supports_hostname_routing());
 }
-
-#[test]
-fn test_address_usage_construction() {
-  let usage = AddressUsage {
-    server_name: "server1".to_string(),
-    listener_kind: "http".to_string(),
-    hostnames: vec!["api.example.com".to_string()],
-  };
-  assert_eq!(usage.server_name, "server1");
-  assert_eq!(usage.listener_kind, "http");
-  assert_eq!(usage.hostnames.len(), 1);
-}

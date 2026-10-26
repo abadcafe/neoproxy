@@ -30,6 +30,7 @@ pub(crate) struct WriterRegistry {
 impl WriterRegistry {
   pub(crate) fn new(config: &AccessLogPluginConfig) -> Result<Self> {
     let mut names = std::collections::HashSet::new();
+    let mut paths = std::collections::HashSet::new();
     for writer in &config.writers {
       ensure!(
         names.insert(&writer.path_prefix),
@@ -71,6 +72,22 @@ impl WriterRegistry {
       ensure!(
         !path.is_dir(),
         "writer path is a directory: {}",
+        path.display()
+      );
+      let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+      let filename = path.file_name().ok_or_else(|| {
+        anyhow::anyhow!(
+          "writer path has no file name: {}",
+          path.display()
+        )
+      })?;
+      let canonical = std::fs::canonicalize(parent)?.join(filename);
+      ensure!(
+        paths.insert(canonical),
+        "multiple writers own the same log path: {}",
         path.display()
       );
     }

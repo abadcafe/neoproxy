@@ -86,7 +86,9 @@ pub(crate) fn build_request_context(
 pub(crate) fn get_server_id(ctx: &RequestContext) -> Option<String> {
   let ip = ctx.get(KEY_SERVER_IP)?;
   let port = ctx.get(KEY_SERVER_PORT)?;
-  Some(format!("{ip}:{port}"))
+  let ip: std::net::IpAddr = ip.parse().ok()?;
+  let port: u16 = port.parse().ok()?;
+  Some(SocketAddr::new(ip, port).to_string())
 }
 
 impl Default for RequestContext {

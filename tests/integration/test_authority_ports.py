@@ -17,7 +17,7 @@ from aioquic.quic.connection import QuicConnection
 from aioquic.quic.events import QuicEvent
 
 from tests.fixtures.certificates import generate_test_certificates
-from tests.fixtures.http3_client import perform_h3_request_with_custom_authority
+from tests.fixtures.h3_request import perform_h3_request_with_custom_authority
 from tests.fixtures.http_configuration import create_test_config
 from tests.fixtures.ports import (
     get_unique_port,

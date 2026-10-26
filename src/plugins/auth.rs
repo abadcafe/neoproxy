@@ -94,7 +94,10 @@ impl AuthPlugin {
           );
         }
         let auth = UserPasswordAuth::from_users(&config.users);
-        Ok(Layer::new(AuthLayer { auth }))
+        Ok(Layer::with_authentication(
+          AuthLayer { auth: auth.clone() },
+          std::sync::Arc::new(auth),
+        ))
       });
 
     let layer_builders =

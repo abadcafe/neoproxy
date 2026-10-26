@@ -88,6 +88,17 @@ fn test_get_server_id_returns_ip_port() {
 }
 
 #[test]
+fn test_get_server_id_brackets_ipv6_address() {
+  let peer = "[::1]:54321".parse().unwrap();
+  let local = "[2001:db8::1]:8080".parse().unwrap();
+  let ctx = build_request_context(&peer, &local, "proxy");
+  assert_eq!(
+    get_server_id(&ctx).as_deref(),
+    Some("[2001:db8::1]:8080")
+  );
+}
+
+#[test]
 fn test_get_server_id_missing_ip() {
   let ctx = RequestContext::new();
   ctx.insert(KEY_SERVER_PORT, "8080");

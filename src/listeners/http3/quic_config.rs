@@ -34,6 +34,9 @@ pub(super) const H3_NO_ERROR_CODE: u32 = 0x100;
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Http3ListenerArgs {
+  #[serde(default)]
+  pub(super) header_read_timeout:
+    crate::listeners::header_deadline::HeaderDeadline,
   /// QUIC protocol parameters (optional)
   #[serde(default)]
   pub(super) quic: Option<QuicConfigArgs>,

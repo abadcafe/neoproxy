@@ -22,9 +22,22 @@ pub(super) struct Upload {
   result: oneshot::Receiver<Result<(), UpstreamError>>,
 }
 
+struct RequestWriter {
+  stream: h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
+  finished: bool,
+}
+
+impl Drop for RequestWriter {
+  fn drop(&mut self) {
+    if !self.finished {
+      self.stream.stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
+    }
+  }
+}
+
 impl Upload {
   pub(super) fn start(
-    mut stream: h3::client::RequestStream<
+    stream: h3::client::RequestStream<
       h3_quinn::SendStream<Bytes>,
       Bytes,
     >,
@@ -32,6 +45,9 @@ impl Upload {
     tracker: &StreamTracker,
   ) -> Self {
     let (sender, result) = oneshot::channel();
+    // Construct before spawning: even cancellation before the first
+    // task poll must reset instead of finishing a truncated request.
+    let mut writer = RequestWriter { stream, finished: false };
     let task = tracker.register(async move {
       let result = async {
         while let Some(frame) = body.frame().await {
@@ -40,7 +56,7 @@ impl Upload {
           })?;
           match frame.into_data() {
             Ok(data) => {
-              stream.send_data(data).await.map_err(|error| {
+              writer.stream.send_data(data).await.map_err(|error| {
                 UpstreamError::ConnectionTerminated(error.to_string())
               })?
             }
@@ -49,21 +65,23 @@ impl Upload {
                 crate::hop_headers::strip_trailer_headers(
                   &mut trailers,
                 );
-                stream.send_trailers(trailers).await.map_err(
+                writer.stream.send_trailers(trailers).await.map_err(
                   |error| {
                     UpstreamError::ConnectionTerminated(
                       error.to_string(),
                     )
                   },
                 )?;
-                return Ok(());
+                break;
               }
             }
           }
         }
-        stream.finish().await.map_err(|error| {
+        writer.stream.finish().await.map_err(|error| {
           UpstreamError::ConnectionTerminated(error.to_string())
-        })
+        })?;
+        writer.finished = true;
+        Ok(())
       }
       .await;
       let _ = sender.send(result);

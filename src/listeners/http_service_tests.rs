@@ -17,7 +17,7 @@
 use std::net::SocketAddr;
 
 use crate::listeners::http_service::HttpServiceAdaptor;
-use crate::server::Server;
+use crate::server::{Server, ServerRouter};
 
 fn test_servers() -> Vec<Server> {
   vec![Server {
@@ -47,14 +47,21 @@ fn multi_servers() -> Vec<Server> {
 
 #[test]
 fn test_http_service_adaptor_new_http_succeeds() {
-  let _adaptor =
-    HttpServiceAdaptor::new_http(test_servers(), None, None);
+  let _adaptor = HttpServiceAdaptor::new_http(
+    ServerRouter::build(test_servers()),
+    None,
+    None,
+  );
 }
 
 #[test]
 fn test_http_service_adaptor_new_https_succeeds() {
-  let _adaptor =
-    HttpServiceAdaptor::new_https(test_servers(), None, None, false);
+  let _adaptor = HttpServiceAdaptor::new_https(
+    ServerRouter::build(test_servers()),
+    None,
+    None,
+    false,
+  );
 }
 
 #[test]
@@ -62,7 +69,7 @@ fn test_http_service_adaptor_new_http_with_addrs() {
   let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
   let local: SocketAddr = "127.0.0.1:8080".parse().unwrap();
   let _adaptor = HttpServiceAdaptor::new_http(
-    test_servers(),
+    ServerRouter::build(test_servers()),
     Some(peer),
     Some(local),
   );
@@ -70,12 +77,19 @@ fn test_http_service_adaptor_new_http_with_addrs() {
 
 #[test]
 fn test_http_service_adaptor_new_https_with_client_cert() {
-  let _adaptor =
-    HttpServiceAdaptor::new_https(test_servers(), None, None, true);
+  let _adaptor = HttpServiceAdaptor::new_https(
+    ServerRouter::build(test_servers()),
+    None,
+    None,
+    true,
+  );
 }
 
 #[test]
 fn test_http_service_adaptor_new_http_multi_servers() {
-  let _adaptor =
-    HttpServiceAdaptor::new_http(multi_servers(), None, None);
+  let _adaptor = HttpServiceAdaptor::new_http(
+    ServerRouter::build(multi_servers()),
+    None,
+    None,
+  );
 }

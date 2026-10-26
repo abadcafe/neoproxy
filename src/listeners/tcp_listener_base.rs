@@ -20,7 +20,7 @@ use anyhow::Result;
 use tokio::task;
 use tokio::task::JoinError;
 
-use super::LISTENER_SHUTDOWN_TIMEOUT;
+use crate::shutdown::LISTENER_SHUTDOWN_TIMEOUT;
 use crate::tracker::StreamTracker;
 
 /// Shared base for TCP-based listeners.

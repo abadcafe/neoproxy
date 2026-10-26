@@ -39,6 +39,7 @@ impl DirectClient {
     );
     connector.set_connect_timeout(Some(config.connect_timeout));
     let client = Client::builder(hyper_util::rt::TokioExecutor::new())
+      .pool_timer(hyper_util::rt::TokioTimer::new())
       .pool_max_idle_per_host(config.pool_config.max_idle_per_host)
       .pool_idle_timeout(config.pool_config.idle_timeout)
       .build(connector);

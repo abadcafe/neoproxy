@@ -9,17 +9,30 @@ use tower::Service;
 
 use crate::plugins::http_upstream::error::DnsResolveError;
 
-pub(crate) async fn resolve_address(
-  address: &str,
-) -> Result<SocketAddr> {
-  resolve_addresses(address)
-    .await?
-    .into_iter()
-    .next()
-    .ok_or_else(|| {
-      anyhow!("address '{address}' resolved to no addresses")
-    })
-    .with_context(|| format!("address '{address}'"))
+// System getaddrinfo cannot be cancelled after entering libc. Keep its
+// permit inside the blocking task even when the caller times out, so
+// abandoned lookups cannot exhaust Tokio's blocking pool or queue.
+static DNS_CAPACITY: tokio::sync::Semaphore =
+  tokio::sync::Semaphore::const_new(64);
+
+async fn lookup<T: std::net::ToSocketAddrs + Send + 'static>(
+  address: T,
+) -> std::io::Result<Vec<SocketAddr>> {
+  let permit =
+    DNS_CAPACITY.acquire().await.expect("DNS capacity is never closed");
+  let lookup = tokio::task::spawn_blocking(move || {
+    let _permit = permit;
+    address.to_socket_addrs().map(|addresses| addresses.collect())
+  });
+  match lookup.await {
+    Ok(result) => result,
+    Err(error) if error.is_panic() => {
+      std::panic::resume_unwind(error.into_panic())
+    }
+    Err(error) => {
+      Err(std::io::Error::new(std::io::ErrorKind::Interrupted, error))
+    }
+  }
 }
 
 pub(crate) async fn resolve_addresses(
@@ -29,15 +42,11 @@ pub(crate) async fn resolve_addresses(
     return Ok(vec![addr]);
   }
 
-  let addresses: Vec<SocketAddr> = tokio::net::lookup_host(address)
-    .await
-    .map_err(|e| {
-      anyhow::Error::from(DnsResolveError(e)).context(format!(
-        "address '{address}' is neither IP:port nor resolvable \
-         hostname"
-      ))
-    })?
-    .collect();
+  let addresses = lookup(address.to_owned()).await.map_err(|e| {
+    anyhow::Error::from(DnsResolveError(e)).context(format!(
+      "address '{address}' is neither IP:port nor resolvable hostname"
+    ))
+  })?;
 
   if addresses.is_empty() {
     return Err(anyhow!(
@@ -82,11 +91,7 @@ impl Service<Name> for TimeoutResolver {
     let timeout = self.timeout;
     let host = name.to_string();
     Box::pin(async move {
-      let lookup = tokio::task::spawn_blocking(move || {
-        std::net::ToSocketAddrs::to_socket_addrs(&(&*host, 0))
-          .map(|iter| iter.collect::<Vec<_>>().into_iter())
-      });
-      tokio::time::timeout(timeout, lookup)
+      tokio::time::timeout(timeout, lookup((host, 0)))
         .await
         .map_err(|_| {
           std::io::Error::new(
@@ -94,13 +99,7 @@ impl Service<Name> for TimeoutResolver {
             "DNS resolve timed out",
           )
         })?
-        .map_err(|e| {
-          if e.is_cancelled() {
-            std::io::Error::new(std::io::ErrorKind::Interrupted, e)
-          } else {
-            std::io::Error::other(e)
-          }
-        })?
+        .map(|addresses| addresses.into_iter())
     })
   }
 }

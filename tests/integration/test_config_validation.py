@@ -765,9 +765,6 @@ listeners:
 - name: http_a
   kind: http
   addresses: ["127.0.0.1:{http_port}"]
-- name: http_b
-  kind: http
-  addresses: ["127.0.0.1:{http_port}"]
 
 servers:
 - name: server_a
@@ -776,7 +773,7 @@ servers:
   service: echo
 - name: server_b
   hostnames: ["api.example.com"]
-  listeners: ["http_b"]
+  listeners: ["http_a"]
   service: echo
 """
         returncode, _, stderr = run_neoproxy_with_config(config)
@@ -808,9 +805,6 @@ listeners:
 - name: http_a
   kind: http
   addresses: ["127.0.0.1:{http_port}"]
-- name: http_b
-  kind: http
-  addresses: ["127.0.0.1:{http_port}"]
 
 servers:
 - name: server_a
@@ -819,7 +813,7 @@ servers:
   service: echo
 - name: server_b
   hostnames: ["api.example.com"]
-  listeners: ["http_b"]
+  listeners: ["http_a"]
   service: echo
 """
         returncode, _, stderr = run_neoproxy_with_config(config)
@@ -848,9 +842,6 @@ listeners:
 - name: http_a
   kind: http
   addresses: ["127.0.0.1:{http_port}"]
-- name: http_b
-  kind: http
-  addresses: ["127.0.0.1:{http_port}"]
 
 servers:
 - name: server_a
@@ -859,7 +850,7 @@ servers:
   service: echo
 - name: server_b
   hostnames: ["*.example.com"]
-  listeners: ["http_b"]
+  listeners: ["http_a"]
   service: echo
 """
         returncode, _, stderr = run_neoproxy_with_config(config)
@@ -895,9 +886,6 @@ listeners:
 - name: socks_a_main
   kind: socks5
   addresses: ["127.0.0.1:{socks_port}"]
-- name: socks_b_main
-  kind: socks5
-  addresses: ["127.0.0.1:{socks_port}"]
 
 servers:
 - name: socks_a
@@ -906,7 +894,7 @@ servers:
   service: direct
 - name: socks_b
   hostnames: []
-  listeners: ["socks_b_main"]
+  listeners: ["socks_a_main"]
   service: direct
 """
         returncode, _, stderr = run_neoproxy_with_config(config)

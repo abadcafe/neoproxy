@@ -118,3 +118,27 @@ fn test_join_cookie_headers_preserves_all_cookie_pairs() {
   assert_eq!(headers[http::header::COOKIE], "a=1; b=2");
   assert_eq!(headers.get_all(http::header::COOKIE).iter().count(), 1);
 }
+
+#[test]
+fn test_strip_trailer_headers_removes_framing_routing_and_authentication()
+ {
+  let mut trailers = http::HeaderMap::new();
+  for name in [
+    "content-length",
+    "host",
+    "authorization",
+    "www-authenticate",
+    "content-encoding",
+    "content-type",
+    "content-range",
+  ] {
+    trailers.insert(
+      http::HeaderName::from_static(name),
+      "forbidden".parse().unwrap(),
+    );
+  }
+  trailers.insert("digest", "sha-256=value".parse().unwrap());
+  crate::hop_headers::strip_trailer_headers(&mut trailers);
+  assert_eq!(trailers.len(), 1);
+  assert!(trailers.contains_key("digest"));
+}

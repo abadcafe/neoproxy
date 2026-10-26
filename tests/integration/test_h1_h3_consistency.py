@@ -642,7 +642,7 @@ class TestHTTP3AuthorityHostMismatch:
         """
         import asyncio
 
-        from tests.fixtures.http3_client import perform_h3_request_with_custom_authority
+        from tests.fixtures.h3_request import perform_h3_request_with_custom_authority
 
         temp_dir = tempfile.mkdtemp(prefix="neoproxy_h3_match_test_")
         http3_port = get_unique_port()
@@ -750,7 +750,7 @@ class TestHTTP3AuthorityHostMismatch:
         """
         import asyncio
 
-        from tests.fixtures.http3_client import perform_h3_request_with_custom_authority
+        from tests.fixtures.h3_request import perform_h3_request_with_custom_authority
 
         temp_dir = tempfile.mkdtemp(prefix="neoproxy_h3_mismatch_test_")
         http3_port = get_unique_port()

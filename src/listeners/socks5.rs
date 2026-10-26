@@ -161,6 +161,7 @@ impl Socks5Listener {
               let handshake_result = match perform_handshake(
                 stream,
                 handshake_timeout,
+                &service.authentication(),
               )
               .await
               {
@@ -189,6 +190,12 @@ impl Socks5Listener {
                       tracing::warn!(
                         "SOCKS5 method not acceptable from {}",
                         peer_addr
+                      );
+                    }
+                    HandshakeError::InvalidCredentials => {
+                      tracing::warn!(
+                        "SOCKS5 authentication rejected from \
+                         {peer_addr}"
                       );
                     }
                     HandshakeError::ClientDisconnected => {
@@ -293,9 +300,8 @@ impl Socks5Listener {
                 }
               };
 
-              // The complete target is now available. Carry credentials
-              // unchanged into the HTTP service; do not validate them
-              // in the protocol adapter. Typed fields
+              // Carry verified credentials into the HTTP middleware.
+              // Typed fields
               // also preserve SOCKS5 usernames containing
               // ':' that HTTP Basic cannot encode without
               // changing the username/password boundary.

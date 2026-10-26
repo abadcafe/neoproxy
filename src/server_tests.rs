@@ -7,6 +7,20 @@ use tower::Service;
 
 use crate::server::{Server, ServerRouter, placeholder_service};
 
+#[test]
+fn test_route_ipv6_uses_address_identity_instead_of_spelling() {
+  let router = ServerRouter::build(vec![Server {
+    hostnames: vec!["2001:db8::1".into()],
+    service: placeholder_service(),
+    service_name: "ipv6".into(),
+    tls: None,
+  }]);
+  assert_eq!(
+    router.route(Some("[2001:0db8:0:0::1]")).unwrap().service_name,
+    "ipv6"
+  );
+}
+
 // ============== Hostname Matching Tests ==============
 
 // Note: matches_hostname is private, tested indirectly through

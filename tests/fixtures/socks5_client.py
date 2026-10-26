@@ -84,9 +84,8 @@ def socks5_handshake_password(
 ) -> AuthenticationResult:
     """Return method selection, subnegotiation status, or an explicit error.
 
-    A successful subnegotiation reply from NeoProxy does not prove the
-    credentials were accepted: its SOCKS-to-HTTP conversion deliberately
-    defers authentication to the subsequent CONNECT operation.
+    NeoProxy verifies credentials against its composed service policy
+    before reporting RFC 1929 authentication success.
     """
     try:
         user_bytes = username.encode("utf-8")

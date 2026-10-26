@@ -14,7 +14,15 @@ pub(crate) fn authority_host_mismatch(
   authority: &str,
   host: &str,
 ) -> bool {
-  !authority.eq_ignore_ascii_case(host)
+  let Ok(authority) = authority.parse::<http::uri::Authority>() else {
+    return true;
+  };
+  let Ok(host) = host.parse::<http::uri::Authority>() else {
+    return true;
+  };
+  crate::hostname::normalize(authority.host())
+    != crate::hostname::normalize(host.host())
+    || authority.port_u16() != host.port_u16()
 }
 
 pub(crate) fn validate_and_route<B>(

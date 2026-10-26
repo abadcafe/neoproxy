@@ -13,10 +13,8 @@ from typing import Literal
 import pytest
 
 from tests.fixtures.certificates import generate_test_certificates
-from tests.fixtures.http3_client import (
-    perform_h3_connect_test_full,
-    perform_h3_request_test,
-)
+from tests.fixtures.h3_request import perform_h3_request_test
+from tests.fixtures.h3_tunnel import perform_h3_connect_test_full
 from tests.fixtures.ports import (
     get_unique_port,
     wait_for_proxy,

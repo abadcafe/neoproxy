@@ -1,10 +1,11 @@
 //! Shared authentication types.
 //!
 //! Contains credential types and verification for request middleware.
-//! Protocol adapters carry credentials into the HTTP request pipeline;
-//! they do not extract authentication policy from Service.
+//! Protocol adapters verify credentials through the composed service's
+//! public authentication contract and carry them into HTTP middleware.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -73,13 +74,19 @@ fn verify_password(
 /// When users are configured, authentication is REQUIRED.
 #[derive(Clone)]
 pub(crate) struct UserPasswordAuth {
-  users: Option<HashMap<String, String>>,
+  users: Option<Arc<HashMap<String, String>>>,
+}
+
+impl crate::authentication::CredentialVerifier for UserPasswordAuth {
+  fn accepts(&self, username: &str, password: &str) -> bool {
+    self.verify_credentials(username, password).is_ok()
+  }
 }
 
 impl std::fmt::Debug for UserPasswordAuth {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("UserPasswordAuth")
-      .field("users", &self.users.as_ref().map(Redacted))
+      .field("users", &self.users.as_deref().map(Redacted))
       .finish()
   }
 }
@@ -105,7 +112,7 @@ impl UserPasswordAuth {
         .iter()
         .map(|u| (u.username().to_string(), u.password().to_string()))
         .collect();
-      Self { users: Some(map) }
+      Self { users: Some(Arc::new(map)) }
     }
   }
 

@@ -4,9 +4,9 @@ use super::document::Config;
 use super::error::{ConfigError, ConfigErrorCollector};
 use super::listener::ListenerPropertiesProvider;
 use super::listener_validation::{
-  validate_address_conflicts, validate_hostname,
-  validate_hostname_conflicts, validate_hostname_routing_compatibility,
-  validate_listener_addresses, validate_listener_references,
+  validate_hostname, validate_hostname_conflicts,
+  validate_hostname_routing_compatibility, validate_listener_addresses,
+  validate_listener_references,
 };
 use super::service::validate_service;
 use super::tls::validate_server_tls;
@@ -108,9 +108,6 @@ pub(super) fn validate_config(
     collector,
     listener_manager,
   );
-
-  // Validate address conflicts across all servers
-  validate_address_conflicts(config, collector, listener_manager);
 
   // Validate hostname conflicts across servers
   validate_hostname_conflicts(config, collector, listener_manager);

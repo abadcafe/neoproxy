@@ -187,3 +187,18 @@ fn validate_unique_names<'a>(
   }
   Ok(())
 }
+
+impl Config {
+  /// Compile TLS before any worker starts or listener binds. The
+  /// compiled snapshots are shared through the cloned configuration.
+  pub(crate) fn compile_tls(&self) -> Result<()> {
+    for server in self.servers() {
+      if let Some(tls) = server.tls() {
+        let _ = tls.compile(server.hostnames()).with_context(|| {
+          format!("server '{}' TLS configuration", server.name())
+        })?;
+      }
+    }
+    Ok(())
+  }
+}

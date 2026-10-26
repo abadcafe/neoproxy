@@ -17,6 +17,7 @@ from tests.fixtures.ports import (
     wait_for_udp_port_bound,
 )
 from tests.fixtures.proxy_process import start_proxy, terminate_process
+from tests.fixtures.stream_cleanup import close_writer
 
 type HalfClose = Literal["upload", "download"]
 
@@ -45,8 +46,7 @@ async def _exercise_half_close(port: int, half_close: HalfClose) -> None:
                 assert await reader.read() == upload
             finished.set()
         finally:
-            writer.close()
-            await writer.wait_closed()
+            await close_writer(writer)
 
     async with asyncio.timeout(12), asyncio.TaskGroup() as tasks:
 
@@ -81,8 +81,7 @@ async def _exercise_half_close(port: int, half_close: HalfClose) -> None:
                     assert await reader.read() == download
                 _ = await finished.wait()
             finally:
-                writer.close()
-                await writer.wait_closed()
+                await close_writer(writer)
 
 
 @pytest.mark.parametrize("half_close", ["upload", "download"])

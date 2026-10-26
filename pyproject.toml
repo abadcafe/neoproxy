@@ -10,6 +10,7 @@ dev = [
     "requests",
     "PyYAML",
     "aioquic",
+    "pylsqpack>=0.3",
     "cryptography",
     "pytest-timeout>=2.4.0",
     "ruff>=0.17.2",

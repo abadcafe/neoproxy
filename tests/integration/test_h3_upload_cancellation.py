@@ -16,6 +16,7 @@ from tests.fixtures.certificates import generate_test_certificates
 from tests.fixtures.h3_protocol import H3ProtocolBase
 from tests.fixtures.ports import get_unique_port, wait_for_proxy
 from tests.fixtures.proxy_process import managed_processes
+from tests.fixtures.stream_cleanup import close_writer
 
 
 async def verify_upload_cancellation(directory: Path) -> None:
@@ -91,8 +92,7 @@ servers:
                         assert data
                         response += data
             finally:
-                writer.close()
-                await writer.wait_closed()
+                await close_writer(writer)
             async with asyncio.timeout(2):
                 reset = await resets.get()
                 assert reset.error_code == 0x10C  # H3_REQUEST_CANCELLED

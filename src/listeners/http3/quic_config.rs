@@ -1,3 +1,13 @@
+//! module: listeners::http3::quic_config
+//! responsibility: validate listener QUIC transport parameters
+//! public operations: DEFAULT_MAX_CONCURRENT_BIDI_STREAMS,
+//! DEFAULT_MAX_IDLE_TIMEOUT, DEFAULT_INITIAL_MTU,
+//! DEFAULT_SEND_WINDOW, DEFAULT_RECEIVE_WINDOW, H3_NO_ERROR_CODE,
+//! Http3ListenerArgs, QuicConfigArgs, validate_and_apply_defaults,
+//! QuicConfig
+//! data entities: Http3ListenerArgs, QuicConfigArgs, QuicConfig
+//! tests: quic_config_tests.rs
+
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};

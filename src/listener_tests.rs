@@ -6,9 +6,7 @@ use std::pin::Pin;
 use anyhow::Result;
 
 use crate::config::SerializedArgs;
-use crate::listener::{
-  BuildListener, Listener, ListenerProps, Listening, TransportLayer,
-};
+use crate::listener::{BuildListener, Listener, Listening};
 use crate::server::Server;
 
 fn dummy_builder(
@@ -25,29 +23,6 @@ fn dummy_builder(
     fn stop(&self) {}
   }
   Ok(Listener::new(DummyListener))
-}
-
-// ========== ListenerProps ==========
-
-#[test]
-fn test_listener_props_tcp_with_hostname_routing() {
-  let props = ListenerProps::new(TransportLayer::Tcp, true);
-  assert_eq!(props.transport_layer(), TransportLayer::Tcp);
-  assert!(props.supports_hostname_routing());
-}
-
-#[test]
-fn test_listener_props_tcp_without_hostname_routing() {
-  let props = ListenerProps::new(TransportLayer::Tcp, false);
-  assert_eq!(props.transport_layer(), TransportLayer::Tcp);
-  assert!(!props.supports_hostname_routing());
-}
-
-#[test]
-fn test_listener_props_udp_with_hostname_routing() {
-  let props = ListenerProps::new(TransportLayer::Udp, true);
-  assert_eq!(props.transport_layer(), TransportLayer::Udp);
-  assert!(props.supports_hostname_routing());
 }
 
 // ========== Listening trait ==========

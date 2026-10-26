@@ -3,9 +3,7 @@
 use std::net::SocketAddr;
 
 use crate::context::{
-  KEY_CLIENT_IP, KEY_CLIENT_PORT, KEY_SERVER_IP, KEY_SERVER_PORT,
-  KEY_SERVICE_NAME, RequestContext, build_request_context,
-  get_server_id,
+  RequestContext, build_request_context, get_server_id,
 };
 
 #[test]
@@ -67,23 +65,22 @@ fn test_build_request_context_has_required_keys() {
   let ctx =
     build_request_context(&peer_addr, &local_addr, service_name);
 
-  assert_eq!(ctx.get(KEY_CLIENT_IP), Some("192.168.1.100".to_string()));
-  assert_eq!(ctx.get(KEY_CLIENT_PORT), Some("54321".to_string()));
-  assert_eq!(ctx.get(KEY_SERVER_IP), Some("10.0.0.1".to_string()));
-  assert_eq!(ctx.get(KEY_SERVER_PORT), Some("8080".to_string()));
-  assert_eq!(
-    ctx.get(KEY_SERVICE_NAME),
-    Some("web_service".to_string())
-  );
+  assert_eq!(ctx.get("client.ip"), Some("192.168.1.100".to_string()));
+  assert_eq!(ctx.get("client.port"), Some("54321".to_string()));
+  assert_eq!(ctx.get("server.ip"), Some("10.0.0.1".to_string()));
+  assert_eq!(ctx.get("server.port"), Some("8080".to_string()));
+  assert_eq!(ctx.get("service.name"), Some("web_service".to_string()));
 }
 
 // ============== get_server_id Tests ==============
 
 #[test]
 fn test_get_server_id_returns_ip_port() {
-  let ctx = RequestContext::new();
-  ctx.insert(KEY_SERVER_IP, "10.0.0.1");
-  ctx.insert(KEY_SERVER_PORT, "8080");
+  let ctx = build_request_context(
+    &"127.0.0.1:1234".parse().unwrap(),
+    &"10.0.0.1:8080".parse().unwrap(),
+    "proxy",
+  );
   assert_eq!(get_server_id(&ctx), Some("10.0.0.1:8080".to_string()));
 }
 
@@ -99,17 +96,15 @@ fn test_get_server_id_brackets_ipv6_address() {
 }
 
 #[test]
-fn test_get_server_id_missing_ip() {
-  let ctx = RequestContext::new();
-  ctx.insert(KEY_SERVER_PORT, "8080");
-  assert_eq!(get_server_id(&ctx), None);
-}
-
-#[test]
-fn test_get_server_id_missing_port() {
-  let ctx = RequestContext::new();
-  ctx.insert(KEY_SERVER_IP, "10.0.0.1");
-  assert_eq!(get_server_id(&ctx), None);
+fn test_build_request_context_exposes_typed_connection_metadata() {
+  let peer: SocketAddr = "192.168.1.100:54321".parse().unwrap();
+  let local: SocketAddr = "[::1]:8080".parse().unwrap();
+  let context = build_request_context(&peer, &local, "proxy");
+  let cloned = context.clone();
+  assert_eq!(cloned.client_addr(), Some(peer));
+  assert_eq!(cloned.server_addr(), Some(local));
+  assert_eq!(cloned.service_name(), Some("proxy"));
+  assert_eq!(get_server_id(&cloned).as_deref(), Some("[::1]:8080"));
 }
 
 #[test]

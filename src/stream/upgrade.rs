@@ -1,24 +1,17 @@
 //! module: upgrade
 //! responsibilities: transfer negotiated protocol streams to request
 //! handlers public operations: OnUpgrade, UpgradeTrigger,
-//! H3UpgradeTrigger, Socks5UpgradeTrigger, extract_upgrade,
-//! http_status_to_socks5_error data entities: UpgradeReceiver,
+//! extract_upgrade data entities: UpgradeReceiver,
 //! UpgradeFuture, OnUpgrade, UpgradeTrigger
 //! tests: upgrade_tests.rs
 
-mod h3;
-mod socks5;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use anyhow::Result;
-pub(crate) use h3::H3UpgradeTrigger;
 use hyper_util::rt::TokioIo;
-pub(crate) use socks5::{
-  Socks5UpgradeTrigger, http_status_to_socks5_error,
-};
 use tokio::sync::oneshot;
 
 use super::Io;

@@ -516,17 +516,16 @@ class TestCombinedLayers:
 
 
 class TestAccessLogErrorHandling:
-    """Verify access_log layer handles service errors correctly."""
+    """Verify logging preserves error responses produced by the service."""
 
-    def test_access_log_converts_err_to_500(
+    def test_access_log_preserves_upstream_error_response(
         self, proxy_with_config: ProxyWithConfig
     ) -> None:
-        """When inner service returns Err, access_log should convert to 5xx response.
+        """The upstream service owns connection-failure response mapping.
 
-        Uses connect_tcp service targeting an unreachable address (127.0.0.1:1).
-        Port 1 on localhost is not listening, so TcpStream::connect will fail
-        immediately with ConnectionRefused. The access_log layer should catch
-        this error and convert it to an HTTP 5xx response.
+        Its successful Result contains an HTTP 502 response. The logging layer
+        must preserve that response and record its status; actual Err propagation
+        is covered by the logging module's public-interface Rust tests.
         """
         config: ConfigDict = {
             "listeners": [
@@ -586,8 +585,8 @@ class TestAccessLogErrorHandling:
             status_line = response.split(b"\r\n")[0].decode()
             # Extract status code from "HTTP/1.1 502 Bad Gateway"
             status = int(status_line.split()[1]) if len(status_line.split()) >= 2 else 0
-            # Should get a server error (500 or 502), not a crash or hang
-            assert status >= 500, f"Expected 5xx error, got {status}"
+            assert status == 502, f"Expected upstream's 502 response, got {status}"
+            assert b"error=connection_refused" in response
 
             # Verify the proxy is still alive after the error
             assert proxy.process.poll() is None, "Proxy should still be running"

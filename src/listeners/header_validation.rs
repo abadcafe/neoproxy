@@ -44,6 +44,7 @@ pub(crate) fn validate_and_route<B>(
     return Err(bad_request());
   }
   let host_authority = host
+    .filter(|host| !host.is_empty())
     .map(|host| {
       let authority = host
         .parse::<http::uri::Authority>()
@@ -71,7 +72,9 @@ pub(crate) fn validate_and_route<B>(
   // RFC 9112 §3.2.2: absolute-form target replaces the supplied Host.
   let authority =
     normalized_authority.as_ref().or(host_authority.as_ref());
-  if authority.is_none() {
+  let default_target = req.version() == http::Version::HTTP_10
+    || (req.version() == http::Version::HTTP_11 && host == Some(""));
+  if authority.is_none() && !default_target {
     return Err(bad_request());
   }
   router.route(authority.map(http::uri::Authority::host)).ok_or_else(

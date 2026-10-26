@@ -27,11 +27,28 @@ fn configurations() -> (quinn::ServerConfig, quinn::ClientConfig) {
   (server, client)
 }
 
+fn available_address(bind: &str) -> SocketAddr {
+  UdpSocket::bind(bind).unwrap().local_addr().unwrap()
+}
+
+#[tokio::test]
+async fn test_create_quic_endpoint_zero_port_has_exclusive_ownership() {
+  let (config, _) = configurations();
+  let first = create_quic_endpoint(
+    "127.0.0.1:0".parse().unwrap(),
+    config.clone(),
+  )
+  .unwrap();
+  assert!(
+    create_quic_endpoint(first.local_addr().unwrap(), config).is_err()
+  );
+}
+
 #[tokio::test]
 async fn test_create_quic_endpoint_ipv4_workers_bind_same_address() {
   let (config, _) = configurations();
   let first = create_quic_endpoint(
-    "127.0.0.1:0".parse().unwrap(),
+    available_address("127.0.0.1:0"),
     config.clone(),
   )
   .unwrap();
@@ -46,7 +63,7 @@ async fn test_create_quic_endpoint_ipv4_workers_bind_same_address() {
 async fn test_create_quic_endpoint_ipv6_workers_bind_same_address() {
   let (config, _) = configurations();
   let first =
-    create_quic_endpoint("[::1]:0".parse().unwrap(), config.clone())
+    create_quic_endpoint(available_address("[::1]:0"), config.clone())
       .unwrap();
   let second =
     create_quic_endpoint(first.local_addr().unwrap(), config).unwrap();
@@ -77,7 +94,7 @@ async fn test_create_quic_endpoint_close_preserves_other_endpoint_connection()
   tokio::time::timeout(Duration::from_secs(3), async {
     let (server_config, client_config) = configurations();
     let first = create_quic_endpoint(
-      "127.0.0.1:0".parse().unwrap(),
+      available_address("127.0.0.1:0"),
       server_config.clone(),
     )
     .unwrap();

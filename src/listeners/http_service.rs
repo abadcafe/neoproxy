@@ -1,3 +1,11 @@
+//! module: listeners::http_service
+//! responsibility: adapt routed Hyper requests to the service
+//! contract
+//! public operations: ClientCertPolicy, HttpServiceAdaptor,
+//! new_http, new_https
+//! data entities: ClientCertPolicy, HttpServiceAdaptor
+//! tests: http_service_tests.rs
+
 //! Shared HTTP service adaptor for HTTP/HTTPS listeners.
 //!
 //! Provides a unified `hyper::Service` implementation that handles

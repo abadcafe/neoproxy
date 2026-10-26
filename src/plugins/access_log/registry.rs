@@ -84,7 +84,13 @@ impl WriterRegistry {
           path.display()
         )
       })?;
-      let canonical = std::fs::canonicalize(parent)?.join(filename);
+      let canonical = match std::fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+          std::fs::canonicalize(parent)?.join(filename)
+        }
+        Err(error) => return Err(error.into()),
+      };
       ensure!(
         paths.insert(canonical),
         "multiple writers own the same log path: {}",

@@ -1,5 +1,12 @@
 #![forbid(unsafe_code)]
 
+//! module: main
+//! responsibility: coordinate process configuration and worker
+//! ownership
+//! public operations: CLI process entry
+//! data entities: none
+//! tests: tests/integration process contracts
+
 use std::thread;
 
 use anyhow::Result;
@@ -23,6 +30,9 @@ mod certificate_tests;
 mod cli;
 mod config;
 mod context;
+mod h3_response;
+#[cfg(test)]
+mod h3_response_tests;
 mod h3_stream;
 mod hop_headers;
 #[cfg(test)]
@@ -34,9 +44,13 @@ mod http_authority;
 #[cfg(test)]
 mod http_authority_tests;
 mod http_message;
+mod io_stream;
 mod listener;
 mod listeners;
 mod logging;
+mod max_forwards;
+#[cfg(test)]
+mod max_forwards_tests;
 mod plugin;
 #[cfg(test)]
 mod plugin_tests;
@@ -57,6 +71,9 @@ mod shutdown;
 mod stream;
 mod tls;
 mod tracker;
+mod via;
+#[cfg(test)]
+mod via_tests;
 mod worker_shutdown;
 #[cfg(test)]
 mod worker_shutdown_tests;

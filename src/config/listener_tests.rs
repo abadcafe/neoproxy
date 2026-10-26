@@ -58,3 +58,26 @@ fn test_listener_property_values_construction() {
   assert_eq!(props.transport_layer(), TransportLayer::Tcp);
   assert!(props.supports_hostname_routing());
 }
+
+// ========== ListenerPropertyValues ==========
+
+#[test]
+fn test_listener_property_values_tcp_with_hostname_routing() {
+  let props = ListenerPropertyValues::new(TransportLayer::Tcp, true);
+  assert_eq!(props.transport_layer(), TransportLayer::Tcp);
+  assert!(props.supports_hostname_routing());
+}
+
+#[test]
+fn test_listener_property_values_tcp_without_hostname_routing() {
+  let props = ListenerPropertyValues::new(TransportLayer::Tcp, false);
+  assert_eq!(props.transport_layer(), TransportLayer::Tcp);
+  assert!(!props.supports_hostname_routing());
+}
+
+#[test]
+fn test_listener_property_values_udp_with_hostname_routing() {
+  let props = ListenerPropertyValues::new(TransportLayer::Udp, true);
+  assert_eq!(props.transport_layer(), TransportLayer::Udp);
+  assert!(props.supports_hostname_routing());
+}

@@ -1,5 +1,5 @@
 use super::response::forward_response;
-use crate::context::RequestContext;
+use crate::context::build_request_context;
 use crate::http_message::build_empty_response;
 
 #[test]
@@ -16,9 +16,11 @@ fn test_forward_response_preserves_chain_and_consumes_hop_fields() {
   original
     .headers_mut()
     .insert("proxy-authenticate", "Basic".parse().unwrap());
-  let ctx = RequestContext::new();
-  ctx.insert("server.ip", "127.0.0.1");
-  ctx.insert("server.port", 8080);
+  let ctx = build_request_context(
+    &"127.0.0.1:1234".parse().unwrap(),
+    &"127.0.0.1:8080".parse().unwrap(),
+    "proxy",
+  );
   let (parts, body) = original.into_parts();
   let response = forward_response(parts, body, &ctx);
   assert_eq!(response.status(), http::StatusCode::ACCEPTED);

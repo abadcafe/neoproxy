@@ -1,3 +1,13 @@
+//! module: tracker
+//! responsibility: own local asynchronous task lifetimes through
+//! shutdown
+//! public operations: ABORT_DRAIN_TIMEOUT, StreamTracker, new,
+//! register, register_connection, shutdown, abort_all, drain,
+//! wait_shutdown, graceful_shutdown, wait_shutdown_with_timeout,
+//! shutdown_handle, active_count
+//! data entities: StreamTracker
+//! tests: tracker_tests.rs
+
 //! Task tracking for graceful shutdown.
 //!
 //! Provides [`StreamTracker`] for tracking async tasks with graceful

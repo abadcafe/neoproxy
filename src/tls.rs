@@ -1,3 +1,10 @@
+//! module: tls
+//! responsibility: construct listener-scoped TLS selection and
+//! verification
+//! public operations: build_tls_server_config, install_provider
+//! data entities: TlsServer, SniResolver
+//! tests: tls_selection_tests.rs, tls_tests.rs
+
 //! TLS utilities for certificate loading and SNI routing.
 //!
 //! This module provides:

@@ -1,3 +1,10 @@
+//! module: server
+//! responsibility: select services by canonical hostname
+//! public operations: placeholder_service, Server, service_name,
+//! requires_client_cert, ServerRouter, build, route
+//! data entities: Server, ServerRouter, Routes
+//! tests: server_tests.rs, server_thread_tests.rs
+
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;

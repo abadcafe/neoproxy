@@ -1,3 +1,9 @@
+//! module: plugins::http_upstream::config::resolver
+//! responsibility: resolve upstream policy inheritance
+//! public operations: merge_chain_config
+//! data entities: none
+//! tests: resolver_tests.rs
+
 use std::collections::HashMap;
 
 use anyhow::Result;

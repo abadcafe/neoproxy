@@ -1,3 +1,11 @@
+//! module: plugins::access_log::config
+//! responsibility: deserialize access log writer and layer policies
+//! public operations: AccessLogWriterConfig, AccessLogPluginConfig,
+//! AccessLogConfig
+//! data entities: AccessLogWriterConfig, AccessLogPluginConfig,
+//! AccessLogConfig
+//! tests: config_tests.rs
+
 //! Access log plugin configuration.
 
 use std::time::Duration;

@@ -1,3 +1,12 @@
+//! module: plugins::http_upstream::config::defaults
+//! responsibility: define upstream policy defaults
+//! public operations: default_weight, default_connect_timeout,
+//! default_tunnel_idle_timeout, default_tls_handshake_timeout,
+//! default_keep_alive_interval, default_max_idle_per_host,
+//! default_idle_timeout, default_dns_resolve_timeout
+//! data entities: none
+//! tests: defaults_tests.rs
+
 use std::time::Duration;
 
 pub(super) fn default_weight() -> usize {

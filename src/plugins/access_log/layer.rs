@@ -1,3 +1,11 @@
+//! module: plugins::access_log::layer
+//! responsibility: observe service results through a log delivery
+//! contract
+//! public operations: DeliveryError, LogSink, AccessLogLayer, new,
+//! build_log_entry
+//! data entities: DeliveryError, AccessLogLayer, AccessLogMiddleware
+//! tests: layer_tests.rs
+
 //! Tower layer and middleware for access logging.
 
 use std::collections::HashMap;
@@ -120,12 +128,7 @@ impl tower::Service<Request> for AccessLogMiddleware {
         }
       }
 
-      match result {
-        Ok(response) => Ok(response),
-        Err(_) => Ok(crate::http_message::build_empty_response(
-          http::StatusCode::INTERNAL_SERVER_ERROR,
-        )),
-      }
+      result
     })
   }
 }
@@ -143,13 +146,19 @@ pub(crate) fn build_log_entry(
   let time = OffsetDateTime::now_utc();
   let duration_ms = start.elapsed().as_millis() as u64;
 
-  let client_ip = ctx.get("client.ip").unwrap_or_default();
-  let client_port: u16 =
-    ctx.get("client.port").and_then(|s| s.parse().ok()).unwrap_or(0);
-  let server_ip = ctx.get("server.ip").unwrap_or_default();
-  let server_port: u16 =
-    ctx.get("server.port").and_then(|s| s.parse().ok()).unwrap_or(0);
-  let service = ctx.get("service.name").unwrap_or_default();
+  let client_ip = ctx
+    .client_addr()
+    .map(|address| address.ip().to_string())
+    .unwrap_or_default();
+  let client_port =
+    ctx.client_addr().map(|address| address.port()).unwrap_or(0);
+  let server_ip = ctx
+    .server_addr()
+    .map(|address| address.ip().to_string())
+    .unwrap_or_default();
+  let server_port =
+    ctx.server_addr().map(|address| address.port()).unwrap_or(0);
+  let service = ctx.service_name().unwrap_or_default().to_owned();
 
   // CR-002 fix: Preserve full context field keys (no stripping).
   // Previously, the first dot-separated segment was stripped from keys

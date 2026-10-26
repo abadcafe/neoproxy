@@ -1,3 +1,9 @@
+//! module: plugins::access_log::formatter
+//! responsibility: serialize escaped access log records
+//! public operations: format_entry
+//! data entities: none
+//! tests: formatter_tests.rs
+
 //! Access log entry formatting.
 
 use serde_json::json;

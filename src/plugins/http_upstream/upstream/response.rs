@@ -18,6 +18,7 @@ pub(super) fn forward_response(
   ctx: &RequestContext,
 ) -> Response {
   crate::hop_headers::strip_connection_headers(&mut parts.headers);
+  crate::via::append(&mut parts.headers, parts.version);
   consume_proxy_auth_headers(&mut parts.headers);
   let upstream = take_proxy_status(&mut parts.headers);
   let status = get_server_id(ctx)

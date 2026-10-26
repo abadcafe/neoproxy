@@ -1,4 +1,10 @@
-use std::cell::RefCell;
+//! module: plugins::http_upstream::service
+//! responsibility: dispatch validated requests to upstream
+//! transports
+//! public operations: UpstreamService, build
+//! data entities: UpstreamService
+//! tests: service_tests.rs
+
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context as TaskContext, Poll};
@@ -34,20 +40,20 @@ use crate::tracker::StreamTracker;
 pub(crate) struct UpstreamService {
   upstream_name: String,
   stream_tracker: Rc<StreamTracker>,
-  registry: Rc<RefCell<UpstreamRegistry>>,
+  registry: Rc<UpstreamRegistry>,
 }
 
 impl UpstreamService {
   pub(crate) fn build(
     sargs: crate::config::SerializedArgs,
     stream_tracker: Rc<StreamTracker>,
-    registry: Rc<RefCell<UpstreamRegistry>>,
+    registry: Rc<UpstreamRegistry>,
   ) -> Result<Service> {
     let args: super::config::UpstreamServiceArgs =
       serde_yaml::from_value(sargs)?;
 
     // Validate upstream exists in registry
-    if !registry.borrow().contains_upstream(&args.upstream) {
+    if !registry.contains_upstream(&args.upstream) {
       anyhow::bail!(
         "upstream '{}' not found in registry",
         args.upstream
@@ -80,6 +86,9 @@ impl tower::Service<Request> for UpstreamService {
   }
 
   fn call(&mut self, mut req: Request) -> Self::Future {
+    if let Some(response) = crate::max_forwards::apply(&mut req) {
+      return Box::pin(async { Ok(response) });
+    }
     let upstream_name = self.upstream_name.clone();
     let st = self.stream_tracker.clone();
     let registry = self.registry.clone();
@@ -142,7 +151,7 @@ impl tower::Service<Request> for UpstreamService {
 
 async fn chain_connect(
   upstream_name: &str,
-  registry: &Rc<RefCell<UpstreamRegistry>>,
+  registry: &Rc<UpstreamRegistry>,
   st: &Rc<StreamTracker>,
   req_headers: http::request::Parts,
   upgrade: Option<stream::UpgradeFuture>,
@@ -164,12 +173,12 @@ async fn chain_connect(
     }
   };
   let (tls_config, tracker) = {
-    let reg = registry.borrow();
+    let reg = registry;
     (reg.tls_config(), reg.tracker())
   };
 
   let connect_start = std::time::Instant::now();
-  let upstream = match registry.borrow().get_upstream(upstream_name) {
+  let upstream = match registry.get_upstream(upstream_name) {
     Ok(upstream) => upstream,
     Err(e) => return Ok(e.to_response(ctx)),
   };
@@ -194,11 +203,10 @@ async fn chain_connect(
 
   let target_io: Box<dyn Io> = transport;
 
-  let client_addr = format!(
-    "{}:{}",
-    ctx.get("client.ip").unwrap_or_default(),
-    ctx.get("client.port").unwrap_or_default(),
-  );
+  let client_addr = ctx
+    .client_addr()
+    .map(|address| address.to_string())
+    .unwrap_or_default();
   let upstream_ip =
     upstream_addr.map(|a| format!(" ({a})")).unwrap_or_default();
   let tunnel_desc = format!("{client_addr} -> {target}{upstream_ip}");
@@ -280,7 +288,7 @@ fn build_tunnel_response() -> Response {
 
 async fn chain_forward(
   upstream_name: &str,
-  registry: &Rc<RefCell<UpstreamRegistry>>,
+  registry: &Rc<UpstreamRegistry>,
   req_headers: http::request::Parts,
   req_body: RequestBody,
   ctx: &RequestContext,
@@ -309,11 +317,11 @@ async fn chain_forward(
   };
 
   let (tls_config, tracker) = {
-    let reg = registry.borrow();
+    let reg = registry;
     (reg.tls_config(), reg.tracker())
   };
 
-  let upstream = match registry.borrow().get_upstream(upstream_name) {
+  let upstream = match registry.get_upstream(upstream_name) {
     Ok(upstream) => upstream,
     Err(e) => {
       warn!("UpstreamService: failed to get upstream for forward: {e}");

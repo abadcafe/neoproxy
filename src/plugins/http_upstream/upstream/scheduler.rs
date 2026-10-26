@@ -1,3 +1,10 @@
+//! module: plugins::http_upstream::upstream::scheduler
+//! responsibility: select weighted transports with smooth round
+//! robin
+//! public operations: WeightedItem, new, item, select
+//! data entities: WeightedItem
+//! tests: scheduler_tests.rs
+
 use std::cell::Cell;
 
 pub(crate) struct WeightedItem<T> {

@@ -1,3 +1,11 @@
+//! module: listener
+//! responsibility: define listener construction and lifecycle
+//! contracts
+//! public operations: Listening, Listener, new, start, stop, finish,
+//! BuildListener
+//! data entities: Listener
+//! tests: listener_tests.rs
+
 //! Listener core abstractions (traits, types, factory).
 //!
 //! This module provides types for building and managing network
@@ -5,7 +13,6 @@
 //! - `Listener` - A wrapper type for any listener implementation
 //! - `Listening` - Trait for listener lifecycle (start/stop)
 //! - `BuildListener` - Factory trait for creating listeners
-//! - `ListenerProps` - Metadata for listener conflict detection
 use std::future::Future;
 use std::pin::Pin;
 
@@ -15,41 +22,6 @@ use crate::config::SerializedArgs;
 // Re-export TransportLayer from config (single source of truth).
 pub(crate) use crate::config::TransportLayer;
 use crate::server::Server;
-
-/// Listener metadata for conflict detection.
-///
-/// Each listener exports its properties via `props()` function,
-/// allowing the framework to detect configuration conflicts
-/// without hardcoding listener-specific logic.
-#[derive(Debug, Clone)]
-pub(crate) struct ListenerProps {
-  /// Transport layer (TCP or UDP)
-  transport_layer: TransportLayer,
-  /// Whether the listener supports hostname-based routing.
-  /// If true, multiple listeners of the same kind can share
-  /// an address if they have different hostnames configured.
-  supports_hostname_routing: bool,
-}
-
-impl ListenerProps {
-  /// Create new listener properties.
-  pub(crate) fn new(
-    transport_layer: TransportLayer,
-    supports_hostname_routing: bool,
-  ) -> Self {
-    Self { transport_layer, supports_hostname_routing }
-  }
-
-  /// Get the transport layer protocol.
-  pub(crate) fn transport_layer(&self) -> TransportLayer {
-    self.transport_layer
-  }
-
-  /// Get whether the listener supports hostname-based routing.
-  pub(crate) fn supports_hostname_routing(&self) -> bool {
-    self.supports_hostname_routing
-  }
-}
 
 /// Trait for listener lifecycle management.
 ///

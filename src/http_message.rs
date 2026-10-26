@@ -1,3 +1,12 @@
+//! module: http_message
+//! responsibility: adapt normalized streaming HTTP messages
+//! public operations: BytesBufBodyWrapper, new, RequestBody,
+//! ResponseBody, Request, Response, build_empty_response,
+//! build_error_response
+//! data entities: BytesBufBodyWrapper, RequestBody, ResponseBody,
+//! Request, Response
+//! tests: http_message_tests.rs
+
 use std::error::Error;
 use std::pin::Pin;
 use std::task::{Context, Poll};

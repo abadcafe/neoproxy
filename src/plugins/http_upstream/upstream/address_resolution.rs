@@ -1,3 +1,9 @@
+//! module: plugins::http_upstream::upstream::address_resolution
+//! responsibility: bound system DNS work and its caller deadlines
+//! public operations: resolve_addresses, TimeoutResolver, new
+//! data entities: TimeoutResolver
+//! tests: address_resolution_tests.rs
+
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};

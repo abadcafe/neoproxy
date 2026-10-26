@@ -28,6 +28,7 @@ from tests.fixtures.ports import (
     wait_for_udp_port_bound,
 )
 from tests.fixtures.proxy_process import start_proxy, terminate_process
+from tests.fixtures.stream_cleanup import close_writer
 
 
 @dataclass(frozen=True)
@@ -246,8 +247,7 @@ def test_default_server_proxies_connect_target_independently_of_tls_name(
                         writer.write(data)
                         await writer.drain()
                 finally:
-                    writer.close()
-                    await writer.wait_closed()
+                    await close_writer(writer)
 
             target_port = get_unique_port()
             server = await asyncio.start_server(echo, "127.0.0.1", target_port)
@@ -272,8 +272,7 @@ def test_default_server_proxies_connect_target_independently_of_tls_name(
                         await writer.drain()
                         assert await reader.readexactly(len(payload)) == payload
                     finally:
-                        writer.close()
-                        await writer.wait_closed()
+                        await close_writer(writer)
                 else:
                     configuration = QuicConfiguration(
                         is_client=True, alpn_protocols=["h3"]

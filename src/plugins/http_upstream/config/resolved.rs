@@ -1,3 +1,11 @@
+//! module: plugins::http_upstream::config::resolved
+//! responsibility: describe fully resolved upstream transports
+//! public operations: ClientCertCredential, QuicResolved, Protocol,
+//! Address, Upstream
+//! data entities: ClientCertCredential, QuicResolved, Protocol,
+//! Address, Upstream
+//! tests: resolved_tests.rs
+
 use std::path;
 use std::time::Duration;
 

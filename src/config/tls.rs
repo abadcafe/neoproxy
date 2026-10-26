@@ -1,9 +1,17 @@
+//! module: config::tls
+//! responsibility: compile immutable configured TLS identities
+//! public operations: CertificateConfig, cert_path, key_path,
+//! ServerTlsConfig, compile, client_roots, certificates,
+//! client_ca_certs, validate_server_tls
+//! data entities: CertificateConfig, ServerTlsConfig
+//! tests: tls_tests.rs
+
 //! TLS configuration types and validation.
 
 use std::fs;
 use std::sync::{Arc, OnceLock};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 
 use super::error::{ConfigError, ConfigErrorCollector};
@@ -101,21 +109,6 @@ impl ServerTlsConfig {
 
   pub(crate) fn client_ca_certs(&self) -> &[String] {
     &self.client_ca_certs
-  }
-}
-
-impl super::Config {
-  /// Compile TLS before any worker starts or listener binds. The
-  /// compiled snapshots are shared through the cloned configuration.
-  pub(crate) fn compile_tls(&self) -> Result<()> {
-    for server in self.servers() {
-      if let Some(tls) = server.tls() {
-        let _ = tls.compile(server.hostnames()).with_context(|| {
-          format!("server '{}' TLS configuration", server.name())
-        })?;
-      }
-    }
-    Ok(())
   }
 }
 

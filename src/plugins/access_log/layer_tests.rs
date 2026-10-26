@@ -49,9 +49,11 @@ fn test_build_log_entry_error_status_and_message() {
 
 #[test]
 fn test_build_log_entry_extracts_client_ip() {
-  let ctx = RequestContext::new();
-  ctx.insert("client.ip", "192.168.1.100");
-  ctx.insert("client.port", "54321");
+  let ctx = crate::context::build_request_context(
+    &"192.168.1.100:54321".parse().unwrap(),
+    &"10.0.0.1:8080".parse().unwrap(),
+    "tunnel",
+  );
   let entry = build_log_entry(
     &make_ok_result(),
     Instant::now(),
@@ -66,9 +68,11 @@ fn test_build_log_entry_extracts_client_ip() {
 
 #[test]
 fn test_build_log_entry_extracts_server_ip() {
-  let ctx = RequestContext::new();
-  ctx.insert("server.ip", "10.0.0.1");
-  ctx.insert("server.port", "8080");
+  let ctx = crate::context::build_request_context(
+    &"192.168.1.100:54321".parse().unwrap(),
+    &"10.0.0.1:8080".parse().unwrap(),
+    "tunnel",
+  );
   let entry = build_log_entry(
     &make_ok_result(),
     Instant::now(),
@@ -83,8 +87,11 @@ fn test_build_log_entry_extracts_server_ip() {
 
 #[test]
 fn test_build_log_entry_extracts_service_name() {
-  let ctx = RequestContext::new();
-  ctx.insert("service.name", "tunnel");
+  let ctx = crate::context::build_request_context(
+    &"192.168.1.100:54321".parse().unwrap(),
+    &"10.0.0.1:8080".parse().unwrap(),
+    "tunnel",
+  );
   let entry = build_log_entry(
     &make_ok_result(),
     Instant::now(),
@@ -154,23 +161,6 @@ fn test_build_log_entry_preserves_method_and_target() {
   );
   assert_eq!(entry.method, "CONNECT");
   assert_eq!(entry.target, "example.com:443");
-}
-
-#[test]
-fn test_build_log_entry_invalid_port_defaults_to_zero() {
-  let ctx = RequestContext::new();
-  ctx.insert("client.port", "not_a_number");
-  ctx.insert("server.port", "99999");
-  let entry = build_log_entry(
-    &make_ok_result(),
-    Instant::now(),
-    ctx,
-    &[],
-    "GET",
-    "/",
-  );
-  assert_eq!(entry.client_port, 0);
-  assert_eq!(entry.server_port, 0);
 }
 
 #[test]
@@ -316,4 +306,21 @@ async fn test_access_log_layer_warns_when_sink_stopped() {
      got: {:?}",
     &output[..output.len().min(500)]
   );
+}
+
+#[tokio::test]
+async fn test_access_log_layer_preserves_service_failure() {
+  use tower::ServiceExt;
+  let layer = AccessLogLayer::new(
+    Arc::new(FailingSink { error: DeliveryError::Full }),
+    vec![],
+  );
+  let service =
+    tower::Layer::layer(&layer, crate::server::placeholder_service());
+  let result = service.oneshot(empty_request()).await;
+  assert!(
+    result.is_err(),
+    "observability must preserve the service result"
+  );
+  assert_eq!(result.unwrap_err().to_string(), "placeholder");
 }

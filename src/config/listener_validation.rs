@@ -1,3 +1,14 @@
+//! module: config::listener_validation
+//! responsibility: validate listener routing relationships
+//! public operations: validate_listener_addresses,
+//! validate_hostname, validate_listener_references,
+//! validate_hostname_routing_compatibility,
+//! validate_hostname_conflicts
+//! data entities: none
+//! tests: listener_validation_conflict_tests.rs,
+//! listener_validation_test_support_tests.rs,
+//! listener_validation_tests.rs
+
 //! Listener configuration validation functions.
 
 use std::collections::HashMap;

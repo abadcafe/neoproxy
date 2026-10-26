@@ -1,3 +1,9 @@
+//! module: plugins::access_log::context
+//! responsibility: describe complete access log records
+//! public operations: AccessLogEntry, LogFormat
+//! data entities: AccessLogEntry, LogFormat
+//! tests: context_tests.rs
+
 //! Access log entry types.
 
 use std::collections::HashMap;

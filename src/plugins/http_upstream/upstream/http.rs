@@ -1,3 +1,12 @@
+//! module: plugins::http_upstream::upstream::http
+//! responsibility: adapt HTTP/HTTPS proxy transports to the client
+//! contract
+//! public operations: ProxyConnector, new, TlsProxyConnector,
+//! HttpProxyClient, HttpsClient
+//! data entities: ProxyConnector, TlsProxyConnector,
+//! HttpProxyClient, HttpsClient
+//! tests: http_tests.rs
+
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -7,16 +16,14 @@ use std::time::Duration;
 
 use http::Uri;
 use hyper::client::conn::http1;
-use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::Connected;
 use hyper_util::rt::TokioIo;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tower::Service;
 use tracing::warn;
 
 use super::address_resolution::resolve_addresses;
 use super::connect_request::build_connect_request;
 use super::forward::chain_forward_http;
+use super::http_pool::ProxyPool;
 use super::protocol::{ClientProtocol, ConnectResult};
 use crate::context::RequestContext;
 use crate::http_message::{RequestBody, Response};
@@ -27,116 +34,6 @@ use crate::plugins::http_upstream::target_parser::{
   ConnectTarget, ForwardTarget,
 };
 use crate::tracker::StreamTracker;
-
-// ============================================================================
-// Proxied Connection Wrapper
-// ============================================================================
-
-/// Wrapper that marks a connection as proxied
-/// (`Connected::proxy(true)`), so hyper sends absolute-form URIs and
-/// pools by connected address.
-pub(crate) struct Proxied<T>(pub(crate) T);
-
-impl<T: hyper::rt::Read + Unpin> hyper::rt::Read for Proxied<T> {
-  fn poll_read(
-    self: Pin<&mut Self>,
-    cx: &mut TaskContext<'_>,
-    buf: hyper::rt::ReadBufCursor<'_>,
-  ) -> Poll<std::io::Result<()>> {
-    Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
-  }
-}
-
-impl<T: hyper::rt::Write + Unpin> hyper::rt::Write for Proxied<T> {
-  fn poll_write(
-    self: Pin<&mut Self>,
-    cx: &mut TaskContext<'_>,
-    buf: &[u8],
-  ) -> Poll<std::io::Result<usize>> {
-    Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
-  }
-
-  fn poll_flush(
-    self: Pin<&mut Self>,
-    cx: &mut TaskContext<'_>,
-  ) -> Poll<std::io::Result<()>> {
-    Pin::new(&mut self.get_mut().0).poll_flush(cx)
-  }
-
-  fn poll_shutdown(
-    self: Pin<&mut Self>,
-    cx: &mut TaskContext<'_>,
-  ) -> Poll<std::io::Result<()>> {
-    Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
-  }
-
-  fn is_write_vectored(&self) -> bool {
-    self.0.is_write_vectored()
-  }
-
-  fn poll_write_vectored(
-    self: Pin<&mut Self>,
-    cx: &mut TaskContext<'_>,
-    bufs: &[std::io::IoSlice<'_>],
-  ) -> Poll<std::io::Result<usize>> {
-    Pin::new(&mut self.get_mut().0).poll_write_vectored(cx, bufs)
-  }
-}
-
-impl<T: hyper_util::client::legacy::connect::Connection>
-  hyper_util::client::legacy::connect::Connection for Proxied<T>
-{
-  fn connected(&self) -> Connected {
-    self.0.connected().proxy(true)
-  }
-}
-
-/// Newtype wrapper for TlsStream so we can implement Connection for it.
-/// Proxied<TokioIo<TlsConn>> will then have both Read/Write and
-/// Connection.
-pub(crate) struct TlsConn(
-  pub(crate) tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
-);
-
-impl AsyncRead for TlsConn {
-  fn poll_read(
-    self: Pin<&mut Self>,
-    cx: &mut TaskContext<'_>,
-    buf: &mut tokio::io::ReadBuf<'_>,
-  ) -> Poll<std::io::Result<()>> {
-    Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
-  }
-}
-
-impl AsyncWrite for TlsConn {
-  fn poll_write(
-    self: Pin<&mut Self>,
-    cx: &mut TaskContext<'_>,
-    buf: &[u8],
-  ) -> Poll<std::io::Result<usize>> {
-    Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
-  }
-
-  fn poll_flush(
-    self: Pin<&mut Self>,
-    cx: &mut TaskContext<'_>,
-  ) -> Poll<std::io::Result<()>> {
-    Pin::new(&mut self.get_mut().0).poll_flush(cx)
-  }
-
-  fn poll_shutdown(
-    self: Pin<&mut Self>,
-    cx: &mut TaskContext<'_>,
-  ) -> Poll<std::io::Result<()>> {
-    Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
-  }
-}
-
-impl hyper_util::client::legacy::connect::Connection for TlsConn {
-  fn connected(&self) -> Connected {
-    Connected::new()
-  }
-}
 
 fn classify_tcp_connect_error(
   address: &str,
@@ -155,8 +52,8 @@ fn classify_tcp_connect_error(
 // ============================================================================
 
 /// Connects to a pre-configured upstream proxy address.
-/// Returns `Proxied` so hyper sends absolute-form URI and pools by
-/// proxy address.
+/// The owning proxy pool defines connection identity; each request
+/// retains its absolute-form target URI on the wire.
 #[derive(Clone)]
 pub(crate) struct ProxyConnector {
   proxy_addr: String,
@@ -181,7 +78,7 @@ impl Service<Uri> for ProxyConnector {
       dyn Future<Output = Result<Self::Response, Self::Error>> + Send,
     >,
   >;
-  type Response = Proxied<TokioIo<tokio::net::TcpStream>>;
+  type Response = TokioIo<tokio::net::TcpStream>;
 
   fn poll_ready(
     &mut self,
@@ -209,15 +106,14 @@ impl Service<Uri> for ProxyConnector {
       .map_err(std::io::Error::other)?;
       let stream =
         super::tcp_connect::connect(addresses, timeout).await?;
-      Ok(Proxied(TokioIo::new(stream)))
+      Ok(TokioIo::new(stream))
     })
   }
 }
 
 /// Connects to a pre-configured upstream proxy address via TLS.
 /// Same as `ProxyConnector` but wraps the TCP stream with a TLS
-/// handshake. Always operates in proxy mode (TLS to proxy, not to
-/// origin).
+/// handshake to that proxy.
 #[derive(Clone)]
 pub(crate) struct TlsProxyConnector {
   inner: ProxyConnector,
@@ -244,7 +140,8 @@ impl Service<Uri> for TlsProxyConnector {
       dyn Future<Output = Result<Self::Response, Self::Error>> + Send,
     >,
   >;
-  type Response = Proxied<TokioIo<TlsConn>>;
+  type Response =
+    TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
 
   fn poll_ready(
     &mut self,
@@ -259,7 +156,7 @@ impl Service<Uri> for TlsProxyConnector {
     let hostname = self.hostname.clone();
     let tls_handshake_timeout = self.tls_handshake_timeout;
     Box::pin(async move {
-      let Proxied(tcp_io) = inner.call(uri).await?;
+      let tcp_io = inner.call(uri).await?;
       let server_name =
         rustls::pki_types::ServerName::try_from(hostname).map_err(
           |e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e),
@@ -277,7 +174,7 @@ impl Service<Uri> for TlsProxyConnector {
           "TLS handshake timed out",
         )
       })??;
-      Ok(Proxied(TokioIo::new(TlsConn(tls_stream))))
+      Ok(TokioIo::new(tls_stream))
     })
   }
 }
@@ -291,7 +188,7 @@ impl Service<Uri> for TlsProxyConnector {
 // ============================================================================
 
 pub(crate) struct HttpProxyClient<C> {
-  pub(crate) client: Client<C, RequestBody>,
+  pub(crate) client: ProxyPool<C>,
   pub(crate) proxy_addr: String,
   pub(crate) connect_timeout: Duration,
   pub(crate) tunnel_idle_timeout: Duration,
@@ -301,12 +198,9 @@ pub(crate) struct HttpProxyClient<C> {
 
 impl<C> ClientProtocol for HttpProxyClient<C>
 where
-  C: hyper_util::client::legacy::connect::Connect
-    + Clone
-    + Send
-    + Sync
-    + Unpin
-    + 'static,
+  C: tower::Service<Uri, Error = std::io::Error> + Clone,
+  C::Response:
+    hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
   fn forward<'a>(
     &'a self,
@@ -380,6 +274,10 @@ where
       .await
     })
   }
+
+  fn close(&self) {
+    self.client.close();
+  }
 }
 
 // ============================================================================
@@ -387,7 +285,7 @@ where
 // ============================================================================
 
 pub(crate) struct HttpsClient {
-  pub(crate) client: Client<TlsProxyConnector, RequestBody>,
+  pub(crate) client: ProxyPool<TlsProxyConnector>,
   pub(crate) proxy_addr: String,
   pub(crate) hostname: String,
   pub(crate) connect_timeout: Duration,
@@ -494,6 +392,10 @@ impl ClientProtocol for HttpsClient {
       )
       .await
     })
+  }
+
+  fn close(&self) {
+    self.client.close();
   }
 }
 

@@ -1,3 +1,10 @@
+//! module: service
+//! responsibility: define type-erased service composition contracts
+//! public operations: Service, new, authentication, BuildService,
+//! Layer, with_authentication, layer, BuildLayer
+//! data entities: Service, Layer
+//! tests: service_tests.rs
+
 //! Runtime service types.
 //!
 //! This module provides types for building and managing request

@@ -4,6 +4,48 @@ use std::time::Duration;
 use crate::address_race::{RaceError, connect};
 
 #[tokio::test(start_paused = true)]
+async fn test_connect_interleaves_families_before_exhausting_first_family()
+ {
+  let start = tokio::time::Instant::now();
+  let reachable: SocketAddr = "127.0.0.1:8123".parse().unwrap();
+  let result = connect(
+    vec![
+      "[::1]:8123".parse().unwrap(),
+      "[::2]:8123".parse().unwrap(),
+      reachable,
+    ],
+    Duration::from_millis(400),
+    |address| async move {
+      if address.is_ipv6() {
+        std::future::pending::<()>().await;
+      }
+      Ok::<_, ()>(address)
+    },
+  )
+  .await;
+  assert_eq!(result.unwrap(), reachable);
+  assert_eq!(start.elapsed(), Duration::from_millis(250));
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_connect_attempts_each_duplicate_address_once() {
+  let count =
+    std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+  let address: SocketAddr = "127.0.0.1:8123".parse().unwrap();
+  let result = connect(
+    vec![address, address],
+    Duration::from_secs(1),
+    |address| {
+      count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+      std::future::ready(Err::<(), _>(address))
+    },
+  )
+  .await;
+  assert!(matches!(result, Err(RaceError::Failed(_))));
+  assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[tokio::test(start_paused = true)]
 async fn test_connect_falls_back_without_waiting_for_stalled_candidate()
 {
   let first: SocketAddr = "[::1]:8123".parse().unwrap();

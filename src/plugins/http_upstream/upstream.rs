@@ -1,3 +1,12 @@
+//! module: plugins::http_upstream::upstream
+//! responsibility: construct and own configured upstream transport
+//! pools
+//! public operations: Upstream, forward, connect_for_tunnel,
+//! UpstreamRegistry, new, get_upstream, contains_upstream, len,
+//! tls_config, tracker, close_all
+//! data entities: ScheduledClient, Upstream, UpstreamRegistry
+//! tests: upstream_tests.rs
+
 use std::collections::HashMap;
 use std::fs;
 use std::io::BufReader;
@@ -5,7 +14,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
-use hyper_util::client::legacy::Client;
 use rustls::pki_types::CertificateDer;
 
 use self::protocol::{ClientProtocol, ConnectResult, QuicConfig};
@@ -33,6 +41,7 @@ mod http;
 mod http3;
 #[cfg(test)]
 mod http3_tests;
+mod http_pool;
 #[cfg(test)]
 mod http_tests;
 pub(super) mod protocol;
@@ -51,7 +60,7 @@ mod tcp_connect_tests;
 
 use self::direct::DirectClient;
 use self::http::{HttpProxyClient, HttpsClient, ProxyConnector};
-use self::http3::{Http3AddressState, Http3Client};
+use self::http3::{Http3Client, SessionPool};
 use self::scheduler::WeightedItem;
 
 // ============================================================================
@@ -275,14 +284,12 @@ impl UpstreamRegistry {
               *connect_timeout,
               upstream.dns_resolve_timeout,
             );
-            let client =
-              Client::builder(hyper_util::rt::TokioExecutor::new())
-                .pool_timer(hyper_util::rt::TokioTimer::new())
-                .pool_max_idle_per_host(
-                  upstream.pool_config.max_idle_per_host,
-                )
-                .pool_idle_timeout(upstream.pool_config.idle_timeout)
-                .build(connector);
+            let client = http_pool::ProxyPool::new(
+              connector,
+              upstream.pool_config.max_idle_per_host,
+              upstream.pool_config.idle_timeout,
+              tracker.clone(),
+            );
 
             addresses.push(ScheduledClient::new(
               addr.weight,
@@ -327,14 +334,12 @@ impl UpstreamRegistry {
               host.to_string(),
               *tls_handshake_timeout,
             );
-            let client =
-              Client::builder(hyper_util::rt::TokioExecutor::new())
-                .pool_timer(hyper_util::rt::TokioTimer::new())
-                .pool_max_idle_per_host(
-                  upstream.pool_config.max_idle_per_host,
-                )
-                .pool_idle_timeout(upstream.pool_config.idle_timeout)
-                .build(connector);
+            let client = http_pool::ProxyPool::new(
+              connector,
+              upstream.pool_config.max_idle_per_host,
+              upstream.pool_config.idle_timeout,
+              tracker.clone(),
+            );
 
             addresses.push(ScheduledClient::new(
               addr.weight,
@@ -357,23 +362,22 @@ impl UpstreamRegistry {
             addresses.push(ScheduledClient::new(
               addr.weight,
               Box::new(Http3Client {
-                state: Rc::new(tokio::sync::Mutex::new(
-                  Http3AddressState::new(),
-                )),
-                proxy_addr: addr.address.clone(),
-                hostname: addr.hostname.clone(),
-                tls_handshake_timeout: *tls_handshake_timeout,
+                session: SessionPool::new(
+                  addr.address.clone(),
+                  addr.hostname.clone(),
+                  QuicConfig {
+                    max_idle_timeout: quic.max_idle_timeout,
+                    keep_alive_interval: quic.keep_alive_interval,
+                    max_concurrent_bidi_streams: quic
+                      .max_concurrent_bidi_streams,
+                    initial_mtu: quic.initial_mtu,
+                    send_window: quic.send_window,
+                    receive_window: quic.receive_window,
+                  },
+                  *tls_handshake_timeout,
+                  upstream.dns_resolve_timeout,
+                ),
                 tunnel_idle_timeout: addr.tunnel_idle_timeout,
-                dns_resolve_timeout: upstream.dns_resolve_timeout,
-                quic: QuicConfig {
-                  max_idle_timeout: quic.max_idle_timeout,
-                  keep_alive_interval: quic.keep_alive_interval,
-                  max_concurrent_bidi_streams: quic
-                    .max_concurrent_bidi_streams,
-                  initial_mtu: quic.initial_mtu,
-                  send_window: quic.send_window,
-                  receive_window: quic.receive_window,
-                },
                 user: addr.user.clone(),
               }),
             ));

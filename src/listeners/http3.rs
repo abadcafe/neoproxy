@@ -1,3 +1,10 @@
+//! module: listeners::http3
+//! responsibility: own HTTP/3 listener admission and draining
+//! public operations: listener_name, props, create_listener_builder
+//! data entities: Http3Listener
+//! tests: http3_tests.rs
+
+use crate::config::ListenerPropertyValues;
 mod accepting_connection;
 mod connection;
 mod quic_bind;
@@ -6,6 +13,7 @@ mod recv_body;
 mod request_stream;
 mod stream_handler;
 mod transport;
+mod upgrade;
 
 #[cfg(test)]
 mod quic_bind_tests;
@@ -31,7 +39,7 @@ use transport::Transport;
 
 use crate::config::SerializedArgs;
 use crate::listener::{
-  BuildListener, Listener, ListenerProps, Listening, TransportLayer,
+  BuildListener, Listener, Listening, TransportLayer,
 };
 use crate::shutdown::{LISTENER_SHUTDOWN_TIMEOUT, ShutdownHandle};
 use crate::tls::build_tls_server_config;
@@ -328,8 +336,8 @@ pub(crate) fn listener_name() -> &'static str {
 }
 
 /// Get listener properties for conflict detection.
-pub(crate) fn props() -> ListenerProps {
-  ListenerProps::new(TransportLayer::Udp, true)
+pub(crate) fn props() -> ListenerPropertyValues {
+  ListenerPropertyValues::new(TransportLayer::Udp, true)
 }
 
 /// Create a listener builder

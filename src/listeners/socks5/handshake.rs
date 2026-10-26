@@ -1,3 +1,10 @@
+//! module: listeners::socks5::handshake
+//! responsibility: negotiate authenticated SOCKS5 sessions
+//! public operations: DEFAULT_HANDSHAKE_TIMEOUT, HandshakeResult,
+//! HandshakeError, perform_handshake
+//! data entities: HandshakeResult, HandshakeError
+//! tests: handshake_tests.rs
+
 //! SOCKS5 handshake protocol handling.
 
 use std::time::Duration;

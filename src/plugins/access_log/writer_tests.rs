@@ -170,6 +170,29 @@ fn test_buffer_size_limit_drops_oversized_entry() {
 }
 
 #[test]
+fn test_write_flushes_pending_entries_to_fit_a_valid_large_entry() {
+  let directory = tempfile::tempdir().unwrap();
+  let config = AccessLogWriterConfig {
+    buffer_capacity: Byte::from_u64(1000),
+    max_buffer_size: Byte::from_u64(1100),
+    ..writer_config(&directory, "access.log", LogFormat::Text)
+  };
+  let mut writer = AccessLogWriter::from_config(&config);
+  let mut first = make_entry(200);
+  first.target = "a".repeat(600);
+  let mut second = make_entry(201);
+  second.target = "b".repeat(600);
+  writer.write(&first);
+  writer.write(&second);
+  writer.flush();
+  let content =
+    fs::read_to_string(directory.path().join("access.log")).unwrap();
+  assert_eq!(content.lines().count(), 2);
+  assert!(content.contains(&first.target));
+  assert!(content.contains(&second.target));
+}
+
+#[test]
 fn test_write_rotates_full_file_and_preserves_entries() {
   let dir = tempfile::tempdir().unwrap();
   let config = AccessLogWriterConfig {

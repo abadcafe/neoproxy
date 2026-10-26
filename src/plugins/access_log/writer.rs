@@ -67,11 +67,14 @@ impl AccessLogWriter {
 
   pub(crate) fn write(&mut self, entry: &AccessLogEntry) {
     let formatted = formatter::format_entry(entry, self.format);
+    if formatted.len() > self.max_buffer_size {
+      warn!("access_log: entry exceeds buffer limit, dropping entry");
+      return;
+    }
     if self.buffer.len().saturating_add(formatted.len())
       > self.max_buffer_size
     {
-      warn!("access_log: buffer full, dropping entry");
-      return;
+      self.do_flush();
     }
 
     self.buffer.extend_from_slice(&formatted);

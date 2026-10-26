@@ -1,3 +1,11 @@
+//! module: auth
+//! responsibility: parse and verify proxy credentials
+//! public operations: AuthError, UserPasswordAuth, none, from_users,
+//! verify_credentials, parse_basic_auth, ProxyCredentials, new,
+//! parts
+//! data entities: AuthError, UserPasswordAuth, ProxyCredentials
+//! tests: auth_tests.rs
+
 //! Shared authentication types.
 //!
 //! Contains credential types and verification for request middleware.

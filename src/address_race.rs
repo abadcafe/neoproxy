@@ -38,7 +38,28 @@ where
   let deadline = Instant::now()
     .checked_add(timeout)
     .ok_or(RaceError::InvalidDeadline)?;
-  let mut addresses = addresses.into_iter();
+  // RFC 8305 §4: try the other address family after the first
+  // candidate, preserving resolver order within each family. Repeated
+  // DNS answers must not consume another fallback interval/socket.
+  let first_is_ipv6 = addresses[0].is_ipv6();
+  let mut seen = std::collections::HashSet::new();
+  let (preferred, alternate): (Vec<_>, Vec<_>) = addresses
+    .into_iter()
+    .filter(|address| seen.insert(*address))
+    .partition(|address| address.is_ipv6() == first_is_ipv6);
+  let mut preferred = preferred.into_iter();
+  let mut alternate = alternate.into_iter();
+  let mut ordered = Vec::new();
+  loop {
+    let first = preferred.next();
+    let second = alternate.next();
+    if first.is_none() && second.is_none() {
+      break;
+    }
+    ordered.extend(first);
+    ordered.extend(second);
+  }
+  let mut addresses = ordered.into_iter();
   let mut attempts = JoinSet::new();
   let mut next_attempt = Instant::now();
   let mut exhausted = false;

@@ -25,6 +25,7 @@ from tests.fixtures.ports import (
     wait_for_udp_port_bound,
 )
 from tests.fixtures.proxy_process import ProcessFactory, start_proxy, terminate_process
+from tests.fixtures.stream_cleanup import close_writer
 
 
 async def _forward_request(
@@ -80,8 +81,7 @@ servers:
                 # Both peers send a two-byte body with a fixed Content-Length.
                 assert await reader.readexactly(2) == b"OK"
         finally:
-            writer.close()
-            await writer.wait_closed()
+            await close_writer(writer)
     finally:
         terminate_process(process, force=True)
 
@@ -106,8 +106,7 @@ async def _tcp_forward(
                 writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
                 await writer.drain()
         finally:
-            writer.close()
-            await writer.wait_closed()
+            await close_writer(writer)
 
     async with asyncio.TaskGroup() as peers:
 

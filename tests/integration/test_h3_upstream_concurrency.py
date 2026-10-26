@@ -17,6 +17,7 @@ from aioquic.quic.events import HandshakeCompleted, QuicEvent
 from tests.fixtures.certificates import generate_test_certificates
 from tests.fixtures.ports import get_unique_port, wait_for_proxy
 from tests.fixtures.proxy_process import start_proxy, terminate_process
+from tests.fixtures.stream_cleanup import close_writer
 
 type RequestKind = Literal["forward", "tunnel", "mixed"]
 
@@ -183,8 +184,7 @@ servers:
                 else:
                     assert await reader.readexactly(2) == b"OK"
             finally:
-                writer.close()
-                await writer.wait_closed()
+                await close_writer(writer)
 
         async with asyncio.timeout(8):
             async with asyncio.TaskGroup() as tasks:

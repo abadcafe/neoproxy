@@ -1,3 +1,9 @@
+//! module: plugins::http_upstream::config
+//! responsibility: expose upstream configuration resolution
+//! public operations: module reexports
+//! data entities: none
+//! tests: config_tests.rs
+
 mod defaults;
 #[cfg(test)]
 mod defaults_tests;

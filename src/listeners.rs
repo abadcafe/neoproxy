@@ -1,3 +1,10 @@
+//! module: listeners
+//! responsibility: register listener construction together with
+//! validation properties
+//! public operations: ListenerManager, new, build_listener
+//! data entities: ListenerManager, Registration
+//! tests: listeners_tests.rs
+
 //! Listener registry and concrete implementations.
 //!
 //! This module provides:
@@ -10,7 +17,7 @@ use std::collections::HashMap;
 use crate::config::{
   ListenerPropertiesProvider, ListenerPropertyValues,
 };
-use crate::listener::{BuildListener, ListenerProps};
+use crate::listener::BuildListener;
 
 pub(crate) mod error_response;
 mod header_deadline;
@@ -33,27 +40,49 @@ pub(crate) mod tcp_listener_base;
 ///
 /// Provides access to:
 /// - `BuildListener` functions for creating listener instances
-/// - `ListenerProps` for conflict detection
+/// - `ListenerPropertyValues` for conflict detection
 pub(crate) struct ListenerManager {
-  builders: HashMap<&'static str, Box<dyn BuildListener>>,
-  props: HashMap<&'static str, ListenerProps>,
+  registrations: HashMap<&'static str, Registration>,
+}
+
+struct Registration {
+  builder: Box<dyn BuildListener>,
+  properties: ListenerPropertyValues,
 }
 
 impl ListenerManager {
   pub(crate) fn new() -> Self {
-    let builders = HashMap::from([
-      (http::listener_name(), http::create_listener_builder()),
-      (https::listener_name(), https::create_listener_builder()),
-      (http3::listener_name(), http3::create_listener_builder()),
-      (socks5::listener_name(), socks5::create_listener_builder()),
+    let registrations = HashMap::from([
+      (
+        http::listener_name(),
+        Registration {
+          builder: http::create_listener_builder(),
+          properties: http::props(),
+        },
+      ),
+      (
+        https::listener_name(),
+        Registration {
+          builder: https::create_listener_builder(),
+          properties: https::props(),
+        },
+      ),
+      (
+        http3::listener_name(),
+        Registration {
+          builder: http3::create_listener_builder(),
+          properties: http3::props(),
+        },
+      ),
+      (
+        socks5::listener_name(),
+        Registration {
+          builder: socks5::create_listener_builder(),
+          properties: socks5::props(),
+        },
+      ),
     ]);
-    let props = HashMap::from([
-      (http::listener_name(), http::props()),
-      (https::listener_name(), https::props()),
-      (http3::listener_name(), http3::props()),
-      (socks5::listener_name(), socks5::props()),
-    ]);
-    Self { builders, props }
+    Self { registrations }
   }
 
   /// Build a listener by kind.
@@ -64,10 +93,11 @@ impl ListenerManager {
     args: crate::config::SerializedArgs,
     servers: Vec<crate::server::Server>,
   ) -> Result<crate::listener::Listener, anyhow::Error> {
-    let builder = self.builders.get(kind).ok_or_else(|| {
-      anyhow::anyhow!("unknown listener kind '{}'", kind)
-    })?;
-    builder(addresses, args, servers)
+    let registration =
+      self.registrations.get(kind).ok_or_else(|| {
+        anyhow::anyhow!("unknown listener kind '{}'", kind)
+      })?;
+    (registration.builder)(addresses, args, servers)
   }
 }
 
@@ -76,12 +106,7 @@ impl ListenerPropertiesProvider for ListenerManager {
     &self,
     kind: &str,
   ) -> Option<ListenerPropertyValues> {
-    self.props.get(kind).map(|p| {
-      ListenerPropertyValues::new(
-        p.transport_layer(),
-        p.supports_hostname_routing(),
-      )
-    })
+    self.registrations.get(kind).map(|entry| entry.properties)
   }
 }
 

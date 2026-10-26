@@ -21,6 +21,7 @@ from aioquic.quic.events import QuicEvent
 from tests.fixtures.certificates import generate_test_certificates
 from tests.fixtures.ports import get_unique_port, wait_for_proxy
 from tests.fixtures.proxy_process import start_proxy, terminate_process
+from tests.fixtures.stream_cleanup import close_writer
 
 type UpstreamKind = Literal["http", "https", "http3"]
 
@@ -95,8 +96,7 @@ servers:
                     assert actual == expected, headers
                     assert f"received-status={status}".encode() in headers
         finally:
-            writer.close()
-            await writer.wait_closed()
+            await close_writer(writer)
     finally:
         terminate_process(process, force=True)
 
@@ -128,8 +128,7 @@ async def _check_http_upstream(
                 else:
                     await writer.drain()
         finally:
-            writer.close()
-            await writer.wait_closed()
+            await close_writer(writer)
 
     # TaskGroup propagates peer failures instead of leaving assertions in an
     # unobserved background task. The client closes every accepted tunnel.

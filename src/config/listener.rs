@@ -1,3 +1,16 @@
+//! module: config::listener
+//! responsibility: describe configured listeners through a consumer-
+//! owned property contract
+//! public operations: TransportLayer, ListenerPropertyValues, new,
+//! transport_layer, supports_hostname_routing,
+//! ListenerPropertiesProvider, ListenerConfig, name, kind,
+//! addresses, args
+//! data entities: TransportLayer, ListenerPropertyValues,
+//! ListenerConfig
+//! tests: listener_tests.rs, listener_validation_conflict_tests.rs,
+//! listener_validation_test_support_tests.rs,
+//! listener_validation_tests.rs
+
 //! Listener configuration types.
 //!
 //! This module provides:

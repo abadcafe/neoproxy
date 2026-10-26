@@ -5,7 +5,6 @@ use super::access_log::{
   build_registry, create_plugin, create_shared_plugin, plugin_name,
 };
 use crate::config::SerializedArgs;
-use crate::context::RequestContext;
 use crate::plugin::Plugin;
 
 fn yaml_key(key: &str) -> serde_yaml::Value {
@@ -61,10 +60,11 @@ fn request_with_context() -> crate::http_message::Request {
     .uri("http://example.com/")
     .body(body)
     .unwrap();
-  let ctx = RequestContext::new();
-  ctx.insert("client.ip", "10.0.0.1");
-  ctx.insert("client.port", "54321");
-  ctx.insert("service.name", "access-log-test");
+  let ctx = crate::context::build_request_context(
+    &"10.0.0.1:54321".parse().unwrap(),
+    &"127.0.0.1:8080".parse().unwrap(),
+    "access-log-test",
+  );
   ctx.insert("basic_auth.user", "alice");
   req.extensions_mut().insert(ctx);
   req
@@ -76,11 +76,8 @@ async fn call_file_layer(plugin: &dyn Plugin, path_prefix: &str) {
     builder(layer_args(path_prefix, vec!["basic_auth.user"])).unwrap();
   let mut service = layer.layer(crate::server::placeholder_service());
   let svc = service.ready().await.unwrap();
-  let response =
-    tower::Service::call(svc, request_with_context()).await.unwrap();
-  assert_eq!(
-    response.status(),
-    http::StatusCode::INTERNAL_SERVER_ERROR
+  assert!(
+    tower::Service::call(svc, request_with_context()).await.is_err()
   );
 }
 
@@ -235,11 +232,7 @@ async fn test_uninstall_shared_plugin_keeps_other_plugin_and_process_writer_aliv
   let mut request = request_with_context();
   *request.uri_mut() =
     "http://example.com/after-first-uninstall".parse().unwrap();
-  let response = service.clone().oneshot(request).await.unwrap();
-  assert_eq!(
-    response.status(),
-    http::StatusCode::INTERNAL_SERVER_ERROR
-  );
+  assert!(service.clone().oneshot(request).await.is_err());
   // Also construct a fresh layer through the still-installed plugin.
   call_file_layer(second.as_ref(), &prefix).await;
   second.uninstall().await;

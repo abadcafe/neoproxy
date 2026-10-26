@@ -1,3 +1,10 @@
+//! module: config
+//! responsibility: expose configuration parsing and validation
+//! contracts
+//! public operations: module reexports
+//! data entities: none
+//! tests: config_tests.rs
+
 //! Configuration types, parsing, and validation.
 //!
 //! This module provides:

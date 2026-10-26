@@ -1,4 +1,4 @@
-//! module: socks5
+//! module: upgrade
 //! responsibilities: complete SOCKS5 CONNECT negotiation before
 //! transferring its stream public operations:
 //! Socks5UpgradeTrigger::{pair, send_success, send_error},
@@ -6,7 +6,7 @@
 //! tests: SOCKS5 process integration tests
 use anyhow::Result;
 
-use super::{OnUpgrade, UpgradeTrigger};
+use crate::stream::{OnUpgrade, UpgradeTrigger};
 
 /// SOCKS5 upgrade trigger (Listener side).
 ///

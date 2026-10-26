@@ -1,3 +1,13 @@
+//! module: plugins::http_upstream::error
+//! responsibility: classify upstream failures into HTTP proxy
+//! diagnostics
+//! public operations: UpstreamError, http_status,
+//! proxy_status_error, to_response, DnsResolveError,
+//! classify_connect_error, classify_http_client_error,
+//! classify_quic_error, classify_tls_handshake_error
+//! data entities: UpstreamError, DnsResolveError
+//! tests: error_tests.rs
+
 use std::fmt;
 
 use crate::context::RequestContext;

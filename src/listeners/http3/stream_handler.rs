@@ -1,18 +1,25 @@
+//! module: listeners::http3::stream_handler
+//! responsibility: adapt routed HTTP/3 exchanges to the service
+//! contract
+//! public operations: handle_h3_stream
+//! data entities: none
+//! tests: stream_handler_tests.rs
+
 use std::net::SocketAddr;
 
 use bytes::Bytes;
 use h3::server;
-use http_body_util::BodyExt;
 use tower::ServiceExt;
 use tracing::warn;
 
 use super::recv_body::H3RecvBody;
 use super::request_stream::CancellableStream;
+use super::upgrade::H3UpgradeTrigger;
+use crate::h3_response::ResponseWriter;
 use crate::http_message::{
-  BytesBufBodyWrapper, RequestBody, Response, build_error_response,
+  BytesBufBodyWrapper, RequestBody, build_error_response,
 };
 use crate::listeners::header_validation::validate_and_route;
-use crate::stream::H3UpgradeTrigger;
 
 /// Handle a single HTTP/3 stream by delegating to the Service.
 ///
@@ -125,37 +132,10 @@ pub(super) async fn handle_h3_stream(
   match result {
     Ok(resp) => {
       if is_connect {
-        if resp.status() == http::StatusCode::OK {
-          let resp_headers = resp.headers().clone();
-          if let Some(t) = trigger
-            && let Err(e) = t.send_success(Some(&resp_headers)).await
-          {
-            warn!("H3 failed to send success: {e}");
-          }
-        } else {
-          let resp_headers = resp.headers().clone();
-          let status = resp.status();
-          let body_bytes =
-            match http_body_util::BodyExt::collect(resp.into_body())
-              .await
-            {
-              Ok(collected) => collected.to_bytes(),
-              Err(e) => {
-                warn!("H3 failed to collect response body: {e}");
-                Bytes::new()
-              }
-            };
-          if let Some(t) = trigger
-            && let Err(e) = t
-              .send_error_with_body(
-                status,
-                body_bytes,
-                Some(&resp_headers),
-              )
-              .await
-          {
-            warn!("H3 failed to send error: {e}");
-          }
+        if let Some(trigger) = trigger
+          && let Err(error) = trigger.respond(resp).await
+        {
+          warn!("H3 failed to send CONNECT response: {error}");
         }
       } else if let Some(ref mut stream) = stream_holder
         && let Err(e) = stream.send(resp, &method).await
@@ -167,8 +147,12 @@ pub(super) async fn handle_h3_stream(
       warn!("H3 service error: {e}");
       if is_connect {
         if let Some(t) = trigger
-          && let Err(e) =
-            t.send_error(http::StatusCode::BAD_GATEWAY).await
+          && let Err(e) = t
+            .respond(build_error_response(
+              http::StatusCode::BAD_GATEWAY,
+              "Bad Gateway",
+            ))
+            .await
         {
           warn!("H3 failed to send error: {e}");
         }
@@ -181,82 +165,6 @@ pub(super) async fn handle_h3_stream(
           warn!("H3 failed to send error response: {e}");
         }
       }
-    }
-  }
-}
-
-/// Cancelling an exchange must reset its response stream. Dropping a
-/// Quinn sender alone sends FIN, which can disguise a truncated body.
-struct ResponseWriter<S: h3::quic::SendStream<Bytes>> {
-  stream: server::RequestStream<S, Bytes>,
-  finished: bool,
-}
-
-impl<S: h3::quic::SendStream<Bytes>> ResponseWriter<S> {
-  fn new(stream: server::RequestStream<S, Bytes>) -> Self {
-    Self { stream, finished: false }
-  }
-
-  async fn send(
-    &mut self,
-    response: Response,
-    method: &http::Method,
-  ) -> anyhow::Result<()> {
-    let (mut parts, mut body) = response.into_parts();
-    let body_allowed = method != http::Method::HEAD
-      && !parts.status.is_informational()
-      && !matches!(
-        parts.status,
-        http::StatusCode::NO_CONTENT
-          | http::StatusCode::RESET_CONTENT
-          | http::StatusCode::NOT_MODIFIED
-      );
-    if parts.status.is_informational()
-      || parts.status == http::StatusCode::NO_CONTENT
-    {
-      parts.headers.remove(http::header::CONTENT_LENGTH);
-    }
-    // Preserve this proxy's locally generated 407 challenge.
-    crate::hop_headers::strip_connection_headers(&mut parts.headers);
-    self
-      .stream
-      .send_response(http::Response::from_parts(parts, ()))
-      .await?;
-    if !body_allowed {
-      drop(body);
-      self.stream.finish().await?;
-      self.finished = true;
-      return Ok(());
-    }
-    while let Some(frame) = body.frame().await {
-      let frame = frame?;
-      match frame.into_data() {
-        Ok(data) => {
-          if !data.is_empty() {
-            self.stream.send_data(data).await?;
-          }
-        }
-        Err(frame) => {
-          if let Ok(mut trailers) = frame.into_trailers() {
-            crate::hop_headers::strip_trailer_headers(&mut trailers);
-            self.stream.send_trailers(trailers).await?;
-            self.stream.finish().await?;
-            self.finished = true;
-            return Ok(());
-          }
-        }
-      }
-    }
-    self.stream.finish().await?;
-    self.finished = true;
-    Ok(())
-  }
-}
-
-impl<S: h3::quic::SendStream<Bytes>> Drop for ResponseWriter<S> {
-  fn drop(&mut self) {
-    if !self.finished {
-      self.stream.stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
     }
   }
 }

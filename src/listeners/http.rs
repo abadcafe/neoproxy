@@ -1,3 +1,9 @@
+//! module: listeners::http
+//! responsibility: serve routed HTTP connections over TCP
+//! public operations: listener_name, props, create_listener_builder
+//! data entities: HttpListenerArgs, HttpListener
+//! tests: http_service_tests.rs, http_tests.rs
+
 use std::future;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -7,9 +13,9 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::{info, warn};
 
-use crate::config::SerializedArgs;
+use crate::config::{ListenerPropertyValues, SerializedArgs};
 use crate::listener::{
-  BuildListener, Listener, ListenerProps, Listening, TransportLayer,
+  BuildListener, Listener, Listening, TransportLayer,
 };
 use crate::listeners::http_service::HttpServiceAdaptor;
 use crate::listeners::tcp_accept::{self, AcceptRetryDelay};
@@ -166,8 +172,8 @@ pub(crate) fn listener_name() -> &'static str {
 }
 
 /// Get listener properties for conflict detection.
-pub(crate) fn props() -> ListenerProps {
-  ListenerProps::new(TransportLayer::Tcp, true)
+pub(crate) fn props() -> ListenerPropertyValues {
+  ListenerPropertyValues::new(TransportLayer::Tcp, true)
 }
 
 pub(crate) fn create_listener_builder() -> Box<dyn BuildListener> {

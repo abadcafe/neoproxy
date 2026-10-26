@@ -16,6 +16,7 @@ from tests.fixtures.certificates import generate_test_certificates
 from tests.fixtures.h3_protocol import H3ProtocolBase
 from tests.fixtures.ports import get_unique_port, wait_for_proxy
 from tests.fixtures.proxy_process import start_proxy, terminate_process
+from tests.fixtures.stream_cleanup import close_writer
 
 
 async def verify_dependency_failure(directory: Path) -> None:
@@ -99,8 +100,7 @@ servers:
             assert b":scheme" in fields and b":path" in fields
             assert b"400" in response.split(b"\r\n", 1)[0]
         finally:
-            writer.close()
-            await writer.wait_closed()
+            await close_writer(writer)
     finally:
         server.close()
         terminate_process(process, timeout=5, force=True)

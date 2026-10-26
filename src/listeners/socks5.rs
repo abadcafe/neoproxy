@@ -1,3 +1,9 @@
+//! module: listeners::socks5
+//! responsibility: adapt SOCKS5 sessions to routed CONNECT services
+//! public operations: listener_name, props, create_listener_builder
+//! data entities: Socks5Listener, Socks5ListenerArgs
+//! tests: socks5_tests.rs
+
 //! SOCKS5 listener implementation.
 //!
 //! This module provides a SOCKS5 protocol listener that accepts SOCKS5
@@ -11,6 +17,9 @@
 
 mod command;
 mod handshake;
+mod upgrade;
+#[cfg(test)]
+mod upgrade_tests;
 
 #[cfg(test)]
 mod command_tests;
@@ -28,17 +37,17 @@ use handshake::{
 };
 use serde::Deserialize;
 
-use super::tcp_accept::{self, AcceptRetryDelay};
-use super::tcp_listener_base::TcpListenerBase;
-use crate::config::SerializedArgs;
-use crate::http_message::{BytesBufBodyWrapper, RequestBody};
-use crate::listener::{
-  BuildListener, Listener, ListenerProps, Listening, TransportLayer,
-};
-use crate::service::Service as RuntimeService;
-use crate::stream::{
+use self::upgrade::{
   Socks5UpgradeTrigger, http_status_to_socks5_error,
 };
+use super::tcp_accept::{self, AcceptRetryDelay};
+use super::tcp_listener_base::TcpListenerBase;
+use crate::config::{ListenerPropertyValues, SerializedArgs};
+use crate::http_message::{BytesBufBodyWrapper, RequestBody};
+use crate::listener::{
+  BuildListener, Listener, Listening, TransportLayer,
+};
+use crate::service::Service as RuntimeService;
 
 /// SOCKS5 listener implementation.
 ///
@@ -558,8 +567,8 @@ pub(crate) fn listener_name() -> &'static str {
 }
 
 /// Get listener properties for conflict detection.
-pub(crate) fn props() -> ListenerProps {
-  ListenerProps::new(TransportLayer::Tcp, false)
+pub(crate) fn props() -> ListenerPropertyValues {
+  ListenerPropertyValues::new(TransportLayer::Tcp, false)
 }
 
 /// Creates a listener builder.

@@ -1,3 +1,10 @@
+//! module: server_thread
+//! responsibility: compose and supervise one worker service graph
+//! public operations: build_service_with_layers, build_listeners,
+//! run_server_thread
+//! data entities: none
+//! tests: server_thread_tests.rs
+
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;

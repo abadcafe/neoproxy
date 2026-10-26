@@ -1,3 +1,11 @@
+//! module: plugins::http_upstream::config::validation
+//! responsibility: validate upstream transport policy before
+//! construction
+//! public operations: validate_address_format,
+//! validate_plugin_config
+//! data entities: none
+//! tests: validation_tests.rs
+
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -41,6 +49,12 @@ pub(crate) fn validate_plugin_config(
   let mut upstream_names: HashSet<&str> = HashSet::new();
 
   validate_duration_positive(
+    plugin.tunnel_idle_timeout,
+    "plugin",
+    "tunnel_idle_timeout",
+  )?;
+
+  validate_duration_positive(
     plugin.request_timeout,
     "plugin",
     "request_timeout",
@@ -80,6 +94,18 @@ pub(crate) fn validate_plugin_config(
 }
 
 fn validate_upstream_config(upstream: &UpstreamConfig) -> Result<()> {
+  validate_duration_positive(
+    upstream.tunnel_idle_timeout,
+    &upstream.name,
+    "tunnel_idle_timeout",
+  )?;
+  if let Some(pool) = &upstream.pool {
+    validate_duration_positive(
+      Some(pool.idle_timeout),
+      &upstream.name,
+      "pool.idle_timeout",
+    )?;
+  }
   validate_duration_positive(
     upstream.request_timeout,
     &upstream.name,
@@ -144,6 +170,11 @@ fn validate_address_config(
   addr: &UpstreamAddressConfig,
 ) -> Result<()> {
   addr.protocol()?;
+  validate_duration_positive(
+    addr.tunnel_idle_timeout,
+    upstream_name,
+    "tunnel_idle_timeout",
+  )?;
   validate_duration_positive(
     addr.http.as_ref().and_then(|value| value.connect_timeout),
     upstream_name,
@@ -266,7 +297,7 @@ fn validate_duration_positive(
     && (value.is_zero()
       || std::time::Instant::now().checked_add(value).is_none())
   {
-    bail!("{location} {field} must be greater than 0s");
+    bail!("{location} {field} must be positive and representable");
   }
   Ok(())
 }

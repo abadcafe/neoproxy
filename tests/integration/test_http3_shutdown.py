@@ -20,6 +20,7 @@ from tests.fixtures.configuration import StringMap
 from tests.fixtures.h3_lifecycle import LifecycleClient
 from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
+from tests.fixtures.stream_cleanup import close_writer
 from tests.fixtures.udp_sockets import bound_socket_count
 
 
@@ -226,8 +227,7 @@ def test_shutdown_delivers_response_tail_before_closing(
                     writer.write(tail)
                     await writer.drain()
                 finally:
-                    writer.close()
-                    await writer.wait_closed()
+                    await close_writer(writer)
 
             target_port = get_unique_port()
             server = await asyncio.start_server(target, "127.0.0.1", target_port)
@@ -310,8 +310,7 @@ def test_shutdown_keeps_mixed_connection_until_service_stops_tunnel(
                     assert await reader.read() == b""
                     target_closed.set()
                 finally:
-                    writer.close()
-                    await writer.wait_closed()
+                    await close_writer(writer)
 
             target_port = get_unique_port()
             server = await asyncio.start_server(target, "127.0.0.1", target_port)

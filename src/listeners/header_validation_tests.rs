@@ -122,6 +122,50 @@ fn test_validate_and_route_without_host_returns_bad_request() {
 }
 
 #[test]
+fn test_validate_and_route_http10_without_host_uses_default() {
+  let request = http::Request::builder()
+    .version(http::Version::HTTP_10)
+    .uri("/")
+    .body(())
+    .unwrap();
+  assert_eq!(
+    validate_and_route(&request, &build_router()).unwrap().service_name,
+    "default"
+  );
+}
+
+#[test]
+fn test_validate_and_route_requires_authority_for_http2_and_http3() {
+  for version in [http::Version::HTTP_2, http::Version::HTTP_3] {
+    let request = http::Request::builder()
+      .version(version)
+      .uri("/")
+      .header("host", "")
+      .body(())
+      .unwrap();
+    assert!(validate_and_route(&request, &build_router()).is_err());
+  }
+}
+
+#[test]
+fn test_validate_and_route_empty_host_uses_target_or_default() {
+  for uri in ["/", "http://api.example.com/path"] {
+    let request = http::Request::builder()
+      .uri(uri)
+      .header("host", "")
+      .body(())
+      .unwrap();
+    let expected = if uri == "/" { "default" } else { "api" };
+    assert_eq!(
+      validate_and_route(&request, &build_router())
+        .unwrap()
+        .service_name,
+      expected
+    );
+  }
+}
+
+#[test]
 fn test_authority_host_mismatch_rejects_missing_authorities() {
   assert!(authority_host_mismatch("", ""));
 }

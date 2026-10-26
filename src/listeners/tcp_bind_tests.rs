@@ -33,3 +33,24 @@ async fn test_create_tcp_listener_returns_valid_local_addr() {
   assert_eq!(local_addr.ip(), addr.ip());
   assert_ne!(local_addr.port(), 0); // port 0 -> assigned by OS
 }
+
+#[tokio::test]
+async fn test_create_tcp_listener_zero_port_has_exclusive_ownership() {
+  let listener =
+    create_tcp_listener("127.0.0.1:0".parse().unwrap()).unwrap();
+  assert!(create_tcp_listener(listener.local_addr().unwrap()).is_err());
+}
+
+#[tokio::test]
+async fn test_create_tcp_listener_fixed_port_workers_share_address() {
+  for bind in ["127.0.0.1:0", "[::1]:0"] {
+    let address =
+      std::net::TcpListener::bind(bind).unwrap().local_addr().unwrap();
+    let first = create_tcp_listener(address).unwrap();
+    let second = create_tcp_listener(address).unwrap();
+    assert_eq!(
+      first.local_addr().unwrap(),
+      second.local_addr().unwrap()
+    );
+  }
+}

@@ -1,3 +1,9 @@
+//! module: listeners::tcp_bind
+//! responsibility: bind worker-owned reusable TCP listening sockets
+//! public operations: create_tcp_listener
+//! data entities: none
+//! tests: tcp_bind_tests.rs
+
 //! TCP socket creation helper for listeners.
 //!
 //! Provides a shared function for creating TCP listeners with
@@ -8,7 +14,8 @@ use std::net::SocketAddr;
 
 use anyhow::Result;
 
-/// Create a TCP listener with SO_REUSEADDR and SO_REUSEPORT enabled.
+/// Share explicitly configured ports across workers. Port zero asks
+/// for independent allocation and therefore keeps exclusive ownership.
 ///
 /// This function creates a TCP socket, sets reuse options, binds to the
 /// given address, and starts listening with a backlog of 1024.
@@ -27,8 +34,9 @@ pub(crate) fn create_tcp_listener(
     SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
     SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
   };
-  socket.set_reuseaddr(true)?;
-  socket.set_reuseport(true)?;
+  let shared = addr.port() != 0;
+  socket.set_reuseaddr(shared)?;
+  socket.set_reuseport(shared)?;
   socket.bind(addr)?;
   Ok(socket.listen(1024)?)
 }

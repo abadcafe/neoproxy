@@ -1,3 +1,9 @@
+//! module: config::validate
+//! responsibility: orchestrate configuration validation
+//! public operations: validate, validate_config
+//! data entities: none
+//! tests: validate_tests.rs
+
 //! Configuration validation orchestration.
 
 use super::document::Config;

@@ -1,3 +1,11 @@
+//! module: config::error
+//! responsibility: collect structured configuration diagnostics
+//! public operations: ConfigError, location, message,
+//! ConfigErrorCollector, new, add, has_errors, errors,
+//! report_and_exit
+//! data entities: ConfigError, ConfigErrorCollector
+//! tests: error_tests.rs
+
 //! Configuration error types.
 
 use std::process;

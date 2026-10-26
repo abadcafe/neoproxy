@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use crate::shutdown::ShutdownHandle;
-use crate::stream::{http_status_to_socks5_error, run_tunnel};
+use crate::stream::run_tunnel;
 
 // ============== run_tunnel Tests ==============
 
@@ -142,14 +142,4 @@ async fn test_run_tunnel_shutdown_notification() {
     elapsed < Duration::from_secs(2),
     "Tunnel should exit quickly on shutdown, took {elapsed:?}"
   );
-}
-
-#[test]
-fn test_http_status_to_socks5_error_proxy_auth_required() {
-  assert!(matches!(
-    http_status_to_socks5_error(
-      http::StatusCode::PROXY_AUTHENTICATION_REQUIRED
-    ),
-    fast_socks5::ReplyError::ConnectionNotAllowed
-  ));
 }

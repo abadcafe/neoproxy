@@ -123,3 +123,42 @@ fn test_validate_plugin_config_rejects_unrepresentable_quic_values() {
     );
   }
 }
+
+#[test]
+fn test_validate_plugin_config_bounds_every_idle_deadline() {
+  for duration in ["0s", "18446744073709551615s"] {
+    for yaml in [
+      format!("tunnel_idle_timeout: {duration}"),
+      format!(
+        "upstreams: [{{name: direct, tunnel_idle_timeout: \
+         {duration}}}]"
+      ),
+      format!(
+        "upstreams: [{{name: chain, addresses: [{{address: \
+         'localhost:80', http: {{}}, tunnel_idle_timeout: \
+         {duration}}}]}}]"
+      ),
+      format!(
+        "upstreams: [{{name: direct, pool: {{idle_timeout: \
+         {duration}}}}}]"
+      ),
+    ] {
+      let config: HttpUpstreamPluginConfig =
+        serde_yaml::from_str(&yaml).unwrap();
+      assert!(
+        validate_plugin_config(&config).is_err(),
+        "accepted {yaml}"
+      );
+    }
+  }
+}
+
+#[test]
+fn test_validate_plugin_config_accepts_finite_idle_deadlines() {
+  let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
+    "tunnel_idle_timeout: 1ms\nupstreams: [{name: direct, pool: \
+     {idle_timeout: 1ms, max_idle_per_host: 0}}]",
+  )
+  .unwrap();
+  assert!(validate_plugin_config(&config).is_ok());
+}

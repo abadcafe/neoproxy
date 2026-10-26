@@ -434,7 +434,7 @@ class TestHTTP10Support:
     - HTTP/1.0 CONNECT (as used by Python 3.8 http.client._tunnel)
       should succeed and establish a tunnel.
     - HTTP/1.0 GET with Host header should route normally.
-    - HTTP/1.0 GET without Host header should return 400 Bad Request.
+    - HTTP/1.0 GET without Host header should use the default server.
     """
 
     def test_http10_connect_succeeds(self) -> None:
@@ -578,14 +578,11 @@ class TestHTTP10Support:
             if proc is not None:
                 terminate_process(proc)
 
-    def test_http10_get_without_host_returns_400(
+    def test_http10_get_without_host_routes_to_default(
         self, h1_h3_test_env: tuple[str, int, int, int, int]
     ) -> None:
         """
-        HTTP/1.0 GET without Host header should return 400 Bad Request.
-
-        The Host header requirement still applies — HTTP/1.0 requests
-        without Host are rejected with 400, not 505.
+        HTTP/1.0 GET without Host uses the listener's default server.
         """
         import socket
 
@@ -614,8 +611,8 @@ class TestHTTP10Support:
             response = sock.recv(1024)
             sock.close()
 
-            assert b"400" in response, (
-                "Expected 400 Bad Request for HTTP/1.0 GET without Host, got:"
+            assert b"200" in response.split(b"\r\n", 1)[0], (
+                "Expected default server for HTTP/1.0 GET without Host, got:"
                 + f" {response.decode(errors='ignore')}"
             )
 

@@ -7,7 +7,6 @@
 //! tests: service::tests, config::tests, error::tests, inherit::tests,
 //! target_parser_tests.rs, upstream child module tests
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,7 +49,7 @@ mod upstream_tests;
 struct HttpUpstreamPlugin {
   service_builders: HashMap<&'static str, Box<dyn BuildService>>,
   stream_tracker: Rc<StreamTracker>,
-  registry: Rc<RefCell<UpstreamRegistry>>,
+  registry: Rc<UpstreamRegistry>,
   is_uninstalled: Rc<AtomicBool>,
 }
 
@@ -59,7 +58,7 @@ impl HttpUpstreamPlugin {
     registry: UpstreamRegistry,
     stream_tracker: Rc<StreamTracker>,
   ) -> Self {
-    let registry = Rc::new(RefCell::new(registry));
+    let registry = Rc::new(registry);
 
     let upstream_st = stream_tracker.clone();
     let upstream_registry = registry.clone();
@@ -106,7 +105,7 @@ impl Plugin for HttpUpstreamPlugin {
       // a grace period for continued tunnel traffic. Listener draining
       // has already allowed ordinary HTTP exchanges to finish first.
       st.shutdown();
-      registry.borrow_mut().close_all();
+      registry.close_all();
 
       match st
         .wait_shutdown_with_timeout(SERVICE_SHUTDOWN_TIMEOUT)

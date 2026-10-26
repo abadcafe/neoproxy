@@ -1,3 +1,9 @@
+//! module: cli
+//! responsibility: parse process command-line actions
+//! public operations: CmdOpt, global, config_file
+//! data entities: CmdOpt
+//! tests: cli_tests.rs
+
 //! Command line options.
 
 use std::sync::LazyLock;
@@ -6,6 +12,12 @@ use clap::Parser;
 
 /// Command line options.
 #[derive(Parser, Debug)]
+#[command(version, disable_version_flag = true)]
+#[command(arg(clap::Arg::new("version")
+  .short('v')
+  .long("version")
+  .action(clap::ArgAction::Version)
+  .help("Show version")))]
 pub(crate) struct CmdOpt {
   /// Sets a custom config file
   #[arg(
@@ -15,10 +27,6 @@ pub(crate) struct CmdOpt {
     default_value_t = String::from("conf/server.yaml")
   )]
   config_file: String,
-
-  /// Gets version
-  #[arg(short, long = "version")]
-  version: bool,
 }
 
 impl CmdOpt {

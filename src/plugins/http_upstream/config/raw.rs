@@ -1,3 +1,12 @@
+//! module: plugins::http_upstream::config::raw
+//! responsibility: deserialize unresolved upstream policy
+//! public operations: CertificateConfig, validate,
+//! UpstreamAddressConfig, protocol, UpstreamConfig,
+//! HttpUpstreamPluginConfig, UpstreamServiceArgs
+//! data entities: CertificateConfig, UpstreamAddressConfig,
+//! UpstreamConfig, HttpUpstreamPluginConfig, UpstreamServiceArgs
+//! tests: raw_tests.rs
+
 use std::time::Duration;
 
 use anyhow::{Result, bail};

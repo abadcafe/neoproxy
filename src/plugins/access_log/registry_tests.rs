@@ -39,6 +39,20 @@ fn test_new_rejects_writer_paths_with_the_same_canonical_parent_and_name()
   );
 }
 
+#[test]
+fn test_new_rejects_writers_following_the_same_file_symlink() {
+  let directory = tempfile::tempdir().unwrap();
+  let mut configuration = config(&directory, LogFormat::Text);
+  let original = directory.path().join("access");
+  std::fs::write(&original, "").unwrap();
+  let alias = directory.path().join("alias");
+  std::os::unix::fs::symlink(&original, &alias).unwrap();
+  let mut second = configuration.writers[0].clone();
+  second.path_prefix = alias.to_str().unwrap().into();
+  configuration.writers.push(second);
+  assert!(WriterRegistry::new(&configuration).is_err());
+}
+
 fn entry() -> AccessLogEntry {
   AccessLogEntry {
     time: time::OffsetDateTime::now_utc(),

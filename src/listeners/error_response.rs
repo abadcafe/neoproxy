@@ -1,3 +1,9 @@
+//! module: listeners::error_response
+//! responsibility: construct listener boundary error responses
+//! public operations: build_403_forbidden, build_404_response
+//! data entities: none
+//! tests: error_response_tests.rs
+
 //! HTTP error response builders for listeners.
 //!
 //! Provides helpers for constructing common HTTP error responses

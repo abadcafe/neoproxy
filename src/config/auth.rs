@@ -1,3 +1,10 @@
+//! module: config::auth
+//! responsibility: deserialize configured user credentials without
+//! exposing passwords
+//! public operations: UserCredential, username, password
+//! data entities: UserCredential
+//! tests: auth_tests.rs
+
 //! Authentication configuration types.
 
 use serde::Deserialize;

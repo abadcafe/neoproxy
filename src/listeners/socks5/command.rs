@@ -1,3 +1,10 @@
+//! module: listeners::socks5::command
+//! responsibility: decode supported SOCKS5 commands
+//! public operations: CommandError, CommandResult,
+//! read_command_and_target
+//! data entities: CommandError, CommandResult
+//! tests: command_tests.rs
+
 //! SOCKS5 command processing.
 
 use super::handshake::HandshakeError;

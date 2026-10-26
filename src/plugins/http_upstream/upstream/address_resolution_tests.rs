@@ -29,3 +29,21 @@ async fn test_timeout_resolver_numeric_host_resolves_within_deadline() {
   assert!(!addresses.is_empty());
   assert!(addresses.iter().all(|address| address.ip().is_loopback()));
 }
+
+#[tokio::test]
+async fn test_timeout_resolver_preserves_dns_failure_category() {
+  use tower::Service;
+  let mut resolver = super::address_resolution::TimeoutResolver::new(
+    std::time::Duration::from_secs(1),
+  );
+  let error = resolver
+    .call("missing..invalid".parse().unwrap())
+    .await
+    .unwrap_err();
+  assert!(matches!(
+    crate::plugins::http_upstream::error::classify_http_client_error(
+      error.into()
+    ),
+    crate::plugins::http_upstream::error::UpstreamError::DnsError(_)
+  ));
+}

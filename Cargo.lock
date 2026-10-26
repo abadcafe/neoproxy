@@ -1482,6 +1482,7 @@ dependencies = [
  "fast-socks5",
  "futures",
  "futures-core",
+ "futures-util",
  "h3",
  "h3-quinn",
  "hickory-resolver",

@@ -234,3 +234,21 @@ async fn test_accept_shutdown_interrupts_continuous_connection_errors()
   }
   assert_eq!(start.elapsed(), Duration::ZERO);
 }
+#[tokio::test]
+async fn test_accept_tcp_disables_nagle_for_interactive_proxy_traffic()
+{
+  let listener =
+    tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let address = listener.local_addr().unwrap();
+  let (accepted, client) = tokio::join!(
+    super::tcp_accept::accept_tcp(
+      address,
+      Default::default(),
+      &listener
+    ),
+    tokio::net::TcpStream::connect(address),
+  );
+  let (stream, _) = accepted.unwrap();
+  assert!(client.is_ok());
+  assert!(stream.nodelay().unwrap());
+}

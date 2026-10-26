@@ -309,3 +309,26 @@ async def test_h3_pool_retains_active_response_past_idle_timeout(
                 status, _, body = await pending
                 assert status == 200
                 assert body == b"delayed-response"
+
+
+@pytest.mark.asyncio
+async def test_h3_pool_reuses_connection_while_an_older_response_is_active(
+    tmp_path: Path,
+) -> None:
+    cert, key, ca, _ = generate_test_certificates(str(tmp_path))
+    async with origin_peer(PeerConfig(certificate=cert, key=key, wire="h3")) as h3:
+        h3.response_delay = 0.6
+        async with origin_peer(PeerConfig(certificate=cert, key=key, wire="h1")) as h1:
+            h1.headers["alt-svc"] = f'h3=":{h3.port}"; ma=60'
+            with direct_proxy(tmp_path, cert, key, ca, idle_timeout="150ms") as entry:
+                url = f"https://127.0.0.1:{h1.port}/"
+                assert (await curl_forward(entry, url))[0] == 200
+                first = asyncio.create_task(curl_forward(entry, url, b"first"))
+                async with asyncio.timeout(2):
+                    while not h3.requests:
+                        await asyncio.sleep(0.01)
+                await asyncio.sleep(0.25)
+                second = asyncio.create_task(curl_forward(entry, url, b"second"))
+                responses = await asyncio.gather(first, second)
+                assert [response[2] for response in responses] == [b"first", b"second"]
+                assert len({request.connection for request in h3.requests}) == 1

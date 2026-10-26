@@ -9,7 +9,6 @@ use std::net::SocketAddr;
 
 use bytes::Bytes;
 use h3::server;
-use tower::ServiceExt;
 use tracing::warn;
 
 use super::recv_body::H3RecvBody;
@@ -19,24 +18,12 @@ use crate::h3_response::ResponseWriter;
 use crate::http_message::{
   BytesBufBodyWrapper, RequestBody, build_error_response,
 };
-use crate::listeners::header_validation::validate_and_route;
+use crate::listeners::http_service::HttpService;
 
 /// Handle a single HTTP/3 stream by delegating to the Service.
 ///
-/// Flow:
-/// 1. authority check (:authority MUST exist, if Host present must
-///    equal :authority)
-/// 2. Authentication check (fail -> send 407 directly)
-/// 3. Route request to correct service based on :authority
-/// 4. Create (trigger, on_upgrade) pair
-/// 5. Build Request with on_upgrade in extensions
-/// 6. Call service.call(request)
-/// 7. Based on response status, trigger.send_success() or
-///    trigger.send_error()
-///
-/// Returns unit `()` because all errors are handled internally via
-/// logging and H3 error responses. This function never propagates
-/// errors upward.
+/// Transport adaptation and stream ownership remain here; the shared
+/// HTTP service owns validation, routing and connection policy.
 pub(super) async fn handle_h3_stream(
   req: http::Request<()>,
   stream: server::RequestStream<CancellableStream, Bytes>,
@@ -47,49 +34,17 @@ pub(super) async fn handle_h3_stream(
 ) -> () {
   let method = req.method().clone();
 
-  let routing_entry = match validate_and_route(&req, &server_router) {
-    Ok(entry) => entry,
-    Err(response) => {
-      let mut stream = ResponseWriter::new(stream);
-      if let Err(error) = stream.send(*response, &method).await {
-        warn!("Failed to send routing error: {error}");
-      }
-      return;
-    }
-  };
-
-  // QUIC/TLS already authenticated any presented client certificate
-  // against this listener's combined CA roots. Only the requirement
-  // for a non-anonymous connection depends on the routed server.
-  // Do not revalidate certificates per stream or compare the proxy's
-  // SNI with the request authority, which can name a tunnel target.
-  if routing_entry.requires_client_cert() && !client_cert_presented {
-    let resp = build_error_response(
-      http::StatusCode::FORBIDDEN,
-      "Forbidden: client certificate required",
-    );
-    let mut stream = ResponseWriter::new(stream);
-    if let Err(e) = stream.send(resp, &method).await {
-      warn!("Failed to send 403 response: {e}");
-    }
-    return;
-  }
-
-  let service = routing_entry.service.clone();
-
-  // Phase 3: Build RequestContext with connection-level keys and insert
-  // into request extensions. Auth and access logging are now handled
-  // by the plugin layer in the service pipeline.
-  let ctx = crate::context::build_request_context(
-    &client_addr,
-    &local_addr,
-    &routing_entry.service_name,
+  let service = HttpService::new_tls(
+    server_router,
+    client_addr,
+    local_addr,
+    client_cert_presented,
   );
 
-  // Phase 4: Create upgrade pair ONLY for CONNECT method
+  // CONNECT transfers the whole stream after a successful response.
   let is_connect = method == http::Method::CONNECT;
 
-  // Phase 5: Build Request with appropriate body and stream handling.
+  // Adapt the body while retaining ownership of the response transport.
   // stream is consumed here — either by H3UpgradeTrigger::pair
   // (CONNECT) or by stream.split() (non-CONNECT). Both branches are
   // mutually exclusive.
@@ -112,10 +67,6 @@ pub(super) async fn handle_h3_stream(
 
   let (parts, ()) = req.into_parts();
   let mut request = http::Request::from_parts(parts, request_body);
-  crate::hop_headers::join_cookie_headers(request.headers_mut());
-
-  // Insert RequestContext into request extensions
-  request.extensions_mut().insert(ctx);
 
   let trigger = if let Some((trigger, on_upgrade)) = trigger_and_upgrade
   {
@@ -125,46 +76,20 @@ pub(super) async fn handle_h3_stream(
     None
   };
 
-  // Phase 6: Call Service
-  let result = service.oneshot(request).await;
-
-  // Phase 7: Handle Service response
-  match result {
-    Ok(resp) => {
-      if is_connect {
-        if let Some(trigger) = trigger
-          && let Err(error) = trigger.respond(resp).await
-        {
-          warn!("H3 failed to send CONNECT response: {error}");
-        }
-      } else if let Some(ref mut stream) = stream_holder
-        && let Err(e) = stream.send(resp, &method).await
-      {
-        warn!("H3 failed to send response: {e}");
-      }
+  let response = match service.dispatch(request).await {
+    Ok(response) => response,
+    Err(error) => {
+      warn!("H3 service error: {error}");
+      build_error_response(http::StatusCode::BAD_GATEWAY, "Bad Gateway")
     }
-    Err(e) => {
-      warn!("H3 service error: {e}");
-      if is_connect {
-        if let Some(t) = trigger
-          && let Err(e) = t
-            .respond(build_error_response(
-              http::StatusCode::BAD_GATEWAY,
-              "Bad Gateway",
-            ))
-            .await
-        {
-          warn!("H3 failed to send error: {e}");
-        }
-      } else if let Some(ref mut stream) = stream_holder {
-        let resp = build_error_response(
-          http::StatusCode::BAD_GATEWAY,
-          "Bad Gateway",
-        );
-        if let Err(e) = stream.send(resp, &method).await {
-          warn!("H3 failed to send error response: {e}");
-        }
-      }
+  };
+  if let Some(trigger) = trigger {
+    if let Err(error) = trigger.respond(response).await {
+      warn!("H3 failed to send CONNECT response: {error}");
     }
+  } else if let Some(ref mut stream) = stream_holder
+    && let Err(error) = stream.send(response, &method).await
+  {
+    warn!("H3 failed to send response: {error}");
   }
 }

@@ -28,6 +28,11 @@ pub(crate) fn validate_address_format(s: &str) -> Result<()> {
       format!("address '{s}' is not a valid authority")
     })?;
 
+  let authority = crate::http_authority::normalize(&authority)
+    .map_err(|error| {
+      anyhow!("address '{s}' has invalid authority: {error:?}")
+    })?;
+
   let host = authority.host();
   if host.is_empty() {
     bail!("address '{s}' missing host");

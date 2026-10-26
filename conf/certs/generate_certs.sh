@@ -4,12 +4,17 @@
 # =============================================================================
 # 生成两套独立的 CA 和证书，带正确的 EKU 限制
 
-set -e
+set -euo pipefail
+umask 077
 
 cd "$(dirname "$0")"
+certificate_directory="$PWD"
 
-# 清理旧证书
-rm -f *.crt *.key *.csr *.srl *.ext
+# 全部生成成功后才替换本脚本拥有的文件；失败时保留现有证书，
+# 不删除目录中其他用途的证书或私钥。
+generation_directory="$(mktemp -d "$certificate_directory/.generation.XXXXXX")"
+trap 'rm -rf -- "$generation_directory"' EXIT
+cd "$generation_directory"
 
 echo "=== 生成 Server CA ==="
 openssl genrsa -out server-ca.key 2048
@@ -54,8 +59,10 @@ EXT
 openssl x509 -req -in client.csr -CA client-ca.crt -CAkey client-ca.key \
   -CAcreateserial -out client.crt -days 3650 -sha256 -extfile client.ext
 
-# 清理临时文件
-rm -f *.csr *.srl *.ext
+for certificate_file in server-ca.key server-ca.crt client-ca.key client-ca.crt \
+  server.key server.crt client.key client.crt; do
+  mv -- "$certificate_file" "$certificate_directory/$certificate_file"
+done
 
 echo ""
 echo "=== 证书生成完成 ==="

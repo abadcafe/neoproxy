@@ -127,3 +127,49 @@ fn test_invalidate_removes_misdirected_origin_routes() {
   cache.invalidate(&source);
   assert!(cache.routes(&source, Instant::now()).is_empty());
 }
+
+#[test]
+fn test_observe_saturates_unbounded_decimal_lifetimes_and_age() {
+  let mut cache = AltServices::default();
+  let source = origin("https://example.com/");
+  let now = Instant::now();
+  let mut response =
+    headers("h3=\":443\"; ma=999999999999999999999999999999");
+  cache.observe(&source, &response, now);
+  assert_eq!(
+    cache.routes(&source, now + Duration::from_secs(86400)).len(),
+    1
+  );
+  response.insert(
+    "age",
+    HeaderValue::from_static("999999999999999999999999999999"),
+  );
+  cache.observe(&source, &response, now);
+  assert!(cache.routes(&source, now).is_empty());
+}
+
+#[test]
+fn test_observe_refresh_at_capacity_preserves_other_origins() {
+  let mut cache = AltServices::default();
+  let now = Instant::now();
+  for index in 0..1024 {
+    cache.observe(
+      &origin(&format!("https://host{index}.test/")),
+      &headers("h3=\":443\""),
+      now,
+    );
+  }
+  cache.observe(
+    &origin("https://host0.test/"),
+    &headers("h3=\":8443\""),
+    now,
+  );
+  assert_eq!(
+    cache.routes(&origin("https://host1.test/"), now).len(),
+    1
+  );
+  assert_eq!(
+    cache.routes(&origin("https://host0.test/"), now)[0].port,
+    8443
+  );
+}

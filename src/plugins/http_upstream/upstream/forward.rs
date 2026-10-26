@@ -1,6 +1,6 @@
 //! module: forward
 //! responsibilities: translate a forward request and streamed response
-//! across an HTTP hop public operations: chain_forward_http
+//! across an HTTP hop public operations: ForwardClient, forward_request
 //! data entities: none
 //! tests: forward_tests.rs
 use std::time::Instant;
@@ -40,8 +40,9 @@ where
 {
   async fn send(
     &self,
-    request: Request,
+    mut request: Request,
   ) -> Result<Response, UpstreamError> {
+    *request.version_mut() = http::Version::HTTP_11;
     let response = self
       .request(request)
       .await
@@ -55,9 +56,9 @@ where
 }
 
 /// Normalize a forward exchange independently of transport pooling.
-pub(super) async fn chain_forward_http<C>(
+pub(super) async fn forward_request<C>(
   client: C,
-  user: Option<crate::config::UserCredential>,
+  user: &Option<crate::config::UserCredential>,
   target: &ForwardTarget,
   mut req_headers: http::request::Parts,
   req_body: RequestBody,
@@ -83,9 +84,8 @@ where
   headers.insert(http::header::HOST, host_header);
 
   req_headers.uri = target.absolute_uri().clone();
-  req_headers.version = http::Version::HTTP_11;
   let mut fwd_req = http::Request::from_parts(req_headers, req_body);
-  apply_proxy_auth(&user, &mut fwd_req);
+  apply_proxy_auth(user, &mut fwd_req);
 
   let forward_start = Instant::now();
   let upstream_resp = match client.send(fwd_req).await {

@@ -9,6 +9,7 @@ import errno
 import socket
 import threading
 import time
+from contextlib import ExitStack
 
 from .proxy_process import BytesProcess
 
@@ -40,11 +41,13 @@ def wait_for_proxy(
         if proc is not None and proc.poll() is not None:
             return False
 
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(1.0)
-            result = sock.connect_ex((host, port))
-            if result == 0:
-                return True
+        try:
+            probe = socket.create_connection((host, port), timeout=1.0)
+        except OSError:
+            pass
+        else:
+            probe.close()
+            return True
         time.sleep(interval)
     return False
 
@@ -68,11 +71,13 @@ def wait_for_port_released(
     """
     start_time = time.monotonic()
     while time.monotonic() - start_time < timeout:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(0.5)
-            result = sock.connect_ex((host, port))
-            if result != 0:
+        try:
+            probe = socket.create_connection((host, port), timeout=0.5)
+        except OSError as error:
+            if error.errno == errno.ECONNREFUSED:
                 return True
+        else:
+            probe.close()
         time.sleep(interval)
     return False
 
@@ -108,7 +113,8 @@ def wait_for_udp_port_bound(
         if proc is not None and proc.poll() is not None:
             return False
 
-        test_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        test_sock = socket.socket(family, socket.SOCK_DGRAM)
         try:
             test_sock.bind((host, port))
             # Port is available, server not started yet
@@ -130,22 +136,15 @@ def get_unique_port() -> int:
     """
     Get a unique port number for testing.
 
-    This function verifies that the port is actually available by attempting
-    to bind to it WITHOUT SO_REUSEADDR. This ensures the port is truly free
-    (not in TIME_WAIT state). If the port is not available, it tries the next
-    port until an available one is found.
-
-    Why no SO_REUSEADDR:
-    - neoproxy server does NOT set SO_REUSEADDR on its listening sockets
-    - If we used SO_REUSEADDR here, we could bind ports in TIME_WAIT state
-    - But neoproxy would then fail to bind those same ports
-    - This caused "works in suite, fails alone" bugs
+    Probe TCP and UDP in each available IP family without reuse options.
+    A QUIC listener needs UDP availability even when the TCP port is free.
+    Keep every probe socket open until all families/transports have passed;
+    IPv6-only probes avoid colliding with our own IPv4 probes.
 
     Returns:
         int: Available port number
 
-    Raises:
-        RuntimeError: If no available port can be found after 100 attempts
+    Resource exhaustion fails the fixture's assertion after 100 candidates.
     """
     global _port_counter
     with _port_lock:
@@ -153,12 +152,21 @@ def get_unique_port() -> int:
             _port_counter += 1
             port = _port_counter
 
-            # Verify the port is actually available by trying to bind
-            # Do NOT use SO_REUSEADDR - we want truly free ports
             try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_sock:
-                    # Don't use SO_REUSEADDR - this ensures port is truly free
-                    test_sock.bind(("0.0.0.0", port))
+                with ExitStack() as probes:
+                    families = [(socket.AF_INET, "0.0.0.0")]
+                    if socket.has_ipv6:
+                        families.append((socket.AF_INET6, "::"))
+                    for family, host in families:
+                        for transport in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+                            probe = probes.enter_context(
+                                socket.socket(family, transport)
+                            )
+                            if family == socket.AF_INET6:
+                                probe.setsockopt(
+                                    socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1
+                                )
+                            probe.bind((host, port))
                     return port
             except OSError:
                 # Port is not available, try next one

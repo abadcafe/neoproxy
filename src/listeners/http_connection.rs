@@ -11,7 +11,7 @@ use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::header_deadline::HeaderDeadline;
-use super::http_service::HttpServiceAdaptor;
+use super::http_service::HttpService;
 use crate::shutdown::ShutdownHandle;
 
 #[derive(Clone)]
@@ -24,7 +24,7 @@ impl<F: Future + 'static> hyper::rt::Executor<F> for LocalExecutor {
 
 pub(crate) async fn serve<I>(
   io: I,
-  service: HttpServiceAdaptor,
+  service: HttpService,
   deadline: HeaderDeadline,
   shutdown: ShutdownHandle,
 ) -> Result<()>

@@ -15,6 +15,7 @@ use tracing::{error, warn};
 use super::config::AccessLogWriterConfig;
 use super::context::{AccessLogEntry, LogFormat};
 use super::formatter;
+use super::paths::LogPaths;
 
 pub(crate) struct AccessLogWriter {
   current_file: Option<File>,
@@ -24,7 +25,7 @@ pub(crate) struct AccessLogWriter {
   next_archive_index: u64,
   buffer: Vec<u8>,
   // Config-driven fields
-  path_prefix: String,
+  paths: LogPaths,
   buffer_capacity: usize,
   max_buffer_size: usize,
   max_file_size: u64,
@@ -56,7 +57,10 @@ impl AccessLogWriter {
       buffer: Vec::with_capacity(
         config.buffer_capacity.as_u64() as usize
       ),
-      path_prefix: config.path_prefix.clone(),
+      paths: LogPaths::new(
+        config.path_prefix.clone().into(),
+        config.rotate_daily,
+      ),
       buffer_capacity: config.buffer_capacity.as_u64() as usize,
       max_buffer_size: config.max_buffer_size.as_u64() as usize,
       max_file_size: config.max_file_size.as_u64(),
@@ -151,13 +155,7 @@ impl AccessLogWriter {
     {
       return;
     }
-    let path = match today {
-      Some(date) => std::path::PathBuf::from(format!(
-        "{}.{}",
-        self.path_prefix, date
-      )),
-      None => std::path::PathBuf::from(&self.path_prefix),
-    };
+    let path = self.paths.active(today);
     if self.current_file.is_none() {
       match OpenOptions::new().create(true).append(true).open(&path) {
         Ok(file) => {
@@ -190,11 +188,7 @@ impl AccessLogWriter {
           error!("access_log: archive index exhausted");
           return;
         };
-        let archive = std::path::PathBuf::from(format!(
-          "{}.{}",
-          path.display(),
-          index
-        ));
+        let archive = self.paths.archive(today, index);
         match std::fs::hard_link(&path, &archive) {
           Ok(()) => {
             self.next_archive_index = next_index;

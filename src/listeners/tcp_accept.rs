@@ -1,8 +1,8 @@
 //! module: tcp_accept
 //! responsibilities: recover TCP accept operations according to error
-//! scope public operations: accept, AcceptRetryDelay (configuration)
-//! data entities: AcceptRetryDelay, DurationValue, Recovery
-//! tests: tcp_accept_tests.rs
+//! scope public operations: accept, accept_tcp, AcceptRetryDelay
+//! (configuration) data entities: AcceptRetryDelay, DurationValue,
+//! Recovery tests: tcp_accept_tests.rs
 
 use std::future::Future;
 use std::io::{self, ErrorKind};
@@ -40,6 +40,20 @@ impl Default for AcceptRetryDelay {
   fn default() -> Self {
     Self(DEFAULT_ACCEPT_RETRY_DELAY)
   }
+}
+
+/// Apply the same low-latency socket policy to every TCP listener.
+pub(super) async fn accept_tcp(
+  address: SocketAddr,
+  retry_delay: AcceptRetryDelay,
+  listener: &tokio::net::TcpListener,
+) -> io::Result<(tokio::net::TcpStream, SocketAddr)> {
+  accept(address, retry_delay, || async {
+    let (stream, peer) = listener.accept().await?;
+    stream.set_nodelay(true)?;
+    Ok((stream, peer))
+  })
+  .await
 }
 
 /// Drive accept until a connection arrives or the listener fails.

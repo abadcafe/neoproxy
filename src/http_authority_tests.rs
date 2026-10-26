@@ -59,3 +59,26 @@ fn test_normalize_rejects_port_zero() {
     );
   }
 }
+
+#[test]
+fn test_normalize_rejects_brackets_without_a_valid_ip_literal() {
+  for input in ["[]:80", "[example.com]:80", "[:::]:443", "foo[bar]:80"]
+  {
+    assert_eq!(
+      normalize(&input.parse().unwrap()),
+      Err(AuthorityError::InvalidAuthority),
+      "{input}"
+    );
+  }
+}
+
+#[test]
+fn test_normalize_accepts_ipvfuture_and_encoded_ipv6_zone() {
+  for input in [
+    "[vF.example:future]:80",
+    "[fe80::1%25eth0]:80",
+    "[::ffff:192.0.2.1]:80",
+  ] {
+    assert!(normalize(&input.parse().unwrap()).is_ok(), "{input}");
+  }
+}

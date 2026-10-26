@@ -109,21 +109,28 @@ where
   C::Response:
     hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
-  async fn open(
+  pub(super) async fn connect(
     &self,
     uri: http::Uri,
-  ) -> Result<SendRequest<RequestBody>, UpstreamError> {
+  ) -> Result<C::Response, UpstreamError> {
     if self.state.borrow().stopped {
       return Err(UpstreamError::ProxyInternalError(
         "proxy pool stopped".into(),
       ));
     }
-    let io = self
+    self
       .connector
       .clone()
       .oneshot(uri)
       .await
-      .map_err(|error| classify_http_client_error(error.into()))?;
+      .map_err(|error| classify_http_client_error(error.into()))
+  }
+
+  async fn open(
+    &self,
+    uri: http::Uri,
+  ) -> Result<SendRequest<RequestBody>, UpstreamError> {
+    let io = self.connect(uri).await?;
     let (mut sender, connection) = http1::handshake(io)
       .await
       .map_err(|error| classify_http_client_error(error.into()))?;
@@ -148,8 +155,9 @@ where
 {
   async fn send(
     &self,
-    request: Request,
+    mut request: Request,
   ) -> Result<Response, UpstreamError> {
+    *request.version_mut() = http::Version::HTTP_11;
     let uri = request.uri().clone();
     let cached = self.checkout();
     let reused = cached.is_some();

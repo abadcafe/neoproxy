@@ -36,9 +36,19 @@ struct PoolEntry {
   transport: Rc<tokio::sync::OnceCell<Rc<Transport>>>,
   used: Instant,
 }
+
+impl PoolEntry {
+  fn retained(&self, now: Instant, timeout: Duration) -> bool {
+    Rc::strong_count(&self.transport) > 1
+      || match self.transport.get().map(Rc::as_ref) {
+        Some(Transport::Quic(session)) => !session.is_idle(timeout),
+        _ => now.duration_since(self.used) < timeout,
+      }
+  }
+}
 enum Transport {
   Tcp(Box<HttpClient>),
-  Quic(SessionPool),
+  Quic(Box<SessionPool>),
 }
 
 pub(super) struct OriginClient {
@@ -109,53 +119,65 @@ impl OriginClient {
       {
         continue;
       }
-      for address in self.dns.addresses(&route).await {
-        let key = PoolKey {
-          origin: origin.clone(),
-          route: route.clone(),
-          address,
-        };
-        let transport = match self
-          .transport(&key, request.uri(), tracker)
-          .await
-        {
-          Ok(transport) => transport,
-          Err(error) => {
-            tracing::debug!(%error, endpoint = %route.authority(), "origin alternative unavailable before request submission");
-            continue;
+      let addresses = self.dns.addresses(&route).await;
+      let selected = crate::address_race::connect(
+        addresses,
+        self.config.request_timeout,
+        |address| {
+          let origin = &origin;
+          let route = &route;
+          let uri = request.uri();
+          async move {
+            let key = PoolKey {
+              origin: origin.clone(),
+              route: route.clone(),
+              address,
+            };
+            self
+              .transport(&key, uri, tracker)
+              .await
+              .map(|transport| (key, transport))
           }
-        };
-        request.headers_mut().insert(
-          "alt-used",
-          route
-            .authority()
-            .parse()
-            .expect("validated endpoint authority"),
-        );
-        let response = match transport.as_ref() {
-          Transport::Tcp(client) => client.send(request).await,
-          Transport::Quic(session) => {
-            let (mut parts, body) = request.into_parts();
-            parts.version = http::Version::HTTP_3;
-            http3::exchange(
-              session,
-              &self.tls,
-              http::Request::from_parts(parts, ()),
-              body,
-              tracker,
-            )
-            .await
-          }
-        }?;
-        self.observe(&origin, &response);
-        if response.status() == http::StatusCode::MISDIRECTED_REQUEST {
-          self.alternatives.borrow_mut().invalidate(&origin);
-          self.mark_broken(origin, route);
-          self.pools.borrow_mut().remove(&key);
+        },
+      )
+      .await;
+      let (key, transport) = match selected {
+        Ok(selected) => selected,
+        Err(error) => {
+          tracing::debug!(?error, endpoint = %route.authority(), "origin alternative unavailable before request submission");
+          self.mark_broken(origin.clone(), route);
+          continue;
         }
-        return Ok(response);
+      };
+      request.headers_mut().insert(
+        "alt-used",
+        route
+          .authority()
+          .parse()
+          .expect("validated endpoint authority"),
+      );
+      let response = match transport.as_ref() {
+        Transport::Tcp(client) => client.send(request).await,
+        Transport::Quic(session) => {
+          let (mut parts, body) = request.into_parts();
+          parts.version = http::Version::HTTP_3;
+          http3::exchange(
+            session,
+            &self.tls,
+            http::Request::from_parts(parts, ()),
+            body,
+            tracker,
+          )
+          .await
+        }
+      }?;
+      self.observe(&origin, &response);
+      if response.status() == http::StatusCode::MISDIRECTED_REQUEST {
+        self.alternatives.borrow_mut().invalidate(&origin);
+        self.mark_broken(origin, route);
+        self.pools.borrow_mut().remove(&key);
       }
-      self.mark_broken(origin.clone(), route);
+      return Ok(response);
     }
     let response = self.base.send(request).await?;
     self.observe(&origin, &response);
@@ -165,8 +187,14 @@ impl OriginClient {
   fn mark_broken(&self, origin: Origin, route: Route) {
     let mut broken = self.broken.borrow_mut();
     broken.retain(|_, until| *until > Instant::now());
-    if broken.len() >= 1024 {
-      broken.clear();
+    if broken.len() >= 1024
+      && !broken.contains_key(&(origin.clone(), route.clone()))
+      && let Some(oldest) = broken
+        .iter()
+        .min_by_key(|(_, until)| **until)
+        .map(|(key, _)| key.clone())
+    {
+      broken.remove(&oldest);
     }
     broken.insert(
       (origin, route),
@@ -195,18 +223,23 @@ impl OriginClient {
       Rc::new(tokio::sync::OnceCell::new())
     } else {
       let mut pools = self.pools.borrow_mut();
-      pools.retain(|_, entry| {
-        now.duration_since(entry.used)
-          < self.config.pool_config.idle_timeout
-      });
-      if pools.len() >= 1024
-        && !pools.contains_key(key)
-        && let Some(oldest) = pools
-          .iter()
-          .min_by_key(|(_, entry)| entry.used)
-          .map(|(key, _)| key.clone())
+      let timeout = self.config.pool_config.idle_timeout;
+      // A hot pooled connection needs only its own activity check.
+      // Scan other origins only when a missing/expired key is admitted.
+      if pools
+        .get(key)
+        .is_none_or(|entry| !entry.retained(now, timeout))
       {
-        pools.remove(&oldest);
+        pools.retain(|_, entry| entry.retained(now, timeout));
+        if pools.len() >= 1024
+          && !pools.contains_key(key)
+          && let Some(oldest) = pools
+            .iter()
+            .min_by_key(|(_, entry)| entry.used)
+            .map(|(key, _)| key.clone())
+        {
+          pools.remove(&oldest);
+        }
       }
       let entry =
         pools.entry(key.clone()).or_insert_with(|| PoolEntry {
@@ -217,7 +250,7 @@ impl OriginClient {
       entry.transport.clone()
     };
     let transport = slot
-      .get_or_try_init(|| self.build_transport(key, uri, tracker))
+      .get_or_try_init(|| self.build_transport(key, uri))
       .await?
       .clone();
     // Reconnect a stale session before committing a new request, so a
@@ -232,7 +265,6 @@ impl OriginClient {
     &self,
     key: &PoolKey,
     uri: &http::Uri,
-    tracker: &Rc<StreamTracker>,
   ) -> Result<Rc<Transport>, UpstreamError> {
     let transport = if key.route.protocol == WireProtocol::Http3 {
       let quic = &self.config.quic;
@@ -253,12 +285,9 @@ impl OriginClient {
           .min(self.config.request_timeout / 3)
           .min(Duration::from_secs(1)),
         self.config.dns_resolve_timeout,
+        self.config.pool_config.clone(),
       );
-      if self.config.pool_config.max_idle_per_host != 0 {
-        session
-          .monitor_idle(self.config.pool_config.idle_timeout, tracker);
-      }
-      Transport::Quic(session)
+      Transport::Quic(Box::new(session))
     } else {
       let mut tls = (*self.tls).clone();
       let expected = match key.route.protocol {

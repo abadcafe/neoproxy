@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::address_resolution::resolve_addresses;
-use super::forward::chain_forward_http;
+use super::forward::forward_request;
 use super::protocol::{ClientProtocol, ConnectResult};
 use crate::context::RequestContext;
 use crate::http_message::{RequestBody, Response};
@@ -55,9 +55,9 @@ impl ClientProtocol for DirectClient {
   {
     Box::pin(async move {
       Ok(
-        chain_forward_http(
+        forward_request(
           client::Sender { client: &self.client, tracker },
-          None,
+          &None,
           target,
           req_headers,
           req_body,

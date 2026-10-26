@@ -10,6 +10,9 @@ pub(crate) mod config;
 pub(crate) mod context;
 pub(crate) mod formatter;
 pub(crate) mod layer;
+mod paths;
+#[cfg(test)]
+mod paths_tests;
 pub(crate) mod registry;
 pub(crate) mod writer;
 

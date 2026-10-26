@@ -33,6 +33,7 @@ fn http3_client() -> Http3Client {
       quic_config(),
       Duration::from_millis(100),
       Duration::from_millis(100),
+      Default::default(),
     ),
     tunnel_idle_timeout: Duration::from_secs(30),
     user: None,
@@ -147,6 +148,7 @@ async fn test_http3_client_reconnects_after_goaway_without_quic_close()
         quic_config(),
         Duration::from_secs(2),
         Duration::from_secs(2),
+        Default::default(),
       );
       let tracker = Rc::new(StreamTracker::new());
       let mut bodies = Vec::new();

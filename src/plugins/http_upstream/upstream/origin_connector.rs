@@ -47,6 +47,7 @@ impl OriginConnector {
       TimeoutResolver::new(config.dns_resolve_timeout),
     );
     http.set_connect_timeout(Some(config.connect_timeout));
+    http.set_nodelay(true);
     let mut https = http.clone();
     https.enforce_http(false);
     https.set_connect_timeout(Some(config.https_connect_timeout));

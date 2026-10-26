@@ -1,206 +1,65 @@
-//! module: plugins::http_upstream::upstream::http
-//! responsibility: adapt HTTP/HTTPS proxy transports to the client
-//! contract
-//! public operations: ProxyConnector, new, TlsProxyConnector,
-//! HttpProxyClient, HttpsClient
-//! data entities: ProxyConnector, TlsProxyConnector,
-//! HttpProxyClient, HttpsClient
-//! tests: http_tests.rs
+//! module: http
+//! responsibility: forward HTTP messages and negotiate tunnels over
+//! proxy transports public operations: ProxyIo, HttpProxyClient::new,
+//! ClientProtocol data entities: HttpProxyClient
+//! tests: http_tests.rs; HTTP/HTTPS upstream process contracts
+
+pub(super) mod connector;
+#[cfg(test)]
+mod connector_tests;
 
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use http::Uri;
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
-use tower::Service;
 use tracing::warn;
 
-use super::address_resolution::resolve_addresses;
 use super::connect_request::build_connect_request;
-use super::forward::chain_forward_http;
+use super::forward::forward_request;
 use super::http_pool::ProxyPool;
 use super::protocol::{ClientProtocol, ConnectResult};
 use crate::context::RequestContext;
-use crate::http_message::{RequestBody, Response};
-use crate::plugins::http_upstream::error::{
-  UpstreamError, classify_connect_error, classify_tls_handshake_error,
-};
+use crate::http_message::{BytesBufBodyWrapper, RequestBody, Response};
+use crate::plugins::http_upstream::error::UpstreamError;
 use crate::plugins::http_upstream::target_parser::{
   ConnectTarget, ForwardTarget,
 };
 use crate::tracker::StreamTracker;
 
-fn classify_tcp_connect_error(
-  address: &str,
-  e: std::io::Error,
-) -> UpstreamError {
-  if e.kind() == std::io::ErrorKind::TimedOut {
-    return UpstreamError::ConnectionTimeout(format!(
-      "TCP connect to {address} timed out"
-    ));
-  }
-  classify_connect_error(e.into())
+/// The HTTP adapter only needs HTTP I/O and the connected peer
+/// identity. Concrete TCP/TLS connectors implement this consumer-owned
+/// contract.
+pub(super) trait ProxyIo:
+  hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static
+{
+  fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr>;
 }
 
-// ============================================================================
-// Custom Connectors for Chain Mode
-// ============================================================================
-
-/// Connects to a pre-configured upstream proxy address.
-/// The owning proxy pool defines connection identity; each request
-/// retains its absolute-form target URI on the wire.
-#[derive(Clone)]
-pub(crate) struct ProxyConnector {
-  proxy_addr: String,
-  connect_timeout: Duration,
-  dns_resolve_timeout: Duration,
+pub(super) struct HttpProxyClient<C> {
+  client: ProxyPool<C>,
+  tunnel_idle_timeout: Duration,
+  user: Option<crate::config::UserCredential>,
 }
 
-impl ProxyConnector {
-  pub(crate) fn new(
-    proxy_addr: String,
-    connect_timeout: Duration,
-    dns_resolve_timeout: Duration,
+impl<C> HttpProxyClient<C> {
+  pub(super) fn new(
+    client: ProxyPool<C>,
+    tunnel_idle_timeout: Duration,
+    user: Option<crate::config::UserCredential>,
   ) -> Self {
-    Self { proxy_addr, connect_timeout, dns_resolve_timeout }
+    Self { client, tunnel_idle_timeout, user }
   }
-}
-
-impl Service<Uri> for ProxyConnector {
-  type Error = std::io::Error;
-  type Future = Pin<
-    Box<
-      dyn Future<Output = Result<Self::Response, Self::Error>> + Send,
-    >,
-  >;
-  type Response = TokioIo<tokio::net::TcpStream>;
-
-  fn poll_ready(
-    &mut self,
-    _: &mut TaskContext<'_>,
-  ) -> Poll<Result<(), Self::Error>> {
-    Poll::Ready(Ok(()))
-  }
-
-  fn call(&mut self, _uri: Uri) -> Self::Future {
-    let proxy_addr = self.proxy_addr.clone();
-    let timeout = self.connect_timeout;
-    let dns_timeout = self.dns_resolve_timeout;
-    Box::pin(async move {
-      let addresses = tokio::time::timeout(
-        dns_timeout,
-        resolve_addresses(&proxy_addr),
-      )
-      .await
-      .map_err(|_| {
-        std::io::Error::new(
-          std::io::ErrorKind::TimedOut,
-          format!("DNS resolve for '{proxy_addr}' timed out"),
-        )
-      })?
-      .map_err(std::io::Error::other)?;
-      let stream =
-        super::tcp_connect::connect(addresses, timeout).await?;
-      Ok(TokioIo::new(stream))
-    })
-  }
-}
-
-/// Connects to a pre-configured upstream proxy address via TLS.
-/// Same as `ProxyConnector` but wraps the TCP stream with a TLS
-/// handshake to that proxy.
-#[derive(Clone)]
-pub(crate) struct TlsProxyConnector {
-  inner: ProxyConnector,
-  tls_config: Arc<rustls::ClientConfig>,
-  hostname: String,
-  tls_handshake_timeout: Duration,
-}
-
-impl TlsProxyConnector {
-  pub(crate) fn new(
-    inner: ProxyConnector,
-    tls_config: Arc<rustls::ClientConfig>,
-    hostname: String,
-    tls_handshake_timeout: Duration,
-  ) -> Self {
-    Self { inner, tls_config, hostname, tls_handshake_timeout }
-  }
-}
-
-impl Service<Uri> for TlsProxyConnector {
-  type Error = std::io::Error;
-  type Future = Pin<
-    Box<
-      dyn Future<Output = Result<Self::Response, Self::Error>> + Send,
-    >,
-  >;
-  type Response =
-    TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
-
-  fn poll_ready(
-    &mut self,
-    cx: &mut TaskContext<'_>,
-  ) -> Poll<Result<(), Self::Error>> {
-    self.inner.poll_ready(cx)
-  }
-
-  fn call(&mut self, uri: Uri) -> Self::Future {
-    let mut inner = self.inner.clone();
-    let tls_config = self.tls_config.clone();
-    let hostname = self.hostname.clone();
-    let tls_handshake_timeout = self.tls_handshake_timeout;
-    Box::pin(async move {
-      let tcp_io = inner.call(uri).await?;
-      let server_name =
-        rustls::pki_types::ServerName::try_from(hostname).map_err(
-          |e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e),
-        )?;
-      let connector = tokio_rustls::TlsConnector::from(tls_config);
-      let tcp_stream = tcp_io.into_inner();
-      let tls_stream = tokio::time::timeout(
-        tls_handshake_timeout,
-        connector.connect(server_name, tcp_stream),
-      )
-      .await
-      .map_err(|_| {
-        std::io::Error::new(
-          std::io::ErrorKind::TimedOut,
-          "TLS handshake timed out",
-        )
-      })??;
-      Ok(TokioIo::new(tls_stream))
-    })
-  }
-}
-
-// ============================================================================
-// HTTP/HTTPS Forward
-// ============================================================================
-
-// ============================================================================
-// HTTP Client (cleartext proxy or direct-to-origin)
-// ============================================================================
-
-pub(crate) struct HttpProxyClient<C> {
-  pub(crate) client: ProxyPool<C>,
-  pub(crate) proxy_addr: String,
-  pub(crate) connect_timeout: Duration,
-  pub(crate) tunnel_idle_timeout: Duration,
-  pub(crate) dns_resolve_timeout: Duration,
-  pub(crate) user: Option<crate::config::UserCredential>,
 }
 
 impl<C> ClientProtocol for HttpProxyClient<C>
 where
   C: tower::Service<Uri, Error = std::io::Error> + Clone,
-  C::Response:
-    hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+  C::Response: ProxyIo,
 {
   fn forward<'a>(
     &'a self,
@@ -212,13 +71,11 @@ where
     ctx: &'a RequestContext,
   ) -> Pin<Box<dyn Future<Output = Result<Response, UpstreamError>> + 'a>>
   {
-    let client = self.client.clone();
-    let user = self.user.clone();
     Box::pin(async move {
       Ok(
-        chain_forward_http(
-          client,
-          user,
+        forward_request(
+          self.client.clone(),
+          &self.user,
           target,
           req_headers,
           req_body,
@@ -237,158 +94,16 @@ where
   ) -> Pin<
     Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
   > {
-    let proxy_addr = self.proxy_addr.clone();
-    let connect_timeout = self.connect_timeout;
-    let tunnel_idle_timeout = self.tunnel_idle_timeout;
-    let user = self.user.clone();
     Box::pin(async move {
-      let addr = &proxy_addr;
-
-      // Http proxy mode: TCP to proxy + HTTP/1.1 handshake +
-      // CONNECT
-      let dns_timeout = self.dns_resolve_timeout;
-      let resolved =
-        tokio::time::timeout(dns_timeout, resolve_addresses(addr))
-          .await
-          .map_err(|_| {
-            UpstreamError::DnsError(format!(
-              "DNS resolve for '{addr}' timed out"
-            ))
-          })?
-          .map_err(classify_connect_error)?;
-      let stream =
-        super::tcp_connect::connect(resolved, connect_timeout)
-          .await
-          .map_err(|e| classify_tcp_connect_error(addr, e))?;
-
-      let upstream_addr = stream.peer_addr().ok();
-      let io = TokioIo::new(stream);
+      let io = self.client.connect(target.uri()).await?;
+      let peer = io.peer_addr().ok();
       negotiate_tunnel(
         io,
         target,
-        &user,
+        &self.user,
         tracker,
-        upstream_addr,
-        tunnel_idle_timeout,
-      )
-      .await
-    })
-  }
-
-  fn close(&self) {
-    self.client.close();
-  }
-}
-
-// ============================================================================
-// HTTPS Client (TLS to proxy, always proxy mode)
-// ============================================================================
-
-pub(crate) struct HttpsClient {
-  pub(crate) client: ProxyPool<TlsProxyConnector>,
-  pub(crate) proxy_addr: String,
-  pub(crate) hostname: String,
-  pub(crate) connect_timeout: Duration,
-  pub(crate) tls_handshake_timeout: Duration,
-  pub(crate) tunnel_idle_timeout: Duration,
-  pub(crate) dns_resolve_timeout: Duration,
-  pub(crate) user: Option<crate::config::UserCredential>,
-}
-
-impl ClientProtocol for HttpsClient {
-  fn forward<'a>(
-    &'a self,
-    _tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    _tracker: &'a Rc<StreamTracker>,
-    target: &'a ForwardTarget,
-    req_headers: ::http::request::Parts,
-    req_body: RequestBody,
-    ctx: &'a RequestContext,
-  ) -> Pin<Box<dyn Future<Output = Result<Response, UpstreamError>> + 'a>>
-  {
-    let client = self.client.clone();
-    let user = self.user.clone();
-    Box::pin(async move {
-      Ok(
-        chain_forward_http(
-          client,
-          user,
-          target,
-          req_headers,
-          req_body,
-          ctx,
-        )
-        .await,
-      )
-    })
-  }
-
-  fn connect_for_tunnel<'a>(
-    &'a self,
-    target: &'a ConnectTarget,
-    tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    tracker: &'a Rc<StreamTracker>,
-  ) -> Pin<
-    Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
-  > {
-    let addr = self.proxy_addr.clone();
-    let hostname = self.hostname.clone();
-    let connect_timeout = self.connect_timeout;
-    let tls_handshake_timeout = self.tls_handshake_timeout;
-    let tunnel_idle_timeout = self.tunnel_idle_timeout;
-    let user = self.user.clone();
-    let tls = tls_config.clone();
-    let tracker = tracker.clone();
-    Box::pin(async move {
-      let tls = tls.ok_or_else(|| {
-        UpstreamError::TlsCertificateError(
-          "no TLS configuration for HTTPS upstream".into(),
-        )
-      })?;
-
-      let dns_timeout = self.dns_resolve_timeout;
-      let resolved =
-        tokio::time::timeout(dns_timeout, resolve_addresses(&addr))
-          .await
-          .map_err(|_| {
-            UpstreamError::DnsError(format!(
-              "DNS resolve for '{addr}' timed out"
-            ))
-          })?
-          .map_err(classify_connect_error)?;
-      let stream =
-        super::tcp_connect::connect(resolved, connect_timeout)
-          .await
-          .map_err(|e| classify_tcp_connect_error(&addr, e))?;
-
-      let upstream_addr = stream.peer_addr().ok();
-
-      let server_name =
-        rustls::pki_types::ServerName::try_from(hostname.clone())
-          .map_err(|e| {
-            UpstreamError::DnsError(format!("invalid server name: {e}"))
-          })?;
-      let connector = tokio_rustls::TlsConnector::from(tls);
-      let tls_stream = tokio::time::timeout(
-        tls_handshake_timeout,
-        connector.connect(server_name, stream),
-      )
-      .await
-      .map_err(|_| {
-        UpstreamError::ConnectionTimeout(format!(
-          "TLS handshake with {addr} timed out"
-        ))
-      })?
-      .map_err(|e| classify_tls_handshake_error(e.into()))?;
-
-      let io = TokioIo::new(tls_stream);
-      negotiate_tunnel(
-        io,
-        target,
-        &user,
-        &tracker,
-        upstream_addr,
-        tunnel_idle_timeout,
+        peer,
+        self.tunnel_idle_timeout,
       )
       .await
     })
@@ -416,7 +131,13 @@ where
     ))
   })?;
 
-  let req = build_connect_request(target, user);
+  let mut req = build_connect_request(target, user);
+  *req.version_mut() = http::Version::HTTP_11;
+  let req = req.map(|()| {
+    RequestBody::new(BytesBufBodyWrapper::new(
+      http_body_util::Empty::new(),
+    ))
+  });
   let resp_fut = sr.send_request(req);
 
   // Drive the connection via tracker (spawn_local + graceful

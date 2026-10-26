@@ -53,6 +53,27 @@ fn test_new_rejects_writers_following_the_same_file_symlink() {
   assert!(WriterRegistry::new(&configuration).is_err());
 }
 
+#[test]
+fn test_new_rejects_writers_owning_another_writers_rotated_path() {
+  let directory = tempfile::tempdir().unwrap();
+  for (daily, suffix) in
+    [(false, ".1"), (true, ".2026-10-26"), (true, ".2026-10-26.2")]
+  {
+    let mut configuration = config(&directory, LogFormat::Text);
+    configuration.writers[0].rotate_daily = daily;
+    let mut second = configuration.writers[0].clone();
+    second.rotate_daily = false;
+    second.path_prefix.push_str(suffix);
+    configuration.writers.push(second);
+    assert!(WriterRegistry::new(&configuration).is_err(), "{suffix}");
+    configuration.writers.reverse();
+    assert!(
+      WriterRegistry::new(&configuration).is_err(),
+      "reverse {suffix}"
+    );
+  }
+}
+
 fn entry() -> AccessLogEntry {
   AccessLogEntry {
     time: time::OffsetDateTime::now_utc(),

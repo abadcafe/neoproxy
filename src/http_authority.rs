@@ -21,7 +21,10 @@ pub(crate) fn normalize(
   authority: &Authority,
 ) -> Result<Authority, AuthorityError> {
   let host = authority.host();
-  if host.is_empty() || authority.as_str().contains('@') {
+  if host.is_empty()
+    || !valid_literal(host)
+    || authority.as_str().contains('@')
+  {
     return Err(AuthorityError::InvalidAuthority);
   }
   let suffix = authority
@@ -43,4 +46,57 @@ pub(crate) fn normalize(
       Ok(authority.clone())
     }
   }
+}
+
+// http::Authority checks delimiters and URI bytes, but deliberately
+// does not validate the address inside brackets. Keep that protocol
+// validation at our shared ingress/egress boundary.
+fn valid_literal(host: &str) -> bool {
+  if !host.contains(['[', ']']) {
+    return true;
+  }
+  let Some(literal) =
+    host.strip_prefix('[').and_then(|host| host.strip_suffix(']'))
+  else {
+    return false;
+  };
+  if let Some(future) = literal.strip_prefix(['v', 'V']) {
+    let Some((version, address)) = future.split_once('.') else {
+      return false;
+    };
+    return !version.is_empty()
+      && version.bytes().all(|byte| byte.is_ascii_hexdigit())
+      && !address.is_empty()
+      && address.bytes().all(|byte| {
+        unreserved(byte) || b"!$&'()*+,;=:".contains(&byte)
+      });
+  }
+  let (address, zone) = literal
+    .split_once("%25")
+    .map_or((literal, None), |(address, zone)| (address, Some(zone)));
+  address.parse::<std::net::Ipv6Addr>().is_ok()
+    && zone.is_none_or(valid_zone)
+}
+
+fn unreserved(byte: u8) -> bool {
+  byte.is_ascii_alphanumeric() || b"-._~".contains(&byte)
+}
+
+fn valid_zone(zone: &str) -> bool {
+  if zone.is_empty() {
+    return false;
+  }
+  let mut bytes = zone.bytes();
+  while let Some(byte) = bytes.next() {
+    if unreserved(byte) {
+      continue;
+    }
+    if byte != b'%'
+      || !bytes.next().is_some_and(|byte| byte.is_ascii_hexdigit())
+      || !bytes.next().is_some_and(|byte| byte.is_ascii_hexdigit())
+    {
+      return false;
+    }
+  }
+  true
 }

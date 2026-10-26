@@ -16,6 +16,7 @@ async fn test_connect_falls_back_to_reachable_address() {
       .await
       .unwrap();
   assert_eq!(stream.peer_addr().unwrap(), target);
+  assert!(stream.nodelay().unwrap());
 }
 
 #[tokio::test]

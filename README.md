@@ -261,6 +261,8 @@ servers:
 ```bash
 curl --proxy https://proxy.example.com:8443 \
      --proxy-cacert /path/to/ca.crt \
+     --proxy-cert /path/to/client.crt \
+     --proxy-key /path/to/client.key \
      https://httpbin.org/ip
 ```
 
@@ -390,7 +392,7 @@ servers:
 curl --socks5 127.0.0.1:1080 https://example.com
 
 # 用户名/密码认证
-curl --socks5 127.0.0.1:1080 --proxy-user user1:pass1 https://example.com
+curl --socks5 127.0.0.1:1080 --proxy-user admin:secret123 https://example.com
 ```
 
 ---
@@ -410,6 +412,10 @@ Service 按方法处理请求：`CONNECT host:port` 建立透明隧道；其他�
 末端直连客户端负责 HTTPS 源站的协议选择：TCP/TLS 通过 ALPN 协商 H2/H1；通过源站响应的 `Alt-Svc` 或 DNS HTTPS 记录发现 H3 时，可建立 QUIC/H3 连接。Alt-Svc 按原始 origin 缓存，处理 `ma`、`Age`、`clear` 和过期；DNS HTTPS 使用 DNS TTL，支持别名、优先级、目标端口、ALPN 和 mandatory 参数检查。两者同时存在时，替代端点仍受其 DNS HTTPS 绑定约束。实际连接地址可以改变，HTTP authority、TLS SNI 和证书校验始终使用原始源站身份。
 
 H1/H2/H3 连接池由直连客户端统一管理，按原始 origin、实际端点和协议隔离；并发首次请求共享初始化，H3 响应流持有连接租约，空闲连接按 `pool.idle_timeout` 回收。H3 建连探测预算取 `http3.tls_handshake_timeout`、`request_timeout` 的三分之一和 1 秒中的最小值；建连失败后短暂避开该端点并回退 TCP。请求一旦提交给 H3，不因后续响应错误重放请求体。直连 upstream 允许配置 `http3` 来调整握手和 QUIC 参数。
+
+发现端点的多个 IP 地址按地址族交错竞速，首选地址握手停滞时，250ms 后开始后续候选；只有选定连接后才提交请求体。HTTP/HTTPS 链式转发及 CONNECT 使用同一连接器策略，所有 TCP 监听和上游连接均启用 `TCP_NODELAY`。
+
+链式 H3 上游同样遵守 `pool`：`max_idle_per_host: 0` 禁用跨请求连接复用，非零值允许复用一个多路复用会话，`idle_timeout` 从最后一个活跃响应或隧道释放后计算。池销毁会立即取消自己的维护任务；池索引不会因一个响应持续时间较长而淘汰仍活跃的 H3 会话。日志 writer 的活动文件和轮转归档必须拥有互不重叠的路径命名空间。
 
 普通转发响应在末端读取发现信息后移除 `Alt-Svc`，中继同样不保留该响应头；响应 trailers 也会移除该字段。CONNECT 保持字节透传，不解析隧道内的 TLS 或 HTTP。
 

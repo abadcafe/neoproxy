@@ -30,17 +30,16 @@ impl AltServices {
     origin: &Origin,
     now: Instant,
   ) -> Vec<Route> {
-    self.entries.retain(|_, entries| {
-      entries.retain(|entry| entry.expires > now);
-      !entries.is_empty()
-    });
-    self
-      .entries
-      .get(origin)
-      .map(|entries| {
-        entries.iter().map(|entry| entry.route.clone()).collect()
-      })
-      .unwrap_or_default()
+    let Some(entries) = self.entries.get_mut(origin) else {
+      return Vec::new();
+    };
+    entries.retain(|entry| entry.expires > now);
+    let routes =
+      entries.iter().map(|entry| entry.route.clone()).collect();
+    if entries.is_empty() {
+      self.entries.remove(origin);
+    }
+    routes
   }
 
   pub(super) fn observe(
@@ -76,7 +75,7 @@ impl AltServices {
     let age = headers
       .get("age")
       .and_then(|v| v.to_str().ok())
-      .and_then(|v| v.parse::<u64>().ok())
+      .and_then(decimal_seconds)
       .unwrap_or(0);
     let Some(advertisements) = split(&value, ',') else {
       return;
@@ -100,11 +99,28 @@ impl AltServices {
       }
     }
     // A new field replaces the origin's previous advertisement set.
-    self.entries.retain(|_, entries| {
-      entries.iter().any(|entry| entry.expires > now)
-    });
-    if self.entries.len() >= 1024 {
-      self.entries.clear();
+    if entries.is_empty() {
+      self.entries.remove(origin);
+      return;
+    }
+    if self.entries.len() >= 1024 && !self.entries.contains_key(origin)
+    {
+      // Maintenance is paid only when admitting another origin at
+      // capacity, never by every request or by an in-place refresh.
+      self.entries.retain(|_, entries| {
+        entries.iter().any(|entry| entry.expires > now)
+      });
+      if self.entries.len() >= 1024
+        && let Some(oldest) = self
+          .entries
+          .iter()
+          .min_by_key(|(_, entries)| {
+            entries.iter().map(|entry| entry.expires).max()
+          })
+          .map(|(origin, _)| origin.clone())
+      {
+        self.entries.remove(&oldest);
+      }
     }
     self.entries.insert(origin.clone(), entries);
   }
@@ -164,10 +180,25 @@ fn parse(value: &str, origin: &Origin) -> Option<(Route, u64)> {
       {
         return None;
       }
-      lifetime = Some(value.parse::<u64>().unwrap_or(u64::MAX));
+      lifetime = Some(decimal_seconds(&value)?);
     }
   }
   Some((Route { host, port, protocol }, lifetime.unwrap_or(86400)))
+}
+
+// HTTP delta-seconds have no integer-width limit. RFC 9111 §1.2.2
+// permits saturation at 2^31 for overflow; use the same bounded domain
+// for Age and ma so an enormous Age cannot become zero and an enormous
+// lifetime cannot overflow Instant and discard a valid advertisement.
+fn decimal_seconds(value: &str) -> Option<u64> {
+  if value.is_empty()
+    || !value.bytes().all(|byte| byte.is_ascii_digit())
+  {
+    return None;
+  }
+  Some(value.bytes().fold(0_u64, |seconds, digit| {
+    (seconds * 10 + u64::from(digit - b'0')).min(1 << 31)
+  }))
 }
 
 fn quoted(value: &str) -> Option<String> {

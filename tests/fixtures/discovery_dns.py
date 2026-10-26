@@ -4,6 +4,7 @@ Tests: test_origin_discovery.py.
 """
 
 import asyncio
+import ipaddress
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ class DnsRecord(BaseModel):
 class DiscoveryDns:
     port: int
     queries: list[tuple[str, int]] = field(default_factory=list)
+    addresses: tuple[str, ...] = ("127.0.0.1",)
 
 
 def encode_name(name: str) -> bytes:
@@ -101,10 +103,12 @@ async def discovery_dns(records: list[DnsRecord]) -> AsyncGenerator[DiscoveryDns
                             + payload
                         )
             elif kind == 1:
-                answers.append(
-                    encode_name(name)
-                    + b"\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\x7f\x00\x00\x01"
-                )
+                for address in dns.addresses:
+                    answers.append(
+                        encode_name(name)
+                        + b"\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04"
+                        + ipaddress.IPv4Address(address).packed
+                    )
             response = (
                 data[:2]
                 + b"\x81\x80\x00\x01"

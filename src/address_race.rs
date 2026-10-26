@@ -8,7 +8,8 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use tokio::task::JoinSet;
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use tokio::time::{Instant, sleep_until};
 
 const FALLBACK_DELAY: Duration = Duration::from_millis(250);
@@ -27,10 +28,8 @@ pub(crate) async fn connect<T, E, F, Fut>(
   attempt: F,
 ) -> Result<T, RaceError<E>>
 where
-  T: Send + 'static,
-  E: Send + 'static,
   F: Fn(SocketAddr) -> Fut,
-  Fut: Future<Output = Result<T, E>> + Send + 'static,
+  Fut: Future<Output = Result<T, E>>,
 {
   if addresses.is_empty() {
     return Err(RaceError::NoAddresses);
@@ -60,7 +59,10 @@ where
     ordered.extend(second);
   }
   let mut addresses = ordered.into_iter();
-  let mut attempts = JoinSet::new();
+  // Poll attempts in the owning task. This supports worker-local
+  // transports and cancels losing attempts immediately on drop, without
+  // detached tasks or converting programming panics into JoinErrors.
+  let mut attempts = FuturesUnordered::new();
   let mut next_attempt = Instant::now();
   let mut exhausted = false;
   let mut last_error = None;
@@ -73,7 +75,7 @@ where
     {
       match addresses.next() {
         Some(address) => {
-          attempts.spawn(attempt(address));
+          attempts.push(Box::pin(attempt(address)));
           next_attempt = Instant::now() + FALLBACK_DELAY;
         }
         None => exhausted = true,
@@ -87,16 +89,10 @@ where
     tokio::select! {
       _ = sleep_until(deadline) => {},
       _ = sleep_until(next_attempt), if !exhausted => {},
-      result = attempts.join_next(), if !attempts.is_empty() => {
+      result = attempts.next(), if !attempts.is_empty() => {
         match result.expect("connection attempt exists") {
-          Ok(Ok(value)) => return Ok(value),
-          Ok(Err(error)) => last_error = Some(error),
-          Err(error) => {
-            if error.is_panic() { std::panic::resume_unwind(error.into_panic()); }
-            // Only this owner can abort attempts, when dropping the whole
-            // race. An independently cancelled child breaks our invariant.
-            panic!("connection attempt cancelled while its race is active: {error}");
-          }
+          Ok(value) => return Ok(value),
+          Err(error) => last_error = Some(error),
         }
       }
     }

@@ -3,20 +3,22 @@
 //! contract
 //! public operations: Http3Client
 //! data entities: H3ClientRequestStream, H3ResponseBodyState,
-//! H3ResponseBody, Http3Client
+//! H3ResponseBody, Http3Client, H3Sender
 //! tests: http3_tests.rs
 
 mod quic_connect;
 #[cfg(test)]
 mod quic_connect_tests;
 mod session;
+#[cfg(test)]
+mod session_tests;
 mod upload;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::{Buf, Bytes};
 use http_body::{Body, Frame, SizeHint};
@@ -24,12 +26,12 @@ use session::SessionLease;
 pub(super) use session::SessionPool;
 use upload::Upload;
 
+use super::connect_request::build_connect_request;
+use super::forward::{ForwardClient, forward_request};
 use super::protocol::{ClientProtocol, ConnectResult};
-use super::proxy_auth::apply_proxy_auth;
-use super::response::forward_response;
 use crate::context::RequestContext;
 use crate::http_message::{
-  RequestBody, Response, ResponseBody, build_error_response,
+  Request, RequestBody, Response, ResponseBody,
 };
 use crate::plugins::http_upstream::error::UpstreamError;
 use crate::plugins::http_upstream::target_parser::{
@@ -41,52 +43,29 @@ use crate::tracker::StreamTracker;
 // H3 Forward
 // ============================================================================
 
-/// Forward an HTTP request over H3 to the upstream proxy.
-async fn chain_forward_http3(
-  client: &Http3Client,
-  tls: &rustls::ClientConfig,
-  target: &ForwardTarget,
-  req_headers: http::request::Parts,
-  req_body: RequestBody,
-  ctx: &RequestContext,
-  tracker: &Rc<StreamTracker>,
-) -> Response {
-  let mut fwd_req = http::Request::from_parts(req_headers, ());
-  let received_version = fwd_req.version();
-  *fwd_req.uri_mut() = target.absolute_uri().clone();
-  *fwd_req.version_mut() = http::Version::HTTP_3;
-  crate::hop_headers::strip_connection_headers(fwd_req.headers_mut());
-  crate::via::append(fwd_req.headers_mut(), received_version);
-  let host_header = match target.host_header_value() {
-    Ok(value) => value,
-    Err(_) => {
-      return build_error_response(
-        http::StatusCode::BAD_REQUEST,
-        "Invalid target address",
-      );
-    }
-  };
-  fwd_req.headers_mut().insert(http::header::HOST, host_header);
-  apply_proxy_auth(&client.user, &mut fwd_req);
+/// Transport adapter for the shared HTTP forwarding policy.
+struct H3Sender<'a> {
+  session: &'a SessionPool,
+  tls: &'a rustls::ClientConfig,
+  tracker: &'a Rc<StreamTracker>,
+}
 
-  let forward_start = Instant::now();
-  let response =
-    match exchange(&client.session, tls, fwd_req, req_body, tracker)
-      .await
-    {
-      Ok(response) => response,
-      Err(error) => return error.to_response(ctx),
-    };
-  ctx.insert(
-    "upstream.forward_ms",
-    forward_start.elapsed().as_millis().to_string(),
-  );
-  ctx.insert(
-    "upstream.forward_status",
-    response.status().as_str().to_string(),
-  );
-  let (parts, body) = response.into_parts();
-  forward_response(parts, body, ctx)
+impl ForwardClient for H3Sender<'_> {
+  async fn send(
+    &self,
+    mut request: Request,
+  ) -> Result<Response, UpstreamError> {
+    *request.version_mut() = http::Version::HTTP_3;
+    let (parts, body) = request.into_parts();
+    exchange(
+      self.session,
+      self.tls,
+      http::Request::from_parts(parts, ()),
+      body,
+      self.tracker,
+    )
+    .await
+  }
 }
 
 /// Exchange a request without applying proxy or origin discovery
@@ -259,14 +238,17 @@ impl ClientProtocol for Http3Client {
       })?;
 
       Ok(
-        chain_forward_http3(
-          self,
-          &tls,
+        forward_request(
+          H3Sender {
+            session: &self.session,
+            tls: &tls,
+            tracker: &tracker,
+          },
+          &self.user,
           target,
           req_headers,
           req_body,
           ctx,
-          &tracker,
         )
         .await,
       )
@@ -284,7 +266,6 @@ impl ClientProtocol for Http3Client {
     let tls = tls_config.clone();
     let tracker = tracker.clone();
     let tunnel_idle_timeout = self.tunnel_idle_timeout;
-    let user = self.user.clone();
     Box::pin(async move {
       let tls = tls.ok_or_else(|| {
         UpstreamError::TlsCertificateError(
@@ -292,17 +273,8 @@ impl ClientProtocol for Http3Client {
         )
       })?;
 
-      // ConnectTarget can only come from successful request validation.
-      // A fixed CONNECT method with its typed URI must build; panic on
-      // an invariant violation rather than hide a programming error in
-      // a recoverable HTTP response.
-      let mut req = ::http::Request::builder()
-        .method(::http::Method::CONNECT)
-        .uri(target.uri())
-        .body(())
-        .expect("validated CONNECT target must build an H3 request");
-
-      apply_proxy_auth(&user, &mut req);
+      let mut req = build_connect_request(target, &self.user);
+      *req.version_mut() = http::Version::HTTP_3;
 
       let (mut stream, lease) =
         self.session.open(req, &tls, &tracker).await?;

@@ -1,16 +1,16 @@
 //! module: listeners::http_service
-//! responsibility: adapt routed Hyper requests to the service
+//! responsibility: dispatch routed HTTP-family requests to the service
 //! contract
-//! public operations: ClientCertPolicy, HttpServiceAdaptor,
-//! new_http, new_https
-//! data entities: ClientCertPolicy, HttpServiceAdaptor
+//! public operations: HttpService, dispatch,
+//! new_http, new_tls
+//! data entities: ClientCertPolicy, HttpService
 //! tests: http_service_tests.rs
 
-//! Shared HTTP service adaptor for HTTP/HTTPS listeners.
+//! Shared HTTP service adaptor for HTTP-family listeners.
 //!
 //! Provides a unified `hyper::Service` implementation that handles
 //! request routing, authenticated-connection requirements, and context
-//! injection for both HTTP and HTTPS listeners.
+//! injection for HTTP, HTTPS and HTTP/3 listeners.
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -29,10 +29,10 @@ use crate::listeners::header_validation::validate_and_route;
 use crate::server::ServerRouter;
 
 /// Connection authentication state supplied by the listener.
-pub(crate) enum ClientCertPolicy {
+enum ClientCertPolicy {
   /// HTTP listener — TLS not involved, no client cert to check.
   NotApplicable,
-  /// HTTPS listener — any presented certificate has already passed
+  /// TLS listener — any presented certificate has already passed
   /// TLS authentication against this listener's combined CA roots.
   Presented(bool),
 }
@@ -43,27 +43,27 @@ impl ClientCertPolicy {
   }
 }
 
-/// Unified HTTP/HTTPS service adaptor with routing support.
+/// Unified HTTP-family service adaptor with routing support.
 ///
 /// Handles request validation, routing, connection authentication
-/// requirements, and service invocation for HTTP and HTTPS listeners.
-pub(crate) struct HttpServiceAdaptor {
+/// requirements, and service invocation for HTTP, HTTPS and HTTP/3.
+pub(crate) struct HttpService {
   /// Server router for hostname-based routing
   server_router: ServerRouter,
   /// Client (peer) address from accept
-  client_addr: Option<SocketAddr>,
+  client_addr: SocketAddr,
   /// Local (server) address from accept
-  local_addr: Option<SocketAddr>,
+  local_addr: SocketAddr,
   /// Client authentication state from the TLS handshake
   client_cert_policy: ClientCertPolicy,
 }
 
-impl HttpServiceAdaptor {
+impl HttpService {
   /// Create a new adaptor for HTTP (no TLS).
   pub(crate) fn new_http(
     server_router: ServerRouter,
-    client_addr: Option<SocketAddr>,
-    local_addr: Option<SocketAddr>,
+    client_addr: SocketAddr,
+    local_addr: SocketAddr,
   ) -> Self {
     Self {
       server_router,
@@ -73,11 +73,11 @@ impl HttpServiceAdaptor {
     }
   }
 
-  /// Create a new adaptor for HTTPS (with TLS).
-  pub(crate) fn new_https(
+  /// Create a service for a TLS-authenticated connection (HTTPS or H3).
+  pub(crate) fn new_tls(
     server_router: ServerRouter,
-    client_addr: Option<SocketAddr>,
-    local_addr: Option<SocketAddr>,
+    client_addr: SocketAddr,
+    local_addr: SocketAddr,
     client_cert_presented: bool,
   ) -> Self {
     Self {
@@ -89,25 +89,13 @@ impl HttpServiceAdaptor {
       ),
     }
   }
-}
 
-impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
-  for HttpServiceAdaptor
-{
-  type Error = anyhow::Error;
-  type Future = Pin<Box<dyn Future<Output = Result<Response>>>>;
-  type Response = Response;
-
-  fn call(
+  /// Route a transport-independent request and attach connection
+  /// metadata.
+  pub(crate) fn dispatch(
     &self,
-    req: http::Request<hyper_body::Incoming>,
-  ) -> Self::Future {
-    let (parts, body) = req.into_parts();
-    let mut req = Request::from_parts(
-      parts,
-      RequestBody::new(BytesBufBodyWrapper::new(body)),
-    );
-
+    mut req: Request,
+  ) -> Pin<Box<dyn Future<Output = Result<Response>>>> {
     // Validate headers and route to correct server
     let routing_entry =
       match validate_and_route(&req, &self.server_router) {
@@ -134,20 +122,34 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
     // Build RequestContext with connection-level keys and
     // insert into request extensions. Auth and access logging are
     // now handled by the plugin layer in the service pipeline.
-    if let (Some(peer_addr), Some(local_addr)) =
-      (self.client_addr, self.local_addr)
-    {
-      let ctx = build_request_context(
-        &peer_addr,
-        &local_addr,
-        &routing_entry.service_name,
-      );
-
-      req.extensions_mut().insert(ctx);
-    }
+    req.extensions_mut().insert(build_request_context(
+      &self.client_addr,
+      &self.local_addr,
+      &routing_entry.service_name,
+    ));
+    crate::hop_headers::join_cookie_headers(req.headers_mut());
 
     // Call service (auth/access_log handled by layers)
     let s = routing_entry.service.clone();
     Box::pin(async move { tower_util::Oneshot::new(s, req).await })
+  }
+}
+
+impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
+  for HttpService
+{
+  type Error = anyhow::Error;
+  type Future = Pin<Box<dyn Future<Output = Result<Response>>>>;
+  type Response = Response;
+
+  fn call(
+    &self,
+    req: http::Request<hyper_body::Incoming>,
+  ) -> Self::Future {
+    let (parts, body) = req.into_parts();
+    self.dispatch(Request::from_parts(
+      parts,
+      RequestBody::new(BytesBufBodyWrapper::new(body)),
+    ))
   }
 }

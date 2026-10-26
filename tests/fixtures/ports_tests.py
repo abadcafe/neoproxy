@@ -6,7 +6,36 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
-from tests.fixtures.ports import wait_for_udp_port_bound
+from tests.fixtures.ports import (
+    get_unique_port,
+    wait_for_port_released,
+    wait_for_proxy,
+    wait_for_udp_port_bound,
+)
+
+
+def test_wait_for_proxy_and_release_support_ipv6() -> None:
+    port = get_unique_port()
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as listener:
+        listener.bind(("::1", port))
+        listener.listen()
+        assert wait_for_proxy("::1", port, timeout=0.1)
+        assert not wait_for_port_released("::1", port, timeout=0.05, interval=0.01)
+    assert wait_for_port_released("::1", port, timeout=0.1)
+
+
+def test_wait_for_udp_port_bound_supports_ipv6() -> None:
+    port = get_unique_port()
+    with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as listener:
+        listener.bind(("::1", port))
+        assert wait_for_udp_port_bound("::1", port, timeout=0.1)
+
+
+def test_get_unique_port_avoids_udp_ports_already_in_use() -> None:
+    previous = get_unique_port()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
+        listener.bind(("0.0.0.0", previous + 1))
+        assert get_unique_port() != previous + 1
 
 
 class TestWaitForUdpPortBound:

@@ -1,10 +1,12 @@
 //! module: session
 //! responsibility: lease reusable H3 sessions through peer draining
-//! public operations: SessionPool::{new, open, close},
-//! SessionLease::attach data entities: SessionPool, State,
-//! SessionLease, LeasedIo tests: http3_tests.rs through Http3Client's
-//! public transport contract
+//! public operations: SessionPool::{new, prepare, is_idle, open,
+//! close}, SessionLease::attach
+//! data entities: SessionPool, State, Activity, ActivityLease,
+//! SessionLease, LeasedIo tests: session_tests.rs; http3_tests.rs; H3
+//! pool process contracts
 
+use std::cell::RefCell;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -18,6 +20,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tracing::info;
 
 use super::quic_connect;
+use crate::plugins::http_upstream::config::protocol::PoolConfig;
 use crate::plugins::http_upstream::error::{
   UpstreamError, classify_quic_error,
 };
@@ -39,6 +42,8 @@ pub(crate) struct SessionPool {
   quic: QuicConfig,
   handshake_timeout: Duration,
   dns_timeout: Duration,
+  pool: PoolConfig,
+  reaper: RefCell<Option<tokio::task::AbortHandle>>,
 }
 
 /// h3 closes a connection when its last SendRequest handle drops.
@@ -54,6 +59,13 @@ struct Activity {
   used: std::sync::Mutex<tokio::time::Instant>,
 }
 struct ActivityLease(Arc<Activity>);
+impl Activity {
+  fn is_idle(&self, timeout: Duration) -> bool {
+    self.active.load(Ordering::Acquire) == 0
+      && self.used.lock().expect("activity lock poisoned").elapsed()
+        >= timeout
+  }
+}
 impl ActivityLease {
   fn new(activity: &Arc<Activity>) -> Self {
     activity.active.fetch_add(1, Ordering::AcqRel);
@@ -69,6 +81,12 @@ impl Drop for ActivityLease {
 }
 
 impl SessionPool {
+  /// A leased response or tunnel makes the session busy regardless of
+  /// how long ago its request was submitted.
+  pub(crate) fn is_idle(&self, timeout: Duration) -> bool {
+    self.activity.is_idle(timeout)
+  }
+
   /// Prepare QUIC and H3 before a request can be committed to this
   /// peer.
   pub(crate) async fn prepare(
@@ -86,6 +104,7 @@ impl SessionPool {
     quic: QuicConfig,
     handshake_timeout: Duration,
     dns_timeout: Duration,
+    pool: PoolConfig,
   ) -> Self {
     Self {
       state: Rc::new(tokio::sync::Mutex::new(State {
@@ -101,16 +120,18 @@ impl SessionPool {
       quic,
       handshake_timeout,
       dns_timeout,
+      pool,
+      reaper: RefCell::new(None),
     }
   }
 
   /// Retire genuinely idle sessions while response leases keep active
   /// streams alive. The task does not keep the pool itself alive.
-  pub(crate) fn monitor_idle(
+  fn monitor_idle(
     &self,
     timeout: Duration,
     tracker: &StreamTracker,
-  ) {
+  ) -> tokio::task::AbortHandle {
     let state = Rc::downgrade(&self.state);
     let activity = Arc::downgrade(&self.activity);
     let shutdown = tracker.shutdown_handle();
@@ -126,14 +147,7 @@ impl SessionPool {
           break;
         };
         let mut state = state.lock().await;
-        if activity.active.load(Ordering::Acquire) == 0
-          && activity
-            .used
-            .lock()
-            .expect("activity lock poisoned")
-            .elapsed()
-            >= timeout
-        {
+        if activity.is_idle(timeout) {
           if let Some(connection) = state.connection.take() {
             connection.close(
               quinn::VarInt::from_u32(0x100),
@@ -143,7 +157,7 @@ impl SessionPool {
           state.sender = None;
         }
       }
-    });
+    })
   }
 
   async fn connection(
@@ -154,6 +168,12 @@ impl SessionPool {
     (usize, h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>),
     UpstreamError,
   > {
+    if self.pool.max_idle_per_host != 0
+      && self.reaper.borrow().is_none()
+    {
+      let reaper = self.monitor_idle(self.pool.idle_timeout, tracker);
+      *self.reaper.borrow_mut() = Some(reaper);
+    }
     let mut state = self.state.lock().await;
     if let (Some(connection), Some(sender)) =
       (&state.connection, &state.sender)
@@ -190,7 +210,7 @@ impl SessionPool {
     UpstreamError,
   > {
     let activity = ActivityLease::new(&self.activity);
-    let (id, mut sender) = self.connection(tls, tracker).await?;
+    let (id, mut sender) = self.checkout(tls, tracker).await?;
     match sender.send_request(request.clone()).await {
       Ok(stream) => {
         return Ok((
@@ -219,7 +239,7 @@ impl SessionPool {
     }
     // RemoteClosing is returned before a stream/request is sent. This
     // single retry cannot replay a method or body accepted by a peer.
-    let (_, mut sender) = self.connection(tls, tracker).await?;
+    let (_, mut sender) = self.checkout(tls, tracker).await?;
     let stream =
       sender.send_request(request).await.map_err(|error| {
         UpstreamError::ConnectionTerminated(error.to_string())
@@ -227,11 +247,44 @@ impl SessionPool {
     Ok((stream, SessionLease { _sender: sender, _activity: activity }))
   }
 
+  async fn checkout(
+    &self,
+    tls: &rustls::ClientConfig,
+    tracker: &Rc<StreamTracker>,
+  ) -> Result<
+    (usize, h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>),
+    UpstreamError,
+  > {
+    let (id, sender) = self.connection(tls, tracker).await?;
+    if self.pool.max_idle_per_host == 0 {
+      // Transfer the session to the exchange lease on every checkout,
+      // including a retry after GOAWAY. No idle sender stays cached.
+      let mut state = self.state.lock().await;
+      if state
+        .connection
+        .as_ref()
+        .is_some_and(|connection| connection.stable_id() == id)
+      {
+        state.connection = None;
+        state.sender = None;
+      }
+    }
+    Ok((id, sender))
+  }
+
   pub(crate) fn close(&self) {
     if let Ok(state) = self.state.try_lock()
       && let Some(connection) = &state.connection
     {
       connection.close(quinn::VarInt::from_u32(0x100), b"shutdown");
+    }
+  }
+}
+
+impl Drop for SessionPool {
+  fn drop(&mut self) {
+    if let Some(reaper) = self.reaper.get_mut().take() {
+      reaper.abort();
     }
   }
 }

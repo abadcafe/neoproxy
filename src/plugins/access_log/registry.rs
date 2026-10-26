@@ -13,6 +13,7 @@ use anyhow::{Result, ensure};
 
 use super::config::AccessLogPluginConfig;
 use super::context::AccessLogEntry;
+use super::paths::LogPaths;
 use super::writer::AccessLogWriter;
 
 const QUEUE_SIZE: usize = 4096;
@@ -30,7 +31,7 @@ pub(crate) struct WriterRegistry {
 impl WriterRegistry {
   pub(crate) fn new(config: &AccessLogPluginConfig) -> Result<Self> {
     let mut names = std::collections::HashSet::new();
-    let mut paths = std::collections::HashSet::new();
+    let mut paths: Vec<LogPaths> = Vec::new();
     for writer in &config.writers {
       ensure!(
         names.insert(&writer.path_prefix),
@@ -91,11 +92,13 @@ impl WriterRegistry {
         }
         Err(error) => return Err(error.into()),
       };
+      let destination = LogPaths::new(canonical, writer.rotate_daily);
       ensure!(
-        paths.insert(canonical),
+        paths.iter().all(|previous| !destination.overlaps(previous)),
         "multiple writers own the same log path: {}",
         path.display()
       );
+      paths.push(destination);
     }
     let mut registry = Self { writers: HashMap::new() };
     for config in &config.writers {

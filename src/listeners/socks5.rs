@@ -17,6 +17,9 @@
 
 mod command;
 mod handshake;
+mod session;
+#[cfg(test)]
+mod session_tests;
 mod upgrade;
 #[cfg(test)]
 mod upgrade_tests;
@@ -31,19 +34,12 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use command::{CommandError, read_command_and_target};
-use handshake::{
-  DEFAULT_HANDSHAKE_TIMEOUT, HandshakeError, perform_handshake,
-};
+use handshake::DEFAULT_HANDSHAKE_TIMEOUT;
 use serde::Deserialize;
 
-use self::upgrade::{
-  Socks5UpgradeTrigger, http_status_to_socks5_error,
-};
-use super::tcp_accept::{self, AcceptRetryDelay};
+use super::tcp_accept::AcceptRetryDelay;
 use super::tcp_listener_base::TcpListenerBase;
 use crate::config::{ListenerPropertyValues, SerializedArgs};
-use crate::http_message::{BytesBufBodyWrapper, RequestBody};
 use crate::listener::{
   BuildListener, Listener, Listening, TransportLayer,
 };
@@ -102,359 +98,28 @@ impl Socks5Listener {
       service_name,
     }))
   }
-
-  /// Create a TCP listener for a single address.
-  ///
-  /// # Arguments
-  ///
-  /// * `addr` - Socket address to bind to
-  /// * `service` - Service for handling connections
-  /// * `stream_tracker` - Tracker for active stream tasks
-  /// * `shutdown_handle` - Shutdown notification handle
-  /// * `handshake_timeout` - Timeout for SOCKS5 handshake
-  /// * `service_name` - Service name for access log
-  ///
-  /// # Returns
-  ///
-  /// Returns a future that runs the listener until shutdown.
-  fn serve_addr(
-    &self,
-    addr: SocketAddr,
-    service: RuntimeService,
-    handshake_timeout: Duration,
-    service_name: String,
-  ) -> Result<std::pin::Pin<Box<dyn Future<Output = Result<()>>>>> {
-    let listener = super::tcp_bind::create_tcp_listener(addr)?;
-    let stream_tracker = self.base.stream_tracker();
-    let shutdown_handle = self.base.shutdown_handle();
-    let accept_retry_delay = self.accept_retry_delay;
-
-    let accepting_fut = async move {
-      tracing::info!("SOCKS5 listener started on {}", addr);
-
-      let accepting = || async {
-        match tcp_accept::accept(addr, accept_retry_delay, || {
-          listener.accept()
-        })
-        .await
-        {
-          Err(error) => return Err(error),
-          Ok((stream, peer_addr)) => {
-            tracing::info!(
-              "SOCKS5 connection established from {}",
-              peer_addr
-            );
-
-            // Clone handles for use in connection handler
-            let service = service.clone();
-            let service_name = service_name.clone();
-
-            // Register connection handler
-            stream_tracker.register(async move {
-              // Capture local address before handshake consumes the
-              // stream
-              let local_addr = match stream.local_addr() {
-                Ok(addr) => addr,
-                Err(e) => {
-                  tracing::warn!(
-                    "SOCKS5 failed to get local addr from {}: {}",
-                    peer_addr,
-                    e
-                  );
-                  return;
-                }
-              };
-
-              // Step 1: Perform SOCKS5 handshake with timeout
-              // protection
-              let handshake_result = match perform_handshake(
-                stream,
-                handshake_timeout,
-                &service.authentication(),
-              )
-              .await
-              {
-                Ok(result) => result,
-                Err(e) => {
-                  // Handle handshake errors
-                  match e {
-                    HandshakeError::Timeout => {
-                      // Timeout - do not send response, just close
-                      // connection
-                      tracing::warn!(
-                        "SOCKS5 handshake timeout from {}",
-                        peer_addr
-                      );
-                    }
-                    HandshakeError::InvalidVersion(v) => {
-                      // Invalid version - do not send response
-                      tracing::warn!(
-                        "SOCKS5 invalid version {} from {}",
-                        v,
-                        peer_addr
-                      );
-                    }
-                    HandshakeError::MethodNotAcceptable(_) => {
-                      // METHOD=0xFF was already sent
-                      tracing::warn!(
-                        "SOCKS5 method not acceptable from {}",
-                        peer_addr
-                      );
-                    }
-                    HandshakeError::InvalidCredentials => {
-                      tracing::warn!(
-                        "SOCKS5 authentication rejected from \
-                         {peer_addr}"
-                      );
-                    }
-                    HandshakeError::ClientDisconnected => {
-                      tracing::info!(
-                        "SOCKS5 connection disconnected from {}",
-                        peer_addr
-                      );
-                    }
-                    HandshakeError::IoError(e) => {
-                      tracing::warn!(
-                        "SOCKS5 handshake IO error from {}: {}",
-                        peer_addr,
-                        e
-                      );
-                    }
-                  }
-                  // Connection is already closed by the error handler
-                  return;
-                }
-              };
-
-              // Bound the command phase as well as authentication.
-              let command = match tokio::time::timeout(
-                handshake_timeout,
-                read_command_and_target(handshake_result.proto),
-              )
-              .await
-              {
-                Ok(result) => result,
-                Err(_) => {
-                  tracing::warn!(
-                    "SOCKS5 command timed out from {peer_addr}"
-                  );
-                  return;
-                }
-              };
-              let command_result = match command {
-                Ok(result) => result,
-                Err(e) => {
-                  // Command error responses are already sent
-                  match e {
-                    CommandError::CommandNotSupported { command } => {
-                      tracing::warn!(
-                        "SOCKS5 command {} not supported from {}",
-                        command,
-                        peer_addr
-                      );
-                    }
-                    CommandError::UnknownCommand { command } => {
-                      tracing::warn!(
-                        "SOCKS5 unknown command {} from {}",
-                        command,
-                        peer_addr
-                      );
-                    }
-                    CommandError::ClientDisconnected => {
-                      tracing::warn!(
-                        "SOCKS5 client disconnected during command \
-                         processing from {}",
-                        peer_addr
-                      );
-                    }
-                    CommandError::IoError(e) => {
-                      tracing::warn!(
-                        "SOCKS5 command read error from {}: {}",
-                        peer_addr,
-                        e
-                      );
-                    }
-                  }
-                  return;
-                }
-              };
-
-              // Step 3: Create upgrade pair
-              let (trigger, on_upgrade) =
-                Socks5UpgradeTrigger::pair(command_result.proto);
-
-              // Step 4: Build HTTP CONNECT request with on_upgrade in
-              // extensions
-              let (host, port) =
-                extract_host_port(&command_result.target_addr);
-              let uri = format_connect_uri(&host, port);
-
-              let request = http::Request::builder()
-                .method(http::Method::CONNECT)
-                .uri(&uri)
-                .version(http::Version::HTTP_11)
-                .body(RequestBody::new(BytesBufBodyWrapper::new(
-                  http_body_util::Empty::<bytes::Bytes>::new(),
-                )));
-              let mut request = match request {
-                Ok(request) => request,
-                Err(error) => {
-                  tracing::warn!("invalid SOCKS5 target: {error}");
-                  let _ = trigger
-                    .send_error(
-                      fast_socks5::ReplyError::AddressTypeNotSupported,
-                    )
-                    .await;
-                  return;
-                }
-              };
-
-              // Carry verified credentials into the HTTP middleware.
-              // Typed fields
-              // also preserve SOCKS5 usernames containing
-              // ':' that HTTP Basic cannot encode without
-              // changing the username/password boundary.
-              if let (Some(username), Some(password)) =
-                (handshake_result.username, handshake_result.password)
-              {
-                request.extensions_mut().insert(
-                  crate::auth::ProxyCredentials::new(
-                    username, password,
-                  ),
-                );
-              }
-
-              request.extensions_mut().insert(on_upgrade);
-
-              // Build RequestContext with connection-level keys and
-              // insert into request extensions. Auth and
-              // access logging are now handled by the
-              // plugin layer in the service pipeline.
-              let ctx = crate::context::build_request_context(
-                &peer_addr,
-                &local_addr,
-                &service_name,
-              );
-              request.extensions_mut().insert(ctx);
-
-              // Step 5: Call the associated Service
-              let result =
-                tower::ServiceExt::oneshot(service, request).await;
-
-              // Step 6: Based on Response, send SOCKS5 reply via
-              // trigger
-              match result {
-                Ok(resp) => {
-                  if resp.status() == http::StatusCode::OK {
-                    if let Err(e) = trigger.send_success().await {
-                      tracing::warn!(
-                        "SOCKS5 failed to send success reply to {}: {}",
-                        peer_addr,
-                        e
-                      );
-                    }
-                  } else {
-                    let error =
-                      http_status_to_socks5_error(resp.status());
-                    if let Err(e) = trigger.send_error(error).await {
-                      tracing::warn!(
-                        "SOCKS5 failed to send error reply to {}: {}",
-                        peer_addr,
-                        e
-                      );
-                    }
-                  }
-                }
-                Err(e) => {
-                  tracing::warn!(
-                    "connection from {} on {}: {}",
-                    peer_addr,
-                    local_addr,
-                    e
-                  );
-                  if let Err(send_err) = trigger
-                    .send_error(fast_socks5::ReplyError::GeneralFailure)
-                    .await
-                  {
-                    tracing::warn!(
-                      "SOCKS5 failed to send error reply to {}: {}",
-                      peer_addr,
-                      send_err
-                    );
-                  }
-                }
-              }
-            });
-          }
-        }
-        Ok::<(), std::io::Error>(())
-      };
-
-      let shutdown = || async {
-        shutdown_handle.notified().await;
-      };
-
-      // Main accept loop
-      loop {
-        tokio::select! {
-          result = accepting() => result.with_context(|| format!("SOCKS5 accept failed on {addr}"))?,
-          _ = shutdown() => {
-            // Graceful shutdown for the TcpListener
-            tracing::info!("SOCKS5 listener on {} shutting down", addr);
-            break;
-          }
-        }
-      }
-
-      // Here the TcpListener is dropped, so listening socket is closed.
-      Ok(())
-    };
-
-    Ok(Box::pin(accepting_fut))
-  }
 }
 
 impl Listening for Socks5Listener {
-  /// Start the SOCKS5 listener.
-  ///
-  /// # Returns
-  ///
-  /// Returns a future that completes when the listener shuts down.
-  /// If all addresses fail to bind, returns an error immediately.
   fn start(
     &self,
   ) -> std::pin::Pin<Box<dyn Future<Output = Result<()>>>> {
-    use std::future;
-
-    // Get the shared shutdown handle from stream tracker
-    let shutdown_handle = self.base.shutdown_handle();
-
-    if shutdown_handle.is_shutdown() {
-      return Box::pin(future::ready(Ok(())));
-    }
-
-    let mut tasks = Vec::new();
-
-    for addr in &self.addresses {
-      match self.serve_addr(
-        *addr,
-        self.service.clone(),
-        self.handshake_timeout,
-        self.service_name.clone(),
-      ) {
-        Ok(f) => tasks.push(f),
-        Err(error) => return Box::pin(future::ready(Err(error))),
-      }
-    }
-
-    if tasks.is_empty() {
-      return Box::pin(future::ready(Err(anyhow::anyhow!(
-        "failed to start any SOCKS5 listener; all addresses failed to \
-         bind"
-      ))));
-    }
-
-    self.base.start_with_tasks(tasks)
+    let service = self.service.clone();
+    let service_name = self.service_name.clone();
+    let handshake_timeout = self.handshake_timeout;
+    self.base.start(
+      &self.addresses,
+      "SOCKS5",
+      self.accept_retry_delay,
+      move |connection| {
+        session::serve(
+          connection,
+          service.clone(),
+          handshake_timeout,
+          service_name.clone(),
+        )
+      },
+    )
   }
 
   fn stop(&self) {
@@ -529,36 +194,6 @@ fn resolve_addresses(addresses: &[String]) -> Result<Vec<SocketAddr>> {
         .with_context(|| format!("Invalid address: {}", addr))
     })
     .collect()
-}
-
-/// Formats a host and port for HTTP CONNECT URI.
-fn format_connect_uri(host: &str, port: u16) -> String {
-  if host.starts_with('[') {
-    return format!("{}:{}", host, port);
-  }
-  if let Ok(addr) = host.parse::<std::net::IpAddr>() {
-    match addr {
-      std::net::IpAddr::V4(_) => format!("{}:{}", host, port),
-      std::net::IpAddr::V6(_) => format!("[{}]:{}", host, port),
-    }
-  } else {
-    format!("{}:{}", host, port)
-  }
-}
-
-/// Extracts host and port from TargetAddr.
-fn extract_host_port(
-  target_addr: &fast_socks5::util::target_addr::TargetAddr,
-) -> (String, u16) {
-  match target_addr {
-    fast_socks5::util::target_addr::TargetAddr::Ip(addr) => {
-      (addr.ip().to_string(), addr.port())
-    }
-    fast_socks5::util::target_addr::TargetAddr::Domain(
-      domain,
-      port,
-    ) => (domain.clone(), *port),
-  }
 }
 
 /// Plugin listener name.

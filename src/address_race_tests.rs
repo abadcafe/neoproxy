@@ -84,3 +84,24 @@ async fn test_connect_reports_empty_expired_and_failed_candidates() {
     matches!(connect(vec![address], Duration::from_secs(1), attempt).await, Err(RaceError::Failed(failed)) if failed == address)
   );
 }
+#[tokio::test(start_paused = true)]
+async fn test_connect_races_borrowed_worker_local_transports() {
+  let count = std::rc::Rc::new(std::cell::Cell::new(0));
+  let addresses = vec![
+    "[::1]:8123".parse().unwrap(),
+    "127.0.0.1:8123".parse().unwrap(),
+  ];
+  let result = connect(addresses, Duration::from_secs(1), |address| {
+    let count = &count;
+    async move {
+      count.set(count.get() + 1);
+      if address.is_ipv6() {
+        std::future::pending::<()>().await;
+      }
+      Ok::<_, ()>(count.clone())
+    }
+  })
+  .await
+  .unwrap();
+  assert_eq!(result.get(), 2);
+}

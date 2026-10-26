@@ -1,5 +1,3 @@
-use http_body_util::BodyExt;
-
 use super::connect_request::build_connect_request;
 use crate::plugins::http_upstream::target_parser::{
   ConnectTarget, parse_connect_target,
@@ -24,20 +22,17 @@ fn user_credential(
   .unwrap()
 }
 
-#[tokio::test]
-async fn test_build_connect_request_sets_method_uri_host_and_empty_body()
+#[test]
+fn test_build_connect_request_sets_method_uri_host_without_transport_body()
  {
   let target = connect_target("example.com:443");
-  let req = build_connect_request(&target, &None);
+  let req: http::Request<()> = build_connect_request(&target, &None);
 
   assert_eq!(req.method(), http::Method::CONNECT);
   assert_eq!(req.uri(), "example.com:443");
   assert_eq!(
     req.headers().get(http::header::HOST).unwrap(),
     "example.com:443"
-  );
-  assert!(
-    req.into_body().collect().await.unwrap().to_bytes().is_empty()
   );
 }
 

@@ -15,6 +15,12 @@ use tower::Service;
 
 use crate::plugins::http_upstream::error::DnsResolveError;
 
+/// Preserve the DNS phase through connector APIs restricted to
+/// io::Error.
+pub(super) fn dns_io_error(error: std::io::Error) -> std::io::Error {
+  std::io::Error::new(error.kind(), DnsResolveError(error))
+}
+
 // System getaddrinfo cannot be cancelled after entering libc. Keep its
 // permit inside the blocking task even when the caller times out, so
 // abandoned lookups cannot exhaust Tokio's blocking pool or queue.
@@ -97,15 +103,17 @@ impl Service<Name> for TimeoutResolver {
     let timeout = self.timeout;
     let host = name.to_string();
     Box::pin(async move {
-      tokio::time::timeout(timeout, lookup((host, 0)))
-        .await
-        .map_err(|_| {
-          std::io::Error::new(
+      let result =
+        match tokio::time::timeout(timeout, lookup((host, 0))).await {
+          Ok(result) => result,
+          Err(_) => Err(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
             "DNS resolve timed out",
-          )
-        })?
+          )),
+        };
+      result
         .map(|addresses| addresses.into_iter())
+        .map_err(dns_io_error)
     })
   }
 }

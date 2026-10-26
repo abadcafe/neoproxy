@@ -62,7 +62,8 @@ mod tcp_connect;
 mod tcp_connect_tests;
 
 use self::direct::DirectClient;
-use self::http::{HttpProxyClient, HttpsClient, ProxyConnector};
+use self::http::HttpProxyClient;
+use self::http::connector::{ProxyConnector, TlsProxyConnector};
 use self::http3::{Http3Client, SessionPool};
 use self::scheduler::WeightedItem;
 
@@ -302,14 +303,11 @@ impl UpstreamRegistry {
 
             addresses.push(ScheduledClient::new(
               addr.weight,
-              Box::new(HttpProxyClient::<ProxyConnector> {
+              Box::new(HttpProxyClient::new(
                 client,
-                proxy_addr: addr.address.clone(),
-                connect_timeout: *connect_timeout,
-                tunnel_idle_timeout: addr.tunnel_idle_timeout,
-                dns_resolve_timeout: upstream.dns_resolve_timeout,
-                user: addr.user.clone(),
-              }),
+                addr.tunnel_idle_timeout,
+                addr.user.clone(),
+              )),
             ));
           }
           super::config::Protocol::Https {
@@ -337,7 +335,7 @@ impl UpstreamRegistry {
               *connect_timeout,
               upstream.dns_resolve_timeout,
             );
-            let connector = http::TlsProxyConnector::new(
+            let connector = TlsProxyConnector::new(
               inner,
               tls,
               host.to_string(),
@@ -352,40 +350,37 @@ impl UpstreamRegistry {
 
             addresses.push(ScheduledClient::new(
               addr.weight,
-              Box::new(HttpsClient {
+              Box::new(HttpProxyClient::new(
                 client,
-                proxy_addr: addr.address.clone(),
-                hostname: host.to_string(),
-                connect_timeout: *connect_timeout,
-                tls_handshake_timeout: *tls_handshake_timeout,
-                tunnel_idle_timeout: addr.tunnel_idle_timeout,
-                dns_resolve_timeout: upstream.dns_resolve_timeout,
-                user: addr.user.clone(),
-              }),
+                addr.tunnel_idle_timeout,
+                addr.user.clone(),
+              )),
             ));
           }
           super::config::Protocol::Http3 {
             tls_handshake_timeout,
             quic,
           } => {
+            let session = SessionPool::new(
+              addr.address.clone(),
+              addr.hostname.clone(),
+              QuicConfig {
+                max_idle_timeout: quic.max_idle_timeout,
+                keep_alive_interval: quic.keep_alive_interval,
+                max_concurrent_bidi_streams: quic
+                  .max_concurrent_bidi_streams,
+                initial_mtu: quic.initial_mtu,
+                send_window: quic.send_window,
+                receive_window: quic.receive_window,
+              },
+              *tls_handshake_timeout,
+              upstream.dns_resolve_timeout,
+              upstream.pool_config.clone(),
+            );
             addresses.push(ScheduledClient::new(
               addr.weight,
               Box::new(Http3Client {
-                session: SessionPool::new(
-                  addr.address.clone(),
-                  addr.hostname.clone(),
-                  QuicConfig {
-                    max_idle_timeout: quic.max_idle_timeout,
-                    keep_alive_interval: quic.keep_alive_interval,
-                    max_concurrent_bidi_streams: quic
-                      .max_concurrent_bidi_streams,
-                    initial_mtu: quic.initial_mtu,
-                    send_window: quic.send_window,
-                    receive_window: quic.receive_window,
-                  },
-                  *tls_handshake_timeout,
-                  upstream.dns_resolve_timeout,
-                ),
+                session,
                 tunnel_idle_timeout: addr.tunnel_idle_timeout,
                 user: addr.user.clone(),
               }),

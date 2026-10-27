@@ -5,15 +5,14 @@ Tests: conftest_tests.py and full-suite runs.
 """
 
 import os
-import sys
 
 import pytest
 
 from tests.fixtures.binary import (
     NEOPROXY_BINARY,
-    build_neoproxy_binary,
     check_binary_exists,
 )
+from tests.fixtures.curl_capability import check_http3_proxy
 
 
 def pytest_xdist_auto_num_workers() -> int:
@@ -22,17 +21,15 @@ def pytest_xdist_auto_num_workers() -> int:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Configure pytest with custom markers and check binary exists."""
-    build_neoproxy_binary()
-    if not check_binary_exists():
-        print(
-            (
-                f"\nERROR: neoproxy binary not found at {NEOPROXY_BINARY}\n"
-                + "Please run 'cargo build' or set NEOPROXY_BINARY.\n"
-            ),
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    """Check the prebuilt artifact and curl before starting workers."""
+    if "PYTEST_XDIST_WORKER" not in os.environ:
+        failures: list[str] = []
+        if not check_binary_exists():
+            failures.append(f"NeoProxy artifact missing: {NEOPROXY_BINARY}")
+        if (failure := check_http3_proxy()) is not None:
+            failures.append(failure)
+        if failures:
+            pytest.exit("\n".join(failures), returncode=1)
 
     config.addinivalue_line("markers", "integration: mark test as integration test")
     config.addinivalue_line("markers", "slow: mark test as slow running")

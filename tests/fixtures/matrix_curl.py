@@ -1,29 +1,14 @@
 """module: matrix_curl; responsibility: invoke curl over a declared proxy transport.
-Public operations: curl_command, matrix_curl. Data entities: none.
+Public operations: curl_command. Data entities: none.
 Tests: two-hop chain matrix process tests.
 """
 
 import base64
-import os
-import shutil
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .binary import PROJECT_ROOT
 from .matrix_configuration import supplied_certificate, supplied_user
 from .matrix_model import AuthCase, CertificateFiles, ChainCase
-
-
-def matrix_curl() -> str:
-    configured = os.environ.get("NEOPROXY_MATRIX_CURL")
-    if configured:
-        return configured
-    local = PROJECT_ROOT / "tmp/curl-h3/prefix/bin/curl"
-    if local.is_file():
-        return str(local)
-    binary = shutil.which("curl")
-    assert binary is not None, "curl is required for the chain matrix"
-    return binary
 
 
 def curl_command(
@@ -36,7 +21,7 @@ def curl_command(
     body: bytes,
 ) -> list[str]:
     command = [
-        matrix_curl(),
+        "curl",
         "--silent",
         "--show-error",
         "--http3-only"

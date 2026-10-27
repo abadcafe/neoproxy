@@ -1113,17 +1113,11 @@ SOCKS5 的 9 种组合（SOCKS5 仅支持隧道）。
 认证用例仅对 HTTPS/HTTP3 使用客户端证书。矩阵通过访问日志验证实际经过的两跳
 及所选中转协议；本地目标另验证接收的方法、路径和请求内容。
 
-HTTP/3 入口隧道需要带实验性 `proxy-HTTP3` 功能的 curl。仓库提供独立构建脚本，
-需要 C 编译器、Perl、make、CMake，以及下载依赖的网络连接：
-
-```bash
-scripts/build-matrix-curl.sh
-uv run pytest tests/integration/test_chain_matrix_local.py tests/integration/test_chain_matrix_baidu.py tests/integration/test_chain_matrix_auth.py tests/integration/test_chain_matrix_idle.py
-```
-
-脚本校验固定版本源码的 SHA256，安装到忽略目录 `tmp/curl-h3/prefix`，不替换系统
-curl。测试优先使用 `NEOPROXY_MATRIX_CURL` 指定的二进制，否则使用该独立构建，再
-回退到 PATH 中的 curl；缺少所需功能会失败，不跳过测试。百度用例需要外网可达。
+集测启动前只检查两项：`target/debug/neoproxy` 编译产物文件存在，以及 PATH 中
+`curl --version` 的 Features 包含 `proxy-HTTP3`。普通 `HTTP3` 特性或
+`--help` 列出 `--proxy-http3` 均不能证明支持 HTTP/3 代理。检查失败立即退出。
+所有用例使用 PATH 中的 curl；测试不会自动编译 NeoProxy 或 curl，也不回退到其他产物。
+Linux 和 macOS 使用相同的预检方式。百度用例需要外网可达。
 
 H3 隧道使用 curl `--proxy-http3`；H3 普通转发使用 `--http3-only` 连接入口，
 以绝对 URL 的 `--request-target` 生成目标伪头，不添加额外桥接代理。目标 TLS 验证

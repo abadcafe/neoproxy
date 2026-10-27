@@ -14,9 +14,6 @@ use std::time::Duration;
 use http::Uri;
 use tower::Service;
 
-use super::super::address_resolution::{
-  dns_io_error, resolve_addresses,
-};
 use super::super::observation::ConnectionObservation;
 use super::transport::ProxyTransport;
 
@@ -25,18 +22,31 @@ use super::transport::ProxyTransport;
 /// retains its absolute-form target URI on the wire.
 #[derive(Clone)]
 pub(crate) struct ProxyConnector {
-  proxy_addr: String,
+  proxy_addr: std::net::SocketAddr,
   connect_timeout: Duration,
-  dns_resolve_timeout: Duration,
+  tcp_options: super::super::tcp_options::TcpOptions,
 }
 
 impl ProxyConnector {
   pub(crate) fn new(
-    proxy_addr: String,
+    proxy_addr: std::net::SocketAddr,
     connect_timeout: Duration,
-    dns_resolve_timeout: Duration,
   ) -> Self {
-    Self { proxy_addr, connect_timeout, dns_resolve_timeout }
+    Self {
+      proxy_addr,
+      connect_timeout,
+      tcp_options: Default::default(),
+    }
+  }
+}
+
+impl ProxyConnector {
+  pub(in crate::plugins::http_upstream::upstream) fn with_tcp_options(
+    mut self,
+    options: super::super::tcp_options::TcpOptions,
+  ) -> Self {
+    self.tcp_options = options;
+    self
   }
 }
 
@@ -57,34 +67,16 @@ impl Service<Uri> for ProxyConnector {
   }
 
   fn call(&mut self, _uri: Uri) -> Self::Future {
-    let proxy_addr = self.proxy_addr.clone();
+    let proxy_addr = self.proxy_addr;
     let timeout = self.connect_timeout;
-    let dns_timeout = self.dns_resolve_timeout;
+    let tcp_options = self.tcp_options;
     Box::pin(async move {
       let observation = ConnectionObservation::new();
       let started = std::time::Instant::now();
       let result = async {
-        let addresses = tokio::time::timeout(
-          dns_timeout,
-          resolve_addresses(&proxy_addr),
-        )
-        .await
-        .map_err(|_| {
-          dns_io_error(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!("DNS resolve for '{proxy_addr}' timed out"),
-          ))
-        })
-        .and_then(|result| result.map_err(std::io::Error::other));
-        observation.dns(
-          &proxy_addr,
-          started.elapsed(),
-          dns_timeout,
-          addresses.as_deref().unwrap_or_default(),
-        );
-        let addresses = addresses?;
         let result =
-          super::super::tcp_connect::connect(addresses, timeout).await;
+          super::super::tcp_connect::connect(vec![proxy_addr], timeout)
+            .await;
         observation.tcp(
           result
             .as_ref()
@@ -97,7 +89,7 @@ impl Service<Uri> for ProxyConnector {
           started.elapsed(),
         );
         let stream = result?;
-        observation.protocol("http/1.1");
+        tcp_options.apply(&stream)?;
         Ok(ProxyTransport::new(stream, observation.clone()))
       }
       .await;
@@ -172,13 +164,7 @@ impl Service<Uri> for TlsProxyConnector {
         )
       })
       .and_then(std::convert::identity);
-      observation.tls(
-        started.elapsed(),
-        result
-          .as_ref()
-          .ok()
-          .and_then(|stream| stream.get_ref().1.alpn_protocol()),
-      );
+      observation.tls(started.elapsed());
       let tls_stream =
         result.map_err(|error| observation.error(error))?;
       Ok(ProxyTransport::new(tls_stream, observation))

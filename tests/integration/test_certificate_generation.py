@@ -37,5 +37,11 @@ def test_certificate_generator_preserves_unowned_files_and_failed_generation(
         assert existing.read_text() == "previous server key"
     else:
         assert result.returncode == 0, result.stderr
-        assert existing.read_text().startswith("-----BEGIN PRIVATE KEY-----")
+        key = subprocess.run(
+            ["openssl", "rsa", "-in", str(existing), "-noout", "-check"],
+            capture_output=True,
+            timeout=10,
+            env=environment,
+        )
+        assert key.returncode == 0, key.stderr
         assert existing.stat().st_mode & 0o077 == 0

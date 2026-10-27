@@ -83,6 +83,7 @@ def test_request_id_propagates_and_tunnel_logs_only_after_transfer(
     )
     fields = [
         "request.id",
+        "upstream.protocol",
         "upstream.connection.peer",
         "upstream.connection.reused",
         "upstream.dns.host",
@@ -99,7 +100,7 @@ def test_request_id_propagates_and_tunnel_logs_only_after_transfer(
         entry = start(entry_config)
         assert entry.wait_ready(timeout=3)
         with socket.create_connection(("127.0.0.1", entry_port), timeout=5) as client:
-            target = f"localhost:{origin_port}"
+            target = f"127.0.0.1:{origin_port}"
             line = f"CONNECT {target}" if mode == "tunnel" else f"POST http://{target}/"
             headers = f"{line} HTTP/1.1\r\nHost: {target}\r\n"
             if incoming is not None:
@@ -139,6 +140,19 @@ def test_request_id_propagates_and_tunnel_logs_only_after_transfer(
                         access[0].extensions["upstream.connection.reused"], bool
                     )
                     assert "tunnel_finished" not in diagnostics(directory)
+                assert (
+                    entries(entry_dir)[0].extensions["upstream.protocol"]
+                    == upstream_kind
+                )
+                if mode == "forward":
+                    assert (
+                        entries(upstream_dir)[0].extensions["upstream.protocol"]
+                        == "http"
+                    )
+                else:
+                    assert (
+                        "upstream.protocol" not in entries(upstream_dir)[0].extensions
+                    )
                 if mode == "tunnel":
                     client.sendall(b"ping")
                     assert response.read(9) == b"ECHO:ping"
@@ -167,15 +181,12 @@ def test_request_id_propagates_and_tunnel_logs_only_after_transfer(
         for directory in (entry_dir, upstream_dir):
             assert "origin_dns" not in diagnostics(directory)
             assert "origin_connect" not in diagnostics(directory)
-        origin_access = entries(upstream_dir)[0]
-        assert isinstance(origin_access.extensions["upstream.dns.duration_ms"], int)
-        assert isinstance(origin_access.extensions["upstream.dns.addresses"], list)
         if mode == "forward":
             second = HTTPConnection("127.0.0.1", entry_port, timeout=5)
             try:
                 second.request(
                     "POST",
-                    f"http://localhost:{origin_port}/",
+                    f"http://127.0.0.1:{origin_port}/",
                     body=b"next",
                     headers={"X-Request-ID": "second-id"},
                 )
@@ -190,6 +201,7 @@ def test_request_id_propagates_and_tunnel_logs_only_after_transfer(
                 time.sleep(0.01)
             reused = entries(entry_dir)[1]
             assert reused.extensions["request.id"] == "second-id"
+            assert reused.extensions["upstream.protocol"] == upstream_kind
             assert reused.extensions["upstream.connection.reused"] is True
             assert "upstream.tcp.connect_ms" not in reused.extensions
             assert "upstream.tls.handshake_ms" not in reused.extensions
@@ -206,6 +218,7 @@ def test_dns_failure_records_native_access_fields_and_response_id(
         config,
         [
             "request.id",
+            "upstream.protocol",
             "upstream.dns.host",
             "upstream.dns.duration_ms",
             "upstream.error.phase",
@@ -231,6 +244,7 @@ def test_dns_failure_records_native_access_fields_and_response_id(
             time.sleep(0.01)
         entry = entries(tmp_path)[0]
         assert entry.extensions["request.id"] == "dns-error-id"
+        assert entry.extensions["upstream.protocol"] == "http"
         assert entry.extensions["upstream.error.phase"] == "dns"
         assert entry.extensions["upstream.error.kind"] == "dns_error"
         assert entry.extensions["upstream.dns.host"] == "bad..name"

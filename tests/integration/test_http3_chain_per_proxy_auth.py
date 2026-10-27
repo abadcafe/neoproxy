@@ -492,7 +492,7 @@ plugins:
           - address: 127.0.0.1:{h3_port}
             hostname: localhost
             weight: 1
-            http3: {{}}
+            address_protocol: http3
 
 listeners:
 - name: http_main

@@ -31,13 +31,16 @@ impl Generator {
   fn next(&mut self) -> RequestId {
     let mut bytes = [0_u8; 32];
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    for half in bytes.chunks_exact_mut(16) {
+    for half in bytes.as_chunks_mut::<16>().0 {
       self.counter += 1;
       let mut hash =
         SipHasher24::new_with_keys(self.key[0], self.key[1]);
       hash.write(&self.counter.to_le_bytes());
-      for (pair, byte) in
-        half.chunks_exact_mut(2).zip(hash.finish().to_le_bytes())
+      for (pair, byte) in half
+        .as_chunks_mut::<2>()
+        .0
+        .iter_mut()
+        .zip(hash.finish().to_le_bytes())
       {
         pair[0] = HEX[usize::from(byte >> 4)];
         pair[1] = HEX[usize::from(byte & 15)];

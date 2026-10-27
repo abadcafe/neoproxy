@@ -24,7 +24,9 @@ mod validation_tests;
 pub(crate) use raw::{
   CertificateConfig, HttpUpstreamPluginConfig, UpstreamServiceArgs,
 };
-pub(crate) use resolved::{ClientCertCredential, Protocol, Upstream};
+pub(crate) use resolved::{
+  Address, ClientCertCredential, Protocol, Upstream,
+};
 pub(crate) use resolver::merge_chain_config;
 #[cfg(test)]
 pub(crate) use validation::validate_address_format;

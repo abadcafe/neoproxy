@@ -1,7 +1,7 @@
 //! module: upstream
 //! responsibility: declare upstream context fields
 //! public operations: FORWARD_TIME, FORWARD_STATUS, CONNECT_TIME,
-//! ERROR_PHASE, ERROR_KIND, ERROR_MESSAGE data entities: none
+//! ERROR_PHASE, ERROR_KIND, ERROR_MESSAGE, PROTOCOL data entities: none
 //! tests: context_tests.rs and public plugin tests
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,3 +19,5 @@ pub(crate) const ERROR_KIND: ContextKey<Arc<str>> =
   ContextKey::new("upstream.error.kind");
 pub(crate) const ERROR_MESSAGE: ContextKey<Arc<str>> =
   ContextKey::new("upstream.error.message");
+pub(crate) const PROTOCOL: ContextKey<Arc<str>> =
+  ContextKey::new("upstream.protocol");

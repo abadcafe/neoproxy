@@ -16,49 +16,50 @@ use super::defaults::{
   default_keep_alive_interval, default_tls_handshake_timeout,
   default_tunnel_idle_timeout,
 };
-use super::protocol::{ProtocolKind, QuicConfig};
+use super::protocol::ProtocolKind;
 use super::raw::HttpUpstreamPluginConfig;
 use super::resolved::{Address, Protocol, QuicResolved, Upstream};
 use super::validation::validate_plugin_config;
 use crate::config::UserCredential;
 
-/// Merge QUIC config at field level through three levels.
 fn merge_quic_field_level(
-  addr: Option<&QuicConfig>,
-  upstream: Option<&QuicConfig>,
-  plugin: Option<&QuicConfig>,
+  addr: Option<&super::raw::UpstreamAddressConfig>,
+  upstream: &super::raw::UpstreamConfig,
+  plugin: &HttpUpstreamPluginConfig,
 ) -> QuicResolved {
   QuicResolved {
     max_idle_timeout: resolve_field(
-      addr.and_then(|q| q.max_idle_timeout).as_ref(),
-      upstream.and_then(|q| q.max_idle_timeout).as_ref(),
-      plugin.and_then(|q| q.max_idle_timeout).as_ref(),
+      addr.and_then(|c| c.quic_connection_idle_timeout).as_ref(),
+      upstream.quic_connection_idle_timeout.as_ref(),
+      plugin.quic_connection_idle_timeout.as_ref(),
     ),
     keep_alive_interval: resolve_field_with_default(
-      addr.and_then(|q| q.keep_alive_interval).as_ref(),
-      upstream.and_then(|q| q.keep_alive_interval).as_ref(),
-      plugin.and_then(|q| q.keep_alive_interval).as_ref(),
+      addr.and_then(|c| c.quic_connection_keep_alive_interval).as_ref(),
+      upstream.quic_connection_keep_alive_interval.as_ref(),
+      plugin.quic_connection_keep_alive_interval.as_ref(),
       default_keep_alive_interval(),
     ),
     max_concurrent_bidi_streams: resolve_field(
-      addr.and_then(|q| q.max_concurrent_bidi_streams).as_ref(),
-      upstream.and_then(|q| q.max_concurrent_bidi_streams).as_ref(),
-      plugin.and_then(|q| q.max_concurrent_bidi_streams).as_ref(),
+      addr
+        .and_then(|c| c.quic_connection_max_concurrent_bidi_streams)
+        .as_ref(),
+      upstream.quic_connection_max_concurrent_bidi_streams.as_ref(),
+      plugin.quic_connection_max_concurrent_bidi_streams.as_ref(),
     ),
     initial_mtu: resolve_field(
-      addr.and_then(|q| q.initial_mtu).as_ref(),
-      upstream.and_then(|q| q.initial_mtu).as_ref(),
-      plugin.and_then(|q| q.initial_mtu).as_ref(),
+      addr.and_then(|c| c.quic_connection_initial_mtu).as_ref(),
+      upstream.quic_connection_initial_mtu.as_ref(),
+      plugin.quic_connection_initial_mtu.as_ref(),
     ),
     send_window: resolve_field(
-      addr.and_then(|q| q.send_window).as_ref(),
-      upstream.and_then(|q| q.send_window).as_ref(),
-      plugin.and_then(|q| q.send_window).as_ref(),
+      addr.and_then(|c| c.quic_connection_send_window).as_ref(),
+      upstream.quic_connection_send_window.as_ref(),
+      plugin.quic_connection_send_window.as_ref(),
     ),
     receive_window: resolve_field(
-      addr.and_then(|q| q.receive_window).as_ref(),
-      upstream.and_then(|q| q.receive_window).as_ref(),
-      plugin.and_then(|q| q.receive_window).as_ref(),
+      addr.and_then(|c| c.quic_connection_receive_window).as_ref(),
+      upstream.quic_connection_receive_window.as_ref(),
+      plugin.quic_connection_receive_window.as_ref(),
     ),
   }
 }
@@ -75,7 +76,12 @@ pub(crate) fn merge_chain_config(
     let mut addresses = Vec::new();
 
     for addr in &upstream.addresses {
-      let proto = addr.protocol()?;
+      let proto = resolve_field(
+        addr.address_protocol.as_ref(),
+        upstream.address_protocol.as_ref(),
+        plugin.address_protocol.as_ref(),
+      )
+      .unwrap_or(addr.address_protocol()?);
 
       // Protocol-agnostic fields: address -> upstream -> plugin ->
       // default
@@ -92,75 +98,87 @@ pub(crate) fn merge_chain_config(
       );
 
       let resolved_protocol = match proto {
-        ProtocolKind::Http => {
-          let a = addr.http.as_ref();
-          let u = upstream.http.as_ref();
-          let p = plugin.http.as_ref();
-          Protocol::Http {
-            connect_timeout: resolve_field_with_default(
-              a.and_then(|c| c.connect_timeout).as_ref(),
-              u.and_then(|c| c.connect_timeout).as_ref(),
-              p.and_then(|c| c.connect_timeout).as_ref(),
-              default_connect_timeout(),
-            ),
-          }
-        }
-        ProtocolKind::Https => {
-          let a = addr.https.as_ref();
-          let u = upstream.https.as_ref();
-          let p = plugin.https.as_ref();
-          Protocol::Https {
-            connect_timeout: resolve_field_with_default(
-              a.and_then(|c| c.connect_timeout).as_ref(),
-              u.and_then(|c| c.connect_timeout).as_ref(),
-              p.and_then(|c| c.connect_timeout).as_ref(),
-              default_connect_timeout(),
-            ),
-            tls_handshake_timeout: resolve_field_with_default(
-              a.and_then(|c| c.tls_handshake_timeout).as_ref(),
-              u.and_then(|c| c.tls_handshake_timeout).as_ref(),
-              p.and_then(|c| c.tls_handshake_timeout).as_ref(),
-              default_tls_handshake_timeout(),
-            ),
-          }
-        }
-        ProtocolKind::Http3 => {
-          let a = addr.http3.as_ref();
-          let u = upstream.http3.as_ref();
-          let p = plugin.http3.as_ref();
-          Protocol::Http3 {
-            tls_handshake_timeout: resolve_field_with_default(
-              a.and_then(|c| c.tls_handshake_timeout).as_ref(),
-              u.and_then(|c| c.tls_handshake_timeout).as_ref(),
-              p.and_then(|c| c.tls_handshake_timeout).as_ref(),
-              default_tls_handshake_timeout(),
-            ),
-            quic: merge_quic_field_level(
-              a.and_then(|c| c.quic.as_ref()),
-              u.and_then(|c| c.quic.as_ref()),
-              p.and_then(|c| c.quic.as_ref()),
-            ),
-          }
-        }
+        ProtocolKind::Http => Protocol::Http {
+          connect_timeout: resolve_field_with_default(
+            addr.tcp_connect_timeout.as_ref(),
+            upstream.tcp_connect_timeout.as_ref(),
+            plugin.tcp_connect_timeout.as_ref(),
+            default_connect_timeout(),
+          ),
+        },
+        ProtocolKind::Https => Protocol::Https {
+          connect_timeout: resolve_field_with_default(
+            addr.tcp_connect_timeout.as_ref(),
+            upstream.tcp_connect_timeout.as_ref(),
+            plugin.tcp_connect_timeout.as_ref(),
+            default_connect_timeout(),
+          ),
+          tls_handshake_timeout: resolve_field_with_default(
+            addr.tls_handshake_timeout.as_ref(),
+            upstream.tls_handshake_timeout.as_ref(),
+            plugin.tls_handshake_timeout.as_ref(),
+            default_tls_handshake_timeout(),
+          ),
+        },
+        ProtocolKind::Http3 => Protocol::Http3 {
+          tls_handshake_timeout: resolve_field_with_default(
+            addr.quic_connection_connect_timeout.as_ref(),
+            upstream.quic_connection_connect_timeout.as_ref(),
+            plugin.quic_connection_connect_timeout.as_ref(),
+            default_tls_handshake_timeout(),
+          ),
+          quic: merge_quic_field_level(Some(addr), upstream, plugin),
+        },
       };
 
       addresses.push(Address {
+        address_max_fails: resolve_field_with_default(
+          addr.address_max_fails.as_ref(),
+          upstream.address_max_fails.as_ref(),
+          plugin.address_max_fails.as_ref(),
+          1,
+        ),
+        address_fail_timeout: resolve_field_with_default(
+          addr.address_fail_timeout.as_ref(),
+          upstream.address_fail_timeout.as_ref(),
+          plugin.address_fail_timeout.as_ref(),
+          std::time::Duration::from_secs(10),
+        ),
+        tcp_keep_alive_time: resolve_field(
+          addr.tcp_keep_alive_time.as_ref(),
+          upstream.tcp_keep_alive_time.as_ref(),
+          plugin.tcp_keep_alive_time.as_ref(),
+        ),
+        tcp_keep_alive_interval: resolve_field(
+          addr.tcp_keep_alive_interval.as_ref(),
+          upstream.tcp_keep_alive_interval.as_ref(),
+          plugin.tcp_keep_alive_interval.as_ref(),
+        ),
+        tcp_keep_alive_retries: resolve_field(
+          addr.tcp_keep_alive_retries.as_ref(),
+          upstream.tcp_keep_alive_retries.as_ref(),
+          plugin.tcp_keep_alive_retries.as_ref(),
+        ),
         address: addr.address.clone(),
         hostname: addr.hostname.clone(),
         weight: addr.weight,
-        protocol: resolved_protocol,
+        address_protocol: resolved_protocol,
         tunnel_idle_timeout,
+        upstream_request_timeout: resolve_field_with_default(
+          addr.upstream_request_timeout.as_ref(),
+          upstream.upstream_request_timeout.as_ref(),
+          plugin.upstream_request_timeout.as_ref(),
+          std::time::Duration::from_secs(30),
+        ),
         user,
       });
     }
 
     let pool_config = upstream.pool.clone().unwrap_or_default();
 
-    let u_http = upstream.http.as_ref();
-    let p_http = plugin.http.as_ref();
     let connect_timeout = resolve_field_with_default(
-      u_http.and_then(|c| c.connect_timeout).as_ref(),
-      p_http.and_then(|c| c.connect_timeout).as_ref(),
+      upstream.tcp_connect_timeout.as_ref(),
+      plugin.tcp_connect_timeout.as_ref(),
       None,
       default_connect_timeout(),
     );
@@ -171,8 +189,8 @@ pub(crate) fn merge_chain_config(
       default_tunnel_idle_timeout(),
     );
     let dns_resolve_timeout = resolve_field_with_default(
-      upstream.dns_resolve_timeout.as_ref(),
       plugin.dns_resolve_timeout.as_ref(),
+      None,
       None,
       default_dns_resolve_timeout(),
     );
@@ -180,65 +198,51 @@ pub(crate) fn merge_chain_config(
     upstreams.insert(
       upstream.name.clone(),
       Upstream {
-        dns_servers: upstream
-          .dns_servers
-          .clone()
-          .or_else(|| plugin.dns_servers.clone()),
-        http3_handshake_timeout: resolve_field_with_default(
-          upstream
-            .http3
-            .as_ref()
-            .and_then(|c| c.tls_handshake_timeout)
-            .as_ref(),
-          plugin
-            .http3
-            .as_ref()
-            .and_then(|c| c.tls_handshake_timeout)
-            .as_ref(),
+        address_max_fails: resolve_field_with_default(
+          upstream.address_max_fails.as_ref(),
+          plugin.address_max_fails.as_ref(),
           None,
-          default_tls_handshake_timeout(),
+          1,
         ),
-        quic: merge_quic_field_level(
+        address_fail_timeout: resolve_field_with_default(
+          upstream.address_fail_timeout.as_ref(),
+          plugin.address_fail_timeout.as_ref(),
           None,
-          upstream.http3.as_ref().and_then(|c| c.quic.as_ref()),
-          plugin.http3.as_ref().and_then(|c| c.quic.as_ref()),
+          std::time::Duration::from_secs(10),
         ),
+        tcp_keep_alive_time: resolve_field(
+          upstream.tcp_keep_alive_time.as_ref(),
+          plugin.tcp_keep_alive_time.as_ref(),
+          None,
+        ),
+        tcp_keep_alive_interval: resolve_field(
+          upstream.tcp_keep_alive_interval.as_ref(),
+          plugin.tcp_keep_alive_interval.as_ref(),
+          None,
+        ),
+        tcp_keep_alive_retries: resolve_field(
+          upstream.tcp_keep_alive_retries.as_ref(),
+          plugin.tcp_keep_alive_retries.as_ref(),
+          None,
+        ),
+        dns_refresh_retry_interval: plugin
+          .dns_refresh_retry_interval
+          .unwrap_or(std::time::Duration::from_secs(30)),
+        dns_servers: plugin.dns_servers.clone(),
         addresses,
         pool_config,
         connect_timeout,
-        https_connect_timeout: resolve_field_with_default(
-          upstream
-            .https
-            .as_ref()
-            .and_then(|c| c.connect_timeout)
-            .as_ref(),
-          plugin
-            .https
-            .as_ref()
-            .and_then(|c| c.connect_timeout)
-            .as_ref(),
-          None,
-          default_connect_timeout(),
-        ),
         tls_handshake_timeout: resolve_field_with_default(
-          upstream
-            .https
-            .as_ref()
-            .and_then(|c| c.tls_handshake_timeout)
-            .as_ref(),
-          plugin
-            .https
-            .as_ref()
-            .and_then(|c| c.tls_handshake_timeout)
-            .as_ref(),
+          upstream.tls_handshake_timeout.as_ref(),
+          plugin.tls_handshake_timeout.as_ref(),
           None,
           default_tls_handshake_timeout(),
         ),
         tunnel_idle_timeout,
         dns_resolve_timeout,
-        request_timeout: resolve_field_with_default(
-          upstream.request_timeout.as_ref(),
-          plugin.request_timeout.as_ref(),
+        upstream_request_timeout: resolve_field_with_default(
+          upstream.upstream_request_timeout.as_ref(),
+          plugin.upstream_request_timeout.as_ref(),
           None,
           std::time::Duration::from_secs(30),
         ),

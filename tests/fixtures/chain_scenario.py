@@ -163,7 +163,7 @@ def run_proxy_chain_test(
                     "upstream.dns.addresses",
                     "upstream.tcp.connect_ms",
                     "upstream.tls.handshake_ms",
-                    "upstream.tls.alpn",
+                    "upstream.protocol",
                     "upstream.error.phase",
                     "upstream.error.kind",
                     "upstream.error.message",

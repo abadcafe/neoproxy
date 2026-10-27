@@ -1,7 +1,7 @@
 //! module: observation
 //! responsibility: attribute physical transport setup to requests
 //! without owning request state public operations:
-//! ConnectionObservation::{new,dns,tcp,tls,protocol,record,error,
+//! ConnectionObservation::{new,dns,tcp,tls,record,error,
 //! record_error,same_connection} data entities: ConnectionObservation,
 //! Snapshot, DnsObservation, ObservedError tests: observation_tests.rs
 use std::error::Error;
@@ -22,8 +22,6 @@ struct Snapshot {
   local: Option<SocketAddr>,
   tcp: Option<Duration>,
   tls: Option<Duration>,
-  alpn: Option<Arc<str>>,
-  protocol: Option<Arc<str>>,
 }
 #[derive(Debug)]
 struct DnsObservation {
@@ -106,16 +104,9 @@ impl ConnectionObservation {
     ));
   }
 
-  pub(super) fn tls(&self, elapsed: Duration, alpn: Option<&[u8]>) {
-    let mut data = self.0.lock().expect("observation lock poisoned");
-    data.tls = Some(elapsed);
-    data.alpn = alpn
-      .map(|value| Arc::from(String::from_utf8_lossy(value).as_ref()));
-  }
-
-  pub(super) fn protocol(&self, protocol: &str) {
-    self.0.lock().expect("observation lock poisoned").protocol =
-      Some(Arc::from(protocol));
+  pub(super) fn tls(&self, elapsed: Duration) {
+    self.0.lock().expect("observation lock poisoned").tls =
+      Some(elapsed);
   }
 
   pub(super) fn record(&self, ctx: &RequestContext) {
@@ -126,12 +117,6 @@ impl ConnectionObservation {
     }
     if let Some(local) = data.local {
       ctx.set(connection::LOCAL, local);
-    }
-    if let Some(alpn) = &data.alpn {
-      ctx.set(connection::ALPN, alpn.clone());
-    }
-    if let Some(protocol) = &data.protocol {
-      ctx.set(connection::PROTOCOL, protocol.clone());
     }
     if !data.used {
       if let Some(dns) = &data.dns {

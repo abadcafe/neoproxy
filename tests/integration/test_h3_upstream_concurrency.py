@@ -124,7 +124,7 @@ async def _exercise_connection_sharing(directory: Path, kind: RequestKind) -> No
     _ = config.write_text(f"""server_threads: 1
 plugins:
   http_upstream:
-    request_timeout: 10s
+    upstream_request_timeout: 10s
     certificates:
       server_ca_path: {ca}
     upstreams:
@@ -132,7 +132,7 @@ plugins:
       addresses:
       - address: 127.0.0.1:{upstream}
         hostname: localhost
-        http3: {{}}
+        address_protocol: http3
 listeners:
 - name: main
   kind: http

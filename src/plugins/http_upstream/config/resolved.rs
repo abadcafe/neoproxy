@@ -9,7 +9,7 @@
 use std::path;
 use std::time::Duration;
 
-use super::protocol::PoolConfig;
+use super::protocol::{PoolConfig, ProtocolKind};
 use crate::config::UserCredential;
 
 /// Client certificate credential for TLS authentication.
@@ -38,30 +38,50 @@ pub(crate) enum Protocol {
   Http3 { tls_handshake_timeout: Duration, quic: QuicResolved },
 }
 
+impl Protocol {
+  pub(crate) fn kind(&self) -> ProtocolKind {
+    match self {
+      Self::Http { .. } => ProtocolKind::Http,
+      Self::Https { .. } => ProtocolKind::Https,
+      Self::Http3 { .. } => ProtocolKind::Http3,
+    }
+  }
+}
+
 /// Resolved address after three-level inheritance.
 #[derive(Clone, Debug)]
 pub(crate) struct Address {
+  pub(crate) address_max_fails: usize,
+  pub(crate) address_fail_timeout: Duration,
+  pub(crate) tcp_keep_alive_time: Option<Duration>,
+  pub(crate) tcp_keep_alive_interval: Option<Duration>,
+  pub(crate) tcp_keep_alive_retries: Option<u32>,
+
   pub(crate) address: String,
   pub(crate) hostname: Option<String>,
   pub(crate) weight: usize,
-  pub(crate) protocol: Protocol,
+  pub(crate) address_protocol: Protocol,
   pub(crate) tunnel_idle_timeout: Duration,
+  pub(crate) upstream_request_timeout: Duration,
   pub(crate) user: Option<UserCredential>,
 }
 
 /// Resolved upstream after three-level inheritance.
 #[derive(Clone, Debug)]
 pub(crate) struct Upstream {
+  pub(crate) address_max_fails: usize,
+  pub(crate) address_fail_timeout: Duration,
+  pub(crate) tcp_keep_alive_time: Option<Duration>,
+  pub(crate) tcp_keep_alive_interval: Option<Duration>,
+  pub(crate) tcp_keep_alive_retries: Option<u32>,
+  pub(crate) dns_refresh_retry_interval: Duration,
   pub(crate) dns_servers: Option<Vec<std::net::SocketAddr>>,
-  pub(crate) http3_handshake_timeout: Duration,
-  pub(crate) quic: QuicResolved,
   pub(crate) addresses: Vec<Address>,
   pub(crate) pool_config: PoolConfig,
   /// Direct-mode fields (used when addresses is empty):
   pub(crate) connect_timeout: Duration,
-  pub(crate) https_connect_timeout: Duration,
   pub(crate) tls_handshake_timeout: Duration,
   pub(crate) tunnel_idle_timeout: Duration,
   pub(crate) dns_resolve_timeout: Duration,
-  pub(crate) request_timeout: Duration,
+  pub(crate) upstream_request_timeout: Duration,
 }

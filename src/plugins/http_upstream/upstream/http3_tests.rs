@@ -28,10 +28,9 @@ fn quic_config() -> QuicConfig {
 fn http3_client() -> Http3Client {
   Http3Client {
     session: SessionPool::new(
-      "127.0.0.1:443".into(),
+      "127.0.0.1:443".parse().unwrap(),
       None,
       quic_config(),
-      Duration::from_millis(100),
       Duration::from_millis(100),
       Default::default(),
     ),
@@ -144,10 +143,9 @@ async fn test_http3_client_reconnects_after_goaway_without_quic_close()
       });
       let mut client = http3_client();
       client.session = SessionPool::new(
-        address.to_string(),
+        address,
         Some("localhost".into()),
         quic_config(),
-        Duration::from_secs(2),
         Duration::from_secs(2),
         Default::default(),
       );

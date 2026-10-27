@@ -1,6 +1,6 @@
 """module: origin_peer; responsibility: serve observable origin protocol exchanges.
 Public operations: PeerConfig, SeenRequest, OriginPeer, origin_peer.
-Data entities: those types. Tests: test_origin_discovery.py.
+Data entities: those types. Tests: test_direct_http1.py, test_h3_pool_lifecycle.py.
 """
 
 import asyncio
@@ -10,9 +10,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Literal, override
 
-import h2.config
-import h2.connection
-import h2.events
 from aioquic.asyncio.protocol import QuicConnectionProtocol, QuicStreamHandler
 from aioquic.asyncio.server import serve
 from aioquic.h3.connection import H3Connection
@@ -20,16 +17,19 @@ from aioquic.h3.events import DataReceived, HeadersReceived
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.events import ConnectionTerminated, QuicEvent, StreamDataReceived
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 from .ports import get_unique_port
 from .stream_cleanup import close_writer
 
 
 class PeerConfig(BaseModel):
+    host: str = "127.0.0.1"
+    port: int | None = None
     certificate: str
     key: str
-    wire: Literal["h1", "h2", "h3"]
+    wire: Literal["h1", "h3"]
+    alpn: tuple[str, ...] = ("http/1.1",)
 
 
 @dataclass(frozen=True)
@@ -37,6 +37,7 @@ class SeenRequest:
     headers: dict[str, str]
     body: bytes
     connection: int
+    alpn: str | None = None
 
 
 @dataclass
@@ -48,11 +49,13 @@ class OriginPeer:
     abort_response: bool = False
     closed_connections: int = 0
     response_delay: float = 0
+    header_delay: float = 0
+    invalid_response: bool = False
 
 
 @asynccontextmanager
 async def origin_peer(config: PeerConfig) -> AsyncGenerator[OriginPeer]:
-    peer = OriginPeer(get_unique_port())
+    peer = OriginPeer(config.port or get_unique_port())
 
     def response_fields(body: bytes) -> list[tuple[bytes, bytes]]:
         return [
@@ -120,7 +123,7 @@ async def origin_peer(config: PeerConfig) -> AsyncGenerator[OriginPeer]:
         quic = QuicConfiguration(is_client=False, alpn_protocols=["h3"])
         quic.load_cert_chain(config.certificate, config.key)
         server = await serve(
-            "127.0.0.1", peer.port, configuration=quic, create_protocol=OriginProtocol
+            config.host, peer.port, configuration=quic, create_protocol=OriginProtocol
         )
         try:
             yield peer
@@ -132,72 +135,50 @@ async def origin_peer(config: PeerConfig) -> AsyncGenerator[OriginPeer]:
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         try:
-            if config.wire == "h1":
-                while True:
-                    try:
-                        header = await reader.readuntil(b"\r\n\r\n")
-                    except asyncio.IncompleteReadError:
-                        break
-                    lines = header.split(b"\r\n")
-                    fields = {
-                        name.decode().lower(): value.strip().decode()
-                        for line in lines[1:]
-                        if (name_and_value := line.partition(b":"))[1]
-                        for name, _, value in [name_and_value]
-                    }
-                    body = await reader.readexactly(
-                        int(fields.get("content-length", "0"))
-                    )
-                    peer.requests.append(SeenRequest(fields, body, id(writer)))
-                    payload = body or b"h1"
-                    writer.write(
-                        f"HTTP/1.1 {peer.status} OK\r\n".encode()
-                        + b"".join(
-                            name + b": " + value + b"\r\n"
-                            for name, value in response_fields(payload)[1:]
-                        )
-                        + b"\r\n"
-                        + payload
-                    )
-                    await writer.drain()
-            else:
-                connection = h2.connection.H2Connection(
-                    config=h2.config.H2Configuration(
-                        client_side=False, header_encoding="utf-8"
+            tls_connection = TypeAdapter(object).validate_python(
+                writer.get_extra_info("ssl_object")
+            )
+            assert isinstance(tls_connection, ssl.SSLObject)
+            while True:
+                try:
+                    header = await reader.readuntil(b"\r\n\r\n")
+                except asyncio.IncompleteReadError:
+                    break
+                lines = header.split(b"\r\n")
+                fields = {
+                    name.decode().lower(): value.strip().decode()
+                    for line in lines[1:]
+                    if (name_and_value := line.partition(b":"))[1]
+                    for name, _, value in [name_and_value]
+                }
+                body = await reader.readexactly(int(fields.get("content-length", "0")))
+                peer.requests.append(
+                    SeenRequest(
+                        fields,
+                        body,
+                        id(writer),
+                        tls_connection.selected_alpn_protocol(),
                     )
                 )
-                connection.initiate_connection()
-                writer.write(connection.data_to_send())
-                headers: dict[int, dict[str, str]] = {}
-                bodies: dict[int, bytearray] = {}
-                while data := await reader.read(65536):
-                    for event in connection.receive_data(data):
-                        if isinstance(event, h2.events.RequestReceived):
-                            headers[event.stream_id] = {
-                                str(name): str(value) for name, value in event.headers
-                            }
-                            bodies[event.stream_id] = bytearray()
-                        elif isinstance(event, h2.events.DataReceived):
-                            bodies[event.stream_id].extend(event.data)
-                            connection.acknowledge_received_data(
-                                event.flow_controlled_length, event.stream_id
-                            )
-                        elif isinstance(event, h2.events.StreamEnded):
-                            body = bytes(bodies.pop(event.stream_id))
-                            peer.requests.append(
-                                SeenRequest(
-                                    headers.pop(event.stream_id), body, id(writer)
-                                )
-                            )
-                            payload = body or b"h2"
-                            connection.send_headers(
-                                event.stream_id, response_fields(payload)
-                            )
-                            connection.send_data(
-                                event.stream_id, payload, end_stream=True
-                            )
-                    writer.write(connection.data_to_send())
+                if peer.abort_response:
+                    break
+                if peer.invalid_response:
+                    writer.write(b"INVALID RESPONSE\r\n\r\n")
                     await writer.drain()
+                    break
+                if peer.header_delay:
+                    await asyncio.sleep(peer.header_delay)
+                payload = body or b"h1"
+                writer.write(
+                    f"HTTP/1.1 {peer.status} OK\r\n".encode()
+                    + b"".join(
+                        name + b": " + value + b"\r\n"
+                        for name, value in response_fields(payload)[1:]
+                    )
+                    + b"\r\n"
+                    + payload
+                )
+                await writer.drain()
         except ConnectionResetError, BrokenPipeError:
             pass
         finally:
@@ -205,7 +186,7 @@ async def origin_peer(config: PeerConfig) -> AsyncGenerator[OriginPeer]:
 
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.load_cert_chain(config.certificate, config.key)
-    tls.set_alpn_protocols(["h2"] if config.wire == "h2" else ["http/1.1"])
-    server = await asyncio.start_server(http_peer, "127.0.0.1", peer.port, ssl=tls)
+    tls.set_alpn_protocols(list(config.alpn))
+    server = await asyncio.start_server(http_peer, config.host, peer.port, ssl=tls)
     async with server:
         yield peer

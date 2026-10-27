@@ -43,7 +43,7 @@ plugins:
       addresses:
       - address: 127.0.0.1:{upstream}
         hostname: localhost
-        {kind}: {{}}
+        address_protocol: {kind}
 listeners:
 - name: main
   kind: http

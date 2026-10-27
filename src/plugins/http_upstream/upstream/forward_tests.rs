@@ -59,8 +59,9 @@ async fn test_forward_request_rewrites_host_from_forward_target() {
   let target = parse_forward_target(&parts).unwrap();
   let ctx = RequestContext::new();
 
-  let resp =
-    forward_request(client, &None, &target, parts, body, &ctx).await;
+  let resp = forward_request(client, &None, &target, parts, body, &ctx)
+    .await
+    .unwrap();
   let body = resp.into_body().collect().await.unwrap().to_bytes();
 
   assert_eq!(body, Bytes::from(addr.to_string()));
@@ -71,114 +72,6 @@ struct CapturingClient {
   request: std::rc::Rc<
     std::cell::RefCell<Option<crate::http_message::Request>>,
   >,
-}
-
-#[tokio::test]
-async fn test_forward_request_attributes_shared_h2_connection_before_response_order()
- {
-  use std::sync::Arc;
-
-  use crate::context::fields::connection;
-  let listener =
-    tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-  let address = listener.local_addr().unwrap();
-  let started = Arc::new(tokio::sync::Notify::new());
-  let release = Arc::new(tokio::sync::Notify::new());
-  let (server_started, server_release) =
-    (started.clone(), release.clone());
-  let server = tokio::spawn(async move {
-    let (stream, _) = listener.accept().await.unwrap();
-    hyper::server::conn::http2::Builder::new(
-      hyper_util::rt::TokioExecutor::new(),
-    )
-    .serve_connection(
-      hyper_util::rt::TokioIo::new(stream),
-      hyper::service::service_fn(
-        move |request: hyper::Request<hyper::body::Incoming>| {
-          let (started, release) =
-            (server_started.clone(), server_release.clone());
-          async move {
-            if request.uri().path() == "/slow" {
-              started.notify_one();
-              release.notified().await;
-            }
-            Ok::<_, std::convert::Infallible>(http::Response::new(
-              http_body_util::Empty::<Bytes>::new(),
-            ))
-          }
-        },
-      ),
-    )
-    .await
-    .unwrap();
-  });
-  let config: crate::plugins::http_upstream::config::HttpUpstreamPluginConfig = serde_yaml::from_str("upstreams: [{name: direct}]").unwrap();
-  let resolved =
-    crate::plugins::http_upstream::config::merge_chain_config(&config)
-      .unwrap();
-  let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-    rustls::crypto::ring::default_provider(),
-  ))
-  .with_safe_default_protocol_versions()
-  .unwrap()
-  .with_root_certificates(rustls::RootCertStore::empty())
-  .with_no_client_auth();
-  let client = Client::builder(hyper_util::rt::TokioExecutor::new())
-    .http2_only(true)
-    .build(super::origin_connector::OriginConnector::new(
-      &resolved["direct"],
-      Arc::new(tls),
-    ));
-  let slow_ctx = RequestContext::new();
-  let fast_ctx = RequestContext::new();
-  let request = |path: &str| {
-    http::Request::builder()
-      .uri(format!("http://{address}/{path}"))
-      .body(RequestBody::new(BytesBufBodyWrapper::new(
-        http_body_util::Empty::<Bytes>::new(),
-      )))
-      .unwrap()
-  };
-  let (slow_parts, slow_body) = request("slow").into_parts();
-  let slow_target = parse_forward_target(&slow_parts).unwrap();
-  let slow = forward_request(
-    client.clone(),
-    &None,
-    &slow_target,
-    slow_parts,
-    slow_body,
-    &slow_ctx,
-  );
-  let fast = async {
-    started.notified().await;
-    let (parts, body) = request("fast").into_parts();
-    let target = parse_forward_target(&parts).unwrap();
-    let response = forward_request(
-      client.clone(),
-      &None,
-      &target,
-      parts,
-      body,
-      &fast_ctx,
-    )
-    .await;
-    assert_eq!(response.status(), http::StatusCode::OK);
-    response.into_body().collect().await.unwrap();
-    release.notify_one();
-  };
-  let (response, ()) =
-    tokio::time::timeout(Duration::from_secs(2), async {
-      tokio::join!(slow, fast)
-    })
-    .await
-    .unwrap();
-  response.into_body().collect().await.unwrap();
-  assert_eq!(slow_ctx.get(connection::REUSED), Some(false));
-  assert_eq!(fast_ctx.get(connection::REUSED), Some(true));
-  assert!(slow_ctx.get(connection::CONNECT_TIME).is_some());
-  assert!(fast_ctx.get(connection::CONNECT_TIME).is_none());
-  server.abort();
-  assert!(server.await.unwrap_err().is_cancelled());
 }
 
 #[tokio::test]
@@ -259,7 +152,8 @@ async fn test_forward_request_normalizes_policy_without_choosing_wire_protocol()
     let context = RequestContext::new();
     let response =
       forward_request(client, &None, &target, parts, body, &context)
-        .await;
+        .await
+        .unwrap();
     assert_eq!(response.status(), http::StatusCode::ACCEPTED);
     assert_eq!(response.headers()["via"], "3 neoproxy");
     assert_eq!(
@@ -338,8 +232,7 @@ async fn test_send_proxy_preserves_unknown_length_get_and_head_bodies()
   verify_unknown_length_requests(|address, tracker| {
     super::http_pool::ProxyPool::new(
       super::http::connector::ProxyConnector::new(
-        address.to_string(),
-        Duration::from_secs(1),
+        address,
         Duration::from_secs(1),
       ),
       1,
@@ -402,7 +295,7 @@ async fn verify_trailer_forwarding<C: ForwardClient>(
       if known_length { request.headers_mut().insert("content-length", "7".parse().unwrap()); }
       let (parts, body) = request.into_parts();
       let target = parse_forward_target(&parts).unwrap();
-      let response = tokio::time::timeout(Duration::from_secs(2), forward_request(client, &None, &target, parts, body, &RequestContext::new())).await.unwrap();
+      let response = tokio::time::timeout(Duration::from_secs(2), forward_request(client, &None, &target, parts, body, &RequestContext::new())).await.unwrap().unwrap();
       assert_eq!(response.status(), http::StatusCode::OK);
       response.into_body().collect().await.unwrap();
       peer.await.unwrap();
@@ -425,8 +318,7 @@ async fn test_forward_request_proxy_preserves_filtered_trailers() {
   verify_trailer_forwarding(|address, tracker| {
     super::http_pool::ProxyPool::new(
       super::http::connector::ProxyConnector::new(
-        address.to_string(),
-        Duration::from_secs(1),
+        address,
         Duration::from_secs(1),
       ),
       1,

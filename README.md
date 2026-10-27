@@ -114,7 +114,7 @@ plugins:
 ### 2. http_upstream 插件
 
 统一代理插件，定义上游代理池和直连配置。支持三级继承配置：**Plugin → Upstream → Address**。
-低层级覆盖高层级同名参数。
+低层级覆盖高层级同名参数。`upstream_request_timeout` 按插件、upstream、address 三级继承；链式请求使用调度选中地址的超时。链式地址通过 `address_protocol: http`、`address_protocol: https` 或 `address_protocol: http3` 选择单一协议；`address_protocol` 支持三级继承，默认 `https`。TCP keepalive 的三个字段均已生效，省略时保持系统默认；配置任一项即启用 TCP keepalive。
 
 **直连模式**：upstream 不配置 `addresses`，代理直接连接目标服务器。
 **链式模式**：upstream 配置 `addresses`，代理通过上游代理服务器转发。
@@ -126,22 +126,26 @@ plugins:
       server_ca_path: conf/certs/server-ca.crt
       client_cert_path: conf/certs/client.crt
       client_key_path: conf/certs/client.key
-    request_timeout: 30s                # 到收到响应头/完成 CONNECT 的总时限，可在 upstream 覆盖
-    tunnel_idle_timeout: 60s            # 插件级默认配置
-    http:
-      connect_timeout: 10s
-    https:
-      connect_timeout: 10s
-      tls_handshake_timeout: 5s
-    http3:
-      quic:
-        keep_alive_interval: "3s"
+    dns_servers: null                 # 仅插件级；未配置时读取系统 DNS 服务器
+    dns_resolve_timeout: 5s            # 仅插件级
+    dns_refresh_retry_interval: 30s    # 仅插件级；刷新失败后重试间隔
+    address_protocol: https           # 三级继承；direct 普通请求由 URL scheme 决定
+    address_max_fails: 1               # 三级继承；0 禁用被动失败摘除
+    address_fail_timeout: 10s          # 三级继承；失败统计及摘除时长
+    tcp_keep_alive_time: null          # 三级继承；开始探测前的空闲时间
+    tcp_keep_alive_interval: null      # 三级继承；探测间隔
+    tcp_keep_alive_retries: null       # 三级继承；探测重试次数
+    upstream_request_timeout: 30s      # 每次上游尝试收到响应头/完成 CONNECT 的时限
+    tunnel_idle_timeout: 60s           # 插件级默认配置
+    tcp_connect_timeout: 10s
+    tls_handshake_timeout: 5s
+    quic_connection_connect_timeout: 10s
+    quic_connection_keep_alive_interval: "3s"
     upstreams:
       # 直连模式（无 addresses）
       - name: direct
         tunnel_idle_timeout: 60s
-        http:
-          connect_timeout: 10s
+        tcp_connect_timeout: 10s
         pool:
           max_idle_per_host: 32            # 连接池最大空闲连接数（默认: 32）
           idle_timeout: 90s                # 连接池空闲超时（默认: 90s）
@@ -149,14 +153,12 @@ plugins:
       # 链式模式（有 addresses）
       - name: remote_relay
         tunnel_idle_timeout: 60s
-        http3:
-          quic:
-            keep_alive_interval: "5s"
+        quic_connection_keep_alive_interval: "5s"
         addresses:
           - address: "host:port"           # 上游代理地址
             hostname: "sni.example.com"    # 连接上游时使用的 SNI（需匹配上游证书 SAN）
             weight: 1                      # 负载均衡权重
-            http: {}                       # 可在此处覆盖协议配置
+            address_protocol: http                 # http、https 或 http3
 ```
 
 ---
@@ -409,17 +411,15 @@ curl --socks5 127.0.0.1:1080 --proxy-user admin:secret123 https://example.com
 
 Service 按方法处理请求：`CONNECT host:port` 建立透明隧道；其他方法统一转发完整的 HTTP 请求，目标 URL 支持 `http://` 和 `https://`。直连时，HTTP 目标使用 TCP，HTTPS 目标使用 TLS 并校验证书和目标主机名；链式模式将目标 scheme、authority、path、方法和消息体交给下一跳，不在中继节点建立目标 TLS。到 proxy 的连接地址、TLS 主机名与请求目标独立。GET/POST 的响应保留 HTTP 消息语义，CONNECT 成功后才转入双向字节传输。
 
-末端直连客户端负责 HTTPS 源站的协议选择：TCP/TLS 通过 ALPN 协商 H2/H1；通过源站响应的 `Alt-Svc` 或 DNS HTTPS 记录发现 H3 时，可建立 QUIC/H3 连接。Alt-Svc 按原始 origin 缓存，处理 `ma`、`Age`、`clear` 和过期；DNS HTTPS 使用 DNS TTL，支持别名、优先级、目标端口、ALPN 和 mandatory 参数检查。两者同时存在时，替代端点仍受其 DNS HTTPS 绑定约束。实际连接地址可以改变，HTTP authority、TLS SNI 和证书校验始终使用原始源站身份。
+末端直连客户端只使用 HTTP/1.1：HTTP 目标走 TCP，HTTPS 目标走 TLS，ALPN 仅提供 `http/1.1`，并保留证书和主机名校验。连接池按目标 scheme、host、port 隔离，由 `pool.max_idle_per_host` 和 `pool.idle_timeout` 控制。直连不使用 HTTP/2、HTTP/3，不解析或缓存 Alt-Svc，也不查询 DNS HTTPS 记录。
 
-H1/H2/H3 连接池由直连客户端统一管理，按原始 origin、实际端点和协议隔离；并发首次请求共享初始化，H3 响应流持有连接租约，空闲连接按 `pool.idle_timeout` 回收。H3 建连探测预算取 `http3.tls_handshake_timeout`、`request_timeout` 的三分之一和 1 秒中的最小值；建连失败后短暂避开该端点并回退 TCP。请求一旦提交给 H3，不因后续响应错误重放请求体。直连 upstream 允许配置 `http3` 来调整握手和 QUIC 参数。
+direct 从请求目标构造一个权重为 1 的 address，链式模式使用配置的全部 addresses；各域名先解析为所有 A/AAAA 地址，再对全部 IP 节点做平滑加权轮询。每个 IP 继承所属 address 的完整权重、协议、认证及超时配置。同一 IP 属于不同 address 时保持不同身份。连接池按选中节点及目标身份隔离，复用连接也先经过节点调度，不再做 IP 并发竞速。所有 TCP 监听和上游连接均启用 `TCP_NODELAY`；`quic_connection_*` 只作用于 HTTP/3 链式上游。
 
-所有可选发现及提交请求之前的替代端点探测，共用 `request_timeout` 三分之一的预算；多个慢候选不会挤占原始端点的全部回退时间。DNS HTTPS 别名最终目标即使没有 HTTPS 记录，也会先尝试其地址。Alt-Svc 与 DNS 求交使用具体的广告协议集合；普通 DNS 建连仍可按 RFC 9460 §7.1.2 提供本地支持的完整 ALPN 列表。
-
-发现端点的多个 IP 地址按地址族交错竞速，首选地址握手停滞时，250ms 后开始后续候选；只有选定连接后才提交请求体。HTTP/HTTPS 链式转发及 CONNECT 使用同一连接器策略，所有 TCP 监听和上游连接均启用 `TCP_NODELAY`。
+节点健康状态按 worker、upstream 和目标分别维护。`address_max_fails` 默认 1，`address_fail_timeout` 默认 10s，采用 Nginx 风格的被动失败计数、有效权重恢复和到期重试；只有一个 IP 节点时不因失败摘除，`address_max_fails: 0` 禁用摘除。失败只统计建连（含 TLS/QUIC 握手）、发送请求、等待响应头阶段的传输错误或超时，不按 HTTP 4xx/5xx 状态摘除，不统计非法响应头、客户端请求体错误、响应 body 或已建立隧道的后续错误。未提交请求的建连失败可尝试同组其他节点；已经提交的普通请求不自动重放。主动健康探测不启用。
 
 链式 H3 上游同样遵守 `pool`：`max_idle_per_host: 0` 禁用跨请求连接复用，非零值允许复用一个多路复用会话，`idle_timeout` 从最后一个活跃响应或隧道释放后计算。池销毁会立即取消自己的维护任务；池索引不会因一个响应持续时间较长而淘汰仍活跃的 H3 会话。日志 writer 的活动文件和轮转归档必须拥有互不重叠的路径命名空间。
 
-普通转发响应在末端读取发现信息后移除 `Alt-Svc`，中继同样不保留该响应头；响应 trailers 也会移除该字段。CONNECT 保持字节透传，不解析隧道内的 TLS 或 HTTP。
+普通转发响应移除 `Alt-Svc`，中继同样不保留该响应头；响应 trailers 也会移除该字段。CONNECT 保持字节透传，不解析隧道内的 TLS 或 HTTP。
 
 链式 CONNECT 在建立隧道前保留请求与成功响应的端到端头，并追加 `Via`；连接专属字段、上一跳代理凭据和成功 CONNECT 的 HTTP 内容长度不会转发。H3 上游提前给出最终响应并用 `H3_NO_ERROR` 停止上传时，上传方向结束，响应继续传输；其他传输错误仍会终止对应交换。
 
@@ -431,11 +431,11 @@ H1/H2/H3 连接池由直连客户端统一管理，按原始 origin、实际端�
 |------|------|------|------|
 | `upstream` | `String` | 是 | 上游名称，引用 `plugins.http_upstream.upstreams[].name` |
 
-直连模式的超时和连接池配置在 upstream 定义中设置：`http.connect_timeout` 用于 HTTP 目标和 CONNECT；`https.connect_timeout`、`https.tls_handshake_timeout` 用于 HTTPS 目标；`request_timeout` 限制响应头或隧道建立的等待时间。普通转发的连接池按 scheme、目标主机和端口区分，配置项为 `pool`；隧道使用 `tunnel_idle_timeout`。HTTPS 目标使用系统信任库，并可通过 `plugins.http_upstream.certificates.server_ca_path` 添加 CA，客户端证书沿用该配置中的 `client_cert_path` 和 `client_key_path`。
+直连模式的超时和连接池配置在 upstream 定义中设置：`tcp_connect_timeout` 用于 TCP 建连；`tls_handshake_timeout` 用于 TCP 上的 TLS 握手；`upstream_request_timeout` 限制响应头或隧道建立的等待时间。普通转发的连接池按 scheme、目标主机和端口区分，配置项为 `pool`；隧道使用 `tunnel_idle_timeout`。HTTPS 目标使用系统信任库，并可通过 `plugins.http_upstream.certificates.server_ca_path` 添加 CA，客户端证书沿用该配置中的 `client_cert_path` 和 `client_key_path`。
 
 显式 CA 文件必须包含有效证书；空文件、只有私钥或无证书内容会导致配置失败，系统信任库不会掩盖该错误。
 
-`dns_servers` 可在插件或 upstream 配置，例如 `["127.0.0.1:5353", "[::1]:5353"]`，upstream 覆盖插件。它指定直连客户端进行 HTTPS 发现和替代端点地址解析时使用的 DNS 服务器；默认读取系统 DNS 配置。普通 HTTP 和 CONNECT 的地址解析保持使用系统解析器。
+`dns_servers`、`dns_resolve_timeout` 和 `dns_refresh_retry_interval` 仅可在插件级配置。`dns_servers` 例如 `["127.0.0.1:5353", "[::1]:5353"]`；未配置时读取系统 DNS 服务器，由同一解析器服务 direct、CONNECT 和链式上游。遵守 DNS TTL，到期由后续请求触发刷新，同域名并发查询合并。刷新失败（包括无可用地址）保留上次成功结果，默认 30s 后允许再次刷新，不强制废弃旧结果；首次失败且无缓存则返回 DNS 错误。DNS 更新保留未变化 IP 的健康状态，移除节点停止接收新请求，已有响应与隧道继续完成。
 
 `tunnel_idle_timeout` 按整个隧道的双向字节进展计时，任一方向成功读取或接受写入新字节都会刷新期限；EOF、空读写和反复轮询不算活动。一个独立计时器覆盖整个传输过程，包括双方读到 EOF 后仍在等待的 H3 `flush`/`finish`。单向半关闭会继续传输另一方向的数据，直到正常完成、空闲超时或服务关闭。H3 适配器每次最多缓冲 64 KiB，接受数据后立即确认本次字节数，`flush`/`shutdown` 推进发送并传播错误。
 
@@ -447,11 +447,8 @@ plugins:
     upstreams:
       - name: direct
         tunnel_idle_timeout: "60s"
-        http:
-          connect_timeout: "10s"
-        https:
-          connect_timeout: "10s"
-          tls_handshake_timeout: "5s"
+        tcp_connect_timeout: "10s"
+        tls_handshake_timeout: "5s"
 
 services:
   - name: tunnel
@@ -487,7 +484,7 @@ plugins:
           - address: upstream.example.com:443
             hostname: "proxy.example.com"
             weight: 1
-            http3: {}
+            address_protocol: http3
 
 listeners:
   - name: http_main
@@ -642,11 +639,11 @@ context 使用受类型约束的字段键保存原生值，耗时保存为 `Dura
 | `upstream.connection.peer`、`upstream.connection.local` | 实际连接端点（可用时） |
 | `upstream.connection.reused` | 连接复用布尔值 |
 | `upstream.tcp.connect_ms`、`upstream.tls.handshake_ms` | 本次连接建立阶段耗时；H3 的后者包含 QUIC/TLS 握手 |
-| `upstream.tls.alpn`、`upstream.protocol` | 协商协议及实际传输协议 |
+| `upstream.protocol` | 本次选择的上游协议：`http`、`https` 或 `http3`；direct CONNECT 没有目标 scheme，字段留空 |
 | `upstream.forward_ms`、`upstream.forward_status` | 等待上游响应头的耗时与状态码 |
 | `upstream.error.phase`、`upstream.error.kind`、`upstream.error.message` | 请求失败阶段、分类和完整错误信息 |
 
-连接池保存连接观测信息，不保存请求 context。复用连接会记录实际地址与协议，
+连接池保存连接观测信息，不保存请求 context。每次选择上游节点时记录其协议；direct 普通请求使用目标 URL 的 scheme，重试时记录最后选中的协议。复用连接会记录实际地址与所选协议，
 本次未发生的解析、TCP 建连和 TLS 握手耗时留空。
 access log 继续在 service 返回响应头时生成；完整正文或 tunnel 的最终传输统计不会
 事后回写这条记录。tunnel 结束后另有一条带相同 `request_id` 的 `tunnel_finished`
@@ -716,9 +713,8 @@ plugins:
   http_upstream:
     upstreams:
       - name: direct
-        http:
-          connect_timeout: "10s"
-          tunnel_idle_timeout: "60s"
+        tcp_connect_timeout: "10s"
+        tunnel_idle_timeout: "60s"
 
 listeners:
   - name: http_main
@@ -840,7 +836,7 @@ plugins:
           - address: remote.example.com:443
             hostname: "proxy.example.com"
             weight: 1
-            http3: {}
+            address_protocol: http3
 
 listeners:
   - name: http_main

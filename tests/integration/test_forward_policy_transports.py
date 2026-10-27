@@ -34,7 +34,7 @@ async def test_forwarding_policy_is_consistent_across_proxy_transports(
                                     "address": f"127.0.0.1:{peer.port}",
                                     "hostname": "localhost",
                                     "user": {"username": "alice", "password": "secret"},
-                                    transport: {},
+                                    "address_protocol": transport,
                                 }
                             ],
                         }

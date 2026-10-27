@@ -54,6 +54,14 @@ plugins:
   # Defines upstream pools with three-level inheritance:
   #   Plugin → Upstream → Address
   http_upstream:
+    dns_resolve_timeout: 5s
+    dns_refresh_retry_interval: 30s
+    address_protocol: https
+    address_max_fails: 1
+    address_fail_timeout: 10s
+    # tcp_keep_alive_time: 60s
+    # tcp_keep_alive_interval: 10s
+    # tcp_keep_alive_retries: 3
     certificates:
       client_cert_path: conf/certs/client.crt
       client_key_path: conf/certs/client.key
@@ -62,8 +70,7 @@ plugins:
       # Direct mode (no addresses) - connects directly to target
       - name: direct
         tunnel_idle_timeout: "60s"
-        http:
-          connect_timeout: "10s"
+        tcp_connect_timeout: "10s"
 
       # Chain mode (with addresses) - connects through upstream proxy
       - name: local_relay
@@ -74,7 +81,7 @@ plugins:
             user:
               username: "admin"
               password: "secret"
-            http3: {}
+            address_protocol: http3
 
 # -----------------------------------------------------------------------------
 # Services

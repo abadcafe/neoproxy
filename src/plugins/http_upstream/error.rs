@@ -26,6 +26,7 @@ pub(crate) enum UpstreamError {
   ConnectionRefused(String),
   ConnectionTimeout(String),
   ConnectionTerminated(String),
+  InvalidResponse(String),
   TlsCertificateError(String),
   TlsProtocolError(String),
   DestinationUnavailable(String),
@@ -45,6 +46,7 @@ impl UpstreamError {
       Self::DnsError(_)
       | Self::ConnectionRefused(_)
       | Self::ConnectionTerminated(_)
+      | Self::InvalidResponse(_)
       | Self::TlsCertificateError(_)
       | Self::TlsProtocolError(_)
       | Self::DestinationUnavailable(_) => {
@@ -71,7 +73,9 @@ impl UpstreamError {
       Self::DnsError(_) => "dns_error",
       Self::ConnectionRefused(_) => "connection_refused",
       Self::ConnectionTimeout(_) => "connection_timeout",
-      Self::ConnectionTerminated(_) => "connection_terminated",
+      Self::ConnectionTerminated(_) | Self::InvalidResponse(_) => {
+        "connection_terminated"
+      }
       Self::TlsCertificateError(_) => "tls_certificate_error",
       Self::TlsProtocolError(_) => "tls_protocol_error",
       Self::DestinationUnavailable(_) => "destination_unavailable",
@@ -89,6 +93,7 @@ impl UpstreamError {
       | Self::ConnectionTimeout(_)
       | Self::DestinationUnavailable(_) => "connect",
       Self::ConnectionTerminated(_)
+      | Self::InvalidResponse(_)
       | Self::UpstreamConnectError { .. } => "response",
       Self::ProxyInternalError(_) => "internal",
     };
@@ -145,6 +150,9 @@ impl fmt::Display for UpstreamError {
       }
       Self::ConnectionTimeout(msg) => {
         write!(f, "Connection timed out: {msg}")
+      }
+      Self::InvalidResponse(msg) => {
+        write!(f, "invalid upstream response: {msg}")
       }
       Self::ConnectionTerminated(msg) => {
         write!(f, "Connection terminated: {msg}")
@@ -236,6 +244,15 @@ pub(crate) fn classify_connect_error(
 pub(crate) fn classify_http_client_error(
   e: anyhow::Error,
 ) -> UpstreamError {
+  if let Some(error) = find_error_in_chain::<hyper::Error>(&e) {
+    if error.is_parse() {
+      return UpstreamError::InvalidResponse(format!("{e:#}"));
+    }
+    if error.is_user() {
+      return UpstreamError::ProxyInternalError(format!("{e:#}"));
+    }
+  }
+
   if error_chain_contains::<rustls::Error>(&e) {
     return classify_tls_handshake_error(e);
   }

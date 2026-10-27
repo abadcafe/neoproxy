@@ -16,53 +16,17 @@ fn test_merge_chain_config_resolves_direct_upstream() {
 }
 
 #[test]
-fn test_merge_chain_config_inherits_direct_discovery_and_quic_policy() {
-  let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
-    "dns_servers: ['127.0.0.1:5353']\nhttp3:\n  \
-     tls_handshake_timeout: 2s\n  quic:\n    keep_alive_interval: \
-     7s\nupstreams:\n- name: inherited\n- name: overridden\n  \
-     dns_servers: ['[::1]:5454']\n  http3:\n    \
-     tls_handshake_timeout: 1s\n    quic:\n      initial_mtu: 1400\n",
-  )
-  .unwrap();
-  let upstreams = merge_chain_config(&config).unwrap();
-  assert_eq!(
-    upstreams["inherited"].dns_servers.as_ref().unwrap()[0],
-    "127.0.0.1:5353".parse::<std::net::SocketAddr>().unwrap()
-  );
-  assert_eq!(
-    upstreams["overridden"].dns_servers.as_ref().unwrap()[0],
-    "[::1]:5454".parse::<std::net::SocketAddr>().unwrap()
-  );
-  assert_eq!(
-    upstreams["inherited"].http3_handshake_timeout,
-    Duration::from_secs(2)
-  );
-  assert_eq!(
-    upstreams["overridden"].http3_handshake_timeout,
-    Duration::from_secs(1)
-  );
-  assert_eq!(
-    upstreams["overridden"].quic.keep_alive_interval,
-    Duration::from_secs(7)
-  );
-  assert_eq!(upstreams["overridden"].quic.initial_mtu, Some(1400));
-}
-
-#[test]
 fn test_merge_chain_config_prefers_address_level_timeout() {
   let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
     r#"
-http:
-  connect_timeout: "30s"
+tcp_connect_timeout: "30s"
 upstreams:
 - name: chain
-  http:
-    connect_timeout: "20s"
+  tcp_connect_timeout: "20s"
   addresses:
   - address: "127.0.0.1:8080"
-    http:
-      connect_timeout: "5s"
+    address_protocol: http
+    tcp_connect_timeout: "5s"
 "#,
   )
   .unwrap();
@@ -71,7 +35,7 @@ upstreams:
   let address = &resolved.get("chain").unwrap().addresses[0];
 
   assert!(matches!(
-    address.protocol,
+    address.address_protocol,
     Protocol::Http { connect_timeout } if connect_timeout == Duration::from_secs(5)
   ));
 }
@@ -84,7 +48,7 @@ upstreams:
 - name: chain
   addresses:
   - address: "missing-port"
-    http: {}
+    address_protocol: http
 "#,
   )
   .unwrap();
@@ -97,34 +61,32 @@ fn test_merge_chain_config_partial_quic_preserves_inherited_keep_alive()
 {
   let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
     r#"
-http3:
-  quic:
-    keep_alive_interval: 11s
+quic_connection_keep_alive_interval: 11s
 upstreams:
 - name: chain
   addresses:
   - address: localhost:443
-    http3:
-      quic:
-        initial_mtu: 1400
+    address_protocol: http3
+    quic_connection_initial_mtu: 1400
 "#,
   )
   .unwrap();
   let resolved = merge_chain_config(&config).unwrap();
   let address = &resolved["chain"].addresses[0];
   assert!(
-    matches!(&address.protocol, Protocol::Http3 { quic, .. } if quic.keep_alive_interval == Duration::from_secs(11))
+    matches!(&address.address_protocol, Protocol::Http3 { quic, .. } if quic.keep_alive_interval == Duration::from_secs(11))
   );
 }
 
 #[test]
 fn test_merge_chain_config_inherits_request_deadline() {
   let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
-    "request_timeout: 2s\nupstreams:\n- name: direct",
+    "upstream_request_timeout: 2s\nupstreams:\n- name: direct",
   )
   .unwrap();
   assert_eq!(
-    merge_chain_config(&config).unwrap()["direct"].request_timeout,
+    merge_chain_config(&config).unwrap()["direct"]
+      .upstream_request_timeout,
     Duration::from_secs(2)
   );
 }
@@ -132,14 +94,14 @@ fn test_merge_chain_config_inherits_request_deadline() {
 #[test]
 fn test_merge_chain_config_resolves_direct_https_policy() {
   let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
-    "https:\n  connect_timeout: 3s\n  tls_handshake_timeout: \
+    "tcp_connect_timeout: 3s\ntls_handshake_timeout: \
      4s\nupstreams:\n- name: inherited\n- name: overridden\n  \
-     https:\n    connect_timeout: 1s\n    tls_handshake_timeout: 2s",
+     tcp_connect_timeout: 1s\n  tls_handshake_timeout: 2s",
   )
   .unwrap();
   let resolved = merge_chain_config(&config).unwrap();
   assert_eq!(
-    resolved["inherited"].https_connect_timeout,
+    resolved["inherited"].connect_timeout,
     Duration::from_secs(3)
   );
   assert_eq!(
@@ -147,11 +109,121 @@ fn test_merge_chain_config_resolves_direct_https_policy() {
     Duration::from_secs(4)
   );
   assert_eq!(
-    resolved["overridden"].https_connect_timeout,
+    resolved["overridden"].connect_timeout,
     Duration::from_secs(1)
   );
   assert_eq!(
     resolved["overridden"].tls_handshake_timeout,
     Duration::from_secs(2)
+  );
+}
+
+#[test]
+fn test_merge_chain_config_inherits_address_request_deadlines() {
+  let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
+    r#"
+upstream_request_timeout: 9s
+upstreams:
+- name: overridden
+  upstream_request_timeout: 4s
+  addresses:
+  - address: "127.0.0.1:80"
+    address_protocol: http
+    upstream_request_timeout: 1s
+  - address: "127.0.0.1:81"
+    address_protocol: http
+- name: inherited
+  addresses:
+  - address: "127.0.0.1:82"
+    address_protocol: http
+- name: defaults
+  addresses:
+  - address: "127.0.0.1:83"
+    address_protocol: http
+"#,
+  )
+  .unwrap();
+  let upstreams = merge_chain_config(&config).unwrap();
+  assert_eq!(
+    upstreams["overridden"].addresses[0].upstream_request_timeout,
+    Duration::from_secs(1)
+  );
+  assert_eq!(
+    upstreams["overridden"].addresses[1].upstream_request_timeout,
+    Duration::from_secs(4)
+  );
+  assert_eq!(
+    upstreams["inherited"].addresses[0].upstream_request_timeout,
+    Duration::from_secs(9)
+  );
+}
+
+#[test]
+fn test_merge_chain_config_defaults_address_request_deadline() {
+  let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
+    "upstreams: [{name: chain, addresses: [{address: '127.0.0.1:80', \
+     address_protocol: http}]}]",
+  )
+  .unwrap();
+  let upstreams = merge_chain_config(&config).unwrap();
+  assert_eq!(
+    upstreams["chain"].addresses[0].upstream_request_timeout,
+    Duration::from_secs(30)
+  );
+}
+
+#[test]
+fn test_merge_chain_config_inherits_address_policy_and_tcp_keepalive() {
+  let plugin: HttpUpstreamPluginConfig = serde_yaml::from_str(
+    r#"
+address_protocol: http3
+address_max_fails: 3
+address_fail_timeout: 20s
+tcp_keep_alive_time: 60s
+tcp_keep_alive_interval: 10s
+tcp_keep_alive_retries: 5
+upstreams:
+- name: chain
+  address_protocol: http
+  address_max_fails: 2
+  addresses:
+  - address: a.test:80
+  - address: b.test:443
+    address_protocol: https
+    address_fail_timeout: 5s
+    tcp_keep_alive_retries: 7
+- name: direct
+"#,
+  )
+  .unwrap();
+  let result = merge_chain_config(&plugin).unwrap();
+  let addresses = &result["chain"].addresses;
+  assert!(matches!(
+    addresses[0].address_protocol,
+    Protocol::Http { .. }
+  ));
+  assert!(matches!(
+    addresses[1].address_protocol,
+    Protocol::Https { .. }
+  ));
+  assert_eq!(addresses[0].address_max_fails, 2);
+  assert_eq!(
+    addresses[0].address_fail_timeout,
+    Duration::from_secs(20)
+  );
+  assert_eq!(addresses[1].address_fail_timeout, Duration::from_secs(5));
+  assert_eq!(
+    addresses[0].tcp_keep_alive_time,
+    Some(Duration::from_secs(60))
+  );
+  assert_eq!(
+    addresses[0].tcp_keep_alive_interval,
+    Some(Duration::from_secs(10))
+  );
+  assert_eq!(addresses[1].tcp_keep_alive_retries, Some(7));
+  assert_eq!(result["direct"].address_max_fails, 3);
+  assert_eq!(
+    result["direct"].dns_refresh_retry_interval,
+    Duration::from_secs(30)
   );
 }

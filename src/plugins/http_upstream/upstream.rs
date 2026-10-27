@@ -14,26 +14,21 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
+pub(crate) use runtime::Upstream;
 use rustls::pki_types::CertificateDer;
 
-use self::protocol::{ClientProtocol, ConnectResult, QuicConfig};
 use super::config::{CertificateConfig, ClientCertCredential};
 use super::error::UpstreamError;
-use super::target_parser::{ConnectTarget, ForwardTarget};
-use crate::context::RequestContext;
-use crate::http_message::{RequestBody, Response};
 use crate::tracker::StreamTracker;
 
 // Sub-modules organized by protocol
-mod address_resolution;
-#[cfg(test)]
-mod address_resolution_tests;
 mod connect_request;
 #[cfg(test)]
 mod connect_request_tests;
 mod direct;
 #[cfg(test)]
 mod direct_tests;
+mod dns_cache;
 mod forward;
 #[cfg(test)]
 mod forward_tests;
@@ -47,6 +42,9 @@ mod http3_tests;
 mod http_pool;
 #[cfg(test)]
 mod http_tests;
+mod nodes;
+#[cfg(test)]
+mod nodes_tests;
 mod observation;
 #[cfg(test)]
 mod observation_tests;
@@ -60,107 +58,15 @@ mod proxy_auth_tests;
 mod response;
 #[cfg(test)]
 mod response_tests;
-mod scheduler;
-#[cfg(test)]
-mod scheduler_tests;
+mod retry_request;
+mod runtime;
 mod tcp_connect;
 #[cfg(test)]
 mod tcp_connect_tests;
-
-use self::direct::DirectClient;
-use self::http::HttpProxyClient;
-use self::http::connector::{ProxyConnector, TlsProxyConnector};
-use self::http3::{Http3Client, SessionPool};
-use self::scheduler::WeightedItem;
-
-// ============================================================================
-// Runtime Types (self-contained, no dependency on config types)
-// ============================================================================
-
-type ScheduledClient = WeightedItem<Box<dyn ClientProtocol>>;
-
-// ============================================================================
-// Upstream
-// ============================================================================
-
-/// A resolved upstream with its addresses and optional direct-client
-/// fallback.
-pub(crate) struct Upstream {
-  clients: Vec<ScheduledClient>,
-  request_timeout: std::time::Duration,
-}
-
-impl Upstream {
-  /// Select an explicitly constructed transport from the weighted pool.
-  fn client(&self) -> Result<&dyn ClientProtocol, UpstreamError> {
-    scheduler::select(&self.clients)
-      .map(|client| client.as_ref())
-      .ok_or_else(|| {
-        UpstreamError::ProxyInternalError("no addresses".into())
-      })
-  }
-
-  pub(crate) async fn forward(
-    &self,
-    tls_config: &Option<Arc<rustls::ClientConfig>>,
-    tracker: &Rc<StreamTracker>,
-    target: &ForwardTarget,
-    req_headers: ::http::request::Parts,
-    req_body: RequestBody,
-    ctx: &RequestContext,
-  ) -> Result<Response, UpstreamError> {
-    tokio::time::timeout(
-      self.request_timeout,
-      self.client()?.forward(
-        tls_config,
-        tracker,
-        target,
-        req_headers,
-        req_body,
-        ctx,
-      ),
-    )
-    .await
-    .map_err(|_| {
-      ctx.set(
-        crate::context::fields::upstream::ERROR_PHASE,
-        std::sync::Arc::from("response_headers"),
-      );
-      UpstreamError::ConnectionTimeout(
-        "upstream response header deadline exceeded".into(),
-      )
-    })?
-  }
-
-  pub(crate) async fn connect_for_tunnel(
-    &self,
-    target: &ConnectTarget,
-    request: &::http::request::Parts,
-    tls_config: &Option<Arc<rustls::ClientConfig>>,
-    tracker: &Rc<StreamTracker>,
-  ) -> Result<ConnectResult, UpstreamError> {
-    tokio::time::timeout(
-      self.request_timeout,
-      self
-        .client()?
-        .connect_for_tunnel(target, request, tls_config, tracker),
-    )
-    .await
-    .map_err(|_| {
-      UpstreamError::ConnectionTimeout(
-        "upstream tunnel establishment deadline exceeded".into(),
-      )
-    })?
-  }
-}
-
-// ============================================================================
-// Connect Result & Tunnel Transport
-// ============================================================================
-
-// ============================================================================
-// TLS Config Builder
-// ============================================================================
+mod tcp_options;
+#[cfg(test)]
+mod tcp_options_tests;
+mod transport_factory;
 
 fn build_root_cert_store(
   server_ca_path: Option<&str>,
@@ -239,7 +145,7 @@ impl UpstreamRegistry {
       upstream.addresses.is_empty()
         || upstream.addresses.iter().any(|address| {
           !matches!(
-            address.protocol,
+            address.address_protocol,
             super::config::Protocol::Http { .. }
           )
         })
@@ -272,139 +178,27 @@ impl UpstreamRegistry {
 
     let mut entries: HashMap<String, Rc<Upstream>> = HashMap::new();
 
-    for (upstream_name, upstream) in upstreams {
-      if upstream.addresses.is_empty() {
-        entries.insert(
-          upstream_name,
-          Rc::new(Upstream {
-            request_timeout: upstream.request_timeout,
-            clients: vec![ScheduledClient::new(
-              1,
-              Box::new(DirectClient::new(
-                &upstream,
-                tls_config.clone().ok_or_else(|| {
-                  anyhow!("direct upstream requires TLS configuration")
-                })?,
-              )?),
-            )],
-          }),
-        );
-        continue;
-      }
-
-      // Chain mode: build an Address per ResolvedAddress with pre-built
-      // client
-      let mut addresses = Vec::new();
-
-      for addr in &upstream.addresses {
-        match &addr.protocol {
-          super::config::Protocol::Http { connect_timeout } => {
-            let connector = ProxyConnector::new(
-              addr.address.clone(),
-              *connect_timeout,
-              upstream.dns_resolve_timeout,
-            );
-            let client = http_pool::ProxyPool::new(
-              connector,
-              upstream.pool_config.max_idle_per_host,
-              upstream.pool_config.idle_timeout,
-              tracker.clone(),
-            );
-
-            addresses.push(ScheduledClient::new(
-              addr.weight,
-              Box::new(HttpProxyClient::new(
-                client,
-                addr.tunnel_idle_timeout,
-                addr.user.clone(),
-              )),
-            ));
-          }
-          super::config::Protocol::Https {
-            connect_timeout,
-            tls_handshake_timeout,
-          } => {
-            let tls = tls_config.clone().ok_or_else(|| {
-              anyhow!(
-                "no TLS configuration for HTTPS upstream \
-                 '{upstream_name}'"
-              )
-            })?;
-            let host = addr.hostname.as_deref().unwrap_or_else(|| {
-              addr
-                .address
-                .split_at(
-                  addr.address.rfind(':').unwrap_or(addr.address.len()),
-                )
-                .0
-            });
-            let host =
-              host.trim_start_matches('[').trim_end_matches(']');
-            let inner = ProxyConnector::new(
-              addr.address.clone(),
-              *connect_timeout,
-              upstream.dns_resolve_timeout,
-            );
-            let connector = TlsProxyConnector::new(
-              inner,
-              tls,
-              host.to_string(),
-              *tls_handshake_timeout,
-            );
-            let client = http_pool::ProxyPool::new(
-              connector,
-              upstream.pool_config.max_idle_per_host,
-              upstream.pool_config.idle_timeout,
-              tracker.clone(),
-            );
-
-            addresses.push(ScheduledClient::new(
-              addr.weight,
-              Box::new(HttpProxyClient::new(
-                client,
-                addr.tunnel_idle_timeout,
-                addr.user.clone(),
-              )),
-            ));
-          }
-          super::config::Protocol::Http3 {
-            tls_handshake_timeout,
-            quic,
-          } => {
-            let session = SessionPool::new(
-              addr.address.clone(),
-              addr.hostname.clone(),
-              QuicConfig {
-                max_idle_timeout: quic.max_idle_timeout,
-                keep_alive_interval: quic.keep_alive_interval,
-                max_concurrent_bidi_streams: quic
-                  .max_concurrent_bidi_streams,
-                initial_mtu: quic.initial_mtu,
-                send_window: quic.send_window,
-                receive_window: quic.receive_window,
-              },
-              *tls_handshake_timeout,
-              upstream.dns_resolve_timeout,
-              upstream.pool_config.clone(),
-            );
-            addresses.push(ScheduledClient::new(
-              addr.weight,
-              Box::new(Http3Client {
-                session,
-                tunnel_idle_timeout: addr.tunnel_idle_timeout,
-                user: addr.user.clone(),
-              }),
-            ));
-          }
-        }
-      }
-
+    let dns = upstreams
+      .values()
+      .next()
+      .map(|config| {
+        dns_cache::DnsCache::new(
+          config.dns_servers.as_deref(),
+          config.dns_resolve_timeout,
+          config.dns_refresh_retry_interval,
+        )
+        .map(Rc::new)
+      })
+      .transpose()?;
+    for (name, config) in upstreams {
       entries.insert(
-        upstream_name,
-        Rc::new(Upstream {
-          clients: addresses,
-          request_timeout: upstream.request_timeout,
-        }),
+        name,
+        Rc::new(Upstream::new(
+          config,
+          dns.clone().expect("upstream DNS exists"),
+          tls_config.clone(),
+          tracker.clone(),
+        )),
       );
     }
 
@@ -444,9 +238,7 @@ impl UpstreamRegistry {
 
   pub(crate) fn close_all(&self) {
     for upstream in self.entries.values() {
-      for client in &upstream.clients {
-        client.item().close();
-      }
+      upstream.close();
     }
   }
 }

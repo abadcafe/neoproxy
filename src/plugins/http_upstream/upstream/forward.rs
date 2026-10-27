@@ -49,6 +49,10 @@ where
       hyper_util::client::legacy::connect::capture_connection(
         &mut request,
       );
+    let progress = request
+      .extensions()
+      .get::<super::retry_request::Progress>()
+      .cloned();
     let pending = self.request(request);
     tokio::pin!(pending);
     let mut assigned: Option<
@@ -57,10 +61,12 @@ where
     let result = std::future::poll_fn(|cx| {
       let result = pending.as_mut().poll(cx);
       // Capture assignment in the same poll that selected the
-      // connection. Waiting for response headers lets concurrent
-      // H2 streams claim setup metadata in response order instead
-      // of assignment order.
+      // connection, so setup metadata is available before response
+      // headers.
       if let Some(connected) = captured.connection_metadata().as_ref() {
+        if let Some(progress) = &progress {
+          progress.mark();
+        }
         let mut extras = http::Extensions::new();
         connected.get_extras(&mut extras);
         if let (Some(observation), Some(ctx)) = (
@@ -102,7 +108,7 @@ pub(super) async fn forward_request<C>(
   mut req_headers: http::request::Parts,
   req_body: RequestBody,
   ctx: &RequestContext,
-) -> Response
+) -> Result<Response, UpstreamError>
 where
   C: ForwardClient,
 {
@@ -115,10 +121,10 @@ where
     Ok(value) => value,
     Err(e) => {
       warn!("http_upstream: invalid forward target authority: {e}");
-      return build_error_response(
+      return Ok(build_error_response(
         http::StatusCode::BAD_REQUEST,
         "Invalid target address",
-      );
+      ));
     }
   };
   headers.insert(http::header::HOST, host_header);
@@ -138,7 +144,7 @@ where
   let upstream_resp = match client.send(fwd_req).await {
     Ok(resp) => resp,
     Err(e) => {
-      return e.to_response(ctx);
+      return Err(e);
     }
   };
   ctx.set(
@@ -151,5 +157,5 @@ where
   );
 
   let (parts, body) = upstream_resp.into_parts();
-  forward_response(parts, body, ctx)
+  Ok(forward_response(parts, body, ctx))
 }

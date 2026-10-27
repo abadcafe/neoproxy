@@ -261,21 +261,19 @@ impl ClientProtocol for Http3Client {
         )
       })?;
 
-      Ok(
-        forward_request(
-          H3Sender {
-            session: &self.session,
-            tls: &tls,
-            tracker: &tracker,
-          },
-          &self.user,
-          target,
-          req_headers,
-          req_body,
-          ctx,
-        )
-        .await,
+      forward_request(
+        H3Sender {
+          session: &self.session,
+          tls: &tls,
+          tracker: &tracker,
+        },
+        &self.user,
+        target,
+        req_headers,
+        req_body,
+        ctx,
       )
+      .await
     })
   }
 

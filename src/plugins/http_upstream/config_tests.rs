@@ -27,26 +27,28 @@ fn test_validate_address_format_missing_host() {
 
 #[test]
 fn test_address_protocol_detection() {
-  let addr: UpstreamAddressConfig =
-    serde_yaml::from_str("address: example.com:443\nhttp3: {}")
-      .unwrap();
-  assert_eq!(addr.protocol().unwrap(), ProtocolKind::Http3);
-}
-
-#[test]
-fn test_address_no_protocol_is_error() {
-  let addr: UpstreamAddressConfig =
-    serde_yaml::from_str("address: example.com:443").unwrap();
-  assert!(addr.protocol().is_err());
-}
-
-#[test]
-fn test_address_multiple_protocols_is_error() {
   let addr: UpstreamAddressConfig = serde_yaml::from_str(
-    "address: example.com:443\nhttp: {}\nhttps: {}",
+    "address: example.com:443\naddress_protocol: http3",
   )
   .unwrap();
-  assert!(addr.protocol().is_err());
+  assert_eq!(addr.address_protocol().unwrap(), ProtocolKind::Http3);
+}
+
+#[test]
+fn test_address_defaults_to_https() {
+  let addr: UpstreamAddressConfig =
+    serde_yaml::from_str("address: example.com:443").unwrap();
+  assert_eq!(addr.address_protocol().unwrap(), ProtocolKind::Https);
+}
+
+#[test]
+fn test_address_invalid_protocol_is_error() {
+  assert!(
+    serde_yaml::from_str::<UpstreamAddressConfig>(
+      "address: example.com:443\naddress_protocol: invalid",
+    )
+    .is_err()
+  );
 }
 
 #[test]
@@ -58,7 +60,7 @@ fn test_merge_chain_config_basic() {
         addresses:
           - address: proxy.example.com:443
             tunnel_idle_timeout: 120s
-            http3: {}
+            address_protocol: http3
     "#,
   )
   .unwrap();
@@ -67,7 +69,7 @@ fn test_merge_chain_config_basic() {
   assert_eq!(upstream.addresses.len(), 1);
   assert_eq!(upstream.addresses[0].address, "proxy.example.com:443");
   assert!(matches!(
-    upstream.addresses[0].protocol,
+    upstream.addresses[0].address_protocol,
     Protocol::Http3 { .. }
   ));
   assert_eq!(
@@ -87,7 +89,7 @@ fn test_merge_chain_config_pool_config() {
           idle_timeout: 30s
         addresses:
           - address: proxy.example.com:8080
-            http: {}
+            address_protocol: http
     "#,
   )
   .unwrap();
@@ -101,18 +103,16 @@ fn test_merge_chain_config_three_level_inheritance() {
   let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
     r#"
     tunnel_idle_timeout: 90s
-    http:
-      connect_timeout: 5s
+    tcp_connect_timeout: 5s
     upstreams:
       - name: test
-        http:
-          connect_timeout: 3s
+        tcp_connect_timeout: 3s
         addresses:
           - address: proxy.example.com:8080
-            http:
-              connect_timeout: 1s
+            address_protocol: http
+            tcp_connect_timeout: 1s
           - address: proxy2.example.com:8080
-            http: {}
+            address_protocol: http
     "#,
   )
   .unwrap();
@@ -120,7 +120,7 @@ fn test_merge_chain_config_three_level_inheritance() {
   let upstream = resolved.get("test").unwrap();
 
   // Address-level overrides upstream-level overrides plugin-level
-  match &upstream.addresses[0].protocol {
+  match &upstream.addresses[0].address_protocol {
     Protocol::Http { connect_timeout, .. } => {
       assert_eq!(*connect_timeout, Duration::from_secs(1));
     }
@@ -133,7 +133,7 @@ fn test_merge_chain_config_three_level_inheritance() {
 
   // Falls back to upstream-level connect_timeout, plugin-level
   // tunnel_idle_timeout
-  match &upstream.addresses[1].protocol {
+  match &upstream.addresses[1].address_protocol {
     Protocol::Http { connect_timeout, .. } => {
       assert_eq!(*connect_timeout, Duration::from_secs(3));
     }
@@ -175,8 +175,7 @@ fn test_resolve_direct_upstream() {
     r#"
     upstreams:
       - name: direct
-        http:
-          connect_timeout: 3s
+        tcp_connect_timeout: 3s
         tunnel_idle_timeout: 45s
     "#,
   )
@@ -192,8 +191,7 @@ fn test_resolve_direct_upstream() {
 fn test_resolve_direct_upstream_inherits_plugin_defaults() {
   let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
     r#"
-    http:
-      connect_timeout: 7s
+    tcp_connect_timeout: 7s
     upstreams:
       - name: direct
     "#,
@@ -222,7 +220,7 @@ fn test_pool_config_defaults() {
       - name: test
         addresses:
           - address: proxy.example.com:8080
-            http: {}
+            address_protocol: http
     "#,
   )
   .unwrap();

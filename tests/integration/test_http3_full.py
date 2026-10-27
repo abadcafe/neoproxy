@@ -668,8 +668,7 @@ plugins:
   http_upstream:
     upstreams:
       - name: direct
-        http:
-          connect_timeout: 1s
+        tcp_connect_timeout: 1s
 
 listeners:
 - name: h3_main

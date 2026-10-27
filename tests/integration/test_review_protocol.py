@@ -122,7 +122,7 @@ plugins:
       addresses:
       - address: 127.0.0.1:{upstream}
         hostname: localhost
-        http3: {{}}
+        address_protocol: http3
 listeners:
 - name: main
   kind: http
@@ -178,12 +178,12 @@ def test_http_chain_connect_response_has_a_deadline(
     config = f"""server_threads: 1
 plugins:
   http_upstream:
-    request_timeout: 100ms
+    upstream_request_timeout: 100ms
     upstreams:
     - name: relay
       addresses:
       - address: 127.0.0.1:{upstream}
-        http: {{}}
+        address_protocol: http
 listeners:
 - name: main
   kind: http
@@ -252,3 +252,69 @@ def test_http_incomplete_headers_expire(
             conn.sendall(b"GET / HTTP/1.1\r\nHost:")
             response = conn.recv(4096)
             assert not response or b"408" in response.split(b"\r\n", 1)[0]
+
+
+@pytest.mark.parametrize("method", ["GET", "CONNECT"])
+def test_chain_uses_selected_address_request_timeout(
+    tmp_path: Path, target_server: TargetServerFactory, method: str
+) -> None:
+    import threading
+
+    release = threading.Event()
+    ports = [get_unique_port(), get_unique_port()]
+    entry = get_unique_port()
+
+    def delayed_proxy(conn: socket.socket) -> None:
+        try:
+            _ = conn.recv(4096)
+            _ = release.wait(0.3)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    for port in ports:
+        _ = target_server(port, delayed_proxy)
+    config = f"""server_threads: 1
+plugins:
+  http_upstream:
+    upstream_request_timeout: 2s
+    upstreams:
+    - name: relay
+      upstream_request_timeout: 1s
+      addresses:
+      - address: 127.0.0.1:{ports[0]}
+        address_protocol: http
+        upstream_request_timeout: 100ms
+      - address: 127.0.0.1:{ports[1]}
+        address_protocol: http
+listeners:
+- name: main
+  kind: http
+  addresses: ["127.0.0.1:{entry}"]
+services:
+- name: relay
+  kind: http_upstream.upstream
+  args:
+    upstream: relay
+servers:
+- name: relay
+  service: relay
+  listeners: [main]
+"""
+    target = "example.com:443" if method == "CONNECT" else "http://example.com/"
+    request = (
+        f"{method} {target} HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+    ).encode()
+    try:
+        with running_proxy(tmp_path, config) as process:
+            assert process.wait_ready(timeout=3)
+            # CONNECT may fail over before exposing a tunnel to the client.
+            statuses = (b"200", b"200") if method == "CONNECT" else (b"504", b"200")
+            for status in statuses:
+                with socket.create_connection(("127.0.0.1", entry), timeout=2) as conn:
+                    conn.sendall(request)
+                    assert status in conn.recv(4096).split(b"\r\n", 1)[0]
+    finally:
+        release.set()

@@ -9,7 +9,7 @@ use crate::plugins::http_upstream::config::{
   HttpUpstreamPluginConfig, merge_chain_config,
 };
 
-fn connector() -> OriginConnector {
+fn connector(address: std::net::SocketAddr) -> OriginConnector {
   let config: HttpUpstreamPluginConfig =
     serde_yaml::from_str("upstreams: [{name: direct}]").unwrap();
   let resolved = merge_chain_config(&config).unwrap();
@@ -20,7 +20,8 @@ fn connector() -> OriginConnector {
   .unwrap()
   .with_root_certificates(rustls::RootCertStore::empty())
   .with_no_client_auth();
-  OriginConnector::new(&resolved["direct"], Arc::new(tls))
+  OriginConnector::new(&resolved["direct"], Arc::new(tls), address)
+    .unwrap()
 }
 
 #[tokio::test]
@@ -30,7 +31,7 @@ async fn test_origin_connector_opens_plain_http_without_tls() {
   let address = listener.local_addr().unwrap();
   let uri = format!("http://{address}/").parse::<http::Uri>().unwrap();
   let (stream, accepted) =
-    tokio::join!(connector().oneshot(uri), listener.accept());
+    tokio::join!(connector(address).oneshot(uri), listener.accept());
   let mut stream = TokioIo::new(stream.unwrap());
   stream.write_all(b"plain HTTP").await.unwrap();
   let mut received = [0; 10];
@@ -40,7 +41,7 @@ async fn test_origin_connector_opens_plain_http_without_tls() {
 
 #[tokio::test]
 async fn test_origin_connector_rejects_missing_authority() {
-  let error = connector()
+  let error = connector("127.0.0.1:1".parse().unwrap())
     .oneshot("/path".parse::<http::Uri>().unwrap())
     .await
     .err()
@@ -55,6 +56,6 @@ async fn test_origin_connector_preserves_connection_refused() {
   let address = listener.local_addr().unwrap();
   drop(listener);
   let uri = format!("http://{address}/").parse::<http::Uri>().unwrap();
-  let error = connector().oneshot(uri).await.err().unwrap();
+  let error = connector(address).oneshot(uri).await.err().unwrap();
   assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
 }

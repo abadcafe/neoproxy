@@ -203,7 +203,7 @@ plugins:
           - address: this-host-does-not-exist.example.com:8443
             hostname: this-host-does-not-exist.example.com
             weight: 1
-            http3: {{}}
+            address_protocol: http3
 
 listeners:
 - name: http_main

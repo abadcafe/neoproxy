@@ -128,7 +128,7 @@ plugins:
             hostname: localhost
             weight: 1
             tunnel_idle_timeout: "2s"
-            http3: {{}}
+            address_protocol: http3
 
 listeners:
 - name: http_main
@@ -266,7 +266,7 @@ plugins:
             hostname: localhost
             weight: 1
             tunnel_idle_timeout: "2s"
-            http3: {{}}
+            address_protocol: http3
 
 listeners:
 - name: http_main
@@ -442,7 +442,7 @@ plugins:
             hostname: localhost
             weight: 1
             tunnel_idle_timeout: "2s"
-            http3: {{}}
+            address_protocol: http3
 
 listeners:
 - name: http_main

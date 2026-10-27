@@ -1,6 +1,6 @@
-"""module: discovery_dns; responsibility: serve mutable DNS HTTPS discovery records.
-Public operations: DnsRecord, DiscoveryDns, discovery_dns. Data entities: those types.
-Tests: test_origin_discovery.py.
+"""module: discovery_dns; responsibility: serve mutable DNS A/AAAA records.
+Public operations: DiscoveryDns, discovery_dns. Data entities: those types.
+Tests: test_direct_http1.py.
 """
 
 import asyncio
@@ -10,19 +10,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import override
 
-from pydantic import BaseModel
-
 from .ports import get_unique_port
-
-
-class DnsRecord(BaseModel):
-    name: str
-    priority: int = 1
-    target: str = "."
-    protocols: tuple[str, ...] = ("h3",)
-    port: int = 443
-    ttl: int = 60
-    mandatory: tuple[int, ...] = ()
 
 
 @dataclass
@@ -31,6 +19,10 @@ class DiscoveryDns:
     queries: list[tuple[str, int]] = field(default_factory=list)
     addresses: tuple[str, ...] = ("127.0.0.1",)
     unanswered: set[str] = field(default_factory=set)
+    ttl: int = 60
+    failure: bool = False
+    response_delay: float = 0
+    hosts: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def encode_name(name: str) -> bytes:
@@ -44,30 +36,8 @@ def encode_name(name: str) -> bytes:
     )
 
 
-def record_data(record: DnsRecord) -> bytes:
-    parameters: dict[int, bytes] = {}
-    if record.priority:
-        if record.mandatory:
-            parameters[0] = b"".join(key.to_bytes(2) for key in record.mandatory)
-        parameters[1] = b"".join(
-            bytes([len(protocol)]) + protocol.encode() for protocol in record.protocols
-        )
-        parameters[3] = record.port.to_bytes(2)
-        for key in record.mandatory:
-            if key not in parameters:
-                parameters[key] = b"unknown"
-    return (
-        record.priority.to_bytes(2)
-        + encode_name(record.target)
-        + b"".join(
-            key.to_bytes(2) + len(value).to_bytes(2) + value
-            for key, value in sorted(parameters.items())
-        )
-    )
-
-
 @asynccontextmanager
-async def discovery_dns(records: list[DnsRecord]) -> AsyncGenerator[DiscoveryDns]:
+async def discovery_dns() -> AsyncGenerator[DiscoveryDns]:
     dns = DiscoveryDns(get_unique_port())
 
     class DnsProtocol(asyncio.DatagramProtocol):
@@ -94,34 +64,36 @@ async def discovery_dns(records: list[DnsRecord]) -> AsyncGenerator[DiscoveryDns
             if name in dns.unanswered:
                 return
             answers: list[bytes] = []
-            if kind == 65:
-                for record in records:
-                    if record.name == name:
-                        payload = record_data(record)
+            if kind in (1, 28) and not dns.failure:
+                for address in dns.hosts.get(name, dns.addresses):
+                    ip = ipaddress.ip_address(address)
+                    if (kind == 1 and ip.version == 4) or (
+                        kind == 28 and ip.version == 6
+                    ):
                         answers.append(
                             encode_name(name)
-                            + b"\x00A\x00\x01"
-                            + record.ttl.to_bytes(4)
-                            + len(payload).to_bytes(2)
-                            + payload
+                            + kind.to_bytes(2)
+                            + b"\x00\x01"
+                            + dns.ttl.to_bytes(4)
+                            + len(ip.packed).to_bytes(2)
+                            + ip.packed
                         )
-            elif kind == 1:
-                for address in dns.addresses:
-                    answers.append(
-                        encode_name(name)
-                        + b"\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04"
-                        + ipaddress.IPv4Address(address).packed
-                    )
             response = (
                 data[:2]
-                + b"\x81\x80\x00\x01"
+                + (b"\x81\x82" if dns.failure else b"\x81\x80")
+                + b"\x00\x01"
                 + len(answers).to_bytes(2)
                 + b"\x00\x00\x00\x00"
                 + data[12 : cursor + 4]
                 + b"".join(answers)
             )
             assert self.transport is not None
-            self.transport.sendto(response, addr)
+            if dns.response_delay:
+                _ = asyncio.get_running_loop().call_later(
+                    dns.response_delay, self.transport.sendto, response, addr
+                )
+            else:
+                self.transport.sendto(response, addr)
 
     transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
         DnsProtocol, local_addr=("127.0.0.1", dns.port)

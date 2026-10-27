@@ -4,7 +4,6 @@
 //! OriginConnection data entities: OriginConnector, OriginConnection,
 //! Transport tests: origin_connector_tests.rs; test_https_forward.py
 
-use std::error::Error as StdError;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -13,65 +12,46 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use http::Uri;
-use hyper_util::client::legacy::connect::{
-  Connected, Connection, HttpConnector,
-};
+use hyper_util::client::legacy::connect::{Connected, Connection};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
-use tower::{Service, ServiceExt};
+use tower::Service;
 
-use super::address_resolution::TimeoutResolver;
 use super::observation::ConnectionObservation;
+use super::tcp_options::TcpOptions;
 use crate::io_stream::Io;
 use crate::plugins::http_upstream::config::Upstream;
 
 #[derive(Clone)]
 pub(super) struct OriginConnector {
   connect_timeout: Duration,
-  https_connect_timeout: Duration,
-  dns_resolve_timeout: Duration,
+  endpoint: std::net::SocketAddr,
+  tcp_options: TcpOptions,
   tls: tokio_rustls::TlsConnector,
   tls_handshake_timeout: Duration,
-  endpoint: Option<Uri>,
-  expected_alpn: Option<&'static [u8]>,
-  prepared:
-    std::sync::Arc<std::sync::Mutex<Option<TokioIo<OriginConnection>>>>,
 }
 
 impl OriginConnector {
   pub(super) fn new(
     config: &Upstream,
     tls: Arc<rustls::ClientConfig>,
-  ) -> Self {
-    Self {
+    endpoint: std::net::SocketAddr,
+  ) -> anyhow::Result<Self> {
+    let mut tls = (*tls).clone();
+    tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(Self {
       connect_timeout: config.connect_timeout,
-      https_connect_timeout: config.https_connect_timeout,
-      dns_resolve_timeout: config.dns_resolve_timeout,
-      tls: tokio_rustls::TlsConnector::from(tls),
+      endpoint,
+      tcp_options: TcpOptions {
+        time: config.tcp_keep_alive_time,
+        interval: config.tcp_keep_alive_interval,
+        retries: config.tcp_keep_alive_retries,
+      },
+      tls: tokio_rustls::TlsConnector::from(Arc::new(tls)),
       tls_handshake_timeout: config.tls_handshake_timeout,
-      endpoint: None,
-      expected_alpn: None,
-      prepared: Arc::new(std::sync::Mutex::new(None)),
-    }
-  }
-
-  pub(super) fn routed(
-    mut self,
-    endpoint: Uri,
-    expected_alpn: Option<&'static [u8]>,
-  ) -> Self {
-    self.endpoint = Some(endpoint);
-    self.expected_alpn = expected_alpn;
-    self
-  }
-
-  pub(super) async fn prepare(&mut self, uri: Uri) -> io::Result<()> {
-    let connection = self.clone().oneshot(uri).await?;
-    *self.prepared.lock().expect("prepared transport lock poisoned") =
-      Some(connection);
-    Ok(())
+    })
   }
 }
 
@@ -92,34 +72,20 @@ impl Service<Uri> for OriginConnector {
   }
 
   fn call(&mut self, uri: Uri) -> Self::Future {
-    if let Some(connection) = self
-      .prepared
-      .lock()
-      .expect("prepared transport lock poisoned")
-      .take()
-    {
-      return Box::pin(async { Ok(connection) });
-    }
-    let https = uri.scheme() == Some(&http::uri::Scheme::HTTPS);
-    let observation = ConnectionObservation::new();
-    let mut connector = HttpConnector::new_with_resolver(
-      TimeoutResolver::new(self.dns_resolve_timeout)
-        .observe(observation.clone()),
-    );
-    connector.enforce_http(!https);
-    connector.set_nodelay(true);
-    connector.set_connect_timeout(Some(if https {
-      self.https_connect_timeout
-    } else {
-      self.connect_timeout
-    }));
-    let tls = self.tls.clone();
-    let timeout = self.tls_handshake_timeout;
-    let endpoint = self.endpoint.clone();
-    let expected_alpn = self.expected_alpn;
+    let connector = self.clone();
     Box::pin(async move {
+      let observation = ConnectionObservation::new();
       let result = async {
-        let started = std::time::Instant::now();
+        let https = match uri.scheme_str() {
+          Some("https") => true,
+          Some("http") => false,
+          _ => {
+            return Err(io::Error::new(
+              io::ErrorKind::InvalidInput,
+              "invalid origin scheme",
+            ));
+          }
+        };
         let host = uri
           .host()
           .ok_or_else(|| {
@@ -129,72 +95,41 @@ impl Service<Uri> for OriginConnector {
             )
           })?
           .trim_start_matches('[')
-          .trim_end_matches(']')
-          .to_owned();
-        let stream = connector
-          .oneshot(endpoint.unwrap_or(uri))
-          .await
-          .map_err(|error| {
-            let mut source: Option<&(dyn StdError + 'static)> =
-              Some(&error);
-            let mut kind = io::ErrorKind::Other;
-            while let Some(current) = source {
-              if let Some(error) = current.downcast_ref::<io::Error>() {
-                kind = error.kind();
-                break;
-              }
-              source = current.source();
-            }
-            io::Error::new(kind, error)
-          })?
-          .into_inner();
-        observation.tcp(
-          stream.peer_addr().ok(),
-          stream.local_addr().ok(),
-          started.elapsed(),
-        );
+          .trim_end_matches(']');
+        let host = host.to_owned();
+        let address = connector.endpoint;
+        let started = std::time::Instant::now();
+        let stream = super::tcp_connect::connect(
+          vec![address],
+          connector.connect_timeout,
+        )
+        .await?;
+        connector.tcp_options.apply(&stream)?;
+        let peer = stream.peer_addr().ok();
+        let local = stream.local_addr().ok();
+        let tcp_elapsed = started.elapsed();
+        observation.tcp(peer, local, tcp_elapsed);
         let transport = if https {
           let name = rustls::pki_types::ServerName::try_from(host)
             .map_err(|error| {
               io::Error::new(io::ErrorKind::InvalidInput, error)
             })?;
           let tls_started = std::time::Instant::now();
-          let result =
-            tokio::time::timeout(timeout, tls.connect(name, stream))
-              .await
-              .map_err(|_| {
-                io::Error::new(
-                  io::ErrorKind::TimedOut,
-                  "origin TLS handshake timed out",
-                )
-              })
-              .and_then(std::convert::identity);
-          observation.tls(
-            tls_started.elapsed(),
-            result
-              .as_ref()
-              .ok()
-              .and_then(|stream| stream.get_ref().1.alpn_protocol()),
-          );
-          let stream = result?;
-          observation.protocol(
-            if stream.get_ref().1.alpn_protocol() == Some(b"h2") {
-              "h2"
-            } else {
-              "http/1.1"
-            },
-          );
-          if expected_alpn.is_some_and(|expected| {
-            stream.get_ref().1.alpn_protocol() != Some(expected)
-          }) {
-            return Err(io::Error::new(
-              io::ErrorKind::InvalidData,
-              "origin did not negotiate advertised ALPN",
-            ));
-          }
-          Transport::Tls(Box::new(stream))
+          let result = tokio::time::timeout(
+            connector.tls_handshake_timeout,
+            connector.tls.connect(name, stream),
+          )
+          .await
+          .map_err(|_| {
+            io::Error::new(
+              io::ErrorKind::TimedOut,
+              "origin TLS handshake timed out",
+            )
+          })
+          .and_then(std::convert::identity);
+          observation.tls(tls_started.elapsed());
+          Transport::Tls(Box::new(result?))
         } else {
-          observation.protocol("http/1.1");
           Transport::Tcp(stream)
         };
         Ok(TokioIo::new(OriginConnection {
@@ -231,14 +166,7 @@ impl Connection for OriginConnection {
   fn connected(&self) -> Connected {
     let connected = match &self.transport {
       Transport::Tcp(stream) => stream.connected(),
-      Transport::Tls(stream) => {
-        let connected = stream.get_ref().0.connected();
-        if stream.get_ref().1.alpn_protocol() == Some(b"h2") {
-          connected.negotiated_h2()
-        } else {
-          connected
-        }
-      }
+      Transport::Tls(stream) => stream.get_ref().0.connected(),
     };
     connected.extra(self.observation.clone())
   }

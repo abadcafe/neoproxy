@@ -14,20 +14,26 @@ fn test_protocol_kind_equality_distinguishes_protocols() {
 #[test]
 fn test_resolved_address_preserves_runtime_fields() {
   let address = Address {
+    address_max_fails: 1,
+    address_fail_timeout: Duration::from_secs(10),
+    tcp_keep_alive_time: None,
+    tcp_keep_alive_interval: None,
+    tcp_keep_alive_retries: None,
     address: "127.0.0.1:8080".to_string(),
     hostname: Some("proxy.local".to_string()),
     weight: 3,
-    protocol: Protocol::Http {
+    address_protocol: Protocol::Http {
       connect_timeout: Duration::from_secs(2),
     },
     tunnel_idle_timeout: Duration::from_secs(30),
+    upstream_request_timeout: Duration::from_secs(30),
     user: None,
   };
 
   assert_eq!(address.address, "127.0.0.1:8080");
   assert_eq!(address.hostname.as_deref(), Some("proxy.local"));
   assert_eq!(address.weight, 3);
-  assert!(matches!(address.protocol, Protocol::Http { .. }));
+  assert!(matches!(address.address_protocol, Protocol::Http { .. }));
 }
 
 #[test]
@@ -48,24 +54,20 @@ fn test_quic_resolved_preserves_optional_transport_fields() {
 #[test]
 fn test_upstream_preserves_direct_mode_defaults() {
   let upstream = Upstream {
+    address_max_fails: 1,
+    address_fail_timeout: Duration::from_secs(10),
+    tcp_keep_alive_time: None,
+    tcp_keep_alive_interval: None,
+    tcp_keep_alive_retries: None,
+    dns_refresh_retry_interval: Duration::from_secs(30),
     dns_servers: None,
-    http3_handshake_timeout: Duration::from_secs(10),
-    quic: QuicResolved {
-      max_idle_timeout: None,
-      keep_alive_interval: Duration::from_secs(15),
-      max_concurrent_bidi_streams: None,
-      initial_mtu: None,
-      send_window: None,
-      receive_window: None,
-    },
     addresses: vec![],
     pool_config: PoolConfig::default(),
     connect_timeout: Duration::from_secs(10),
-    https_connect_timeout: Duration::from_secs(10),
     tls_handshake_timeout: Duration::from_secs(10),
     tunnel_idle_timeout: Duration::from_secs(60),
     dns_resolve_timeout: Duration::from_secs(5),
-    request_timeout: Duration::from_secs(30),
+    upstream_request_timeout: Duration::from_secs(30),
   };
 
   assert!(upstream.addresses.is_empty());

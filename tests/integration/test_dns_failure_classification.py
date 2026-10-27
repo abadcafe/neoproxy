@@ -19,7 +19,9 @@ def test_dns_failure_returns_bad_gateway_with_dns_diagnostic(
     destination = "missing..invalid:80"
     upstream: ConfigDict = {"name": "relay"}
     if transport != "direct":
-        upstream["addresses"] = [{"address": destination, transport: {}}]
+        upstream["addresses"] = [
+            {"address": destination, "address_protocol": transport}
+        ]
     config: ConfigDict = {
         "server_threads": 1,
         "plugins": {"http_upstream": {"upstreams": [upstream]}},

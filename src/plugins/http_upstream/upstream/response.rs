@@ -19,7 +19,7 @@ pub(super) fn forward_response(
 ) -> Response {
   let trailer_policy =
     crate::hop_headers::strip_connection_headers(&mut parts.headers);
-  // Origin transport discovery belongs to the terminal direct client.
+  // Do not advertise origin alternatives through a forwarding proxy.
   parts.headers.remove("alt-svc");
   crate::via::append(&mut parts.headers, parts.version);
   consume_proxy_auth_headers(&mut parts.headers);

@@ -4,7 +4,7 @@ use std::time::Duration;
 use super::quic_connect::connect;
 
 #[tokio::test]
-async fn test_connect_quic_falls_back_from_unreachable_first_address() {
+async fn test_connect_quic_connects_selected_address() {
   let _ = rustls::crypto::ring::default_provider().install_default();
   let identity =
     rcgen::generate_simple_self_signed(vec!["localhost".into()])
@@ -30,14 +30,8 @@ async fn test_connect_quic_falls_back_from_unreachable_first_address() {
   let client = quinn::ClientConfig::new(Arc::new(
     quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap(),
   ));
-  let unreachable = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
   let (connection, peer) = tokio::join!(
-    connect(
-      vec![unreachable.local_addr().unwrap(), address],
-      "localhost",
-      client,
-      Duration::from_secs(2)
-    ),
+    connect(address, "localhost", client, Duration::from_secs(2)),
     async { endpoint.accept().await.unwrap().await.unwrap() },
   );
   let connection = connection.unwrap();

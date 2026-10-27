@@ -6,6 +6,7 @@ Tests: socket_trace_tests.py.
 
 import os
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -83,8 +84,13 @@ class SocketTrace:
         if not pids:
             return sample
         try:
+            command = (
+                ["netstat", "-anv", "-p", protocol]
+                if sys.platform == "darwin"
+                else ["ss", "-tinap" if protocol == "tcp" else "-uinap"]
+            )
             result = subprocess.run(
-                ["ss", "-tinap" if protocol == "tcp" else "-uinap"],
+                command,
                 capture_output=True,
                 text=True,
                 timeout=1,
@@ -96,6 +102,16 @@ class SocketTrace:
             return sample
         sample.returncode = result.returncode
         sample.error = result.stderr or None
+        if sys.platform == "darwin":
+            watched = {str(pid) for pid in pids}
+            lines = result.stdout.splitlines()
+            selected = [
+                line
+                for line in lines[2:]
+                if len(fields := line.split()) >= 10 and fields[-10] in watched
+            ]
+            sample.output = "\n".join(lines[:2] + selected) if selected else ""
+            return sample
         selected: list[str] = []
         owned = False
         for line in result.stdout.splitlines():

@@ -32,13 +32,16 @@ fn test_record_attributes_setup_once_and_reused_connections_without_setup_times(
     Some("127.0.0.1:30000".parse().unwrap()),
     Duration::from_millis(3),
   );
-  observation.tls(Duration::from_millis(5), Some(b"h2"));
+  observation.tls(Duration::from_millis(5));
   let first = RequestContext::new();
   observation.record(&first);
   assert_eq!(first.get(connection::REUSED), Some(false));
   assert_eq!(first.get(dns::HOST).as_deref(), Some("localhost"));
   assert_eq!(first.get(dns::TIME), Some(Duration::from_millis(2)));
-  assert_eq!(first.get(connection::ALPN).as_deref(), Some("h2"));
+  assert_eq!(
+    first.get(connection::TLS_TIME),
+    Some(Duration::from_millis(5))
+  );
   let second = RequestContext::new();
   observation.record(&second);
   assert_eq!(second.get(connection::REUSED), Some(true));

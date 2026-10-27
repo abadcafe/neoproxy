@@ -26,20 +26,20 @@ fn test_upstream_address_config_protocol_detects_http3() {
   let addr: UpstreamAddressConfig = serde_yaml::from_str(
     r#"
 address: example.com:443
-http3: {}
+address_protocol: http3
 "#,
   )
   .unwrap();
 
-  assert_eq!(addr.protocol().unwrap(), ProtocolKind::Http3);
+  assert_eq!(addr.address_protocol().unwrap(), ProtocolKind::Http3);
 }
 
 #[test]
-fn test_upstream_address_config_protocol_rejects_missing_protocol() {
+fn test_upstream_address_config_protocol_defaults_to_https() {
   let addr: UpstreamAddressConfig =
     serde_yaml::from_str("address: example.com:443").unwrap();
 
-  assert!(addr.protocol().is_err());
+  assert_eq!(addr.address_protocol().unwrap(), ProtocolKind::Https);
 }
 
 #[test]

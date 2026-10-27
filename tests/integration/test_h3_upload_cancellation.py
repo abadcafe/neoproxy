@@ -58,7 +58,7 @@ plugins:
       addresses:
       - address: 127.0.0.1:{upstream_port}
         hostname: localhost
-        http3: {{}}
+        address_protocol: http3
 listeners:
 - name: main
   kind: http

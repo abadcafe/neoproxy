@@ -74,17 +74,15 @@ where
   ) -> Pin<Box<dyn Future<Output = Result<Response, UpstreamError>> + 'a>>
   {
     Box::pin(async move {
-      Ok(
-        forward_request(
-          self.client.clone(),
-          &self.user,
-          target,
-          req_headers,
-          req_body,
-          ctx,
-        )
-        .await,
+      forward_request(
+        self.client.clone(),
+        &self.user,
+        target,
+        req_headers,
+        req_body,
+        ctx,
       )
+      .await
     })
   }
 
@@ -159,9 +157,11 @@ where
     }
   });
 
-  let mut resp = resp_fut
-    .await
-    .map_err(|e| UpstreamError::ConnectionTerminated(e.to_string()))?;
+  let mut resp = resp_fut.await.map_err(|e| {
+    crate::plugins::http_upstream::error::classify_http_client_error(
+      e.into(),
+    )
+  })?;
 
   // RFC 9110 §9.3.6: every 2xx establishes a CONNECT tunnel.
   if !resp.status().is_success() {
@@ -178,9 +178,15 @@ where
   // failure visible; the dependency case is recorded in
   // tests/integration/test_connect_upstream_status.py.
   let upgrade = hyper::upgrade::on(&mut resp);
-  let upgraded = upgrade
-    .await
-    .map_err(|e| UpstreamError::ConnectionTerminated(e.to_string()))?;
+  let upgraded = upgrade.await.map_err(|e| {
+    if e.is_user() {
+      UpstreamError::InvalidResponse(e.to_string())
+    } else {
+      crate::plugins::http_upstream::error::classify_http_client_error(
+        e.into(),
+      )
+    }
+  })?;
 
   Ok(ConnectResult {
     transport: Box::new(TokioIo::new(upgraded)),

@@ -195,6 +195,7 @@ where
     if let Some(ctx) = &ctx {
       sender.observation.record(ctx);
     }
+    super::retry_request::Progress::mark_request(&request);
     let response = match sender.try_send_request(request).await {
       Ok(response) => response,
       Err(mut error) => {

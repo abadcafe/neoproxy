@@ -1,6 +1,6 @@
-"""module: discovery_scenario; responsibility: exercise origin discovery with curl.
+"""module: discovery_scenario; responsibility: exercise direct origins with curl.
 Public operations: direct_proxy, curl_forward. Data entities: none.
-Tests: test_origin_discovery.py.
+Tests: test_direct_http1.py.
 """
 
 import asyncio
@@ -26,6 +26,7 @@ def direct_proxy(
     dns_port: int | None = None,
     idle_timeout: str = "90s",
     max_idle_per_host: int = 32,
+    tls_handshake_timeout: str = "10s",
 ) -> Generator[int]:
     with managed_processes() as start:
         processes: list[BytesProcess] = []
@@ -34,7 +35,6 @@ def direct_proxy(
             port = get_unique_port()
             upstream: ConfigDict = {
                 "name": "direct",
-                "http3": {"tls_handshake_timeout": "300ms"},
                 "pool": {
                     "idle_timeout": idle_timeout,
                     "max_idle_per_host": max_idle_per_host,
@@ -44,14 +44,18 @@ def direct_proxy(
                 upstream = {
                     "name": "relay",
                     "addresses": [
-                        {"address": f"127.0.0.1:{upstream_port}", "http": {}}
+                        {
+                            "address": f"127.0.0.1:{upstream_port}",
+                            "address_protocol": "http",
+                        }
                     ],
                 }
             plugin: ConfigDict = {
                 "certificates": {"server_ca_path": ca},
                 "upstreams": [upstream],
                 "dns_resolve_timeout": "1s",
-                "request_timeout": "4s",
+                "upstream_request_timeout": "4s",
+                "tls_handshake_timeout": tls_handshake_timeout,
             }
             if dns_port is not None:
                 plugin["dns_servers"] = [f"127.0.0.1:{dns_port}"]

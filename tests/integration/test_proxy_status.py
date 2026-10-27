@@ -202,8 +202,7 @@ plugins:
     upstreams:
       - name: direct
         tunnel_idle_timeout: 60s
-        http:
-          connect_timeout: 1s
+        tcp_connect_timeout: 1s
 
 listeners:
 - name: http_main

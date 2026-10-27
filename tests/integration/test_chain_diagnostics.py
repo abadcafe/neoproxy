@@ -78,7 +78,7 @@ def test_proxy_chain_trace_survives_working_directory_cleanup(
     assert "shutdown complete" in entry_logs and "shutdown complete" in upstream_logs
 
 
-def test_chain_capture_records_system_dns_and_tcp_stage_timings(tmp_path: Path) -> None:
+def test_chain_capture_records_loopback_tcp_stage_timings(tmp_path: Path) -> None:
     working = tmp_path / "proxy"
     port, origin_port = get_unique_port(), get_unique_port()
     config = write_forward_node(working, ForwardNode(port=port, certificate="", key=""))
@@ -122,7 +122,7 @@ def test_chain_capture_records_system_dns_and_tcp_stage_timings(tmp_path: Path) 
                     str(working / "curl.body"),
                     "--write-out",
                     "%{http_code} %{http_connect}",
-                    f"http://localhost:{origin_port}/",
+                    f"http://127.0.0.1:{origin_port}/",
                 ]
             )
             assert result.returncode == 0, result.stderr
@@ -133,7 +133,7 @@ def test_chain_capture_records_system_dns_and_tcp_stage_timings(tmp_path: Path) 
     assert "origin_dns" not in logs and "origin_connect" not in logs
     records = access_records(directory / "entry")
     assert len(records) == 1
-    assert records[0].extensions["upstream.dns.host"] == "localhost"
-    assert isinstance(records[0].extensions["upstream.dns.duration_ms"], int)
-    assert isinstance(records[0].extensions["upstream.dns.addresses"], list)
+    assert "upstream.dns.host" not in records[0].extensions
+    assert "upstream.dns.duration_ms" not in records[0].extensions
+    assert "upstream.dns.addresses" not in records[0].extensions
     assert isinstance(records[0].extensions["upstream.tcp.connect_ms"], int)

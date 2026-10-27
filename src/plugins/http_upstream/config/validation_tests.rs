@@ -67,7 +67,7 @@ upstreams:
     addresses:
       - address: "127.0.0.1:8080"
         weight: 0
-        http: {}
+        address_protocol: http
 "#,
   )
   .unwrap();
@@ -81,7 +81,6 @@ fn test_validate_plugin_config_accepts_direct_http3_config() {
     r#"
 upstreams:
   - name: direct
-    http3: {}
 "#,
   )
   .unwrap();
@@ -94,7 +93,7 @@ fn test_validate_plugin_config_rejects_empty_or_zero_port_dns_servers()
 {
   for value in [
     "dns_servers: []\nupstreams: [{name: direct}]",
-    "upstreams: [{name: direct, dns_servers: ['127.0.0.1:0']}]",
+    "dns_servers: ['127.0.0.1:0']",
   ] {
     let config: HttpUpstreamPluginConfig =
       serde_yaml::from_str(value).unwrap();
@@ -110,9 +109,8 @@ upstreams:
   - name: chain
     addresses:
       - address: "127.0.0.1:8443"
-        http3:
-          quic:
-            initial_mtu: 1000
+        address_protocol: http3
+        quic_connection_initial_mtu: 1000
 "#,
   )
   .unwrap();
@@ -123,13 +121,17 @@ upstreams:
 #[test]
 fn test_validate_plugin_config_rejects_unrepresentable_quic_values() {
   for field in [
-    "max_idle_timeout: 100us",
-    "max_idle_timeout: 18446744073709552s",
-    "receive_window: 4611686018427387904",
+    "quic_connection_idle_timeout: 100us",
+    "quic_connection_idle_timeout: 18446744073709552s",
+    "quic_connection_receive_window: 4611686018427387904",
   ] {
-    let config: HttpUpstreamPluginConfig = serde_yaml::from_str(&format!(
-      "upstreams:\n  - name: chain\n    addresses:\n      - address: 127.0.0.1:443\n        http3:\n          quic:\n            {field}"
-    )).unwrap();
+    let config: HttpUpstreamPluginConfig =
+      serde_yaml::from_str(&format!(
+        "upstreams:\n  - name: chain\n    addresses:\n      - \
+         address: 127.0.0.1:443\n        address_protocol: http3\n        \
+         {field}"
+      ))
+      .unwrap();
     assert!(
       validate_plugin_config(&config).is_err(),
       "accepted {field}"
@@ -148,7 +150,7 @@ fn test_validate_plugin_config_bounds_every_idle_deadline() {
       ),
       format!(
         "upstreams: [{{name: chain, addresses: [{{address: \
-         'localhost:80', http: {{}}, tunnel_idle_timeout: \
+         'localhost:80', address_protocol: http, tunnel_idle_timeout: \
          {duration}}}]}}]"
       ),
       format!(
@@ -174,4 +176,49 @@ fn test_validate_plugin_config_accepts_finite_idle_deadlines() {
   )
   .unwrap();
   assert!(validate_plugin_config(&config).is_ok());
+}
+
+#[test]
+fn test_validate_plugin_config_accepts_tcp_keepalive() {
+  for field in [
+    "tcp_keep_alive_time: 10s",
+    "tcp_keep_alive_interval: 5s",
+    "tcp_keep_alive_retries: 3",
+  ] {
+    let config: HttpUpstreamPluginConfig =
+      serde_yaml::from_str(field).unwrap();
+    assert!(validate_plugin_config(&config).is_ok());
+  }
+}
+
+#[test]
+fn test_validate_plugin_config_rejects_invalid_address_request_timeout()
+{
+  let config: HttpUpstreamPluginConfig = serde_yaml::from_str(
+    "upstreams: [{name: chain, addresses: [{address: '127.0.0.1:80', \
+     address_protocol: http, upstream_request_timeout: 0s}]}]",
+  )
+  .unwrap();
+  assert!(validate_plugin_config(&config).is_err());
+}
+
+#[test]
+fn test_dns_configuration_is_plugin_scoped() {
+  for field in
+    ["dns_servers: ['127.0.0.1:53']", "dns_resolve_timeout: 5s"]
+  {
+    let upstream = format!("upstreams:\n  - name: direct\n    {field}");
+    let address = format!(
+      "upstreams:\n  - name: chain\n    addresses:\n      - address: \
+       '127.0.0.1:80'\n        address_protocol: http\n        {field}"
+    );
+    assert!(
+      serde_yaml::from_str::<HttpUpstreamPluginConfig>(&upstream)
+        .is_err()
+    );
+    assert!(
+      serde_yaml::from_str::<HttpUpstreamPluginConfig>(&address)
+        .is_err()
+    );
+  }
 }

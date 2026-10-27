@@ -128,7 +128,7 @@ plugins:
             user:
               username: user1
               password: pass1
-            http3: {{}}
+            address_protocol: http3
   auth:
 
 services:
@@ -182,7 +182,7 @@ plugins:
           - address: "127.0.0.1:{h3_port}"
             hostname: localhost
             weight: 1
-            http3: {{}}
+            address_protocol: http3
   auth:
 
 services:
@@ -234,7 +234,7 @@ plugins:
             user:
               username: user1
               password: pass1
-            http3: {{}}
+            address_protocol: http3
   auth:
 
 services:
@@ -290,7 +290,7 @@ plugins:
           - address: "127.0.0.1:{h3_port}"
             hostname: localhost
             weight: 1
-            http3: {{}}
+            address_protocol: http3
   auth:
 
 services:
@@ -338,7 +338,7 @@ plugins:
           - address: "127.0.0.1:{h3_port}"
             hostname: localhost
             weight: 1
-            http3: {{}}
+            address_protocol: http3
   auth:
 
 services:
@@ -385,7 +385,7 @@ plugins:
           - address: "127.0.0.1:{h3_port}"
             hostname: localhost
             weight: 1
-            http3: {{}}
+            address_protocol: http3
   auth:
 
 services:
@@ -436,7 +436,7 @@ plugins:
             user:
               username: wrong_user
               password: wrong_pass
-            http3: {{}}
+            address_protocol: http3
   auth:
 
 services:

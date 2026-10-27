@@ -41,7 +41,9 @@ def test_pool_idle_timeout_closes_unused_connection(
     _ = target_server(port, upstream)
     relay: ConfigDict = {"name": "relay", "pool": {"idle_timeout": "100ms"}}
     if chained:
-        relay["addresses"] = [{"address": f"127.0.0.1:{port}", "http": {}}]
+        relay["addresses"] = [
+            {"address": f"127.0.0.1:{port}", "address_protocol": "http"}
+        ]
     config: ConfigDict = {
         "server_threads": 1,
         "plugins": {"http_upstream": {"upstreams": [relay]}},
@@ -113,7 +115,7 @@ def test_proxy_pool_reuses_one_connection_across_origin_authorities(
                             {
                                 "address": f"127.0.0.1:{port}",
                                 "hostname": "localhost",
-                                protocol: {},
+                                "address_protocol": protocol,
                             }
                         ],
                     }

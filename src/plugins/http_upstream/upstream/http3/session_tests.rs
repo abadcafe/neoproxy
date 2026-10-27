@@ -22,7 +22,7 @@ async fn test_session_pool_drop_cancels_maintenance_after_failed_handshake()
       .with_root_certificates(rustls::RootCertStore::empty())
       .with_no_client_auth();
       let pool = SessionPool::new(
-        peer.local_addr().unwrap().to_string(),
+        peer.local_addr().unwrap(),
         Some("localhost".into()),
         QuicConfig {
           max_idle_timeout: None,
@@ -33,10 +33,21 @@ async fn test_session_pool_drop_cancels_maintenance_after_failed_handshake()
           receive_window: None,
         },
         Duration::from_millis(100),
-        Duration::from_millis(100),
         Default::default(),
       );
-      assert!(pool.prepare(&tls, &tracker).await.is_err());
+      assert!(
+        pool
+          .open(
+            http::Request::builder()
+              .uri("https://localhost/")
+              .body(())
+              .unwrap(),
+            &tls,
+            &tracker
+          )
+          .await
+          .is_err()
+      );
       drop(pool);
       assert!(
         tokio::time::timeout(

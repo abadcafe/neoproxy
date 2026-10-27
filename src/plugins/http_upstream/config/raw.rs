@@ -1,7 +1,7 @@
 //! module: plugins::http_upstream::config::raw
 //! responsibility: deserialize unresolved upstream policy
 //! public operations: CertificateConfig, validate,
-//! UpstreamAddressConfig, protocol, UpstreamConfig,
+//! UpstreamAddressConfig, address_protocol, UpstreamConfig,
 //! HttpUpstreamPluginConfig, UpstreamServiceArgs
 //! data entities: CertificateConfig, UpstreamAddressConfig,
 //! UpstreamConfig, HttpUpstreamPluginConfig, UpstreamServiceArgs
@@ -13,10 +13,7 @@ use anyhow::{Result, bail};
 use serde::Deserialize;
 
 use super::defaults::default_weight;
-use super::protocol::{
-  Http3ProtocolConfig, HttpProtocolConfig, HttpsProtocolConfig,
-  PoolConfig, ProtocolKind,
-};
+use super::protocol::{PoolConfig, ProtocolKind};
 use crate::config::UserCredential;
 
 /// Global TLS client identity configuration. Shared across all
@@ -46,8 +43,7 @@ impl CertificateConfig {
   }
 }
 
-/// Upstream address configuration. Exactly one protocol block must be
-/// set.
+/// Upstream address configuration. One protocol must be selected.
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpstreamAddressConfig {
@@ -58,44 +54,46 @@ pub(crate) struct UpstreamAddressConfig {
   pub(super) weight: usize,
   #[serde(with = "humantime_serde", default)]
   pub(super) tunnel_idle_timeout: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) upstream_request_timeout: Option<Duration>,
   #[serde(default)]
   pub(super) user: Option<UserCredential>,
   #[serde(default)]
-  pub(super) http: Option<HttpProtocolConfig>,
+  pub(super) address_protocol: Option<ProtocolKind>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) tcp_connect_timeout: Option<Duration>,
   #[serde(default)]
-  pub(super) https: Option<HttpsProtocolConfig>,
+  pub(super) address_max_fails: Option<usize>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) address_fail_timeout: Option<Duration>,
+
+  #[serde(with = "humantime_serde", default)]
+  pub(super) tcp_keep_alive_time: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) tcp_keep_alive_interval: Option<Duration>,
   #[serde(default)]
-  pub(super) http3: Option<Http3ProtocolConfig>,
+  pub(super) tcp_keep_alive_retries: Option<u32>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) tls_handshake_timeout: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) quic_connection_connect_timeout: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) quic_connection_keep_alive_interval: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) quic_connection_idle_timeout: Option<Duration>,
+  #[serde(default)]
+  pub(super) quic_connection_max_concurrent_bidi_streams: Option<u64>,
+  #[serde(default)]
+  pub(super) quic_connection_initial_mtu: Option<u16>,
+  #[serde(default)]
+  pub(super) quic_connection_send_window: Option<u64>,
+  #[serde(default)]
+  pub(super) quic_connection_receive_window: Option<u64>,
 }
 
 impl UpstreamAddressConfig {
-  pub(crate) fn protocol(&self) -> Result<ProtocolKind> {
-    let count =
-      [self.http.is_some(), self.https.is_some(), self.http3.is_some()]
-        .iter()
-        .filter(|&&x| x)
-        .count();
-    match count {
-      0 => bail!(
-        "address '{}' must specify exactly one protocol block (http, \
-         https, or http3)",
-        self.address
-      ),
-      1 => {
-        if self.http.is_some() {
-          Ok(ProtocolKind::Http)
-        } else if self.https.is_some() {
-          Ok(ProtocolKind::Https)
-        } else {
-          Ok(ProtocolKind::Http3)
-        }
-      }
-      _ => bail!(
-        "address '{}' must have exactly one protocol block, found {}",
-        self.address,
-        count
-      ),
-    }
+  pub(crate) fn address_protocol(&self) -> Result<ProtocolKind> {
+    Ok(self.address_protocol.clone().unwrap_or(ProtocolKind::Https))
   }
 }
 
@@ -103,9 +101,9 @@ impl UpstreamAddressConfig {
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub(super) struct UpstreamConfig {
-  pub(super) name: String,
   #[serde(default)]
-  pub(super) dns_servers: Option<Vec<std::net::SocketAddr>>,
+  pub(super) address_protocol: Option<ProtocolKind>,
+  pub(super) name: String,
   #[serde(default)]
   pub(super) addresses: Vec<UpstreamAddressConfig>,
   #[serde(default)]
@@ -113,23 +111,48 @@ pub(super) struct UpstreamConfig {
   #[serde(with = "humantime_serde", default)]
   pub(super) tunnel_idle_timeout: Option<Duration>,
   #[serde(with = "humantime_serde", default)]
-  pub(super) dns_resolve_timeout: Option<Duration>,
-  #[serde(with = "humantime_serde", default)]
-  pub(super) request_timeout: Option<Duration>,
+  pub(super) upstream_request_timeout: Option<Duration>,
   #[serde(default)]
   pub(super) user: Option<UserCredential>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) tcp_connect_timeout: Option<Duration>,
   #[serde(default)]
-  pub(super) http: Option<HttpProtocolConfig>,
+  pub(super) address_max_fails: Option<usize>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) address_fail_timeout: Option<Duration>,
+
+  #[serde(with = "humantime_serde", default)]
+  pub(super) tcp_keep_alive_time: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) tcp_keep_alive_interval: Option<Duration>,
   #[serde(default)]
-  pub(super) https: Option<HttpsProtocolConfig>,
+  pub(super) tcp_keep_alive_retries: Option<u32>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) tls_handshake_timeout: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) quic_connection_connect_timeout: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) quic_connection_keep_alive_interval: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) quic_connection_idle_timeout: Option<Duration>,
   #[serde(default)]
-  pub(super) http3: Option<Http3ProtocolConfig>,
+  pub(super) quic_connection_max_concurrent_bidi_streams: Option<u64>,
+  #[serde(default)]
+  pub(super) quic_connection_initial_mtu: Option<u16>,
+  #[serde(default)]
+  pub(super) quic_connection_send_window: Option<u64>,
+  #[serde(default)]
+  pub(super) quic_connection_receive_window: Option<u64>,
 }
 
 /// Top-level plugin configuration.
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HttpUpstreamPluginConfig {
+  #[serde(default)]
+  pub(super) address_protocol: Option<ProtocolKind>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) dns_refresh_retry_interval: Option<Duration>,
   #[serde(default)]
   pub(super) dns_servers: Option<Vec<std::net::SocketAddr>>,
   #[serde(default)]
@@ -139,15 +162,38 @@ pub(crate) struct HttpUpstreamPluginConfig {
   #[serde(with = "humantime_serde", default)]
   pub(super) dns_resolve_timeout: Option<Duration>,
   #[serde(with = "humantime_serde", default)]
-  pub(super) request_timeout: Option<Duration>,
+  pub(super) upstream_request_timeout: Option<Duration>,
   #[serde(default)]
   pub(super) user: Option<UserCredential>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) tcp_connect_timeout: Option<Duration>,
   #[serde(default)]
-  pub(super) http: Option<HttpProtocolConfig>,
+  pub(super) address_max_fails: Option<usize>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) address_fail_timeout: Option<Duration>,
+
+  #[serde(with = "humantime_serde", default)]
+  pub(super) tcp_keep_alive_time: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) tcp_keep_alive_interval: Option<Duration>,
   #[serde(default)]
-  pub(super) https: Option<HttpsProtocolConfig>,
+  pub(super) tcp_keep_alive_retries: Option<u32>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) tls_handshake_timeout: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) quic_connection_connect_timeout: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) quic_connection_keep_alive_interval: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) quic_connection_idle_timeout: Option<Duration>,
   #[serde(default)]
-  pub(super) http3: Option<Http3ProtocolConfig>,
+  pub(super) quic_connection_max_concurrent_bidi_streams: Option<u64>,
+  #[serde(default)]
+  pub(super) quic_connection_initial_mtu: Option<u16>,
+  #[serde(default)]
+  pub(super) quic_connection_send_window: Option<u64>,
+  #[serde(default)]
+  pub(super) quic_connection_receive_window: Option<u64>,
   #[serde(default)]
   pub(super) upstreams: Vec<UpstreamConfig>,
 }

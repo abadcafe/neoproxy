@@ -34,7 +34,7 @@ plugins:
     - name: unused-relay
       addresses:
       - address: 127.0.0.1:9
-        http: {{}}
+        address_protocol: http
 listeners:
 - name: main
   kind: {listener_kind}

@@ -9,8 +9,7 @@ use super::connector::ProxyConnector;
 #[test]
 fn test_proxy_connector_poll_ready_returns_ready() {
   let mut connector = ProxyConnector::new(
-    "127.0.0.1:1".to_string(),
-    Duration::from_millis(10),
+    "127.0.0.1:1".parse().unwrap(),
     Duration::from_millis(10),
   );
   let waker = noop_waker();
@@ -27,11 +26,7 @@ async fn test_proxy_connector_call_connects_to_configured_proxy() {
   let listener =
     tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
   let addr = listener.local_addr().unwrap();
-  let mut connector = ProxyConnector::new(
-    addr.to_string(),
-    Duration::from_secs(1),
-    Duration::from_secs(1),
-  );
+  let mut connector = ProxyConnector::new(addr, Duration::from_secs(1));
 
   let accept = async {
     let (_stream, peer) = listener.accept().await.unwrap();

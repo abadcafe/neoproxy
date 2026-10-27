@@ -39,11 +39,8 @@ async fn test_connect_for_tunnel_preserves_peer_and_bytes_after_response_headers
         socket.write_all(b"pong").await.unwrap();
       });
       let tracker = Rc::new(StreamTracker::new());
-      let connector = ProxyConnector::new(
-        address.to_string(),
-        Duration::from_secs(1),
-        Duration::from_secs(1),
-      );
+      let connector =
+        ProxyConnector::new(address, Duration::from_secs(1));
       let client = HttpProxyClient::new(
         ProxyPool::new(
           connector,

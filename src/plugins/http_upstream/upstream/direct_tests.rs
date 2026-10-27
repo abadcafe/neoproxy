@@ -22,9 +22,12 @@ async fn test_http_client_direct_tunnel_connects_to_target() {
   .unwrap()
   .with_root_certificates(rustls::RootCertStore::empty())
   .with_no_client_auth();
-  let http_client =
-    DirectClient::new(&upstreams["direct"], std::sync::Arc::new(tls))
-      .unwrap();
+  let http_client = DirectClient::new(
+    &upstreams["direct"],
+    std::sync::Arc::new(tls),
+    addr,
+  )
+  .unwrap();
   let tracker = Rc::new(StreamTracker::new());
 
   let accept = async {

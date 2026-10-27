@@ -52,7 +52,7 @@ plugins:
       - name: http_chain
         addresses:
           - address: "127.0.0.1:{upstream_port}"
-            http: {{}}
+            address_protocol: http
 
 listeners:
   - name: http_main
@@ -90,7 +90,7 @@ plugins:
         addresses:
           - address: "127.0.0.1:{upstream_port}"
             hostname: localhost
-            https: {{}}
+            address_protocol: https
 
 listeners:
   - name: http_main

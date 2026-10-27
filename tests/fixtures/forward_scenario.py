@@ -34,16 +34,16 @@ def write_forward_node(directory: Path, node: ForwardNode) -> str:
         address: ConfigDict = {
             "address": f"127.0.0.1:{node.upstream_port}",
             "hostname": "proxy.test",
-            node.upstream_kind: {},
+            "address_protocol": node.upstream_kind,
         }
         if node.upstream_username is not None:
             address["user"] = {"username": node.upstream_username, "password": "secret"}
         upstream["addresses"] = [address]
     else:
-        upstream["https"] = {"tls_handshake_timeout": node.handshake_timeout}
+        upstream["tls_handshake_timeout"] = node.handshake_timeout
     plugin: ConfigDict = {
         "upstreams": [upstream],
-        "request_timeout": node.request_timeout,
+        "upstream_request_timeout": node.request_timeout,
     }
     if node.ca is not None:
         plugin["certificates"] = {"server_ca_path": node.ca}

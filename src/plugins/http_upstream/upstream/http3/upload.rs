@@ -53,7 +53,7 @@ impl RequestWriter {
         Err(UpstreamError::ConnectionTerminated(error.to_string()))
       }
       Err(UploadError::Body(error)) => {
-        Err(UpstreamError::ConnectionTerminated(error.to_string()))
+        Err(UpstreamError::ProxyInternalError(error.to_string()))
       }
     };
     self.finished = result.is_ok();

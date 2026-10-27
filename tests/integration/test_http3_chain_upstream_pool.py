@@ -198,7 +198,7 @@ plugins:
           - address: 127.0.0.1:{h3_port}
             hostname: localhost
             weight: 1
-            http3: {{}}
+            address_protocol: http3
 
 listeners:
   - name: http_1
@@ -317,7 +317,6 @@ plugins:
     user:
       username: "wrong_user"
       password: "wrong_pass"
-    http3: {{}}
     upstreams:
       - name: test_upstream
         addresses:
@@ -327,7 +326,7 @@ plugins:
             user:
               username: "addr_user"
               password: "addr_pass"
-            http3: {{}}
+            address_protocol: http3
 
 listeners:
   - name: http_main
@@ -422,14 +421,13 @@ plugins:
     user:
       username: "plugin_user"
       password: "plugin_pass"
-    http3: {{}}
     upstreams:
       - name: test_upstream
         addresses:
           - address: 127.0.0.1:{h3_port}
             hostname: localhost
             weight: 1
-            http3: {{}}
+            address_protocol: http3
 
 listeners:
   - name: http_main
@@ -524,7 +522,6 @@ plugins:
     user:
       username: "wrong_plugin_user"
       password: "wrong_plugin_pass"
-    http3: {{}}
     upstreams:
       - name: test_upstream
         user:
@@ -534,7 +531,7 @@ plugins:
           - address: 127.0.0.1:{h3_port}
             hostname: localhost
             weight: 1
-            http3: {{}}
+            address_protocol: http3
 
 listeners:
   - name: http_main
@@ -648,11 +645,11 @@ plugins:
           - address: 127.0.0.1:{h3_port_1}
             hostname: localhost
             weight: 2
-            http3: {{}}
+            address_protocol: http3
           - address: 127.0.0.1:{h3_port_2}
             hostname: localhost
             weight: 1
-            http3: {{}}
+            address_protocol: http3
 
 listeners:
   - name: http_main
@@ -826,15 +823,15 @@ servers:
 
 
 # ==============================================================================
-# Test: quic: sub-block and max_idle_timeout format
+# Test: QUIC connection configuration
 # ==============================================================================
 
 
-class TestQuicAndMaxIdleTimeoutConfig:
-    """Verify quic: sub-block and max_idle_timeout rename."""
+class TestQuicConnectionConfig:
+    """Verify QUIC connection configuration."""
 
-    def test_quic_sub_block_parses(self) -> None:
-        """http3_chain with quic: sub-block starts successfully."""
+    def test_quic_connection_fields_parse(self) -> None:
+        """HTTP/3 chain with QUIC connection fields starts successfully."""
         temp_dir = tempfile.mkdtemp()
         port = get_unique_port()
 
@@ -842,17 +839,15 @@ class TestQuicAndMaxIdleTimeoutConfig:
 plugins:
   http_upstream:
     tunnel_idle_timeout: "5m"
-    http3:
-        quic:
-          keep_alive_interval: "3s"
-          max_idle_timeout: "30s"
+    quic_connection_keep_alive_interval: "3s"
+    quic_connection_idle_timeout: "30s"
     upstreams:
       - name: u
         addresses:
           - address: 127.0.0.1:1
             hostname: localhost
             weight: 1
-            http3: {{}}
+            address_protocol: http3
 listeners:
   - name: http
     kind: http
@@ -877,7 +872,9 @@ servers:
             text=False,
         )
         try:
-            assert proc.wait_ready(timeout=5.0), "Should start with quic: sub-block"
+            assert proc.wait_ready(timeout=5.0), (
+                "Should start with QUIC connection fields"
+            )
         finally:
             terminate_process(proc, timeout=5, force=True)
 
@@ -894,7 +891,7 @@ plugins:
           - address: 127.0.0.1:1
             hostname: localhost
             weight: 1
-            http3: {{}}
+            address_protocol: http3
 listeners:
   - name: http
     kind: http
@@ -956,7 +953,7 @@ servers:
             text=False,
         )
         try:
-            assert proc.wait_ready(timeout=5.0), "Should start with max_idle_timeout"
+            assert proc.wait_ready(timeout=5.0), "Should start with tunnel_idle_timeout"
         finally:
             terminate_process(proc, timeout=5, force=True)
 
@@ -1010,7 +1007,7 @@ plugins:
           - address: 127.0.0.1:1
             hostname: localhost
             weight: 1
-            http3: {{}}
+            address_protocol: http3
 listeners:
   - name: http
     kind: http

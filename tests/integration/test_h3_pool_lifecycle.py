@@ -32,7 +32,10 @@ async def test_chain_h3_pool_respects_reuse_policy(
                                 "idle_timeout": "90s",
                             },
                             "addresses": [
-                                {"address": f"127.0.0.1:{peer.port}", "http3": {}}
+                                {
+                                    "address": f"127.0.0.1:{peer.port}",
+                                    "address_protocol": "http3",
+                                }
                             ],
                         }
                     ],
@@ -70,7 +73,10 @@ async def test_chain_h3_pool_expires_without_subsequent_request(tmp_path: Path) 
                             "name": "relay",
                             "pool": {"idle_timeout": "100ms"},
                             "addresses": [
-                                {"address": f"127.0.0.1:{peer.port}", "http3": {}}
+                                {
+                                    "address": f"127.0.0.1:{peer.port}",
+                                    "address_protocol": "http3",
+                                }
                             ],
                         }
                     ],

@@ -1,38 +1,54 @@
 //! module: tcp_connect
-//! responsibility: connect TCP candidates under a shared deadline
-//! public operations: connect
+//! responsibility: establish TCP transports within a connection
+//! deadline public operations: connect
 //! data entities: none
 //! tests: tcp_connect_tests.rs
-
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use tokio::net::TcpStream;
 
-use crate::address_race::{self, RaceError};
-
 pub(super) async fn connect(
   addresses: Vec<SocketAddr>,
   timeout: Duration,
 ) -> std::io::Result<TcpStream> {
-  let stream =
-    address_race::connect(addresses, timeout, TcpStream::connect)
+  if addresses.is_empty() {
+    return Err(std::io::Error::new(
+      std::io::ErrorKind::InvalidInput,
+      "no resolved addresses",
+    ));
+  }
+  let deadline = tokio::time::Instant::now()
+    .checked_add(timeout)
+    .ok_or_else(|| {
+      std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "connect timeout exceeds clock range",
+      )
+    })?;
+  if timeout.is_zero() {
+    return Err(std::io::Error::new(
+      std::io::ErrorKind::TimedOut,
+      "connect timed out",
+    ));
+  }
+  let mut last_error = None;
+  for address in addresses {
+    match tokio::time::timeout_at(deadline, TcpStream::connect(address))
       .await
-      .map_err(|error| match error {
-        RaceError::NoAddresses => std::io::Error::new(
-          std::io::ErrorKind::InvalidInput,
-          "no resolved addresses",
-        ),
-        RaceError::InvalidDeadline => std::io::Error::new(
-          std::io::ErrorKind::InvalidInput,
-          "connect timeout exceeds clock range",
-        ),
-        RaceError::Timeout => std::io::Error::new(
+    {
+      Ok(Ok(stream)) => {
+        stream.set_nodelay(true)?;
+        return Ok(stream);
+      }
+      Ok(Err(error)) => last_error = Some(error),
+      Err(_) => {
+        return Err(std::io::Error::new(
           std::io::ErrorKind::TimedOut,
           "connect timed out",
-        ),
-        RaceError::Failed(error) => error,
-      })?;
-  stream.set_nodelay(true)?;
-  Ok(stream)
+        ));
+      }
+    }
+  }
+  Err(last_error.expect("nonempty TCP candidate list"))
 }

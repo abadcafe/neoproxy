@@ -108,7 +108,7 @@ def create_http3_chain_config(
                 f"          - address: {addr}:{port}\n"
                 + "            hostname: localhost\n"
                 + f"            weight: {weight}\n"
-                + "            http3: {}"
+                + "            address_protocol: http3"
             )
         )
 
@@ -434,7 +434,7 @@ def create_http3_chain_config_with_per_proxy_auth(
             f"          - address: {addr}:{port}\n"
             + "            hostname: localhost\n"
             + f"            weight: {weight}{user_section}\n"
-            + "            http3: {}"
+            + "            address_protocol: http3"
         )
         address_list.append(entry)
 

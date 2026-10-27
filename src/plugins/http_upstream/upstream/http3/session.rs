@@ -1,6 +1,6 @@
 //! module: session
 //! responsibility: lease reusable H3 sessions through peer draining
-//! public operations: SessionPool::{new, prepare, is_idle, open,
+//! public operations: SessionPool::{new, open,
 //! close}, SessionLease::attach
 //! data entities: SessionPool, State, Activity, ActivityLease,
 //! SessionLease, LeasedIo tests: session_tests.rs; http3_tests.rs; H3
@@ -22,10 +22,7 @@ use super::super::observation::ConnectionObservation;
 use super::quic_connect;
 use crate::context::RequestContext;
 use crate::plugins::http_upstream::config::protocol::PoolConfig;
-use crate::plugins::http_upstream::error::{
-  UpstreamError, classify_quic_error,
-};
-use crate::plugins::http_upstream::upstream::address_resolution::resolve_addresses;
+use crate::plugins::http_upstream::error::UpstreamError;
 use crate::plugins::http_upstream::upstream::protocol::QuicConfig;
 use crate::stream::Io;
 use crate::tracker::StreamTracker;
@@ -39,11 +36,10 @@ struct State {
 pub(crate) struct SessionPool {
   state: Rc<tokio::sync::Mutex<State>>,
   activity: Arc<Activity>,
-  address: String,
+  address: std::net::SocketAddr,
   hostname: Option<String>,
   quic: QuicConfig,
   handshake_timeout: Duration,
-  dns_timeout: Duration,
   pool: PoolConfig,
   reaper: RefCell<Option<tokio::task::AbortHandle>>,
 }
@@ -83,29 +79,11 @@ impl Drop for ActivityLease {
 }
 
 impl SessionPool {
-  /// A leased response or tunnel makes the session busy regardless of
-  /// how long ago its request was submitted.
-  pub(crate) fn is_idle(&self, timeout: Duration) -> bool {
-    self.activity.is_idle(timeout)
-  }
-
-  /// Prepare QUIC and H3 before a request can be committed to this
-  /// peer.
-  pub(crate) async fn prepare(
-    &self,
-    tls: &rustls::ClientConfig,
-    tracker: &Rc<StreamTracker>,
-  ) -> Result<(), UpstreamError> {
-    let _activity = ActivityLease::new(&self.activity);
-    self.connection(tls, tracker).await.map(|_| ())
-  }
-
   pub(crate) fn new(
-    address: String,
+    address: std::net::SocketAddr,
     hostname: Option<String>,
     quic: QuicConfig,
     handshake_timeout: Duration,
-    dns_timeout: Duration,
     pool: PoolConfig,
   ) -> Self {
     Self {
@@ -122,7 +100,6 @@ impl SessionPool {
       hostname,
       quic,
       handshake_timeout,
-      dns_timeout,
       pool,
       reaper: RefCell::new(None),
     }
@@ -232,6 +209,7 @@ impl SessionPool {
     if let Some(ctx) = &ctx {
       observation.record(ctx);
     }
+    super::super::retry_request::Progress::mark_request(&request);
     match sender.send_request(request.clone()).await {
       Ok(stream) => {
         return Ok((
@@ -402,7 +380,6 @@ async fn create_quic_connection(
   let hostname = pool.hostname.as_deref();
   let quic = &pool.quic;
   let tls_handshake_timeout = pool.handshake_timeout;
-  let dns_timeout = pool.dns_timeout;
   let mut tls_config = tls_config.clone();
   tls_config.enable_early_data = true;
   tls_config.alpn_protocols = vec![b"h3".to_vec()];
@@ -460,37 +437,18 @@ async fn create_quic_connection(
   }
   cli_config.transport_config(Arc::new(transport));
 
-  let started = std::time::Instant::now();
-  let addresses =
-    tokio::time::timeout(dns_timeout, resolve_addresses(address))
-      .await
-      .map_err(|_| {
-        UpstreamError::DnsError(format!(
-          "DNS resolve for '{address}' timed out"
-        ))
-      })
-      .and_then(|result| result.map_err(classify_quic_error));
-  observation.dns(
-    address,
-    started.elapsed(),
-    dns_timeout,
-    addresses.as_deref().unwrap_or_default(),
-  );
-  let addresses = addresses?;
-  let host: &str = hostname.unwrap_or_else(|| {
-    address.split_at(address.rfind(':').unwrap_or(address.len())).0
-  });
-  let host = host.trim_start_matches('[').trim_end_matches(']');
+  let host = hostname
+    .map(str::to_owned)
+    .unwrap_or_else(|| address.ip().to_string());
   let tls_started = std::time::Instant::now();
   let result = quic_connect::connect(
-    addresses,
-    host,
+    *address,
+    &host,
     cli_config,
     tls_handshake_timeout,
   )
   .await;
-  observation.tls(tls_started.elapsed(), Some(b"h3"));
-  observation.protocol("h3");
+  observation.tls(tls_started.elapsed());
   let conn = result?;
   observation.endpoint(Some(conn.remote_address()), None);
   Ok(conn)

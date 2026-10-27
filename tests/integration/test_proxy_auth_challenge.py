@@ -52,6 +52,8 @@ services:
       users:
       - username: user
         password: password
+      - username: second
+        password: different
 servers:
 - name: echo
   listeners: [main]
@@ -139,12 +141,27 @@ def test_local_407_preserves_proxy_authenticate_challenge(
 
 
 @pytest.mark.parametrize("listener_kind", ["http", "https", "http3"])
-def test_client_retries_local_challenge_with_valid_credentials(
-    tmp_path: Path, listener_kind: ListenerKind
+@pytest.mark.parametrize(
+    "credentials,expected",
+    [
+        (("user", "password"), 200),
+        (("second", "different"), 200),
+        (("user", "different"), 407),
+        (("second", "password"), 407),
+        (("unknown", "password"), 407),
+    ],
+)
+def test_client_retries_local_challenge_and_checks_each_users_password(
+    tmp_path: Path,
+    listener_kind: ListenerKind,
+    credentials: tuple[str, str],
+    expected: int,
 ) -> None:
     with authenticated_proxy(tmp_path, listener_kind) as (port, ca):
         status, headers = request(listener_kind, port, ca, "GET", None)
         assert status == 407
         assert headers.get("proxy-authenticate") == 'Basic realm="proxy"'
-        status, _ = request(listener_kind, port, ca, "GET", ("user", "password"))
-        assert status == 200
+        status, headers = request(listener_kind, port, ca, "GET", credentials)
+        assert status == expected
+        if expected == 407:
+            assert headers.get("proxy-authenticate") == 'Basic realm="proxy"'

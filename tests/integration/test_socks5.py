@@ -3,13 +3,15 @@ SOCKS5 Listener 集成测试
 
 测试目标: 验证 neoproxy SOCKS5 Listener 功能
 测试性质: 黑盒测试，通过外部接口验证行为
+
+握手方法及认证由 test_socks5_method_selection.py 和 test_socks5_credentials.py
+覆盖；这里保留命令拒绝、目标地址编码和边界值，不能用正常请求矩阵替代。
 """
 
 import shutil
 import socket
 import tempfile
 import threading
-import time
 
 from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
@@ -19,7 +21,6 @@ from tests.fixtures.socks5_client import (
     socks5_connect_ipv6,
     socks5_handshake_no_auth,
     socks5_handshake_password,
-    socks5_request_unsupported_method,
     socks5_send_bind_command,
     socks5_send_udp_associate,
 )
@@ -31,252 +32,6 @@ from tests.fixtures.tcp_peer import create_target_server, send_ok_and_close
 # ==============================================================================
 # Test Classes
 # ==============================================================================
-
-
-class TestSocks5BasicConnection:
-    """Basic SOCKS5 connection tests"""
-
-    def test_no_auth_connection_success(self) -> None:
-        """
-        TC-S5-001: No authentication mode connection success
-
-        Test that SOCKS5 connection succeeds with no authentication
-        and bidirectional data transfer works correctly.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        target_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-        target_socket: socket.socket | None = None
-
-        try:
-            # Create config (no auth field = no auth required)
-            config_path = create_socks5_config(proxy_port, temp_dir)
-
-            # Create target server
-            received_data: list[bytes] = []
-
-            def echo_handler(conn: socket.socket) -> None:
-                try:
-                    while True:
-                        data = conn.recv(1024)
-                        if not data:
-                            break
-                        received_data.append(data)
-                        conn.sendall(b"ECHO:" + data)
-                except OSError:
-                    pass
-                finally:
-                    conn.close()
-
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
-
-            # Start proxy
-            proxy_proc = start_proxy(config_path)
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
-
-            # Connect and perform SOCKS5 handshake
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
-            try:
-                sock.connect(("127.0.0.1", proxy_port))
-
-                # Handshake
-                assert socks5_handshake_no_auth(sock) == MethodReply(AuthMethod.NONE), (
-                    "Handshake failed"
-                )
-
-                # Connect to target
-                reply = socks5_connect_ipv4(sock, "127.0.0.1", target_port)
-                assert isinstance(reply, CommandReply)
-                assert reply.code is ReplyCode.SUCCESS, (
-                    f"Connect failed with reply code {reply}"
-                )
-
-                # Send data and verify echo
-                test_data = b"HELLO_SOCKS5"
-                sock.sendall(test_data)
-                response = sock.recv(1024)
-                assert response == b"ECHO:" + test_data, (
-                    f"Expected 'ECHO:{test_data}', got: {response}"
-                )
-
-            finally:
-                sock.close()
-
-            # Verify target received data
-            time.sleep(0.2)
-            assert any((test_data in d for d in received_data)), (
-                "Target server did not receive data"
-            )
-
-        finally:
-            if proxy_proc:
-                terminate_process(proxy_proc)
-            if target_socket:
-                target_socket.close()
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_password_auth_success(self) -> None:
-        """
-        TC-S5-002: Password authentication mode success
-
-        Test that SOCKS5 connection succeeds with correct credentials.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        target_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-        target_socket: socket.socket | None = None
-
-        try:
-            # Create config with password auth
-            users = [{"username": "testuser", "password": "testpass"}]
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_type="password", users=users
-            )
-
-            # Create target server
-            def echo_handler(conn: socket.socket) -> None:
-                try:
-                    data = conn.recv(1024)
-                    if data:
-                        conn.sendall(b"OK")
-                except OSError:
-                    pass
-                finally:
-                    conn.close()
-
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, echo_handler
-            )
-
-            # Start proxy
-            proxy_proc = start_proxy(config_path)
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
-
-            # Connect and authenticate
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
-            try:
-                sock.connect(("127.0.0.1", proxy_port))
-
-                # Authenticate with correct credentials
-                status = socks5_handshake_password(sock, "testuser", "testpass")
-                assert isinstance(status, AuthReply)
-                assert status.status is AuthStatus.SUCCESS, (
-                    f"Authentication failed with status {status}"
-                )
-
-                # Connect to target
-                reply = socks5_connect_ipv4(sock, "127.0.0.1", target_port)
-                assert isinstance(reply, CommandReply)
-                assert reply.code is ReplyCode.SUCCESS, (
-                    f"Connect failed with reply code {reply}"
-                )
-
-                # Send data and verify
-                sock.sendall(b"TEST")
-                response = sock.recv(1024)
-                assert response == b"OK", f"Expected 'OK', got: {response}"
-
-            finally:
-                sock.close()
-
-        finally:
-            if proxy_proc:
-                terminate_process(proxy_proc)
-            if target_socket:
-                target_socket.close()
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_password_auth_failure(self) -> None:
-        """
-        TC-S5-003: Password authentication failure
-
-        Test that SOCKS5 connection fails with wrong credentials.
-        Subnegotiation acknowledges receipt; CONNECT middleware rejects credentials.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-
-        try:
-            # Create config with password auth
-            users = [{"username": "testuser", "password": "correctpass"}]
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_type="password", users=users
-            )
-
-            # Start proxy
-            proxy_proc = start_proxy(config_path)
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
-
-            # Connect and try wrong password
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
-            try:
-                sock.connect(("127.0.0.1", proxy_port))
-
-                status = socks5_handshake_password(sock, "testuser", "wrongpass")
-                assert isinstance(status, AuthReply)
-                assert status.status is AuthStatus.SUCCESS
-                reply = socks5_connect_ipv4(sock, "127.0.0.1", 1)
-                assert isinstance(reply, CommandReply)
-                assert reply.code is ReplyCode.CONNECTION_NOT_ALLOWED
-                assert sock.recv(1) == b""
-
-            finally:
-                sock.close()
-
-        finally:
-            if proxy_proc:
-                terminate_process(proxy_proc)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_unsupported_auth_method(self) -> None:
-        """
-        TC-S5-004: Unsupported authentication method
-
-        Test that server returns METHOD=0xFF when client requests
-        an authentication method not supported by server.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-
-        try:
-            # Create config with password auth
-            users = [{"username": "testuser", "password": "testpass"}]
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_type="password", users=users
-            )
-
-            # Start proxy
-            proxy_proc = start_proxy(config_path)
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
-
-            # Request unsupported method (GSSAPI)
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
-            try:
-                sock.connect(("127.0.0.1", proxy_port))
-
-                method = socks5_request_unsupported_method(sock)
-                assert isinstance(method, MethodReply)
-                assert method.method is AuthMethod.NO_ACCEPTABLE, (
-                    f"Expected METHOD=0xFF, got {method}"
-                )
-
-            finally:
-                sock.close()
-
-        finally:
-            if proxy_proc:
-                terminate_process(proxy_proc)
-            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 class TestSocks5UnsupportedCommands:
@@ -565,57 +320,6 @@ class TestSocks5TargetAddressTypes:
 
 class TestSocks5ConnectionTarget:
     """Tests for connection target success/failure scenarios"""
-
-    def test_connection_success(self) -> None:
-        """
-        TC-S5-013: Connection to target success
-
-        Test that Service sends REP=0x00 on successful connection.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        target_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-        target_socket: socket.socket | None = None
-
-        try:
-            config_path = create_socks5_config(proxy_port, temp_dir)
-
-            _, target_socket = create_target_server(
-                "127.0.0.1",
-                target_port,
-                send_ok_and_close,
-            )
-
-            proxy_proc = start_proxy(config_path)
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
-            try:
-                sock.connect(("127.0.0.1", proxy_port))
-                assert socks5_handshake_no_auth(sock) == MethodReply(AuthMethod.NONE), (
-                    "Handshake failed"
-                )
-
-                reply = socks5_connect_ipv4(sock, "127.0.0.1", target_port)
-                assert isinstance(reply, CommandReply)
-                assert reply.code is ReplyCode.SUCCESS, (
-                    f"Expected success, got reply {reply}"
-                )
-                assert reply.code is ReplyCode.SUCCESS, (
-                    f"Expected REP=0x00, got {reply}"
-                )
-
-            finally:
-                sock.close()
-
-        finally:
-            if proxy_proc:
-                terminate_process(proxy_proc)
-            if target_socket:
-                target_socket.close()
-            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_connection_refused(self) -> None:
         """

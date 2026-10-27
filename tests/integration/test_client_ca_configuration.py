@@ -124,6 +124,7 @@ def test_empty_ca_list_allows_anonymous_requests(
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [
+        ("missing", "read CA file"),
         ("empty", "no certificates"),
         ("whitespace", "no certificates"),
         ("text", "no certificates"),
@@ -149,7 +150,8 @@ def test_invalid_ca_file_is_not_hidden_by_other_roots(
         "bad_der": "-----BEGIN CERTIFICATE-----\nYWJj\n-----END CERTIFICATE-----\n",
     }
     invalid = tmp_path / "invalid-client-ca.pem"
-    _ = invalid.write_text(contents[payload])
+    if payload != "missing":
+        _ = invalid.write_text(contents[payload])
     ca_paths = [tls_material.ca]
     other_ca_paths: list[str] = []
     if placement == "same_server":

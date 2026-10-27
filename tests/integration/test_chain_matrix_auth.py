@@ -9,10 +9,14 @@ from tests.fixtures.matrix_model import AuthCase, CertificateFiles, ChainCase
 from tests.fixtures.matrix_scenario import run_exchange
 
 _CASES = [
-    (ChainCase(entry=a, relay=b), AuthCase(hop=hop, policy=policy, fault=fault))
-    for a, b, hop, policy, fault in product(
+    (
+        ChainCase(entry=a, relay=b, mode=mode),
+        AuthCase(hop=hop, policy=policy, fault=fault),
+    )
+    for a, b, mode, hop, policy, fault in product(
         ("http", "https", "http3", "socks5"),
         ("http", "https", "http3", "socks5"),
+        ("tunnel", "forward"),
         ("entry", "relay"),
         ("password", "certificate", "both"),
         (
@@ -24,6 +28,10 @@ _CASES = [
         ),
     )
     if (policy == "password" or (a if hop == "entry" else b) in ("https", "http3"))
+    # All transport pairs are exercised by the tunnel matrix. Forwarding has
+    # distinct HTTP error semantics; exercise each listener without repeating
+    # the full pair cross product. SOCKS5 has no forward request operation.
+    and (mode == "tunnel" or (a == b and a != "socks5"))
     and (
         fault == "none"
         or ("password" in fault and policy != "certificate")
@@ -36,7 +44,7 @@ _CASES = [
     "case,auth",
     _CASES,
     ids=[
-        f"{case.entry}-{case.relay}-{auth.hop}-{auth.policy}-{auth.fault}"
+        f"{case.entry}-{case.relay}-{case.mode}-{auth.hop}-{auth.policy}-{auth.fault}"
         for case, auth in _CASES
     ],
 )
@@ -61,22 +69,34 @@ def test_two_hop_authentication(
         assert len(result.origin_requests) == 1
         assert len(result.entry_logs) == len(result.relay_logs) == 1
     else:
-        assert result.returncode != 0
-        assert result.http_status == 0
         assert not result.origin_requests
+        expected_status = (
+            403
+            if auth.fault == "missing_certificate" or case.relay == "socks5"
+            else 502
+        )
+        if case.mode == "forward" and "password" in auth.fault:
+            # Forward responses preserve the relay's challenge; a rejected
+            # upstream CONNECT instead fails establishment of the tunnel.
+            expected_status = 407
         if auth.hop == "relay":
             assert len(result.entry_logs) == 1
-            assert result.entry_logs[0].status == (
-                403
-                if auth.fault == "missing_certificate" or case.relay == "socks5"
-                else 502
-            )
+            assert result.entry_logs[0].status == expected_status
         elif "password" in auth.fault:
+            expected_status = 407
             assert len(result.entry_logs) == 1
             assert result.entry_logs[0].status == 407
             # curl's experimental H3 proxy backend does not populate
             # http_connect on rejected streams. The server log is authoritative.
-            if case.entry in ("http", "https"):
+            if case.mode == "tunnel" and case.entry in ("http", "https"):
                 assert result.connect_status == 407
         if auth.hop == "entry":
             assert not result.relay_logs
+        if case.mode == "forward" and not (
+            auth.hop == "entry" and auth.fault == "wrong_certificate"
+        ):
+            assert result.returncode == 0, result.stderr
+            assert result.http_status == expected_status
+        else:
+            assert result.returncode != 0
+            assert result.http_status == 0

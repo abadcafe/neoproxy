@@ -1,17 +1,8 @@
-"""
-HTTP/3 Listener integration tests.
+"""HTTP/3 configuration failures, idle shutdown latency and echo dispatch.
 
-Test target: Verify neoproxy HTTP/3 Listener behavior
-Test nature: Black-box testing through external interface (HTTP/3)
-
-This test module covers:
-- 7.1 Basic connection scenarios
-- 7.3 Authentication scenarios
-- 7.5 Error handling scenarios (HTTP/3 specific)
-- 7.7 Configuration validation scenarios (HTTP/3 specific)
-
-NOTE: Some tests are skipped due to missing CryptoProvider initialization
-in the main binary. This is a known issue in the implementation.
+Startup, unauthenticated traffic and worker cleanup are exercised by
+test_chain_matrix_local.py and test_http3_workers.py. Keep the configuration
+errors and no-connection shutdown deadline here as independent contracts.
 """
 
 import os
@@ -30,143 +21,6 @@ from tests.fixtures.h3_configuration import create_http3_listener_config
 from tests.fixtures.notified_process import ProxyProcess
 from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy
-
-# Alias for backward compatibility in this file
-
-
-# ==============================================================================
-# Test helper functions (unique to this module)
-# ==============================================================================
-
-
-# ==============================================================================
-# Test cases - 7.1 Basic connection scenarios
-# ==============================================================================
-
-
-class TestHTTP3BasicConnection:
-    """Test 7.1: Basic HTTP/3 connection scenarios."""
-
-    def test_http3_listener_starts_successfully(
-        self, shared_test_certs: StringMap
-    ) -> None:
-        """
-        TC-H3-001: HTTP/3 Listener starts and binds to port.
-
-        Target: Verify HTTP/3 listener starts successfully and binds to UDP port
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-
-        try:
-            cert_path = shared_test_certs["cert_path"]
-            key_path = shared_test_certs["key_path"]
-            config_path = create_http3_listener_config(
-                proxy_port, cert_path, key_path, temp_dir
-            )
-
-            proxy_proc = start_proxy(config_path)
-
-            # Wait for UDP port to be bound
-            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
-
-            # Verify process is still running
-            assert proxy_proc.poll() is None, "HTTP/3 listener process crashed"
-
-        finally:
-            if proxy_proc:
-                proxy_proc.kill()
-                _ = proxy_proc.wait(timeout=5)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_http3_listener_graceful_shutdown(
-        self, shared_test_certs: StringMap
-    ) -> None:
-        """
-        TC-H3-002: HTTP/3 Listener graceful shutdown.
-
-        Target: Verify HTTP/3 listener shuts down gracefully with exit code 0
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-
-        try:
-            cert_path = shared_test_certs["cert_path"]
-            key_path = shared_test_certs["key_path"]
-            config_path = create_http3_listener_config(
-                proxy_port, cert_path, key_path, temp_dir
-            )
-
-            proxy_proc = start_proxy(config_path)
-
-            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
-
-            # Send SIGTERM
-            proxy_proc.send_signal(signal.SIGTERM)
-
-            # Wait for graceful shutdown
-            try:
-                return_code = proxy_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proxy_proc.kill()
-                _ = proxy_proc.wait()
-                assert False, "Process did not exit within expected time"
-
-            # Verify exit code is 0
-            assert return_code == 0, f"Expected exit code 0, got {return_code}"
-
-        finally:
-            if proxy_proc and proxy_proc.poll() is None:
-                proxy_proc.terminate()
-                _ = proxy_proc.wait(timeout=5)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-# ==============================================================================
-# Test cases - 7.3 Authentication scenarios
-# ==============================================================================
-
-
-class TestHTTP3Authentication:
-    """Test 7.3: HTTP/3 authentication scenarios."""
-
-    def test_no_auth_allows_all(self, shared_test_certs: StringMap) -> None:
-        """
-        TC-H3-AUTH-001: No authentication allows all connections.
-
-        Target: Verify HTTP/3 listener without auth accepts all connections
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-
-        try:
-            cert_path = shared_test_certs["cert_path"]
-            key_path = shared_test_certs["key_path"]
-            # No auth config means no authentication
-            config_path = create_http3_listener_config(
-                proxy_port, cert_path, key_path, temp_dir
-            )
-
-            proxy_proc = start_proxy(config_path)
-
-            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
-
-            # Verify process is running
-            assert proxy_proc.poll() is None, "HTTP/3 listener should be running"
-
-        finally:
-            if proxy_proc:
-                proxy_proc.kill()
-                _ = proxy_proc.wait(timeout=5)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-# ==============================================================================
-# Test cases - 7.5 Error handling scenarios (HTTP/3 specific)
-# ==============================================================================
 
 
 class TestHTTP3ErrorHandling:
@@ -384,11 +238,6 @@ servers:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-# ==============================================================================
-# Test cases - 7.7 Configuration validation scenarios (HTTP/3 specific)
-# ==============================================================================
-
-
 class TestHTTP3ConfigValidation:
     """Test 7.7: HTTP/3 configuration validation scenarios.
 
@@ -565,11 +414,6 @@ servers:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-# ==============================================================================
-# Test cases - 7.4 Graceful Shutdown scenarios (HTTP/3 specific)
-# ==============================================================================
-
-
 class TestHTTP3GracefulShutdown:
     """Test 7.4: HTTP/3 graceful shutdown scenarios."""
 
@@ -610,53 +454,6 @@ class TestHTTP3GracefulShutdown:
                 proxy_proc.terminate()
                 _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_shutdown_with_multiple_workers(self, shared_test_certs: StringMap) -> None:
-        """
-        TC-H3-SHUTDOWN-002: Shutdown with multiple worker threads.
-
-        Target: Verify HTTP/3 listener shuts down gracefully with multiple workers
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-
-        try:
-            cert_path = shared_test_certs["cert_path"]
-            key_path = shared_test_certs["key_path"]
-            config_path = create_http3_listener_config(
-                proxy_port,
-                cert_path,
-                key_path,
-                temp_dir,
-                server_threads=4,
-            )
-
-            proxy_proc = start_proxy(config_path)
-
-            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
-
-            proxy_proc.send_signal(signal.SIGTERM)
-
-            try:
-                return_code = proxy_proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                proxy_proc.kill()
-                _ = proxy_proc.wait()
-                assert False, "Process did not exit within expected time"
-
-            assert return_code == 0, f"Expected exit code 0, got {return_code}"
-
-        finally:
-            if proxy_proc and proxy_proc.poll() is None:
-                proxy_proc.terminate()
-                _ = proxy_proc.wait(timeout=5)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-# ==============================================================================
-# Test cases - Service delegation scenarios (for refactoring)
-# ==============================================================================
 
 
 class TestHTTP3EchoService:

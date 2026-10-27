@@ -1,5 +1,5 @@
 """module: h3_connection; responsibility: probe H3 TLS authentication.
-Public operations: perform_h3_connection_test, perform_h3_tls_client_cert_test.
+Public operations: perform_h3_connection_test.
 Data entities: none. Tests: h3_connection_tests.py, TLS process contracts.
 """
 
@@ -38,26 +38,4 @@ async def perform_h3_connection_test(
 ) -> tuple[bool, int, str]:
     return await _probe(
         H3Client(host, port, ca_path=ca_path, server_hostname=server_hostname), timeout
-    )
-
-
-async def perform_h3_tls_client_cert_test(
-    proxy_host: str,
-    proxy_port: int,
-    ca_path: str,
-    client_cert_path: str,
-    client_key_path: str,
-    timeout: float = 10.0,
-    server_hostname: str | None = None,
-) -> tuple[bool, int, str]:
-    return await _probe(
-        H3Client(
-            proxy_host,
-            proxy_port,
-            ca_path=ca_path,
-            cert_path=client_cert_path,
-            key_path=client_key_path,
-            server_hostname=server_hostname,
-        ),
-        timeout,
     )

@@ -91,10 +91,12 @@ def test_socks5_selects_offered_method_and_authenticates_only_connect(
                     origin = target.accept()[0]
                     with origin:
                         origin.settimeout(2)
-                        client.sendall(b"upload")
-                        assert _receive_exact(origin, 6) == b"upload"
-                        origin.sendall(b"response")
-                        assert _receive_exact(client, 8) == b"response"
+                        for payload in (b"upload", b"\x00\xffnext", b"last"):
+                            client.sendall(payload)
+                            assert _receive_exact(origin, len(payload)) == payload
+                            response = b"response:" + payload
+                            origin.sendall(response)
+                            assert _receive_exact(client, len(response)) == response
                 else:
                     if accepted:
                         reply = socks5_connect_ipv4(client, "127.0.0.1", target_port)

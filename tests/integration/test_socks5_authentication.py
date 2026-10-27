@@ -17,54 +17,6 @@ from tests.fixtures.tcp_peer import create_target_server, send_ok_and_close
 class TestSocks5HandshakeTimeout:
     """Tests for SOCKS5 handshake timeout behavior"""
 
-    def test_handshake_timeout_no_data(self) -> None:
-        """
-        TC-S5-007: Handshake timeout - no data sent
-
-        Test that connection is closed after timeout when client
-        sends no data. No response should be sent.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-
-        try:
-            # Use 0.5 second timeout for faster test
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, handshake_timeout="0.5s"
-            )
-
-            proxy_proc = start_proxy(config_path)
-            assert proxy_proc.wait_ready(timeout=2.0), "Proxy server failed to start"
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(3.0)
-            try:
-                sock.connect(("127.0.0.1", proxy_port))
-
-                # Don't send anything, wait for timeout
-                start_time = time.monotonic()
-                try:
-                    data = sock.recv(1024)
-                    # If we receive data, it should be connection close
-                    assert len(data) == 0, (
-                        "Expected connection close, not response data"
-                    )
-                except socket.timeout:
-                    pass
-
-                elapsed = time.monotonic() - start_time
-                # Should timeout around 0.5 seconds
-                assert elapsed >= 0.3, f"Timeout too fast: {elapsed}s (expected ~0.5s)"
-
-            finally:
-                sock.close()
-
-        finally:
-            if proxy_proc:
-                terminate_process(proxy_proc, timeout=0.5, force=True)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
     def test_handshake_timeout_partial_data(self) -> None:
         """
         TC-S5-008: Handshake timeout - partial data sent
@@ -155,6 +107,50 @@ class TestSocks5HandshakeTimeout:
         finally:
             if proxy_proc:
                 terminate_process(proxy_proc, timeout=0.5, force=True)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_handshake_timeout_default(self) -> None:
+        """
+        TC-S5-039: Handshake timeout default value
+
+        Test that default handshake timeout is 3 seconds.
+        """
+        temp_dir = tempfile.mkdtemp()
+        proxy_port = get_unique_port()
+        proxy_proc: BytesProcess | None = None
+
+        try:
+            # No handshake_timeout specified, should use default 3s
+            config_path = create_socks5_config(proxy_port, temp_dir)
+
+            proxy_proc = start_proxy(config_path)
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(10.0)
+            try:
+                sock.connect(("127.0.0.1", proxy_port))
+
+                # Don't send anything, wait for timeout
+                start_time = time.monotonic()
+                try:
+                    data = sock.recv(1024)
+                    assert len(data) == 0, "Expected connection close"
+                except socket.timeout:
+                    pass
+
+                elapsed = time.monotonic() - start_time
+                # Default should be around 3 seconds
+                assert 2.0 <= elapsed <= 6.0, (
+                    f"Timeout not matching default: {elapsed}s (expected ~3s)"
+                )
+
+            finally:
+                sock.close()
+
+        finally:
+            if proxy_proc:
+                terminate_process(proxy_proc)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -399,100 +395,6 @@ class TestSocks5InvalidVersion:
                 ):
                     # Connection reset or timeout is acceptable
                     pass
-
-            finally:
-                sock.close()
-
-        finally:
-            if proxy_proc:
-                terminate_process(proxy_proc)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-class TestSocks5HandshakeTimeoutFormat:
-    """Tests for handshake timeout string format configuration"""
-
-    def test_handshake_timeout_string_format(self) -> None:
-        """
-        TC-S5-038: Handshake timeout string format
-
-        Test that handshake timeout string format (e.g., "0.5s") is correctly parsed.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-
-        try:
-            # Use 0.5 second timeout in string format to verify parsing works
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, handshake_timeout="0.5s"
-            )
-
-            proxy_proc = start_proxy(config_path)
-            assert proxy_proc.wait_ready(timeout=2.0), "Proxy server failed to start"
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(3.0)
-            try:
-                sock.connect(("127.0.0.1", proxy_port))
-
-                # Don't send anything, wait for timeout
-                start_time = time.monotonic()
-                try:
-                    data = sock.recv(1024)
-                    assert len(data) == 0, "Expected connection close"
-                except socket.timeout:
-                    pass
-
-                elapsed = time.monotonic() - start_time
-                # Should timeout around 0.5 second
-                assert 0.3 <= elapsed <= 1.5, (
-                    f"Timeout not matching config: {elapsed}s (expected ~0.5s)"
-                )
-
-            finally:
-                sock.close()
-
-        finally:
-            if proxy_proc:
-                terminate_process(proxy_proc, timeout=0.5, force=True)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_handshake_timeout_default(self) -> None:
-        """
-        TC-S5-039: Handshake timeout default value
-
-        Test that default handshake timeout is 3 seconds.
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-
-        try:
-            # No handshake_timeout specified, should use default 3s
-            config_path = create_socks5_config(proxy_port, temp_dir)
-
-            proxy_proc = start_proxy(config_path)
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
-            try:
-                sock.connect(("127.0.0.1", proxy_port))
-
-                # Don't send anything, wait for timeout
-                start_time = time.monotonic()
-                try:
-                    data = sock.recv(1024)
-                    assert len(data) == 0, "Expected connection close"
-                except socket.timeout:
-                    pass
-
-                elapsed = time.monotonic() - start_time
-                # Default should be around 3 seconds
-                assert 2.0 <= elapsed <= 6.0, (
-                    f"Timeout not matching default: {elapsed}s (expected ~3s)"
-                )
 
             finally:
                 sock.close()

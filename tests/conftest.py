@@ -16,8 +16,8 @@ from tests.fixtures.curl_capability import check_http3_proxy
 
 
 def pytest_xdist_auto_num_workers() -> int:
-    """Bound parallel process scenarios to four available CPUs."""
-    return min(4, os.process_cpu_count() or 1)
+    """Use up to eight available CPUs for independent process scenarios."""
+    return min(8, os.process_cpu_count() or 1)
 
 
 def pytest_configure(config: pytest.Config) -> None:

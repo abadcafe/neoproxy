@@ -29,7 +29,7 @@ pythonpath = ["."]
 testpaths = ["tests"]
 python_files = ["*_tests.py", "test_*.py"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short --timeout=60 --timeout-method=thread -n auto --dist=worksteal"
+addopts = "-v --tb=short --timeout=60 --timeout-method=thread -n auto --dist=worksteal --durations=20 --durations-min=0.5"
 
 [tool.ruff]
 target-version = "py314"

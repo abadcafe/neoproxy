@@ -10,6 +10,7 @@ import socket
 import time
 from collections.abc import Iterator
 from contextlib import ExitStack
+from pathlib import Path
 
 from .binary import PROJECT_ROOT
 
@@ -54,6 +55,17 @@ def wait_for_port_released(
     return False
 
 
+def _listener_port_range() -> range:
+    kernel_range = Path("/proc/sys/net/ipv4/ip_local_port_range")
+    if not kernel_range.is_file():
+        return range(1024, 32768)
+    first, last = (int(value) for value in kernel_range.read_text().split())
+    # Keep listener candidates outside automatic client source-port allocation.
+    # Choose the larger unprivileged range so concurrent tests can keep using
+    # distinct candidates without wrapping frequently.
+    return max(range(1024, first), range(last + 1, 65536), key=len)
+
+
 def get_unique_port() -> int:
     """
     Get a unique port number for testing.
@@ -68,6 +80,7 @@ def get_unique_port() -> int:
 
     Resource exhaustion fails the fixture's assertion after 100 candidates.
     """
+    candidates = _listener_port_range()
     # Probing alone cannot stop independent workers returning the same
     # still-unbound candidate. Share the counter across test processes.
     counter_path = PROJECT_ROOT / "tmp" / "test-port-counter"
@@ -76,9 +89,9 @@ def get_unique_port() -> int:
         fcntl.flock(counter, fcntl.LOCK_EX)
         _ = counter.seek(0)
         saved = counter.read().strip()
-        port = int(saved) if saved else 28000
+        port = int(saved) if saved else candidates.start - 1
         for _ in range(100):  # Limit attempts to avoid infinite loop
-            port = port + 1 if port < 65534 else 28001
+            port = port + 1 if port + 1 in candidates else candidates.start
 
             try:
                 with ExitStack() as probes:

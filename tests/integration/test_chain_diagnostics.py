@@ -1,5 +1,6 @@
-"""Timeout evidence is an executable contract of the original chain fixture."""
+"""Durable evidence and stage timing contracts of the shared chain fixture."""
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -7,10 +8,11 @@ from pydantic import BaseModel
 
 from tests.fixtures.access_log_configuration import enable_access_log
 from tests.fixtures.chain_diagnostics import record_chain
-from tests.fixtures.chain_scenario import ChainRequest, run_proxy_chain_test
-from tests.fixtures.configuration import JsonValue, StringMap
+from tests.fixtures.configuration import JsonValue
 from tests.fixtures.forward_scenario import ForwardNode, write_forward_node
 from tests.fixtures.http_echo import http_echo_handler
+from tests.fixtures.matrix_model import AuthCase, CertificateFiles, ChainCase
+from tests.fixtures.matrix_scenario import run_exchange
 from tests.fixtures.ports import get_unique_port
 from tests.fixtures.tcp_peer import managed_target_servers
 
@@ -30,36 +32,34 @@ def access_records(directory: Path) -> list[AccessRecord]:
 def test_proxy_chain_trace_survives_working_directory_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    shared_test_certs: StringMap,
+    matrix_certificates: CertificateFiles,
 ) -> None:
     root = tmp_path / "artifacts"
     monkeypatch.setenv("NEOPROXY_TEST_ARTIFACTS", str(root))
-    entry, upstream = tmp_path / "entry", tmp_path / "upstream"
-    entry.mkdir()
-    upstream.mkdir()
-    run_proxy_chain_test(
-        entry_type="http",
-        upstream_auth="password",
-        target_type="mock",
-        http_port=get_unique_port(),
-        h3_port=get_unique_port(),
-        target_port=get_unique_port(),
-        temp_dir1=str(upstream),
-        temp_dir2=str(entry),
-        shared_test_certs=shared_test_certs,
-        case=ChainRequest(mode="forward", scheme="http", method="POST"),
+    working = tmp_path / "working"
+    result = run_exchange(
+        working,
+        ChainCase(
+            entry="http", relay="http3", mode="forward", scheme="http", method="POST"
+        ),
+        "local",
+        matrix_certificates,
+        entry_auth=AuthCase(hop="entry", policy="password"),
+        relay_auth=AuthCase(hop="relay", policy="password"),
     )
-    assert not entry.exists() and not upstream.exists()
+    assert result.returncode == 0, result.stderr
+    shutil.rmtree(working)
+    assert not working.exists()
     captures = list(root.iterdir())
     assert len(captures) == 1
     capture = captures[0]
-    assert (capture / "entry/curl.body").read_bytes() == b"test_data_chain"
+    assert (capture / "entry/curl.body").read_bytes() == result.sent_body
     assert (capture / "curl.metrics.json").is_file()
     entry_logs = "".join(
         path.read_text() for path in (capture / "entry/logs").glob("neoproxy.log*")
     )
     upstream_logs = "".join(
-        path.read_text() for path in (capture / "upstream/logs").glob("neoproxy.log*")
+        path.read_text() for path in (capture / "relay/logs").glob("neoproxy.log*")
     )
     assert "H3 response content received" in entry_logs
     assert "H3 request content sent" in entry_logs
@@ -67,7 +67,7 @@ def test_proxy_chain_trace_survives_working_directory_cleanup(
     assert "origin_connect" not in upstream_logs
     assert "origin TCP connected" not in upstream_logs
     entry_access = access_records(capture / "entry")
-    upstream_access = access_records(capture / "upstream")
+    upstream_access = access_records(capture / "relay")
     assert len(entry_access) == len(upstream_access) == 1
     assert (
         entry_access[0].extensions["request.id"]
@@ -137,3 +137,25 @@ def test_chain_capture_records_loopback_tcp_stage_timings(tmp_path: Path) -> Non
     assert "upstream.dns.duration_ms" not in records[0].extensions
     assert "upstream.dns.addresses" not in records[0].extensions
     assert isinstance(records[0].extensions["upstream.tcp.connect_ms"], int)
+
+
+def test_local_matrix_closes_quic_without_shutdown_deadline(
+    tmp_path: Path,
+    matrix_certificates: CertificateFiles,
+) -> None:
+    """Ordinary matrix cleanup must finish gracefully without a 3s abort."""
+    result = run_exchange(
+        tmp_path,
+        ChainCase(entry="http3", relay="http3"),
+        "local",
+        matrix_certificates,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.body == b"matrix-origin"
+    for role in ("entry", "relay"):
+        logs = "".join(
+            path.read_text()
+            for path in (tmp_path / role / "logs").glob("neoproxy.log*")
+        )
+        assert "shutdown complete" in logs
+        assert "transport shutdown timed out" not in logs

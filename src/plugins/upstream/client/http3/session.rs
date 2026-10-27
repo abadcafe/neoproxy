@@ -359,7 +359,7 @@ async fn establish_http3_connection(
     h3::client::new(h3_quinn::Connection::new(quinn_conn.clone()))
       .await
       .map_err(|e| {
-        UpstreamError::ProxyInternalError(format!(
+        UpstreamError::ConnectionTerminated(format!(
           "H3 connection setup to {address} failed: {e}"
         ))
       })?;

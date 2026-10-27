@@ -61,3 +61,75 @@ async fn test_session_pool_drop_cancels_maintenance_after_failed_handshake()
     })
     .await;
 }
+
+#[tokio::test]
+async fn test_session_pool_peer_closure_during_h3_setup_is_bad_gateway()
+{
+  use crate::plugins::upstream::error::UpstreamError;
+
+  let identity =
+    rcgen::generate_simple_self_signed(vec!["localhost".into()])
+      .unwrap();
+  let certificate = identity.cert.der().clone();
+  let key = rustls::pki_types::PrivatePkcs8KeyDer::from(
+    identity.key_pair.serialize_der(),
+  );
+  let provider = Arc::new(rustls::crypto::ring::default_provider());
+  let mut server_tls =
+    rustls::ServerConfig::builder_with_provider(provider.clone())
+      .with_safe_default_protocol_versions()
+      .unwrap()
+      .with_no_client_auth()
+      .with_single_cert(vec![certificate.clone()], key.into())
+      .unwrap();
+  server_tls.alpn_protocols = vec![b"h3".to_vec()];
+  let mut server = quinn::ServerConfig::with_crypto(Arc::new(
+    quinn::crypto::rustls::QuicServerConfig::try_from(server_tls)
+      .unwrap(),
+  ));
+  // Hold H3 control-stream creation pending after the QUIC handshake.
+  Arc::get_mut(&mut server.transport)
+    .unwrap()
+    .max_concurrent_uni_streams(0_u32.into());
+  let endpoint =
+    quinn::Endpoint::server(server, "127.0.0.1:0".parse().unwrap())
+      .unwrap();
+  let mut roots = rustls::RootCertStore::empty();
+  roots.add(certificate).unwrap();
+  let tls = rustls::ClientConfig::builder_with_provider(provider)
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+  tokio::task::LocalSet::new().run_until(async {
+    let peer = tokio::task::spawn_local({
+      let endpoint = endpoint.clone();
+      async move {
+        let connection = endpoint.accept().await.unwrap().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        connection.close(0_u32.into(), b"reject H3 setup");
+      }
+    });
+    let tracker = Rc::new(StreamTracker::new());
+    let pool = SessionPool::new(
+      endpoint.local_addr().unwrap(), Some("localhost".into()),
+      QuicConfig {
+        max_idle_timeout: None, keep_alive_interval: Duration::from_secs(3),
+        max_concurrent_bidi_streams: None, initial_mtu: None,
+        send_window: None, receive_window: None,
+      },
+      Duration::from_secs(2), Default::default(),
+    );
+    let result = pool.open(
+      http::Request::builder().uri("https://localhost/").body(()).unwrap(),
+      &tls, &tracker,
+    ).await;
+    let Err(error) = result else { panic!("peer rejection unexpectedly succeeded") };
+    assert!(matches!(&error, UpstreamError::ConnectionTerminated(message) if message.contains("H3 connection setup")), "{error}");
+    assert_eq!(error.http_status(), http::StatusCode::BAD_GATEWAY);
+    peer.await.unwrap();
+    drop(pool);
+    tracker.drain().await;
+    endpoint.close(0_u32.into(), b"done");
+  }).await;
+}

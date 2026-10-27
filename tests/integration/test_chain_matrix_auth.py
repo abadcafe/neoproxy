@@ -46,7 +46,14 @@ def test_two_hop_authentication(
     case: ChainCase,
     auth: AuthCase,
 ) -> None:
-    result = run_exchange(tmp_path, case, "local", matrix_certificates, auth)
+    result = run_exchange(
+        tmp_path,
+        case,
+        "local",
+        matrix_certificates,
+        entry_auth=auth if auth.hop == "entry" else None,
+        relay_auth=auth if auth.hop == "relay" else None,
+    )
     if auth.fault == "none":
         assert result.returncode == 0, result.stderr
         assert result.http_status == 200

@@ -36,6 +36,7 @@ class Exchange:
     entry_logs: list[AccessEntry]
     relay_logs: list[AccessEntry]
     origin_requests: list[OriginRequest]
+    elapsed: float
 
 
 def read_access(directory: Path) -> list[AccessEntry]:

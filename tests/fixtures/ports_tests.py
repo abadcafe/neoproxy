@@ -6,6 +6,7 @@ import sys
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 from pydantic import TypeAdapter
@@ -96,3 +97,13 @@ def test_get_unique_port_avoids_udp_ports_already_in_use() -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
         listener.bind(("0.0.0.0", previous + 1))
         assert get_unique_port() != previous + 1
+
+
+def test_get_unique_port_excludes_kernel_ephemeral_client_ports() -> None:
+    port = get_unique_port()
+    kernel_range = Path("/proc/sys/net/ipv4/ip_local_port_range")
+    if kernel_range.is_file():
+        first, last = (int(value) for value in kernel_range.read_text().split())
+        assert not first <= port <= last
+    else:
+        assert 1024 <= port < 32768

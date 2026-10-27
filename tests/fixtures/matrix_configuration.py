@@ -13,8 +13,10 @@ def supplied_user(auth: AuthCase | None) -> ConfigDict | None:
     if auth is None or not auth.password_required or auth.fault == "missing_password":
         return None
     return {
-        "username": "matrix-user",
-        "password": "wrong" if auth.fault == "wrong_password" else "matrix-password",
+        "username": f"matrix-{auth.hop}",
+        "password": "wrong"
+        if auth.fault == "wrong_password"
+        else f"{auth.hop}-password",
     }
 
 
@@ -42,6 +44,7 @@ def write_node(
     next_peer: tuple[ProxyProtocol, int] | None = None,
     next_auth: AuthCase | None = None,
     tunnel_idle_timeout: str = "10s",
+    quic_idle_timeout: str = "5s",
 ) -> str:
     directory.mkdir(parents=True, exist_ok=True)
     upstream: ConfigDict = {"name": "route"}
@@ -51,6 +54,7 @@ def write_node(
         address: ConfigDict = {
             "address": f"127.0.0.1:{next_port}",
             "address_protocol": kind,
+            "tunnel_idle_timeout": tunnel_idle_timeout,
         }
         if (user := supplied_user(next_auth)) is not None:
             address["user"] = user
@@ -63,6 +67,8 @@ def write_node(
             "args": {
                 "writer": "logs/access",
                 "context_fields": [
+                    "request.id",
+                    "upstream.tcp.connect_ms",
                     "upstream.protocol",
                     "upstream.connection.peer",
                     "upstream.error.kind",
@@ -74,7 +80,9 @@ def write_node(
         "upstream": {
             "certificates": trust,
             "upstream_request_timeout": "10s",
-            "tunnel_idle_timeout": tunnel_idle_timeout,
+            "tunnel_idle_timeout": "10s"
+            if next_peer is not None
+            else tunnel_idle_timeout,
             "upstreams": [upstream],
         },
         "access_log": {
@@ -94,7 +102,10 @@ def write_node(
                 "kind": "auth.basic_auth",
                 "args": {
                     "users": [
-                        {"username": "matrix-user", "password": "matrix-password"}
+                        {
+                            "username": f"matrix-{listener_auth.hop}",
+                            "password": f"{listener_auth.hop}-password",
+                        }
                     ],
                 },
             }
@@ -109,12 +120,17 @@ def write_node(
         if listener_auth is not None and listener_auth.certificate_required:
             tls["client_ca_certs"] = [certs.ca]
         server["tls"] = tls
+    listener: ConfigDict = {
+        "name": "main",
+        "kind": protocol,
+        "addresses": [f"127.0.0.1:{port}"],
+    }
+    if protocol == "http3":
+        listener["args"] = {"quic": {"max_idle_timeout": quic_idle_timeout}}
     config: ConfigDict = {
         "server_threads": 1,
         "plugins": plugins,
-        "listeners": [
-            {"name": "main", "kind": protocol, "addresses": [f"127.0.0.1:{port}"]}
-        ],
+        "listeners": [listener],
         "services": [
             {
                 "name": "main",

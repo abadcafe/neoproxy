@@ -42,43 +42,6 @@ from tests.fixtures.tcp_peer import create_target_server
 class TestHTTP3ChainProxy:
     """Test 7.2: HTTP/3 Chain proxy scenarios."""
 
-    def test_http3_chain_config_valid(self, shared_test_certs: StringMap) -> None:
-        """
-        TC-CHAIN-001: HTTP/3 Chain configuration is valid.
-
-        Target: Verify http3_chain service starts with valid configuration
-        """
-        temp_dir = tempfile.mkdtemp()
-        http_port = get_unique_port()
-        h3_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-
-        try:
-            ca_path = shared_test_certs["ca_path"]
-
-            # Create http3_chain config pointing to a non-existent H3 listener
-            # The service should still start, it will try to connect on demand
-            config_path = create_http3_chain_config(
-                http_port=http_port,
-                proxy_group=[("127.0.0.1", h3_port, 1)],
-                ca_path=ca_path,
-                temp_dir=temp_dir,
-            )
-
-            proxy_proc = start_proxy(config_path)
-
-            # Wait for HTTP listener
-            assert proxy_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
-
-            # Verify process is running
-            assert proxy_proc.poll() is None, "HTTP/3 chain service should be running"
-
-        finally:
-            if proxy_proc:
-                proxy_proc.kill()
-                _ = proxy_proc.wait(timeout=5)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
     def test_http3_chain_graceful_shutdown(self, shared_test_certs: StringMap) -> None:
         """
         TC-CHAIN-002: HTTP/3 Chain graceful shutdown.
@@ -234,88 +197,6 @@ servers:
                 _ = proc.wait(timeout=2)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_http3_chain_data_transmission(self, shared_test_certs: StringMap) -> None:
-        """
-        TC-CHAIN-DATA-001: HTTP/3 Chain data transmission.
-
-        Target: Verify data can be transmitted through HTTP/3 chain to a target server.
-        """
-        temp_dir1 = tempfile.mkdtemp()
-        temp_dir2 = tempfile.mkdtemp()
-
-        http_port = get_unique_port()
-        h3_port = get_unique_port()
-        target_port = get_unique_port()
-
-        chain_proc: BytesProcess | None = None
-        h3_proc: BytesProcess | None = None
-        target_socket: socket.socket | None = None
-
-        try:
-            cert_path = shared_test_certs["cert_path"]
-            key_path = shared_test_certs["key_path"]
-            ca_path = shared_test_certs["ca_path"]
-
-            # Create target echo server (HTTP response for curl compatibility)
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, http_echo_handler
-            )
-
-            # Start HTTP/3 listener
-            h3_config = create_http3_listener_config(
-                proxy_port=h3_port,
-                cert_path=cert_path,
-                key_path=key_path,
-                temp_dir=temp_dir1,
-            )
-            h3_proc = start_proxy(h3_config)
-            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
-
-            # Start chain service
-            chain_config = create_http3_chain_config(
-                http_port=http_port,
-                proxy_group=[("127.0.0.1", h3_port, 1)],
-                ca_path=ca_path,
-                temp_dir=temp_dir2,
-            )
-            chain_proc = start_proxy(chain_config)
-            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
-
-            # Test data transmission using curl
-            result = subprocess.run(
-                [
-                    "curl",
-                    "-s",
-                    "-p",
-                    "-x",
-                    f"http://127.0.0.1:{http_port}",
-                    f"http://127.0.0.1:{target_port}/",
-                    "-d",
-                    "test_data_through_chain",
-                    "--connect-timeout",
-                    "10",
-                ],
-                capture_output=True,
-                text=True,
-            )
-
-            assert "test_data_through_chain" in result.stdout, (
-                f"Expected echo data, got stdout: {result.stdout}, stderr:"
-                + f" {result.stderr}"
-            )
-
-        finally:
-            if chain_proc:
-                chain_proc.kill()
-                _ = chain_proc.wait(timeout=5)
-            if h3_proc:
-                h3_proc.kill()
-                _ = h3_proc.wait(timeout=5)
-            if target_socket:
-                target_socket.close()
-            shutil.rmtree(temp_dir1, ignore_errors=True)
-            shutil.rmtree(temp_dir2, ignore_errors=True)
-
 
 # ==============================================================================
 # Test cases - Full proxy chain (HTTP -> HTTP/3 -> Target)
@@ -324,62 +205,6 @@ servers:
 
 class TestFullProxyChain:
     """Test complete proxy chain scenarios."""
-
-    def test_full_chain_starts_successfully(self, shared_test_certs: StringMap) -> None:
-        """
-        TC-FULL-CHAIN-001: Full proxy chain starts successfully.
-
-        Target: Verify both HTTP/3 listener and chain service can start together
-        """
-        temp_dir1 = tempfile.mkdtemp()
-        temp_dir2 = tempfile.mkdtemp()
-
-        http_port = get_unique_port()
-        h3_port = get_unique_port()
-
-        chain_proc: BytesProcess | None = None
-        h3_proc: BytesProcess | None = None
-
-        try:
-            cert_path = shared_test_certs["cert_path"]
-            key_path = shared_test_certs["key_path"]
-            ca_path = shared_test_certs["ca_path"]
-
-            # Create HTTP/3 listener (machine 2)
-            h3_config = create_http3_listener_config(
-                proxy_port=h3_port,
-                cert_path=cert_path,
-                key_path=key_path,
-                temp_dir=temp_dir1,
-            )
-            h3_proc = start_proxy(h3_config)
-
-            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
-
-            # Create HTTP/3 chain service (machine 1)
-            chain_config = create_http3_chain_config(
-                http_port=http_port,
-                proxy_group=[("127.0.0.1", h3_port, 1)],
-                ca_path=ca_path,
-                temp_dir=temp_dir2,
-            )
-            chain_proc = start_proxy(chain_config)
-
-            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
-
-            # Both should be running
-            assert h3_proc.poll() is None, "H3 listener should be running"
-            assert chain_proc.poll() is None, "Chain service should be running"
-
-        finally:
-            if chain_proc:
-                chain_proc.kill()
-                _ = chain_proc.wait(timeout=5)
-            if h3_proc:
-                h3_proc.kill()
-                _ = h3_proc.wait(timeout=5)
-            shutil.rmtree(temp_dir1, ignore_errors=True)
-            shutil.rmtree(temp_dir2, ignore_errors=True)
 
     def test_full_chain_graceful_shutdown(self, shared_test_certs: StringMap) -> None:
         """

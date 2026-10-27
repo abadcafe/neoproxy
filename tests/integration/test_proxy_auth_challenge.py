@@ -15,11 +15,7 @@ import pytest
 from tests.fixtures.certificates import generate_test_certificates
 from tests.fixtures.h3_request import perform_h3_request_test
 from tests.fixtures.h3_tunnel import perform_h3_connect_test_full
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import start_proxy, terminate_process
 
 type ListenerKind = Literal["http", "https", "http3"]
@@ -66,10 +62,7 @@ servers:
     _ = config.write_text(content)
     process = start_proxy(str(config))
     try:
-        if listener_kind == "http3":
-            assert wait_for_udp_port_bound("127.0.0.1", port, timeout=3, proc=process)
-        else:
-            assert wait_for_proxy("127.0.0.1", port, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         yield port, ca
     finally:
         terminate_process(process, timeout=2, force=True)

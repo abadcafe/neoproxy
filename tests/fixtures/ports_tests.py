@@ -1,34 +1,94 @@
 """Public behavior tests for ports."""
 
-import errno
 import socket
-import threading
+import subprocess
+import sys
 import time
-from unittest.mock import MagicMock, patch
+from contextlib import ExitStack
+from dataclasses import dataclass
+
+import pytest
+from pydantic import TypeAdapter
 
 from tests.fixtures.ports import (
     get_unique_port,
     wait_for_port_released,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
 )
+from tests.fixtures.proxy_process import terminate_process
 
 
-def test_wait_for_proxy_and_release_support_ipv6() -> None:
+@dataclass
+class ProbeClock:
+    elapsed: float = 0
+
+    def monotonic(self) -> float:
+        return self.elapsed
+
+    def sleep(self, duration: float) -> None:
+        self.elapsed += duration
+
+
+def test_wait_for_port_released_caps_wait_to_remaining_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = ProbeClock()
+
+    def connect(address: tuple[str, int], timeout: float) -> socket.socket:
+        assert address == ("127.0.0.1", 12345)
+        assert 0 < timeout <= 0.005
+        return socket.socket()
+
+    monkeypatch.setattr(time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(time, "sleep", clock.sleep)
+    monkeypatch.setattr(socket, "create_connection", connect)
+    assert not wait_for_port_released("127.0.0.1", 12345, timeout=0.005, interval=1)
+    assert clock.elapsed == 0.005
+
+
+def test_get_unique_port_coordinates_independent_processes() -> None:
+    program = """import json
+import sys
+from tests.fixtures.ports import get_unique_port
+
+print('ready', flush=True)
+assert sys.stdin.readline() == 'go\\n'
+ports: list[int] = [get_unique_port() for _ in range(12)]
+print(json.dumps(ports))
+"""
+    with ExitStack() as resources:
+        processes: list[subprocess.Popen[bytes]] = []
+        for _ in range(4):
+            process = resources.enter_context(
+                subprocess.Popen(
+                    [sys.executable, "-c", program],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            )
+            _ = resources.callback(terminate_process, process)
+            assert process.stdout is not None
+            assert process.stdout.readline() == b"ready\n"
+            processes.append(process)
+        for process in processes:
+            assert process.stdin is not None
+            _ = process.stdin.write(b"go\n")
+            process.stdin.flush()
+        allocated: list[int] = []
+        for process in processes:
+            output, errors = process.communicate(timeout=5)
+            assert process.returncode == 0, errors.decode()
+            allocated.extend(TypeAdapter(list[int]).validate_json(output))
+        assert len(allocated) == len(set(allocated)) == 48
+
+
+def test_wait_for_port_released_supports_ipv6() -> None:
     port = get_unique_port()
     with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as listener:
         listener.bind(("::1", port))
         listener.listen()
-        assert wait_for_proxy("::1", port, timeout=0.1)
         assert not wait_for_port_released("::1", port, timeout=0.05, interval=0.01)
     assert wait_for_port_released("::1", port, timeout=0.1)
-
-
-def test_wait_for_udp_port_bound_supports_ipv6() -> None:
-    port = get_unique_port()
-    with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as listener:
-        listener.bind(("::1", port))
-        assert wait_for_udp_port_bound("::1", port, timeout=0.1)
 
 
 def test_get_unique_port_avoids_udp_ports_already_in_use() -> None:
@@ -36,95 +96,3 @@ def test_get_unique_port_avoids_udp_ports_already_in_use() -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
         listener.bind(("0.0.0.0", previous + 1))
         assert get_unique_port() != previous + 1
-
-
-class TestWaitForUdpPortBound:
-    """Tests for wait_for_udp_port_bound function."""
-
-    def test_returns_true_when_port_is_bound(self) -> None:
-        """Should return True when a UDP port is bound by another process."""
-        port = 54321
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind(("127.0.0.1", port))
-
-        try:
-            result = wait_for_udp_port_bound("127.0.0.1", port, timeout=1.0)
-            assert result is True
-        finally:
-            sock.close()
-
-    def test_returns_false_when_port_not_bound(self) -> None:
-        """Should return False when port is never bound within timeout."""
-        # Use a port that's unlikely to be bound
-        port = 59999
-        result = wait_for_udp_port_bound("127.0.0.1", port, timeout=0.5)
-        assert result is False
-
-    def test_detects_port_bound_during_wait(self) -> None:
-        """Should detect port becoming bound during the wait period."""
-        port = 54322
-        bound_event = threading.Event()
-
-        def bind_later() -> None:
-            time.sleep(0.2)
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.bind(("127.0.0.1", port))
-            bound_event.set()
-            # Keep socket open until test completes
-            time.sleep(2)
-            sock.close()
-
-        thread = threading.Thread(target=bind_later, daemon=True)
-        thread.start()
-
-        result = wait_for_udp_port_bound("127.0.0.1", port, timeout=2.0)
-        assert result is True
-        assert bound_event.is_set()
-
-    def test_returns_false_for_permission_denied(self) -> None:
-        """Should return False (not True) when OSError is EACCES (permission denied).
-
-        This tests CR-001: The function should only return True for EADDRINUSE,
-        not for other OSErrors like permission denied.
-        """
-        with patch("socket.socket") as mock_socket:
-            mock_sock = MagicMock()
-            mock_socket_factory = MagicMock(return_value=mock_sock)
-            mock_socket.side_effect = mock_socket_factory
-
-            # Simulate permission denied error
-            mock_bind = MagicMock(
-                side_effect=OSError(errno.EACCES, "Permission denied")
-            )
-            mock_sock.bind = mock_bind
-
-            result = wait_for_udp_port_bound("127.0.0.1", 12345, timeout=0.5)
-            # Should return False (timeout), not True (incorrectly treating as "port in
-            # use")
-            assert result is False
-
-    def test_returns_false_for_address_not_available(self) -> None:
-        """Should return False when OSError is EADDRNOTAVAIL (address not available).
-
-        This tests CR-001: The function should only return True for EADDRINUSE,
-        not for other OSErrors like address not available.
-        """
-        with patch("socket.socket") as mock_socket:
-            mock_sock = MagicMock()
-            mock_socket_factory = MagicMock(return_value=mock_sock)
-            mock_socket.side_effect = mock_socket_factory
-
-            # Simulate address not available error
-            mock_bind = MagicMock(
-                side_effect=OSError(
-                    errno.EADDRNOTAVAIL, "Cannot assign requested address"
-                )
-            )
-            mock_sock.bind = mock_bind
-
-            result = wait_for_udp_port_bound(
-                "invalid.host.that.does.not.exist", 12345, timeout=0.5
-            )
-            # Should return False (timeout), not True (incorrectly treating as "port in
-            # use")
-            assert result is False

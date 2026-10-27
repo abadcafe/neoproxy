@@ -13,11 +13,7 @@ import pytest
 
 from tests.fixtures.certificates import generate_test_certificates
 from tests.fixtures.http3_client import H3Client
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import start_proxy, terminate_process
 
 
@@ -28,10 +24,11 @@ class TLSMaterial:
     ca: str
 
 
-@pytest.fixture
-def tls_material(tmp_path: Path) -> TLSMaterial:
+@pytest.fixture(scope="module")
+def tls_material(tmp_path_factory: pytest.TempPathFactory) -> TLSMaterial:
+    directory = tmp_path_factory.mktemp("client-ca-material")
     certificate, key, ca, _ = generate_test_certificates(
-        str(tmp_path), san_entries=["localhost", "a.test", "b.test"]
+        str(directory), san_entries=["localhost", "a.test", "b.test"]
     )
     return TLSMaterial(certificate, key, ca)
 
@@ -102,7 +99,7 @@ def test_empty_ca_list_allows_anonymous_requests(
     process = start_proxy(str(config))
     try:
         if kind == "http3":
-            assert wait_for_udp_port_bound("127.0.0.1", port, proc=process)
+            assert process.wait_ready(timeout=5.0)
             assert (
                 asyncio.run(
                     _request_h3_without_client_certificate(port, tls_material.ca)
@@ -110,7 +107,7 @@ def test_empty_ca_list_allows_anonymous_requests(
                 == 200
             )
         else:
-            assert wait_for_proxy("127.0.0.1", port, proc=process)
+            assert process.wait_ready(timeout=5.0)
             context = ssl.create_default_context(cafile=tls_material.ca)
             with socket.create_connection(("127.0.0.1", port), timeout=5) as tcp:
                 with context.wrap_socket(tcp, server_hostname="localhost") as tls:

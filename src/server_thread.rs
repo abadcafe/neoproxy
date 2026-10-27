@@ -134,6 +134,7 @@ pub(crate) fn run_server_thread(
     Arc<crate::plugins::access_log::registry::WriterRegistry>,
   >,
   mut worker: WorkerShutdown,
+  mut readiness: crate::startup::WorkerReadiness,
   thread_id: usize,
 ) -> Result<()> {
   let shutdown = worker.shutdown_handle();
@@ -167,23 +168,41 @@ pub(crate) fn run_server_thread(
         }
       };
     let mut join_set = task::JoinSet::new();
-    for listener in &listeners {
-      join_set.spawn_local(listener.start());
-    }
     let mut failure = None;
-    tokio::select! {
-      _ = shutdown.notified() => {},
-      result = join_set.join_next(), if !join_set.is_empty() => {
-        // Notify peers before cleanup/rendezvous. Waiting until this
-        // thread returns would leave peers running while it waits for them.
-        shutdown.shutdown();
-        failure = match result {
-          Some(Ok(Err(error))) => Some(error),
-          Some(Err(error)) => Some(error.into()),
-          _ => Some(anyhow::anyhow!("listener stopped unexpectedly")),
-        };
+    for listener in &listeners {
+      match listener.start() {
+        Ok(running) => {
+          join_set.spawn_local(running);
+        }
+        Err(error) => {
+          failure = Some(error);
+          break;
+        }
       }
     }
+    if failure.is_none()
+      && let Err(error) = readiness.mark_ready()
+    {
+      failure = Some(error.into());
+    }
+    if failure.is_some() {
+      shutdown.shutdown();
+    } else {
+      tokio::select! {
+        _ = shutdown.notified() => {},
+        result = join_set.join_next(), if !join_set.is_empty() => {
+          // Notify peers before cleanup/rendezvous. Waiting until this
+          // thread returns would leave peers running while it waits for them.
+          shutdown.shutdown();
+          failure = match result {
+            Some(Ok(Err(error))) => Some(error),
+            Some(Err(error)) => Some(error.into()),
+            _ => Some(anyhow::anyhow!("listener stopped unexpectedly")),
+          };
+        }
+      }
+    }
+    drop(readiness);
     // Stop acceptance and let each protocol driver drain its exchanges,
     // including streamed response bodies, within the listener budget.
     // Keep upstream plugin resources alive until those drivers finish.

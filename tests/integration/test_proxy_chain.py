@@ -36,11 +36,7 @@ from tests.fixtures.chain_scenario import (
     run_proxy_chain_test,
 )
 from tests.fixtures.configuration import StringMap
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy
 
 type TargetScheme = Literal["http", "https"]
@@ -321,7 +317,7 @@ class TestNegativeAuthHTTPEntry:
                 h3_port, cert_path, key_path, temp_dir1
             )
             upstream_proc = start_proxy(upstream_config)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
+            assert upstream_proc.wait_ready(timeout=5.0), (
                 "Upstream HTTP/3 listener failed to start"
             )
 
@@ -330,7 +326,7 @@ class TestNegativeAuthHTTPEntry:
                 http_port, h3_port, ca_path, temp_dir2
             )
             entry_proc = start_proxy(entry_config)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
+            assert entry_proc.wait_ready(timeout=5.0), (
                 "Entry HTTP listener failed to start"
             )
 
@@ -402,7 +398,7 @@ class TestNegativeAuthHTTPEntry:
                 h3_port, cert_path, key_path, temp_dir1
             )
             upstream_proc = start_proxy(upstream_config)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
+            assert upstream_proc.wait_ready(timeout=5.0), (
                 "Upstream HTTP/3 listener failed to start"
             )
 
@@ -411,7 +407,7 @@ class TestNegativeAuthHTTPEntry:
                 http_port, h3_port, ca_path, temp_dir2
             )
             entry_proc = start_proxy(entry_config)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
+            assert entry_proc.wait_ready(timeout=5.0), (
                 "Entry HTTP listener failed to start"
             )
 
@@ -483,7 +479,7 @@ class TestNegativeAuthSOCKS5Entry:
                 h3_port, cert_path, key_path, temp_dir1
             )
             upstream_proc = start_proxy(upstream_config)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
+            assert upstream_proc.wait_ready(timeout=5.0), (
                 "Upstream HTTP/3 listener failed to start"
             )
 
@@ -492,7 +488,7 @@ class TestNegativeAuthSOCKS5Entry:
                 socks5_port, h3_port, ca_path, temp_dir2
             )
             entry_proc = start_proxy(entry_config)
-            assert wait_for_proxy("127.0.0.1", socks5_port, timeout=5.0), (
+            assert entry_proc.wait_ready(timeout=5.0), (
                 "Entry SOCKS5 listener failed to start"
             )
 
@@ -569,7 +565,7 @@ class TestNegativeAuthUpstream:
                 h3_port, cert_path, key_path, temp_dir1
             )
             upstream_proc = start_proxy(upstream_config)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
+            assert upstream_proc.wait_ready(timeout=5.0), (
                 "Upstream HTTP/3 listener failed to start"
             )
 
@@ -578,7 +574,7 @@ class TestNegativeAuthUpstream:
                 http_port, h3_port, ca_path, temp_dir2
             )
             entry_proc = start_proxy(entry_config)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
+            assert entry_proc.wait_ready(timeout=5.0), (
                 "Entry HTTP listener failed to start"
             )
 

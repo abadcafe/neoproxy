@@ -13,7 +13,7 @@ import socket
 import tempfile
 
 from tests.fixtures.http_configuration import create_test_config
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy
 from tests.fixtures.tcp_peer import create_target_server
 
@@ -75,9 +75,7 @@ class TestProxyStatus:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy failed to start"
 
             # Send CONNECT via raw socket to read response headers
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -141,9 +139,7 @@ class TestProxyStatus:
             config_path = create_test_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy failed to start"
 
             # Send CONNECT to an unbound port (will get connection refused)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -230,9 +226,7 @@ servers:
                 _ = f.write(config_content)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy failed to start"
 
             # Send CONNECT to a black-hole address (no route, will timeout)
             # 10.255.255.1 is in TEST-NET-1 reserved range, unlikely to respond
@@ -293,9 +287,7 @@ servers:
             config_path = create_test_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy failed to start"
 
             # Send origin-form GET request (locally rejected → 400, no Proxy-Status)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

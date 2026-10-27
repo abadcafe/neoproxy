@@ -7,7 +7,7 @@ from typing import Literal
 import pytest
 from pydantic import BaseModel
 
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import start_proxy, terminate_process
 from tests.fixtures.socks5_client import (
     socks5_connect_ipv4,
@@ -87,7 +87,7 @@ servers:
         target.settimeout(2)
         process = start_proxy(str(config))
         try:
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=3, proc=process)
+            assert process.wait_ready(timeout=3)
             with socket.create_connection(
                 ("127.0.0.1", proxy_port), timeout=2
             ) as client:

@@ -19,11 +19,7 @@ from aioquic.quic.events import QuicEvent
 from tests.fixtures.certificates import generate_test_certificates
 from tests.fixtures.h3_request import perform_h3_request_with_custom_authority
 from tests.fixtures.http_configuration import create_test_config
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import ProcessFactory, start_proxy, terminate_process
 from tests.fixtures.stream_cleanup import close_writer
 
@@ -64,7 +60,7 @@ servers:
 """)
     process = start_proxy(str(config))
     try:
-        assert wait_for_proxy("127.0.0.1", entry, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         reader, writer = await asyncio.open_connection("127.0.0.1", entry)
         try:
             async with asyncio.timeout(3):
@@ -217,7 +213,7 @@ def test_listener_http_accepts_empty_port_and_rejects_invalid_authority(
 ) -> None:
     port = get_unique_port()
     process = proxy_process(str(_echo_config(tmp_path, port, kind)))
-    assert wait_for_proxy("127.0.0.1", port, timeout=3, proc=process)
+    assert process.wait_ready(timeout=3)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
@@ -253,7 +249,7 @@ def test_listener_h3_accepts_empty_port_and_rejects_invalid_authority(
 ) -> None:
     port = get_unique_port()
     process = proxy_process(str(_echo_config(tmp_path, port, "http3")))
-    assert wait_for_udp_port_bound("127.0.0.1", port, timeout=3, proc=process)
+    assert process.wait_ready(timeout=3)
     for authority, expected in [
         ("example.test:", 200),
         ("[::1]:", 200),
@@ -279,7 +275,7 @@ def test_connect_rejects_missing_empty_and_invalid_ports(
 ) -> None:
     port = get_unique_port()
     process = proxy_process(create_test_config(port, str(tmp_path)))
-    assert wait_for_proxy("127.0.0.1", port, timeout=3, proc=process)
+    assert process.wait_ready(timeout=3)
     for target in [
         "example.test",
         "example.test:",

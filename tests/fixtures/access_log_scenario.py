@@ -14,10 +14,8 @@ import pytest
 
 from tests.fixtures.binary import NEOPROXY_BINARY
 from tests.fixtures.configuration import ConfigDict, JsonValue, dict_to_yaml
+from tests.fixtures.notified_process import ProxyProcess
 from tests.fixtures.ports import get_unique_port
-from tests.fixtures.proxy_process import (
-    BytesProcess,
-)
 
 
 @dataclass(frozen=True)
@@ -104,14 +102,14 @@ def write_config(
     return config_path
 
 
-def start_proxy_with_cwd(config_path: str, cwd: str) -> BytesProcess:
+def start_proxy_with_cwd(config_path: str, cwd: str) -> ProxyProcess:
     """Start proxy with a specific working directory.
 
     The access log writer uses a configurable relative path (logs/access),
     so the proxy's CWD must be set to the test's temp directory.
     """
     binary_path = os.path.abspath(NEOPROXY_BINARY)
-    return subprocess.Popen(
+    return ProxyProcess(
         [binary_path, "--config", config_path],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

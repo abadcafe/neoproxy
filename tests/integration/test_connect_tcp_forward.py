@@ -26,7 +26,7 @@ from pydantic import TypeAdapter
 from tests.fixtures.curl import curl_request_with_headers, get_curl_env_without_no_proxy
 from tests.fixtures.http_configuration import create_test_config
 from tests.fixtures.http_request import send_raw_request
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 from tests.fixtures.tcp_peer import create_target_server
 
@@ -118,9 +118,7 @@ class TestConnectTcpForwardProxy:
         try:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy failed to start"
 
             request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
             response = send_raw_request("127.0.0.1", proxy_port, request)
@@ -148,9 +146,7 @@ class TestConnectTcpForwardProxy:
         try:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy failed to start"
 
             request = b"GET ftp://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n"
             response = send_raw_request("127.0.0.1", proxy_port, request)
@@ -184,9 +180,7 @@ class TestConnectTcpForwardProxy:
 
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy failed to start"
 
             status_code, _resp_headers, body = curl_request_with_headers(
                 url=f"http://127.0.0.1:{target_port}/",
@@ -265,9 +259,7 @@ class TestConnectTcpForwardProxy:
 
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy failed to start"
 
             post_body = b"key=value&foo=bar"
             cmd = [
@@ -332,9 +324,7 @@ class TestConnectTcpForwardProxy:
 
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy failed to start"
 
             request = (
                 f"GET http://127.0.0.1:{dead_port}/ HTTP/1.1\r\nHost:"
@@ -371,9 +361,7 @@ class TestConnectTcpForwardProxy:
 
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy failed to start"
 
             status_code, resp_headers, _ = curl_request_with_headers(
                 url=f"http://127.0.0.1:{target_port}/",
@@ -421,9 +409,7 @@ class TestConnectTcpForwardProxy:
 
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5.0)

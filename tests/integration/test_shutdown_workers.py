@@ -9,7 +9,7 @@ import time
 
 from tests.fixtures.http_configuration import create_test_config
 from tests.fixtures.http_request import establish_connect_tunnel
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy
 from tests.fixtures.tcp_peer import create_target_server
 
@@ -31,9 +31,7 @@ class TestMultipleWorkerThreads:
             config_path = create_test_config(proxy_port, temp_dir, server_threads=4)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -92,9 +90,7 @@ class TestMultipleWorkerThreads:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Establish multiple tunnels
             for _ in range(5):

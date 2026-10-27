@@ -17,10 +17,7 @@ from tests.fixtures.h3_tunnel import (
     perform_h3_connect_test,
     perform_h3_tunnel_data_transfer,
 )
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy
 from tests.fixtures.tcp_peer import create_target_server
 
@@ -68,9 +65,7 @@ class TestHTTP3Performance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Test concurrent connections
             num_connections = 10
@@ -142,9 +137,7 @@ class TestHTTP3Performance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Measure connection latency
             latencies: list[float] = []
@@ -226,9 +219,7 @@ class TestHTTP3Performance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Test throughput with large data transfer
             large_data = b"X" * (100 * 1024)  # 100KB

@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 
 from tests.fixtures.certificates import generate_test_certificates
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 from tests.fixtures.tcp_peer import TargetHandler, create_target_server
 
@@ -156,7 +156,7 @@ def test_http_upstream_http_proxy_forward_request() -> None:
         )
         config_path = _write_http_upstream_config(entry_port, upstream_port, temp_dir)
         proxy_proc = start_proxy(config_path)
-        assert wait_for_proxy("127.0.0.1", entry_port, timeout=5.0, proc=proxy_proc)
+        assert proxy_proc.wait_ready(timeout=5.0)
 
         result: subprocess.CompletedProcess[str] = subprocess.run(
             [
@@ -219,7 +219,7 @@ def test_http_upstream_https_proxy_forward_request() -> None:
             entry_port, upstream_port, ca_path, temp_dir
         )
         proxy_proc = start_proxy(config_path)
-        assert wait_for_proxy("127.0.0.1", entry_port, timeout=5.0, proc=proxy_proc)
+        assert proxy_proc.wait_ready(timeout=5.0)
 
         result: subprocess.CompletedProcess[str] = subprocess.run(
             [
@@ -283,7 +283,7 @@ def test_http_upstream_http_proxy_connect_tunnel() -> None:
         )
         config_path = _write_http_upstream_config(entry_port, upstream_port, temp_dir)
         proxy_proc = start_proxy(config_path)
-        assert wait_for_proxy("127.0.0.1", entry_port, timeout=5.0, proc=proxy_proc)
+        assert proxy_proc.wait_ready(timeout=5.0)
 
         with socket.create_connection(("127.0.0.1", entry_port), timeout=5.0) as sock:
             sock.sendall(
@@ -349,7 +349,7 @@ def test_http_upstream_https_proxy_connect_tunnel() -> None:
             entry_port, upstream_port, ca_path, temp_dir
         )
         proxy_proc = start_proxy(config_path)
-        assert wait_for_proxy("127.0.0.1", entry_port, timeout=5.0, proc=proxy_proc)
+        assert proxy_proc.wait_ready(timeout=5.0)
 
         with socket.create_connection(("127.0.0.1", entry_port), timeout=5.0) as sock:
             sock.sendall(

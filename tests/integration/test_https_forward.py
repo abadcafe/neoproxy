@@ -13,11 +13,7 @@ from aioquic.quic.configuration import QuicConfiguration
 from tests.fixtures.certificates import generate_server_cert, generate_test_certificates
 from tests.fixtures.forward_scenario import ForwardNode, ProxyKind, write_forward_node
 from tests.fixtures.h3_lifecycle import LifecycleClient
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import managed_processes
 from tests.fixtures.stream_cleanup import close_writer
 
@@ -130,12 +126,7 @@ def test_forward_preserves_target_and_message_across_proxy_routes(
                         else None,
                     )
                     process = start(write_forward_node(tmp_path / f"node{index}", node))
-                    wait = (
-                        wait_for_udp_port_bound
-                        if listener == "http3"
-                        else wait_for_proxy
-                    )
-                    assert wait("127.0.0.1", port, timeout=3, proc=process)
+                    assert process.wait_ready(timeout=3)
                     upstream_port, upstream_kind = port, listener
                 assert upstream_port is not None
                 status, _, body = await _exchange(
@@ -193,7 +184,7 @@ def test_direct_https_pool_reuses_origin_and_isolates_scheme(tmp_path: Path) -> 
             with managed_processes() as start:
                 node = ForwardNode(port=entry, ca=ca, certificate=certificate, key=key)
                 process = start(write_forward_node(tmp_path / "entry", node))
-                assert wait_for_proxy("127.0.0.1", entry, timeout=3, proc=process)
+                assert process.wait_ready(timeout=3)
                 target = f"127.0.0.1:{origin_port}/"
                 assert (await _exchange(entry, f"https://{target}", "GET", b""))[
                     0
@@ -296,12 +287,7 @@ def test_https_forward_streams_before_upload_eof_across_h3_proxy(
                         ),
                     ]:
                         process = start(write_forward_node(tmp_path / name, node))
-                        wait = (
-                            wait_for_udp_port_bound
-                            if node.listener == "http3"
-                            else wait_for_proxy
-                        )
-                        assert wait("127.0.0.1", node.port, timeout=3, proc=process)
+                        assert process.wait_ready(timeout=3)
                     authority = f"127.0.0.1:{origin_port}"
                     if listener == "http3":
                         configuration = QuicConfiguration(
@@ -401,7 +387,7 @@ def test_direct_https_forward_reports_tls_failures(
             )
             with managed_processes() as start:
                 process = start(write_forward_node(tmp_path / "entry", node))
-                assert wait_for_proxy("127.0.0.1", entry, timeout=3, proc=process)
+                assert process.wait_ready(timeout=3)
                 status, headers, _ = await _exchange(
                     entry, f"https://127.0.0.1:{origin_port}/", "GET", b""
                 )

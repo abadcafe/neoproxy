@@ -18,7 +18,7 @@ import time
 import pytest
 
 from tests.fixtures.http_configuration import create_test_config
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy
 from tests.fixtures.tcp_peer import create_target_server
 
@@ -64,9 +64,7 @@ class TestPerformance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Establish tunnel
             client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -144,9 +142,7 @@ class TestPerformance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Establish tunnel
             client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -233,9 +229,7 @@ class TestPerformance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Rapid connection cycle
             num_cycles = 50
@@ -320,9 +314,7 @@ class TestPerformance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Create 1000 concurrent connections via asyncio
             num_connections = 1000

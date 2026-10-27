@@ -103,7 +103,7 @@ impl Socks5Listener {
 impl Listening for Socks5Listener {
   fn start(
     &self,
-  ) -> std::pin::Pin<Box<dyn Future<Output = Result<()>>>> {
+  ) -> Result<std::pin::Pin<Box<dyn Future<Output = Result<()>>>>> {
     let service = self.service.clone();
     let service_name = self.service_name.clone();
     let handshake_timeout = self.handshake_timeout;

@@ -14,11 +14,7 @@ from tests.fixtures.certificates import (
     generate_test_certificates,
 )
 from tests.fixtures.http3_client import H3Client
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import start_proxy, terminate_process
 
 
@@ -95,7 +91,7 @@ servers:
     process = start_proxy(str(config))
     try:
         if kind == "http3":
-            assert wait_for_udp_port_bound("127.0.0.1", port, proc=process)
+            assert process.wait_ready(timeout=5.0)
             for hostname in ("a.test", "b.test"):
                 asyncio.run(
                     _request_h3(
@@ -103,7 +99,7 @@ servers:
                     )
                 )
         else:
-            assert wait_for_proxy("127.0.0.1", port, proc=process)
+            assert process.wait_ready(timeout=5.0)
             context = ssl.create_default_context(cafile=server_ca)
             context.load_cert_chain(client_certificate, client_key)
             for hostname in ("a.test", "b.test"):

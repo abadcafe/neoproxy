@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from tests.fixtures.binary import NEOPROXY_BINARY
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import start_proxy, terminate_process
 from tests.fixtures.socks5_client import socks5_connect_domain, socks5_handshake_no_auth
 from tests.fixtures.socks5_configuration import create_socks5_config
@@ -21,7 +21,7 @@ def test_socks5_command_has_its_own_timeout_after_subnegotiation(
     config = create_socks5_config(port, str(tmp_path), handshake_timeout="300ms")
     process = start_proxy(config)
     try:
-        assert wait_for_proxy("127.0.0.1", port, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
             assert socks5_handshake_no_auth(client) == MethodReply(AuthMethod.NONE)
             started = time.monotonic()
@@ -41,7 +41,7 @@ def test_socks5_invalid_http_target_fails_connection_and_keeps_worker_alive(
     config = create_socks5_config(port, str(tmp_path))
     process = start_proxy(config)
     try:
-        assert wait_for_proxy("127.0.0.1", port, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
             assert socks5_handshake_no_auth(client) == MethodReply(AuthMethod.NONE)
             reply = socks5_connect_domain(client, "invalid target", 80)

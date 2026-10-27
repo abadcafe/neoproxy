@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .configuration import ConfigDict, dict_to_yaml
 from .curl import get_curl_env_without_no_proxy
-from .ports import get_unique_port, wait_for_proxy
+from .ports import get_unique_port
 from .proxy_process import BytesProcess, managed_processes, terminate_process
 
 
@@ -76,7 +76,7 @@ def direct_proxy(
             _ = path.write_text(dict_to_yaml(config))
             process = start(str(path))
             processes.append(process)
-            assert wait_for_proxy("127.0.0.1", port, proc=process, timeout=3)
+            assert process.wait_ready(timeout=3)
             upstream_port = port
         assert upstream_port is not None
         try:

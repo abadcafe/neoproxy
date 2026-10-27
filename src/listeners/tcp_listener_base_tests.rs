@@ -20,23 +20,27 @@ async fn test_start_accepts_multiple_addresses_with_connection_metadata()
     .run_until(async {
       let addresses = [available_address(), available_address()];
       let base = TcpListenerBase::new();
-      let running = tokio::task::spawn_local(base.start(
-        &addresses,
-        "test",
-        Default::default(),
-        |mut connection| async move {
-          assert!(connection.stream.nodelay().unwrap());
-          assert_eq!(
-            connection.stream.local_addr().unwrap(),
-            connection.local_addr
-          );
-          assert_eq!(
-            connection.stream.peer_addr().unwrap(),
-            connection.peer_addr
-          );
-          connection.stream.write_all(b"accepted").await.unwrap();
-        },
-      ));
+      let running = tokio::task::spawn_local(
+        base
+          .start(
+            &addresses,
+            "test",
+            Default::default(),
+            |mut connection| async move {
+              assert!(connection.stream.nodelay().unwrap());
+              assert_eq!(
+                connection.stream.local_addr().unwrap(),
+                connection.local_addr
+              );
+              assert_eq!(
+                connection.stream.peer_addr().unwrap(),
+                connection.peer_addr
+              );
+              connection.stream.write_all(b"accepted").await.unwrap();
+            },
+          )
+          .unwrap(),
+      );
       for address in addresses {
         let mut client =
           tokio::net::TcpStream::connect(address).await.unwrap();
@@ -58,16 +62,14 @@ async fn test_start_bind_failure_releases_previously_bound_addresses() {
   let base = TcpListenerBase::new();
   let address = available_address();
   let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-  let result = base
-    .start(
-      &[address, occupied.local_addr().unwrap()],
-      "test",
-      Default::default(),
-      |_| async {
-        panic!("failed startup must not dispatch connections")
-      },
-    )
-    .await;
+  let result = base.start(
+    &[address, occupied.local_addr().unwrap()],
+    "test",
+    Default::default(),
+    |_| async {
+      panic!("failed startup must not dispatch connections")
+    },
+  );
   assert!(result.is_err());
   assert!(std::net::TcpListener::bind(address).is_ok());
 }
@@ -76,10 +78,7 @@ async fn test_start_bind_failure_releases_previously_bound_addresses() {
 async fn test_start_rejects_empty_addresses() {
   let base = TcpListenerBase::new();
   assert!(
-    base
-      .start(&[], "test", Default::default(), |_| async {})
-      .await
-      .is_err()
+    base.start(&[], "test", Default::default(), |_| async {}).is_err()
   );
 }
 
@@ -95,6 +94,7 @@ async fn test_start_after_stop_does_not_bind() {
       Default::default(),
       |_| async {},
     )
+    .unwrap()
     .await
     .unwrap();
 }
@@ -109,20 +109,24 @@ async fn test_stop_notifies_and_drains_connection_handlers() {
       let stopped = completed.clone();
       let (accepted, ready) = tokio::sync::oneshot::channel();
       let accepted = Rc::new(std::cell::RefCell::new(Some(accepted)));
-      let running = tokio::task::spawn_local(base.start(
-        &[address],
-        "test",
-        Default::default(),
-        move |connection| {
-          let stopped = stopped.clone();
-          let accepted = accepted.borrow_mut().take().unwrap();
-          async move {
-            accepted.send(()).unwrap();
-            connection.shutdown.notified().await;
-            stopped.set(true);
-          }
-        },
-      ));
+      let running = tokio::task::spawn_local(
+        base
+          .start(
+            &[address],
+            "test",
+            Default::default(),
+            move |connection| {
+              let stopped = stopped.clone();
+              let accepted = accepted.borrow_mut().take().unwrap();
+              async move {
+                accepted.send(()).unwrap();
+                connection.shutdown.notified().await;
+                stopped.set(true);
+              }
+            },
+          )
+          .unwrap(),
+      );
       let _client =
         tokio::net::TcpStream::connect(address).await.unwrap();
       ready.await.unwrap();
@@ -141,19 +145,23 @@ async fn test_stop_aborts_unresponsive_connection_after_grace_period() {
       let address = available_address();
       let (accepted, ready) = tokio::sync::oneshot::channel();
       let accepted = Rc::new(std::cell::RefCell::new(Some(accepted)));
-      let running = tokio::task::spawn_local(base.start(
-        &[address],
-        "test",
-        Default::default(),
-        move |connection| {
-          let accepted = accepted.borrow_mut().take().unwrap();
-          async move {
-            accepted.send(()).unwrap();
-            std::future::pending::<()>().await;
-            drop(connection);
-          }
-        },
-      ));
+      let running = tokio::task::spawn_local(
+        base
+          .start(
+            &[address],
+            "test",
+            Default::default(),
+            move |connection| {
+              let accepted = accepted.borrow_mut().take().unwrap();
+              async move {
+                accepted.send(()).unwrap();
+                std::future::pending::<()>().await;
+                drop(connection);
+              }
+            },
+          )
+          .unwrap(),
+      );
       let mut client =
         tokio::net::TcpStream::connect(address).await.unwrap();
       ready.await.unwrap();

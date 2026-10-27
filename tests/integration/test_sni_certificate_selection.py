@@ -18,7 +18,7 @@ import tempfile
 from dataclasses import dataclass
 
 from tests.fixtures.certificates import generate_ca, generate_server_cert
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 
 
@@ -324,9 +324,7 @@ class TestSniCertificateSelection:
 
             # Start proxy
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy failed to start"
 
             # Test SNI=api.test.local -> should get server A's cert
             cn_a = get_certificate_cn(
@@ -377,9 +375,7 @@ class TestSniCertificateSelection:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy failed to start"
 
             # Test SNI=foo.test.local -> should succeed
             success, error = try_tls_connection_with_sni(
@@ -422,9 +418,7 @@ class TestSniCertificateSelection:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy failed to start"
 
             # The explicit test.local SAN supplies bare-domain coverage.
             # It is independent of the wildcard SAN and default-server selection.
@@ -466,9 +460,7 @@ class TestSniCertificateSelection:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy failed to start"
 
             # Test SNI=bar.foo.test.local -> should FAIL (multi-level)
             # Since we have no default certificate, TLS handshake should fail
@@ -518,9 +510,7 @@ class TestSniCertificateSelection:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy failed to start"
 
             # Test SNI=unknown.test.local -> should FAIL
             success, _ = try_tls_connection_with_sni(
@@ -595,9 +585,7 @@ class TestSniCertificateSelection:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy failed to start"
 
             # Test SNI=api.test.local -> should get exact cert (not wildcard)
             cn = get_certificate_cn(

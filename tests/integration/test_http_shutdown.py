@@ -15,11 +15,7 @@ import pytest
 
 from tests.fixtures.certificates import generate_test_certificates
 from tests.fixtures.http_configuration import create_test_config
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_port_released,
-    wait_for_proxy,
-)
+from tests.fixtures.ports import get_unique_port, wait_for_port_released
 from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 from tests.fixtures.tcp_peer import TargetServerFactory
 
@@ -47,7 +43,7 @@ def running_proxy(
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
     process = start_proxy(str(config))
     try:
-        assert wait_for_proxy("127.0.0.1", port, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         connection.connect()
         if context is not None:
             stream = connection.sock

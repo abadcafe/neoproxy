@@ -16,8 +16,10 @@ fn dummy_builder(
 ) -> Result<Listener> {
   struct DummyListener;
   impl Listening for DummyListener {
-    fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-      Box::pin(async { Ok(()) })
+    fn start(
+      &self,
+    ) -> Result<Pin<Box<dyn Future<Output = Result<()>>>>> {
+      Ok(Box::pin(async { Ok(()) }))
     }
 
     fn stop(&self) {}
@@ -39,12 +41,14 @@ async fn test_start_completes_after_stop() {
     notify: Arc<Notify>,
   }
   impl Listening for NotifyListener {
-    fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+    fn start(
+      &self,
+    ) -> Result<Pin<Box<dyn Future<Output = Result<()>>>>> {
       let notify = self.notify.clone();
-      Box::pin(async move {
+      Ok(Box::pin(async move {
         notify.notified().await;
         Ok(())
-      })
+      }))
     }
 
     fn stop(&self) {
@@ -56,7 +60,7 @@ async fn test_start_completes_after_stop() {
 
   // stop() should cause start() to complete with Ok
   listener.stop();
-  let result = listener.start().await;
+  let result = listener.start().unwrap().await;
   assert!(result.is_ok());
 }
 
@@ -75,14 +79,16 @@ async fn test_start_blocks_until_stop_called() {
     completed: Arc<AtomicBool>,
   }
   impl Listening for NotifyListener {
-    fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+    fn start(
+      &self,
+    ) -> Result<Pin<Box<dyn Future<Output = Result<()>>>>> {
       let notify = self.notify.clone();
       let completed = self.completed.clone();
-      Box::pin(async move {
+      Ok(Box::pin(async move {
         notify.notified().await;
         completed.store(true, Ordering::Relaxed);
         Ok(())
-      })
+      }))
     }
 
     fn stop(&self) {
@@ -99,7 +105,7 @@ async fn test_start_blocks_until_stop_called() {
   // Use tokio::select! with a timeout to verify it blocks
   let timeout = std::time::Duration::from_millis(50);
   tokio::select! {
-    _ = listener.start() => {
+    _ = listener.start().unwrap() => {
       panic!("start() should not complete before stop()");
     }
     _ = tokio::time::sleep(timeout) => {
@@ -110,7 +116,7 @@ async fn test_start_blocks_until_stop_called() {
 
   // Now stop — start() should complete
   listener.stop();
-  let result = listener.start().await;
+  let result = listener.start().unwrap().await;
   assert!(result.is_ok());
   assert!(completed.load(Ordering::Relaxed));
 }
@@ -130,8 +136,10 @@ async fn test_finish_waits_for_retained_protocol_resources() {
 
   struct ProtocolListener(ShutdownHandle);
   impl Listening for ProtocolListener {
-    fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-      Box::pin(async { Ok(()) })
+    fn start(
+      &self,
+    ) -> Result<Pin<Box<dyn Future<Output = Result<()>>>>> {
+      Ok(Box::pin(async { Ok(()) }))
     }
 
     fn stop(&self) {}

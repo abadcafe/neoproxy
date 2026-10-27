@@ -27,7 +27,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from tests.fixtures.binary import NEOPROXY_BINARY
 from tests.fixtures.configuration import StringMap
 from tests.fixtures.h3_configuration import create_http3_listener_config
-from tests.fixtures.ports import get_unique_port, wait_for_udp_port_bound
+from tests.fixtures.notified_process import ProxyProcess
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy
 
 # Alias for backward compatibility in this file
@@ -68,9 +69,7 @@ class TestHTTP3BasicConnection:
             proxy_proc = start_proxy(config_path)
 
             # Wait for UDP port to be bound
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), (
-                "HTTP/3 listener failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Verify process is still running
             assert proxy_proc.poll() is None, "HTTP/3 listener process crashed"
@@ -102,9 +101,7 @@ class TestHTTP3BasicConnection:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), (
-                "HTTP/3 listener failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -155,9 +152,7 @@ class TestHTTP3Authentication:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), (
-                "HTTP/3 listener failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Verify process is running
             assert proxy_proc.poll() is None, "HTTP/3 listener should be running"
@@ -226,7 +221,7 @@ servers:
             with open(config_path, "w") as f:
                 _ = f.write(config_content)
 
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -291,7 +286,7 @@ servers:
             with open(config_path, "w") as f:
                 _ = f.write(config_content)
 
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -368,7 +363,7 @@ servers:
             with open(config_path, "w") as f:
                 _ = f.write(config_content)
 
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -486,7 +481,7 @@ servers:
             with open(config_path, "w") as f:
                 _ = f.write(config_content)
 
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -550,7 +545,7 @@ servers:
             with open(config_path, "w") as f:
                 _ = f.write(config_content)
 
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -597,9 +592,7 @@ class TestHTTP3GracefulShutdown:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), (
-                "HTTP/3 listener failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             start_time = time.monotonic()
             proxy_proc.send_signal(signal.SIGTERM)
@@ -641,9 +634,7 @@ class TestHTTP3GracefulShutdown:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), (
-                "HTTP/3 listener failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             proxy_proc.send_signal(signal.SIGTERM)
 
@@ -732,15 +723,13 @@ servers:
             with open(config_path, "w") as f:
                 _ = f.write(config_content)
 
-            proxy_proc = subprocess.Popen(
+            proxy_proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
 
-            assert wait_for_udp_port_bound("127.0.0.1", proxy_port, timeout=5.0), (
-                "HTTP/3 listener failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Send a GET request using HTTP/3 client
             async def do_get_request() -> tuple[bool, int, bytes]:

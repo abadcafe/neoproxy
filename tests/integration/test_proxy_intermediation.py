@@ -16,11 +16,7 @@ from aioquic.quic.events import ConnectionTerminated, StreamReset
 from tests.fixtures.certificates import generate_test_certificates
 from tests.fixtures.h3_protocol import EventProtocol
 from tests.fixtures.http_request import send_raw_request
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import managed_processes
 from tests.fixtures.tcp_peer import TargetServerFactory
 
@@ -103,8 +99,7 @@ servers:
 """)
     with managed_processes() as start:
         process = start(str(path))
-        ready = wait_for_proxy if kind == "http" else wait_for_udp_port_bound
-        assert ready("127.0.0.1", port, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         for limit, expected_status in [("0", 204), ("2", 200)]:
             if kind == "http":
                 response = send_raw_request(
@@ -144,6 +139,6 @@ def test_http_listener_routes_hostless_http10_to_default(tmp_path: Path) -> None
     port = get_unique_port()
     with managed_processes() as start:
         process = start(create_echo_config(port, str(tmp_path)))
-        assert wait_for_proxy("127.0.0.1", port, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         response = send_raw_request("127.0.0.1", port, b"GET / HTTP/1.0\r\n\r\n")
         assert int(response.split()[1]) == 200

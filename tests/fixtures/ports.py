@@ -1,55 +1,29 @@
 """module: ports; responsibility: allocate and observe test ports.
-Public operations: get_unique_port, wait_for_proxy, wait_for_port_released,
-wait_for_udp_port_bound.
+Public operations: get_unique_port, wait_for_port_released.
 Data entities: none.
 Tests: sibling module tests and public fixture consumers.
 """
 
 import errno
+import fcntl
 import socket
-import threading
 import time
+from collections.abc import Iterator
 from contextlib import ExitStack
 
-from .proxy_process import BytesProcess
+from .binary import PROJECT_ROOT
 
 
-def wait_for_proxy(
-    host: str,
-    port: int,
-    timeout: float = 5.0,
-    interval: float = 0.1,
-    proc: BytesProcess | None = None,
-) -> bool:
-    """
-    Wait for proxy server to be ready.
-
-    Args:
-        host: Proxy server host
-        port: Proxy server port
-        timeout: Maximum wait time in seconds
-        interval: Check interval in seconds
-        proc: Optional process to check for early termination.
-              If process exits, returns False immediately.
-
-    Returns:
-        bool: True if server is ready, False if timeout or process exited
-    """
-    start_time = time.monotonic()
-    while time.monotonic() - start_time < timeout:
-        # Check if process has exited (if provided)
-        if proc is not None and proc.poll() is not None:
-            return False
-
-        try:
-            probe = socket.create_connection((host, port), timeout=1.0)
-        except OSError:
-            pass
-        else:
-            probe.close()
-            return True
-        time.sleep(interval)
-    return False
+def _release_windows(timeout: float, interval: float) -> Iterator[float]:
+    """Observe port release with bounded backoff and one deadline."""
+    deadline = time.monotonic() + timeout
+    delay = min(interval, 0.001)
+    while (remaining := deadline - time.monotonic()) > 0:
+        yield remaining
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, interval)
 
 
 def wait_for_port_released(
@@ -64,72 +38,20 @@ def wait_for_port_released(
         host: Host to check
         port: Port to check
         timeout: Maximum wait time in seconds
-        interval: Poll interval in seconds
+        interval: Maximum poll interval in seconds
 
     Returns:
         bool: True if port was released, False on timeout
     """
-    start_time = time.monotonic()
-    while time.monotonic() - start_time < timeout:
+    for remaining in _release_windows(timeout, interval):
         try:
-            probe = socket.create_connection((host, port), timeout=0.5)
+            probe = socket.create_connection((host, port), timeout=min(0.5, remaining))
         except OSError as error:
             if error.errno == errno.ECONNREFUSED:
                 return True
         else:
             probe.close()
-        time.sleep(interval)
     return False
-
-
-def wait_for_udp_port_bound(
-    host: str,
-    port: int,
-    timeout: float = 5.0,
-    interval: float = 0.1,
-    proc: BytesProcess | None = None,
-) -> bool:
-    """
-    Wait for UDP port to be bound (indicating server started).
-
-    This function checks if a UDP port is in use by attempting to bind to it.
-    If binding fails with EADDRINUSE, the port is bound by another process.
-
-    Args:
-        host: Host address
-        port: Port number
-        timeout: Maximum wait time in seconds
-        interval: Check interval in seconds
-        proc: Optional process to check for early termination.
-              If process exits, returns False immediately.
-
-    Returns:
-        bool: True if port is bound by another process, False if timeout or process
-        exited
-    """
-    start_time = time.monotonic()
-    while time.monotonic() - start_time < timeout:
-        # Check if process has exited (if provided)
-        if proc is not None and proc.poll() is not None:
-            return False
-
-        family = socket.AF_INET6 if ":" in host else socket.AF_INET
-        test_sock = socket.socket(family, socket.SOCK_DGRAM)
-        try:
-            test_sock.bind((host, port))
-            # Port is available, server not started yet
-        except OSError as e:
-            # Only return True if the error is specifically EADDRINUSE.
-            if e.errno == errno.EADDRINUSE:
-                return True
-        finally:
-            test_sock.close()
-        time.sleep(interval)
-    return False
-
-
-_port_counter = 28000
-_port_lock = threading.Lock()
 
 
 def get_unique_port() -> int:
@@ -146,11 +68,17 @@ def get_unique_port() -> int:
 
     Resource exhaustion fails the fixture's assertion after 100 candidates.
     """
-    global _port_counter
-    with _port_lock:
+    # Probing alone cannot stop independent workers returning the same
+    # still-unbound candidate. Share the counter across test processes.
+    counter_path = PROJECT_ROOT / "tmp" / "test-port-counter"
+    counter_path.parent.mkdir(parents=True, exist_ok=True)
+    with counter_path.open("a+", encoding="ascii") as counter:
+        fcntl.flock(counter, fcntl.LOCK_EX)
+        _ = counter.seek(0)
+        saved = counter.read().strip()
+        port = int(saved) if saved else 28000
         for _ in range(100):  # Limit attempts to avoid infinite loop
-            _port_counter += 1
-            port = _port_counter
+            port = port + 1 if port < 65534 else 28001
 
             try:
                 with ExitStack() as probes:
@@ -167,6 +95,10 @@ def get_unique_port() -> int:
                                     socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1
                                 )
                             probe.bind((host, port))
+                    _ = counter.seek(0)
+                    _ = counter.truncate()
+                    _ = counter.write(str(port))
+                    counter.flush()
                     return port
             except OSError:
                 # Port is not available, try next one

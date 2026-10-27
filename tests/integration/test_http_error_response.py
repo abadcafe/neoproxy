@@ -26,7 +26,7 @@ import tempfile
 
 from tests.fixtures.http_configuration import create_echo_config, create_test_config
 from tests.fixtures.http_request import send_raw_request
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy
 
 
@@ -98,9 +98,7 @@ class TestHTTPErrorResponse:
             config_path = create_echo_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Send a normal POST request to echo service
             # Echo service should return the body as-is (200 OK)
@@ -148,9 +146,7 @@ class TestHTTPErrorResponse:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Send an origin-form GET request (should return 400)
             request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
@@ -196,9 +192,7 @@ class TestHTTPErrorResponse:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Send CONNECT with invalid target (missing port)
             request = b"CONNECT example.com HTTP/1.1\r\nHost: example.com\r\n\r\n"
@@ -246,9 +240,7 @@ class TestHTTPErrorResponse:
             config_path = create_echo_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Test 1: POST with body
             test_body = b"Hello, Echo Service!"

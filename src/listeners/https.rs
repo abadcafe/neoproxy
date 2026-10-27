@@ -146,7 +146,7 @@ impl HttpsListener {
 }
 
 impl Listening for HttpsListener {
-  fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+  fn start(&self) -> Result<Pin<Box<dyn Future<Output = Result<()>>>>> {
     let tls_acceptor =
       tokio_rustls::TlsAcceptor::from(self.tls_config.clone());
     let router = self.server_router.clone();

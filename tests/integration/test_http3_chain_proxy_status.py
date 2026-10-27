@@ -17,11 +17,8 @@ from tests.fixtures.h3_configuration import (
     create_http3_chain_config,
     create_http3_listener_config,
 )
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.notified_process import ProxyProcess
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, terminate_process
 from tests.fixtures.tcp_peer import create_target_server
 
@@ -88,15 +85,15 @@ class TestHttp3ChainProxyStatus:
             upstream_config_path = create_http3_listener_config(
                 h3_port, cert_path, key_path, temp_dir
             )
-            upstream_proc = subprocess.Popen(
+            upstream_proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", upstream_config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", h3_port, timeout=10.0, proc=upstream_proc
-            ), "Upstream proxy (H3) failed to start"
+            assert upstream_proc.wait_ready(timeout=10.0), (
+                "Upstream proxy (H3) failed to start"
+            )
 
             # Start entry proxy (http3_chain -> H3 upstream)
             entry_config_path = create_http3_chain_config(
@@ -105,15 +102,15 @@ class TestHttp3ChainProxyStatus:
                 ca_path,
                 temp_dir,
             )
-            entry_proc = subprocess.Popen(
+            entry_proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", entry_config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=10.0, proc=entry_proc
-            ), "Entry proxy (http3_chain) failed to start"
+            assert entry_proc.wait_ready(timeout=10.0), (
+                "Entry proxy (http3_chain) failed to start"
+            )
 
             # Send CONNECT via entry proxy
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -228,15 +225,15 @@ servers:
             with open(config_path, "w") as f:
                 _ = f.write(config_content)
 
-            entry_proc = subprocess.Popen(
+            entry_proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=10.0, proc=entry_proc
-            ), "Entry proxy (http3_chain) failed to start"
+            assert entry_proc.wait_ready(timeout=10.0), (
+                "Entry proxy (http3_chain) failed to start"
+            )
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10)
@@ -309,15 +306,15 @@ servers:
             upstream_config_path = create_http3_listener_config(
                 h3_port, cert_path, key_path, temp_dir
             )
-            upstream_proc = subprocess.Popen(
+            upstream_proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", upstream_config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", h3_port, timeout=10.0, proc=upstream_proc
-            ), "Upstream proxy (H3) failed to start"
+            assert upstream_proc.wait_ready(timeout=10.0), (
+                "Upstream proxy (H3) failed to start"
+            )
 
             # Start entry proxy
             entry_config_path = create_http3_chain_config(
@@ -326,15 +323,15 @@ servers:
                 ca_path,
                 temp_dir,
             )
-            entry_proc = subprocess.Popen(
+            entry_proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", entry_config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=10.0, proc=entry_proc
-            ), "Entry proxy (http3_chain) failed to start"
+            assert entry_proc.wait_ready(timeout=10.0), (
+                "Entry proxy (http3_chain) failed to start"
+            )
 
             # CONNECT to a port where nothing is listening
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

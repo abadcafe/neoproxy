@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 from tests.fixtures.socks5_client import (
     socks5_connect_domain,
@@ -75,9 +75,7 @@ class TestSocks5BasicConnection:
 
             # Start proxy
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Connect and perform SOCKS5 handshake
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -157,9 +155,7 @@ class TestSocks5BasicConnection:
 
             # Start proxy
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Connect and authenticate
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -216,9 +212,7 @@ class TestSocks5BasicConnection:
 
             # Start proxy
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Connect and try wrong password
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -259,9 +253,7 @@ class TestSocks5BasicConnection:
 
             # Start proxy
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Request unsupported method (GSSAPI)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -301,9 +293,7 @@ class TestSocks5UnsupportedCommands:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -343,9 +333,7 @@ class TestSocks5UnsupportedCommands:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -407,9 +395,7 @@ class TestSocks5TargetAddressTypes:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -483,9 +469,7 @@ class TestSocks5TargetAddressTypes:
             thread.start()
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -545,9 +529,7 @@ class TestSocks5TargetAddressTypes:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -603,9 +585,7 @@ class TestSocks5ConnectionTarget:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -651,9 +631,7 @@ class TestSocks5ConnectionTarget:
             # Don't create target server - port should be unavailable
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -696,9 +674,7 @@ class TestSocks5PortBoundary:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -738,9 +714,7 @@ class TestSocks5PortBoundary:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -786,9 +760,7 @@ class TestSocks5DomainBoundary:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=2.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5.0)
@@ -826,9 +798,7 @@ class TestSocks5DomainBoundary:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -883,9 +853,7 @@ class TestSocks5AdditionalBoundary:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
@@ -922,9 +890,7 @@ class TestSocks5AdditionalBoundary:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)

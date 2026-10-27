@@ -71,6 +71,9 @@ mod server;
 mod server_thread;
 mod service;
 mod shutdown;
+mod startup;
+#[cfg(test)]
+mod startup_tests;
 mod stream;
 #[cfg(test)]
 mod stream_transfer_tests;
@@ -172,45 +175,44 @@ fn main() -> Result<std::process::ExitCode> {
   // workers have exited before that configuration can be dropped.
   let exit_code = thread::scope(|scope| -> Result<i32> {
     let config = &config;
-    let mut handles = Vec::new();
+    let mut supervisor = process::Workers::new(shutdown.clone());
+    let startup = startup::participants(
+      config.server_threads(),
+      std::env::var_os("NOTIFY_SOCKET"),
+      shutdown.clone(),
+    )?;
     let mut workers = worker_shutdown::participants(
       config.server_threads(),
       shutdown.clone(),
     )
     .into_iter()
+    .zip(startup)
     .enumerate();
-    while let Some((i, worker)) = workers.next() {
+    while let Some((i, (worker, readiness))) = workers.next() {
       let log_registry = log_registry.clone();
-      match thread::Builder::new()
-        .name(format!("neoproxy-server-{i}"))
-        .spawn_scoped(scope, move || {
+      if let Err(error) = supervisor.spawn(
+        scope,
+        &format!("neoproxy-server-{i}"),
+        move || {
           server_thread::run_server_thread(
             config,
             log_registry,
             worker,
+            readiness,
             i,
           )
-        }) {
-        Ok(handle) => handles.push(handle),
-        Err(error) => {
-          shutdown.shutdown();
-          // Unstarted participants must leave before joining workers
-          // which can already be waiting at transport release.
-          drop(workers);
-          for handle in handles {
-            let _ = handle.join();
-          }
-          return Err(error.into());
-        }
+        },
+      ) {
+        shutdown.shutdown();
+        // Unstarted participants must leave before joining workers
+        // which can already be waiting at transport release.
+        drop(workers);
+        return Err(error.into());
       }
     }
 
     // Supervise and explicitly join workers within their borrow scope.
-    Ok(rt.block_on(process::run(
-      handles,
-      shutdown,
-      process::shutdown_signal(),
-    )))
+    Ok(rt.block_on(supervisor.run(process::shutdown_signal())))
   })?;
 
   // Drop the process-owned writers before the diagnostic log guard.

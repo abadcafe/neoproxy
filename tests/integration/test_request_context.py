@@ -14,11 +14,7 @@ from tests.fixtures.certificates import generate_test_certificates
 from tests.fixtures.configuration import JsonValue
 from tests.fixtures.forward_scenario import ForwardNode, ProxyKind, write_forward_node
 from tests.fixtures.http_echo import http_echo_handler
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import managed_processes
 from tests.fixtures.tcp_peer import TargetServerFactory, one_shot_echo_handler
 
@@ -99,12 +95,9 @@ def test_request_id_propagates_and_tunnel_logs_only_after_transfer(
     enable_access_log(entry_config, fields)
     with managed_processes() as start:
         upstream = start(upstream_config)
-        if upstream_kind == "http3":
-            assert wait_for_udp_port_bound("127.0.0.1", upstream_port, timeout=3)
-        else:
-            assert wait_for_proxy("127.0.0.1", upstream_port, timeout=3, proc=upstream)
+        assert upstream.wait_ready(timeout=3)
         entry = start(entry_config)
-        assert wait_for_proxy("127.0.0.1", entry_port, timeout=3, proc=entry)
+        assert entry.wait_ready(timeout=3)
         with socket.create_connection(("127.0.0.1", entry_port), timeout=5) as client:
             target = f"localhost:{origin_port}"
             line = f"CONNECT {target}" if mode == "tunnel" else f"POST http://{target}/"
@@ -221,7 +214,7 @@ def test_dns_failure_records_native_access_fields_and_response_id(
     )
     with managed_processes() as start:
         process = start(config)
-        assert wait_for_proxy("127.0.0.1", port, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         client = HTTPConnection("127.0.0.1", port, timeout=5)
         try:
             client.request(

@@ -10,11 +10,8 @@ import yaml
 
 from tests.fixtures.binary import NEOPROXY_BINARY
 from tests.fixtures.configuration import ConfigDict, StringMap
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.notified_process import ProxyProcess
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, terminate_process
 
 
@@ -85,13 +82,13 @@ class TestHTTPSClientCert:
             with open(config_path, "w") as f:
                 yaml.dump(config, f)
 
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
 
-            if not wait_for_proxy("127.0.0.1", https_port, timeout=5.0):
+            if not proc.wait_ready(timeout=5.0):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -183,13 +180,13 @@ class TestHTTPSClientCert:
             with open(config_path, "w") as f:
                 yaml.dump(config, f)
 
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
 
-            if not wait_for_proxy("127.0.0.1", https_port, timeout=5.0):
+            if not proc.wait_ready(timeout=5.0):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -292,13 +289,13 @@ class TestHTTP3ClientCert:
             with open(config_path, "w") as f:
                 yaml.dump(config, f)
 
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
 
-            if not wait_for_udp_port_bound("127.0.0.1", http3_port, timeout=5.0):
+            if not proc.wait_ready(timeout=5.0):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -376,13 +373,13 @@ class TestHostHeaderRequired:
             with open(config_path, "w") as f:
                 yaml.dump(config, f)
 
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
 
-            if not wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=proc):
+            if not proc.wait_ready(timeout=5.0):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -471,13 +468,13 @@ class TestHostHeaderRequired:
             with open(config_path, "w") as f:
                 yaml.dump(config, f)
 
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
 
-            if not wait_for_proxy("127.0.0.1", https_port, timeout=5.0):
+            if not proc.wait_ready(timeout=5.0):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")

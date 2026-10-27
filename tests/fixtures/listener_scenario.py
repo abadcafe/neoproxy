@@ -13,11 +13,8 @@ import yaml
 
 from tests.fixtures.binary import NEOPROXY_BINARY
 from tests.fixtures.configuration import ConfigDict
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.notified_process import ProxyProcess
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, terminate_process
 
 
@@ -243,28 +240,23 @@ def proxy_with_capture(
     Yields:
         Tuple of (process, stderr_content, config_path)
     """
-    config_path, http_port, _https_port, http3_port, _default_port = h1_h3_test_env
+    config_path, _http_port, _https_port, _http3_port, _default_port = h1_h3_test_env
 
     proc: BytesProcess | None = None
     stderr_data = b""
 
     try:
-        proc = subprocess.Popen(
+        proc = ProxyProcess(
             [NEOPROXY_BINARY, "--config", config_path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
 
-        # Wait for HTTP listener to be ready using polling
-        http_ready = wait_for_proxy("127.0.0.1", http_port, timeout=5.0, proc=proc)
-
-        # Wait for HTTP3 listener to be ready using polling
-        h3_ready = wait_for_udp_port_bound(
-            "127.0.0.1", http3_port, timeout=5.0, proc=proc
-        )
+        # One notification covers every worker and every listener.
+        ready = proc.wait_ready(timeout=5.0)
 
         # If process exited or listeners not ready, capture stderr
-        if proc.poll() is not None or not http_ready or not h3_ready:
+        if proc.poll() is not None or not ready:
             if proc.poll() is not None:
                 _, stderr_data = proc.communicate(timeout=5)
                 proc = None

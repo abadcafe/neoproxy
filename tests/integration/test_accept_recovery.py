@@ -14,7 +14,7 @@ import pytest
 
 from tests.fixtures.certificates import generate_test_certificates
 from tests.fixtures.http_configuration import create_echo_config
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 
 type ListenerKind = Literal["http", "https", "socks5"]
@@ -42,7 +42,7 @@ def running_proxy(
     _ = config.write_text(content)
     process = start_proxy(str(config), nofile_limit=64)
     try:
-        assert wait_for_proxy("127.0.0.1", port, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         yield process, port
     finally:
         # The descriptor limit is restricted to this disposable child.

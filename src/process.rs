@@ -1,19 +1,38 @@
 //! module: process
 //! responsibilities: supervise worker threads and propagate process
-//! shutdown public operations: run, shutdown_signal
-//! data entities: ExitReason
+//! shutdown public operations: Workers::{new, spawn, run},
+//! shutdown_signal data entities: Workers, Completion, ExitReason
 //! tests: process_tests.rs
 use std::future::Future;
 use std::pin::Pin;
 use std::thread;
-use std::time::Duration;
 
 use anyhow::Result;
 use tokio::signal::unix as signal;
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use crate::shutdown::ShutdownHandle;
-const THREAD_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Creating workers through their supervisor makes completion
+/// notification mandatory, including normal errors and unwinding.
+pub(crate) struct Workers<'scope> {
+  handles: Vec<Option<thread::ScopedJoinHandle<'scope, Result<()>>>>,
+  completed: mpsc::UnboundedReceiver<usize>,
+  notify: mpsc::UnboundedSender<usize>,
+  shutdown: ShutdownHandle,
+}
+
+struct Completion {
+  index: usize,
+  notify: mpsc::UnboundedSender<usize>,
+}
+
+impl Drop for Completion {
+  fn drop(&mut self) {
+    let _ = self.notify.send(self.index);
+  }
+}
 
 /// Exit reason for determining the exit code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,46 +103,93 @@ pub(crate) fn shutdown_signal()
   })
 }
 
-/// Supervise scoped workers and join every handle before returning.
-/// Joining records worker panics as process failure, so the enclosing
-/// scope has no unjoined panic to propagate a second time.
-pub(crate) async fn run(
-  handles: Vec<thread::ScopedJoinHandle<'_, Result<()>>>,
-  shutdown: ShutdownHandle,
-  signal_future: impl Future<Output = ()>,
-) -> i32 {
-  tokio::pin!(signal_future);
-  let mut handles: Vec<_> = handles.into_iter().map(Some).collect();
-  let mut exit_reasons = Vec::new();
-  if handles.is_empty() {
-    signal_future.await;
-    shutdown.shutdown();
-    return 0;
+impl<'scope> Workers<'scope> {
+  pub(crate) fn new(shutdown: ShutdownHandle) -> Self {
+    let (notify, completed) = mpsc::unbounded_channel();
+    Self { handles: Vec::new(), completed, notify, shutdown }
   }
-  while handles.iter().any(Option::is_some) {
-    tokio::select! {
-      _ = signal_future.as_mut(), if !shutdown.is_shutdown() => {
-        info!("received shutdown signal");
-        shutdown.shutdown();
-      }
-      _ = tokio::time::sleep(THREAD_CHECK_INTERVAL) => {
-        for slot in &mut handles {
-          if slot.as_ref().is_some_and(thread::ScopedJoinHandle::is_finished) {
-            let handle = slot.take().expect("finished worker exists");
-            let reason = match handle.join() {
-              Err(payload) => { error!("server thread panicked: {payload:?}"); ExitReason::Panic }
-              Ok(Err(error)) => { error!("server thread failed: {error}"); ExitReason::Error }
-              Ok(Ok(())) => ExitReason::Normal,
-            };
-            exit_reasons.push(reason);
-            // Every worker exit must stop its peers, including an
-            // unexpected normal return.
-            shutdown.shutdown();
-          }
+
+  pub(crate) fn spawn<'env, F>(
+    &mut self,
+    scope: &'scope thread::Scope<'scope, 'env>,
+    name: &str,
+    task: F,
+  ) -> std::io::Result<()>
+  where
+    F: FnOnce() -> Result<()> + Send + 'scope,
+  {
+    let index = self.handles.len();
+    let notify = self.notify.clone();
+    let handle = thread::Builder::new()
+      .name(name.to_owned())
+      .spawn_scoped(scope, move || {
+        // Created inside the thread: a failed spawn cannot enqueue an
+        // event for a handle which was never registered. This guard is
+        // dropped after the worker body and its local resources.
+        let _completion = Completion { index, notify };
+        task()
+      })?;
+    self.handles.push(Some(handle));
+    Ok(())
+  }
+
+  /// Join every notified worker before returning. Joining records
+  /// worker panics, so the enclosing scope cannot propagate them again.
+  pub(crate) async fn run(
+    mut self,
+    signal_future: impl Future<Output = ()>,
+  ) -> i32 {
+    tokio::pin!(signal_future);
+    let mut exit_reasons = Vec::new();
+    if self.handles.is_empty() {
+      signal_future.await;
+      self.shutdown.shutdown();
+      return 0;
+    }
+    let mut remaining = self.handles.len();
+    while remaining != 0 {
+      tokio::select! {
+        _ = signal_future.as_mut(), if !self.shutdown.is_shutdown() => {
+          info!("received shutdown signal");
+          self.shutdown.shutdown();
+        }
+        completed = self.completed.recv() => {
+          let index = completed
+            .expect("registered workers retain completion senders");
+          let handle = self.handles[index]
+            .take()
+            .expect("worker completes exactly once");
+          let reason = match handle.join() {
+            Err(payload) => {
+              error!("server thread panicked: {payload:?}");
+              ExitReason::Panic
+            }
+            Ok(Err(error)) => {
+              error!("server thread failed: {error}");
+              ExitReason::Error
+            }
+            Ok(Ok(())) => ExitReason::Normal,
+          };
+          exit_reasons.push(reason);
+          // Every worker exit must stop its peers, including an
+          // unexpected normal return.
+          self.shutdown.shutdown();
+          remaining -= 1;
         }
       }
     }
+    info!("shutdown complete");
+    determine_exit_code(&exit_reasons)
   }
-  info!("shutdown complete");
-  determine_exit_code(&exit_reasons)
+}
+
+impl Drop for Workers<'_> {
+  fn drop(&mut self) {
+    if self.handles.iter().any(Option::is_some) {
+      self.shutdown.shutdown();
+      for handle in self.handles.iter_mut().filter_map(Option::take) {
+        let _ = handle.join();
+      }
+    }
+  }
 }

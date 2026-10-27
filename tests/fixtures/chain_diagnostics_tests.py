@@ -12,7 +12,7 @@ from pydantic import BaseModel, TypeAdapter
 from tests.fixtures.chain_diagnostics import record_chain
 from tests.fixtures.http_configuration import create_echo_config
 from tests.fixtures.http_echo import read_http_request
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.tcp_peer import managed_target_servers
 
 
@@ -38,7 +38,7 @@ def test_record_chain_keeps_logs_and_exact_curl_status(tmp_path: Path) -> None:
     ) as capture:
         directory = capture.directory
         process = capture.start_proxy("entry", create_echo_config(port, str(working)))
-        assert wait_for_proxy("127.0.0.1", port, timeout=2, proc=process)
+        assert process.wait_ready(timeout=2)
         result = capture.run_curl(
             [
                 "curl",

@@ -20,11 +20,8 @@ import yaml
 
 from tests.fixtures.binary import NEOPROXY_BINARY
 from tests.fixtures.configuration import ConfigDict, StringMap
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.notified_process import ProxyProcess
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 
 # ==============================================================================
@@ -243,7 +240,7 @@ class TestServerLevelConfig:
 
             proc = start_proxy(config_path)
             try:
-                assert wait_for_proxy("127.0.0.1", port, timeout=5.0, proc=proc), (
+                assert proc.wait_ready(timeout=5.0), (
                     "HTTP listener should start and ignore server-level TLS config"
                 )
             finally:
@@ -350,12 +347,12 @@ class TestHTTP3MultiAddress:
             proxy_proc = start_proxy(config_path)
 
             # Wait for both UDP ports to be bound
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port1, timeout=5.0, proc=proxy_proc
-            ), f"HTTP/3 listener failed to start on port {proxy_port1}"
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port2, timeout=5.0, proc=proxy_proc
-            ), f"HTTP/3 listener failed to start on port {proxy_port2}"
+            assert proxy_proc.wait_ready(timeout=5.0), (
+                f"HTTP/3 listener failed to start on port {proxy_port1}"
+            )
+            assert proxy_proc.wait_ready(timeout=5.0), (
+                f"HTTP/3 listener failed to start on port {proxy_port2}"
+            )
 
             # Verify process is still running
             assert proxy_proc.poll() is None, "Proxy process should be running"
@@ -386,14 +383,14 @@ class TestHTTP3ConnectOnlyUpgrade:
         stderr_data = b""
 
         try:
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
 
-            # Wait for server to start using polling
-            if not wait_for_proxy("127.0.0.1", default_port, timeout=5.0, proc=proc):
+            # Wait for every listener to report readiness.
+            if not proc.wait_ready(timeout=5.0):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -478,9 +475,7 @@ class TestHTTP10Support:
             )
 
             proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Send CONNECT with HTTP/1.0 (as Python 3.8 does)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -540,13 +535,13 @@ class TestHTTP10Support:
         proc: BytesProcess | None = None
 
         try:
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
 
-            if not wait_for_proxy("127.0.0.1", default_port, timeout=5.0, proc=proc):
+            if not proc.wait_ready(timeout=5.0):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -591,13 +586,13 @@ class TestHTTP10Support:
         proc: BytesProcess | None = None
 
         try:
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
 
-            if not wait_for_proxy("127.0.0.1", default_port, timeout=5.0, proc=proc):
+            if not proc.wait_ready(timeout=5.0):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -689,16 +684,14 @@ class TestHTTP3AuthorityHostMismatch:
             with open(config_path, "w") as f:
                 yaml.dump(config, f)
 
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
 
             # Wait for HTTP/3 listener
-            if not wait_for_udp_port_bound(
-                "127.0.0.1", http3_port, timeout=5.0, proc=proc
-            ):
+            if not proc.wait_ready(timeout=5.0):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -797,16 +790,14 @@ class TestHTTP3AuthorityHostMismatch:
             with open(config_path, "w") as f:
                 yaml.dump(config, f)
 
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
 
             # Wait for HTTP/3 listener
-            if not wait_for_udp_port_bound(
-                "127.0.0.1", http3_port, timeout=5.0, proc=proc
-            ):
+            if not proc.wait_ready(timeout=5.0):
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")

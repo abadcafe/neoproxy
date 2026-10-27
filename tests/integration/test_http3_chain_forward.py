@@ -32,7 +32,7 @@ from tests.fixtures.certificates import generate_test_certificates
 from tests.fixtures.configuration import StringMap
 from tests.fixtures.h3_configuration import create_http3_chain_config
 from tests.fixtures.http_request import send_raw_request
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 
 
@@ -89,9 +89,7 @@ def chain_service_context(
             temp_dir=temp_dir,
         )
         proxy_proc = start_proxy(config_path)
-        assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
-            "HTTP listener failed to start"
-        )
+        assert proxy_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
         yield temp_dir, proxy_proc
 

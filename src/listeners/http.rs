@@ -82,7 +82,7 @@ impl HttpListener {
 }
 
 impl Listening for HttpListener {
-  fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+  fn start(&self) -> Result<Pin<Box<dyn Future<Output = Result<()>>>>> {
     let server_router = self.server_router.clone();
     let header_deadline = self.header_deadline;
     self.base.start(

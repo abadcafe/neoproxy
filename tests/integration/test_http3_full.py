@@ -39,11 +39,7 @@ from tests.fixtures.h3_tunnel import (
 
 # Alias for convenience
 from tests.fixtures.http3_client import H3Client
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy
 from tests.fixtures.tcp_peer import create_target_server
 
@@ -76,9 +72,7 @@ class TestHTTP3FullConnection:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Use real HTTP/3 client to verify QUIC handshake
             async def do_handshake() -> tuple[bool, int, str]:
@@ -146,9 +140,7 @@ class TestHTTP3FullConnection:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Send CONNECT request using real HTTP/3 client
             async def do_connect() -> tuple[bool, int, str]:
@@ -234,9 +226,7 @@ class TestHTTP3FullConnection:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Test actual data transfer through HTTP/3 tunnel
             test_data = b"HELLO_FROM_HTTP3_CLIENT_12345"
@@ -339,9 +329,7 @@ class TestHTTP3GracefulShutdownWithConnections:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Graceful shutdown
             start_time = time.monotonic()
@@ -382,9 +370,7 @@ class TestHTTP3GracefulShutdownWithConnections:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Graceful shutdown - should complete within timeout
             proxy_proc.send_signal(signal.SIGTERM)
@@ -438,9 +424,7 @@ class TestFullHTTP3ProxyChain:
             )
             h3_proc = start_proxy(h3_config)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", h3_port, timeout=5.0, proc=h3_proc
-            ), "HTTP/3 listener failed to start"
+            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Create HTTP/3 chain service (machine 1 - the frontend)
             chain_config = create_http3_chain_config(
@@ -451,9 +435,7 @@ class TestFullHTTP3ProxyChain:
             )
             chain_proc = start_proxy(chain_config)
 
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=5.0, proc=chain_proc
-            ), "HTTP listener failed to start"
+            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
             # Both should be running
             assert h3_proc.poll() is None, "H3 listener should be running"
@@ -501,9 +483,7 @@ class TestFullHTTP3ProxyChain:
             )
             h3_proc = start_proxy(h3_config)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", h3_port, timeout=5.0, proc=h3_proc
-            ), "HTTP/3 listener failed to start"
+            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Start chain service
             chain_config = create_http3_chain_config(
@@ -514,9 +494,7 @@ class TestFullHTTP3ProxyChain:
             )
             chain_proc = start_proxy(chain_config)
 
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=5.0, proc=chain_proc
-            ), "HTTP listener failed to start"
+            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
             # Shutdown chain first (frontend)
             chain_proc.send_signal(signal.SIGTERM)
@@ -573,9 +551,7 @@ class TestHTTP3ErrorHandling:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Send a GET request (non-CONNECT) using HTTP/3 client
             async def do_get_request() -> tuple[bool, int, bytes | str]:
@@ -632,9 +608,7 @@ class TestHTTP3ErrorHandling:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # CONNECT to an invalid target (port 0 is invalid)
             async def do_connect() -> tuple[bool, int, bytes | str]:
@@ -723,9 +697,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # CONNECT to an unreachable target
             # Use TEST-NET-2 (198.51.100.0/24) which is non-routable
@@ -916,9 +888,9 @@ servers:
             proxy_proc = start_proxy(config_path)
 
             # Should start successfully with valid plaintext password
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener should start with valid plaintext password"
+            assert proxy_proc.wait_ready(timeout=5.0), (
+                "HTTP/3 listener should start with valid plaintext password"
+            )
 
         finally:
             if proxy_proc:
@@ -960,9 +932,7 @@ servers:
             proxy_proc = start_proxy(config_path)
 
             # Should start with minimum valid values
-            if not wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ):
+            if not proxy_proc.wait_ready(timeout=5.0):
                 if proxy_proc.poll() is not None:
                     _, stderr_data = proxy_proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -1011,9 +981,7 @@ servers:
             proxy_proc = start_proxy(config_path)
 
             # Should start with maximum valid values
-            if not wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ):
+            if not proxy_proc.wait_ready(timeout=5.0):
                 if proxy_proc.poll() is not None:
                     _, stderr_data = proxy_proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -1059,9 +1027,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener should start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener should start"
 
         finally:
             if proxy_proc:
@@ -1118,9 +1084,7 @@ class TestFullHTTP3ProxyChainDataTransfer:
             )
             h3_proc = start_proxy(h3_config)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", h3_port, timeout=5.0, proc=h3_proc
-            ), "HTTP/3 listener failed to start"
+            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Create target server that echoes data
             def echo_handler(conn: socket.socket) -> None:
@@ -1148,9 +1112,7 @@ class TestFullHTTP3ProxyChainDataTransfer:
             )
             chain_proc = start_proxy(chain_config)
 
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=5.0, proc=chain_proc
-            ), "HTTP listener failed to start"
+            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
             # Verify both services are running
             assert h3_proc.poll() is None, "HTTP/3 listener should be running"
@@ -1253,9 +1215,7 @@ class TestHTTP3GracefulShutdownTimeout:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Send SIGTERM while server is running (no active streams, but tests
             # timeout)

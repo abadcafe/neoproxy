@@ -29,11 +29,8 @@ from tests.fixtures.h3_configuration import (
     create_http3_listener_config,
 )
 from tests.fixtures.http_echo import http_echo_handler
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.notified_process import ProxyProcess
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy
 from tests.fixtures.tcp_peer import create_target_server
 
@@ -71,9 +68,7 @@ class TestHTTP3ChainProxy:
             proxy_proc = start_proxy(config_path)
 
             # Wait for HTTP listener
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
             # Verify process is running
             assert proxy_proc.poll() is None, "HTTP/3 chain service should be running"
@@ -107,9 +102,7 @@ class TestHTTP3ChainProxy:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
             start_time = time.monotonic()
             proxy_proc.send_signal(signal.SIGTERM)
@@ -157,9 +150,7 @@ class TestHTTP3ChainProxy:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
-                "HTTP listener failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
             # Verify process is running
             assert proxy_proc.poll() is None, "HTTP/3 chain service should be running"
@@ -221,7 +212,7 @@ servers:
             with open(config_path, "w") as f:
                 _ = f.write(config_content)
 
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -278,9 +269,7 @@ servers:
                 temp_dir=temp_dir1,
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", h3_port, timeout=5.0, proc=h3_proc
-            ), "HTTP/3 listener failed to start"
+            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Start chain service
             chain_config = create_http3_chain_config(
@@ -290,9 +279,7 @@ servers:
                 temp_dir=temp_dir2,
             )
             chain_proc = start_proxy(chain_config)
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=5.0, proc=chain_proc
-            ), "HTTP listener failed to start"
+            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
             # Test data transmission using curl
             result = subprocess.run(
@@ -367,9 +354,7 @@ class TestFullProxyChain:
             )
             h3_proc = start_proxy(h3_config)
 
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
-                "HTTP/3 listener failed to start"
-            )
+            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Create HTTP/3 chain service (machine 1)
             chain_config = create_http3_chain_config(
@@ -380,9 +365,7 @@ class TestFullProxyChain:
             )
             chain_proc = start_proxy(chain_config)
 
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
-                "HTTP listener failed to start"
-            )
+            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
             # Both should be running
             assert h3_proc.poll() is None, "H3 listener should be running"
@@ -427,9 +410,7 @@ class TestFullProxyChain:
             )
             h3_proc = start_proxy(h3_config)
 
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
-                "HTTP/3 listener failed to start"
-            )
+            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Start chain service
             chain_config = create_http3_chain_config(
@@ -440,9 +421,7 @@ class TestFullProxyChain:
             )
             chain_proc = start_proxy(chain_config)
 
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
-                "HTTP listener failed to start"
-            )
+            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
             # Shutdown chain first
             chain_proc.send_signal(signal.SIGTERM)
@@ -503,9 +482,7 @@ class TestHTTP3ChainGracefulShutdown:
             )
             h3_proc = start_proxy(h3_config)
 
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
-                "HTTP/3 listener failed to start"
-            )
+            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Start chain service
             chain_config = create_http3_chain_config(
@@ -516,9 +493,7 @@ class TestHTTP3ChainGracefulShutdown:
             )
             chain_proc = start_proxy(chain_config)
 
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
-                "HTTP listener failed to start"
-            )
+            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
             # Shutdown chain (no active streams)
             start_time = time.monotonic()
@@ -579,9 +554,7 @@ class TestHTTP3ChainGracefulShutdown:
             )
             h3_proc = start_proxy(h3_config)
 
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
-                "HTTP/3 listener failed to start"
-            )
+            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Create a target server that accepts connection
             def handler(conn: socket.socket) -> None:
@@ -603,9 +576,7 @@ class TestHTTP3ChainGracefulShutdown:
             )
             chain_proc = start_proxy(chain_config)
 
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
-                "HTTP listener failed to start"
-            )
+            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
             # Trigger shutdown while server is running
             start_time = time.monotonic()
@@ -708,9 +679,7 @@ class TestWRRLoadBalancing:
                 temp_dir=temp_dir1,
             )
             h3_proc1 = start_proxy(h3_config1)
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", h3_port1, timeout=5.0, proc=h3_proc1
-            ), "HTTP/3 listener 1 failed to start"
+            assert h3_proc1.wait_ready(timeout=5.0), "HTTP/3 listener 1 failed to start"
 
             # Start HTTP/3 listener 2 (weight 1)
             h3_config2 = create_http3_listener_config(
@@ -720,9 +689,7 @@ class TestWRRLoadBalancing:
                 temp_dir=temp_dir2,
             )
             h3_proc2 = start_proxy(h3_config2)
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", h3_port2, timeout=5.0, proc=h3_proc2
-            ), "HTTP/3 listener 2 failed to start"
+            assert h3_proc2.wait_ready(timeout=5.0), "HTTP/3 listener 2 failed to start"
 
             # Start chain service with weights 2:1
             chain_config = create_http3_chain_config(
@@ -735,9 +702,7 @@ class TestWRRLoadBalancing:
                 temp_dir=temp_dir3,
             )
             chain_proc = start_proxy(chain_config)
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=5.0, proc=chain_proc
-            ), "HTTP listener failed to start"
+            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
             # Send multiple requests through the chain
             # WRR should distribute these across both upstreams
@@ -842,9 +807,7 @@ class TestConnectionReuse:
                 temp_dir=temp_dir1,
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", h3_port, timeout=5.0, proc=h3_proc
-            ), "HTTP/3 listener failed to start"
+            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Start chain service
             chain_config = create_http3_chain_config(
@@ -863,9 +826,7 @@ class TestConnectionReuse:
                 ],
             )
             chain_proc = start_proxy(chain_config)
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=5.0, proc=chain_proc
-            ), "HTTP listener failed to start"
+            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
             # Send 5 requests through the chain
             for i in range(5):

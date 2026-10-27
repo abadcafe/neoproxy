@@ -30,9 +30,10 @@ use crate::server::Server;
 pub(crate) trait Listening {
   /// Start the listener.
   ///
-  /// Returns a future that completes when the listener stops
-  /// (either due to error or explicit stop).
-  fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>>;
+  /// Bind every address and install acceptance before returning.
+  /// A successful result contains the long-running listener task;
+  /// a startup error is returned synchronously.
+  fn start(&self) -> Result<Pin<Box<dyn Future<Output = Result<()>>>>>;
 
   /// Stop the listener gracefully.
   fn stop(&self);
@@ -65,7 +66,7 @@ impl Listener {
   /// Start the listener.
   pub(crate) fn start(
     &self,
-  ) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+  ) -> Result<Pin<Box<dyn Future<Output = Result<()>>>>> {
     self.0.start()
   }
 

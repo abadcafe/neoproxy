@@ -11,11 +11,7 @@ from tests.fixtures.h3_configuration import (
     create_http3_chain_config,
     create_http3_listener_config,
 )
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import start_proxy, terminate_process
 from tests.fixtures.stream_cleanup import close_writer
 
@@ -108,10 +104,10 @@ def test_h3_chain_preserves_bulk_data_and_independent_half_closes(
     )
     relay = start_proxy(relay_config)
     try:
-        assert wait_for_udp_port_bound("127.0.0.1", relay_port, timeout=3, proc=relay)
+        assert relay.wait_ready(timeout=3)
         entry = start_proxy(entry_config)
         try:
-            assert wait_for_proxy("127.0.0.1", entry_port, timeout=3, proc=entry)
+            assert entry.wait_ready(timeout=3)
             # Both client/server H3 adapters run in real proxy processes.
             # The dependency's classic CONNECT pseudo-header defect has
             # its own strict-peer failure case in test_dependency_h3.py.

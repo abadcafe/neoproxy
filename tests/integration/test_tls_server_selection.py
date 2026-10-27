@@ -22,11 +22,7 @@ from cryptography.x509.oid import NameOID
 from tests.fixtures.binary import NEOPROXY_BINARY
 from tests.fixtures.configuration import ConfigDict, dict_to_yaml
 from tests.fixtures.h3_lifecycle import LifecycleClient
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import start_proxy, terminate_process
 from tests.fixtures.stream_cleanup import close_writer
 
@@ -119,10 +115,7 @@ def _proxy(
     _ = path.write_text(dict_to_yaml(config))
     process = start_proxy(str(path))
     try:
-        if kind == "https":
-            assert wait_for_proxy("127.0.0.1", port, timeout=3, proc=process)
-        else:
-            assert wait_for_udp_port_bound("127.0.0.1", port, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         yield port
     finally:
         terminate_process(process, timeout=7)
@@ -324,7 +317,7 @@ def test_tls_and_http_server_selection_stay_within_the_current_listener(
             (ports[0], "a.test", "b.test", first),
             (ports[1], "b.test", "a.test", second),
         ]:
-            assert wait_for_proxy("127.0.0.1", port, timeout=3, proc=process)
+            assert process.wait_ready(timeout=3)
             with socket.create_connection(("127.0.0.1", port), timeout=3) as tcp:
                 with _context().wrap_socket(tcp, server_hostname=name) as tls:
                     assert tls.getpeercert(binary_form=True) == credential.der

@@ -11,13 +11,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .configuration import ConfigDict, JsonValue, dict_to_yaml
-from .ports import get_unique_port, wait_for_proxy
-from .proxy_process import BytesProcess, managed_processes
+from .notified_process import ProxyProcess
+from .ports import get_unique_port
+from .proxy_process import managed_processes
 
 
 @dataclass(frozen=True)
 class ProxyContext:
-    process: BytesProcess
+    process: ProxyProcess
     port: int
     working_dir: str
 
@@ -57,7 +58,5 @@ def running_proxy(
     _ = path.write_text(dict_to_yaml(_with_port(config, port)))
     with managed_processes() as start:
         process = start(str(path))
-        assert wait_for_proxy("127.0.0.1", port, timeout=2, proc=process), (
-            f"Proxy did not start on port {port}"
-        )
+        assert process.wait_ready(timeout=2), f"Proxy did not start on port {port}"
         yield ProxyContext(process, port, str(directory))

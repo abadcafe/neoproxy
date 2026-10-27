@@ -35,7 +35,8 @@ from tests.fixtures.h3_tunnel import perform_h3_connect_test
 
 # Alias for convenience
 from tests.fixtures.http3_client import H3Client
-from tests.fixtures.ports import get_unique_port, wait_for_udp_port_bound
+from tests.fixtures.notified_process import ProxyProcess
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy
 from tests.fixtures.tcp_peer import create_target_server, echo_handler
 
@@ -77,9 +78,9 @@ class TestHTTP3PasswordAuth:
             proxy_proc = start_proxy(config_path)
 
             # Verify process starts and stays running
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start with password auth (multiple users)"
+            assert proxy_proc.wait_ready(timeout=5.0), (
+                "HTTP/3 listener failed to start with password auth (multiple users)"
+            )
 
             assert proxy_proc.poll() is None, (
                 "HTTP/3 listener should be running with password auth config"
@@ -143,9 +144,7 @@ class TestHTTP3PasswordAuth:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Test with real HTTP/3 client using valid credentials
             async def do_auth_connect() -> tuple[bool, int]:
@@ -237,9 +236,7 @@ class TestHTTP3PasswordAuth:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Test with wrong password
             async def do_auth_connect() -> tuple[bool, int]:
@@ -316,9 +313,9 @@ class TestHTTP3TLSClientCertAuth:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start with TLS client cert auth"
+            assert proxy_proc.wait_ready(timeout=5.0), (
+                "HTTP/3 listener failed to start with TLS client cert auth"
+            )
 
             assert proxy_proc.poll() is None, (
                 "HTTP/3 listener should be running with TLS client cert auth"
@@ -381,7 +378,7 @@ servers:
             with open(config_path, "w") as f:
                 _ = f.write(config_content)
 
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -429,9 +426,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Verify graceful shutdown works with TLS client cert auth
             proxy_proc.send_signal(signal.SIGTERM)
@@ -475,9 +470,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Test with real HTTP/3 client using valid client certificate
             async def do_client_cert_connect() -> tuple[bool, int, str]:
@@ -558,9 +551,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Test with HTTP/3 client using INVALID client certificate
             async def do_invalid_client_cert_connect() -> tuple[bool, int, str]:
@@ -640,9 +631,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Test with HTTP/3 client without client certificate
             async def do_no_cert_connect() -> tuple[bool, int, str]:
@@ -735,9 +724,7 @@ class TestHTTP3DualAuth:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Use H3Client with client cert AND password
             async def do_dual_auth() -> tuple[bool, int]:
@@ -818,9 +805,7 @@ class TestHTTP3DualAuth:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Connect WITHOUT client cert - should fail at transport layer
             async def do_no_cert_connect() -> tuple[bool, int, str]:
@@ -903,9 +888,7 @@ class TestHTTP3DualAuth:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Use H3Client with valid client cert but WRONG password
             async def do_wrong_password() -> tuple[bool, int]:
@@ -987,9 +970,7 @@ class TestHTTP3DualAuth:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Use H3Client with valid client cert but NO password
             async def do_no_password() -> tuple[bool, int]:
@@ -1069,9 +1050,7 @@ class TestHTTP3DualAuth:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Connect with INVALID cert - should fail at transport
             async def do_invalid_cert() -> tuple[bool, int, str]:

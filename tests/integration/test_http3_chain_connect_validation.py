@@ -25,7 +25,7 @@ from tests.fixtures.certificates import generate_test_certificates
 from tests.fixtures.configuration import StringMap
 from tests.fixtures.h3_configuration import create_http3_chain_config
 from tests.fixtures.http_request import send_raw_request
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 
 
@@ -102,9 +102,7 @@ def chain_service_context(
             temp_dir=temp_dir,
         )
         proxy_proc = start_proxy(config_path)
-        assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
-            "HTTP listener failed to start"
-        )
+        assert proxy_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
         yield temp_dir, proxy_proc
 
@@ -274,9 +272,9 @@ class TestHTTP3ChainAddressResolution:
             proxy_proc = start_proxy(config_path)
 
             # Should start successfully with hostname address
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=5.0, proc=proxy_proc
-            ), "HTTP listener should start with hostname address in proxy_group"
+            assert proxy_proc.wait_ready(timeout=5.0), (
+                "HTTP listener should start with hostname address in proxy_group"
+            )
 
         finally:
             if proxy_proc:
@@ -338,9 +336,9 @@ servers:
             proxy_proc = start_proxy(config_path)
 
             # Should start successfully (DNS resolved at connect time)
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=5.0, proc=proxy_proc
-            ), "Service should start even with unresolvable proxy address"
+            assert proxy_proc.wait_ready(timeout=5.0), (
+                "Service should start even with unresolvable proxy address"
+            )
 
             # But requests should fail gracefully (502, not connection reset)
             result = subprocess.run(

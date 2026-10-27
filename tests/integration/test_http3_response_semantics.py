@@ -11,7 +11,7 @@ from aioquic.quic.events import ConnectionTerminated, StreamDataReceived, Stream
 
 from tests.fixtures.certificates import generate_test_certificates
 from tests.fixtures.h3_lifecycle import LifecycleClient
-from tests.fixtures.ports import get_unique_port, wait_for_udp_port_bound
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import managed_processes
 
 
@@ -70,5 +70,5 @@ servers:
 """)
     with managed_processes() as start:
         process = start(str(path))
-        assert wait_for_udp_port_bound("127.0.0.1", port, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         asyncio.run(head_response(port))

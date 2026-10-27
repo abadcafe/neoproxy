@@ -4,7 +4,7 @@ import socket
 import time
 from pathlib import Path
 
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import start_proxy, terminate_process
 
 
@@ -60,7 +60,7 @@ servers:
     process = start_proxy(str(config))
     log = tmp_path / "logs" / "access"
     try:
-        assert wait_for_proxy("127.0.0.1", port, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         _request(port, "/timer-anchor")
         assert _wait_for_log(log, "/timer-anchor", timeout=3)
         anchor = time.monotonic()

@@ -20,11 +20,7 @@ import time
 
 from tests.fixtures.configuration import StringMap
 from tests.fixtures.h3_configuration import create_http3_listener_config
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy
 from tests.fixtures.tcp_peer import create_target_server
 
@@ -115,9 +111,7 @@ class TestTunnelIdleTimeout:
                 temp_dir=temp_dir1,
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", h3_port, timeout=5.0, proc=h3_proc
-            ), "HTTP/3 listener failed to start"
+            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Start chain service with short tunnel_idle_timeout
             # This config includes tunnel_idle_timeout: 2s
@@ -157,9 +151,7 @@ servers:
                 _ = f.write(config_content)
 
             chain_proc = start_proxy(config_path)
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=5.0, proc=chain_proc
-            ), "HTTP listener failed to start"
+            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
             # Download through the proxy — should succeed even though
             # transfer takes ~2.5s and tunnel_idle_timeout is 2s
@@ -258,9 +250,7 @@ servers:
                 temp_dir=temp_dir1,
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", h3_port, timeout=5.0, proc=h3_proc
-            ), "HTTP/3 listener failed to start"
+            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Start chain service with short tunnel_idle_timeout
             config_content = f"""server_threads: 1
@@ -299,9 +289,7 @@ servers:
                 _ = f.write(config_content)
 
             chain_proc = start_proxy(config_path)
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=5.0, proc=chain_proc
-            ), "HTTP listener failed to start"
+            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
             # Use raw socket to establish CONNECT and then idle
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -438,9 +426,7 @@ servers:
                 temp_dir=temp_dir1,
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port_bound(
-                "127.0.0.1", h3_port, timeout=5.0, proc=h3_proc
-            ), "HTTP/3 listener failed to start"
+            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
 
             # Start chain service with 2s tunnel_idle_timeout
             config_content = f"""server_threads: 1
@@ -479,9 +465,7 @@ servers:
                 _ = f.write(config_content)
 
             chain_proc = start_proxy(config_path)
-            assert wait_for_proxy(
-                "127.0.0.1", http_port, timeout=5.0, proc=chain_proc
-            ), "HTTP listener failed to start"
+            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
             # Download through the proxy — one-way transfer lasting 5s
             # with 2s tunnel_idle_timeout. Without stale alarm fix, this would fail.

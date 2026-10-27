@@ -14,17 +14,14 @@ from aioquic.quic.configuration import QuicConfiguration
 
 from tests.fixtures.certificates import generate_test_certificates
 from tests.fixtures.h3_lifecycle import LifecycleClient
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
-from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
+from tests.fixtures.notified_process import ProxyProcess
+from tests.fixtures.ports import get_unique_port
+from tests.fixtures.proxy_process import start_proxy, terminate_process
 from tests.fixtures.tcp_peer import TargetServerFactory
 
 
 @contextmanager
-def running_proxy(directory: Path, content: str) -> Generator[BytesProcess]:
+def running_proxy(directory: Path, content: str) -> Generator[ProxyProcess]:
     directory.mkdir(parents=True, exist_ok=True)
     config = directory / "server.yaml"
     _ = config.write_text(content)
@@ -59,7 +56,7 @@ def test_https_accepts_clients_while_another_handshake_stalls(tmp_path: Path) ->
     port = get_unique_port()
     tls = f"  tls:\n    certificates:\n    - cert_path: {cert}\n      key_path: {key}"
     with running_proxy(tmp_path, echo_config(port, "https", tls)) as process:
-        assert wait_for_proxy("127.0.0.1", port, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         with socket.create_connection(("127.0.0.1", port), timeout=2):
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             context.check_hostname = False
@@ -106,7 +103,7 @@ def test_http3_streams_echo_before_upload_eof_and_preserves_trailers(
             "server_threads: 1", "server_threads: 2"
         ),
     ) as process:
-        assert wait_for_udp_port_bound("127.0.0.1", port, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         asyncio.run(stream_echo(port))
 
 
@@ -143,9 +140,9 @@ servers:
     with running_proxy(
         tmp_path / "upstream", echo_config(upstream, "http3", tls)
     ) as remote:
-        assert wait_for_udp_port_bound("127.0.0.1", upstream, timeout=3, proc=remote)
+        assert remote.wait_ready(timeout=3)
         with running_proxy(tmp_path / "entry", chain) as local:
-            assert wait_for_proxy("127.0.0.1", entry, timeout=3, proc=local)
+            assert local.wait_ready(timeout=3)
             with socket.create_connection(("127.0.0.1", entry), timeout=3) as conn:
                 conn.sendall(
                     (
@@ -203,7 +200,7 @@ servers:
 """
     try:
         with running_proxy(tmp_path, config) as process:
-            assert wait_for_proxy("127.0.0.1", entry, timeout=3, proc=process)
+            assert process.wait_ready(timeout=3)
             with socket.create_connection(("127.0.0.1", entry), timeout=2) as conn:
                 conn.sendall(
                     b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
@@ -214,7 +211,9 @@ servers:
 
 
 @pytest.mark.parametrize("listener_kind", ["http", "https"])
-@pytest.mark.parametrize("header_timeout", [None, "100ms"])
+@pytest.mark.parametrize(
+    "header_timeout", [pytest.param(None, marks=pytest.mark.slow), "100ms"]
+)
 def test_http_incomplete_headers_expire(
     tmp_path: Path,
     listener_kind: Literal["http", "https"],
@@ -235,7 +234,7 @@ def test_http_incomplete_headers_expire(
             + f"    header_read_timeout: {header_timeout}\n",
         )
     with running_proxy(tmp_path, config) as process:
-        assert wait_for_proxy("127.0.0.1", port, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         with ExitStack() as connections:
             conn: socket.socket = connections.enter_context(
                 socket.create_connection(("127.0.0.1", port), timeout=2)

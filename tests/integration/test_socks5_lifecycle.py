@@ -6,7 +6,7 @@ import socket
 import tempfile
 import time
 
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 from tests.fixtures.socks5_client import socks5_connect_ipv4, socks5_handshake_no_auth
 from tests.fixtures.socks5_configuration import create_socks5_config
@@ -48,10 +48,10 @@ class TestSocks5MultiAddress:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port1, timeout=5.0), (
+            assert proxy_proc.wait_ready(timeout=5.0), (
                 "Proxy server failed to start on port 1"
             )
-            assert wait_for_proxy("127.0.0.1", proxy_port2, timeout=5.0), (
+            assert proxy_proc.wait_ready(timeout=5.0), (
                 "Proxy server failed to start on port 2"
             )
 
@@ -108,9 +108,7 @@ class TestSocks5ClientDisconnect:
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Connect and disconnect immediately
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -124,7 +122,7 @@ class TestSocks5ClientDisconnect:
                 sock.close()
 
             # Server should still be running
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=2.0), (
+            assert proxy_proc.wait_ready(timeout=2.0), (
                 "Server should still accept connections after client disconnect"
             )
 
@@ -178,9 +176,7 @@ class TestSocks5GracefulShutdown:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(15.0)
@@ -252,9 +248,7 @@ class TestSocks5BidirectionalTransfer:
             )
 
             proxy_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)

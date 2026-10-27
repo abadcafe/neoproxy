@@ -28,7 +28,8 @@ import time
 from tests.fixtures.binary import NEOPROXY_BINARY
 from tests.fixtures.http_configuration import create_echo_config, create_test_config
 from tests.fixtures.http_request import establish_connect_tunnel
-from tests.fixtures.ports import get_unique_port, wait_for_port_released, wait_for_proxy
+from tests.fixtures.notified_process import ProxyProcess
+from tests.fixtures.ports import get_unique_port, wait_for_port_released
 from tests.fixtures.proxy_process import MAX_SHUTDOWN_TIME, BytesProcess, start_proxy
 from tests.fixtures.tcp_peer import create_target_server
 
@@ -54,9 +55,7 @@ class TestNormalShutdown:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Send SIGINT
             proxy_proc.send_signal(signal.SIGINT)
@@ -92,9 +91,7 @@ class TestNormalShutdown:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -139,9 +136,7 @@ class TestRepeatedSignal:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Send multiple SIGINT signals rapidly
             proxy_proc.send_signal(signal.SIGINT)
@@ -214,9 +209,7 @@ class TestShutdownTimeout:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Establish CONNECT tunnel
             client_sock = establish_connect_tunnel(
@@ -351,9 +344,7 @@ class TestConnectTunnel:
 
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Establish CONNECT tunnel
             client_sock = establish_connect_tunnel(
@@ -415,9 +406,7 @@ class TestResourceCleanup:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=5.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -459,9 +448,7 @@ class TestResourceCleanup:
             config_path = create_echo_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy(
-                "127.0.0.1", proxy_port, timeout=2.0, proc=proxy_proc
-            ), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(timeout=2.0), "Proxy server failed to start"
 
             # Create multiple idle connections
             num_connections = 5
@@ -516,7 +503,7 @@ class TestInitializationFailure:
             _ = f.write("server_threads: [\n  invalid yaml\n")
 
         try:
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -542,7 +529,7 @@ class TestInitializationFailure:
 
         Target: Verify that missing config file causes exit with code 1
         """
-        proc = subprocess.Popen(
+        proc = ProxyProcess(
             [NEOPROXY_BINARY, "--config", "/nonexistent/config.yaml"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -582,7 +569,7 @@ servers:
             _ = f.write(config_content)
 
         try:
-            proc = subprocess.Popen(
+            proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

@@ -54,15 +54,15 @@ impl TcpListenerBase {
     name: &'static str,
     retry: AcceptRetryDelay,
     handler: H,
-  ) -> Pin<Box<dyn Future<Output = Result<()>>>>
+  ) -> Result<Pin<Box<dyn Future<Output = Result<()>>>>>
   where
     H: Fn(TcpConnection) -> F + Clone + 'static,
     F: Future<Output = ()> + 'static,
   {
     if self.stream_tracker.shutdown_handle().is_shutdown() {
-      return Box::pin(std::future::ready(Ok(())));
+      return Ok(Box::pin(std::future::ready(Ok(()))));
     }
-    let listeners = (|| {
+    let listeners = {
       anyhow::ensure!(
         !addresses.is_empty(),
         "{name} listener requires an address"
@@ -73,11 +73,7 @@ impl TcpListenerBase {
           super::tcp_bind::create_tcp_listener(address)
             .with_context(|| format!("{name} bind failed on {address}"))
         })
-        .collect::<Result<Vec<_>>>()
-    })();
-    let listeners = match listeners {
-      Ok(listeners) => listeners,
-      Err(error) => return Box::pin(std::future::ready(Err(error))),
+        .collect::<Result<Vec<_>>>()?
     };
     let tasks = listeners.into_iter().map(|listener| {
       let tracker = self.stream_tracker.clone();
@@ -109,7 +105,7 @@ impl TcpListenerBase {
         Ok(())
       }) as Pin<Box<dyn Future<Output = Result<()>>>>
     });
-    self.start_with_tasks(tasks)
+    Ok(self.start_with_tasks(tasks))
   }
 
   /// Spawn tasks and return a future that manages their lifecycle.

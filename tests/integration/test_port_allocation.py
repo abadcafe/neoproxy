@@ -14,7 +14,7 @@ import pytest
 from tests.fixtures.http_configuration import create_test_config
 
 # Import from conftest
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 
 
@@ -65,7 +65,7 @@ class TestPortAllocation:
             proxy_proc = start_proxy(config_path)
 
             # Wait for proxy to be ready
-            assert wait_for_proxy("127.0.0.1", port, timeout=5.0), (
+            assert proxy_proc.wait_ready(timeout=5.0), (
                 f"Proxy failed to start on port {port}"
             )
 

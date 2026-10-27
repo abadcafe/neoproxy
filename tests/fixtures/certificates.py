@@ -1,14 +1,20 @@
-"""Certificate generation utilities using the cryptography library.
+"""module: certificates; responsibility: issue isolated test certificates.
+Public operations: generate_ca, generate_server_cert, generate_client_cert,
+generate_test_certificates, CertPair, TestCertBundle.
+Data entities: CertPair, TestCertBundle, Authority, AuthorityBytes.
+Tests: certificates_tests.py and TLS process contracts.
 
-Replaces subprocess calls to the `openssl` CLI, ensuring certificates
-are generated with the same OpenSSL library that Python uses for
-validation, avoiding version mismatch issues.
+Retain validated authority objects instead of repeating expensive RSA
+validation on every certificate issuance. New authorities remain independent.
 """
 
 import datetime
 import ipaddress
 import os
 import random
+import threading
+from collections import OrderedDict
+from pathlib import Path
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -18,6 +24,19 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 type CertPair = tuple[str, str]
 type TestCertBundle = tuple[str, str, str, str]
+type Authority = tuple[x509.Certificate, RSAPrivateKey]
+type AuthorityBytes = tuple[bytes, bytes]
+
+_authorities: OrderedDict[AuthorityBytes, Authority] = OrderedDict()
+_authority_lock = threading.Lock()
+
+
+def _retain_authority(identity: AuthorityBytes, authority: Authority) -> None:
+    """Update the bounded cache while the caller holds its lock."""
+    _authorities[identity] = authority
+    _authorities.move_to_end(identity)
+    if len(_authorities) > 64:
+        _ = _authorities.popitem(last=False)
 
 
 def _make_key() -> rsa.RSAPrivateKey:
@@ -40,15 +59,18 @@ def _write_cert(path: str, cert: x509.Certificate) -> None:
         _ = f.write(cert.public_bytes(serialization.Encoding.PEM))
 
 
-def _load_ca(
-    ca_cert_path: str, ca_key_path: str
-) -> tuple[x509.Certificate, RSAPrivateKey]:
-    with open(ca_cert_path, "rb") as f:
-        ca_cert = x509.load_pem_x509_certificate(f.read())
-    with open(ca_key_path, "rb") as f:
-        ca_key = serialization.load_pem_private_key(f.read(), password=None)
-    assert isinstance(ca_key, RSAPrivateKey)
-    return ca_cert, ca_key
+def _load_ca(ca_cert_path: str, ca_key_path: str) -> Authority:
+    identity = (Path(ca_cert_path).read_bytes(), Path(ca_key_path).read_bytes())
+    with _authority_lock:
+        if (authority := _authorities.get(identity)) is not None:
+            _authorities.move_to_end(identity)
+            return authority
+        ca_cert = x509.load_pem_x509_certificate(identity[0])
+        ca_key = serialization.load_pem_private_key(identity[1], password=None)
+        assert isinstance(ca_key, RSAPrivateKey)
+        authority = (ca_cert, ca_key)
+        _retain_authority(identity, authority)
+        return authority
 
 
 def generate_ca(
@@ -104,6 +126,9 @@ def generate_ca(
     ca_key_path = os.path.join(temp_dir, "ca.key")
     _write_cert(ca_cert_path, cert)
     _write_key(ca_key_path, key)
+    identity = (Path(ca_cert_path).read_bytes(), Path(ca_key_path).read_bytes())
+    with _authority_lock:
+        _retain_authority(identity, (cert, key))
     return ca_cert_path, ca_key_path
 
 

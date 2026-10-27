@@ -17,7 +17,7 @@ import tempfile
 import time
 
 from tests.fixtures.http_configuration import create_test_config
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import (
     BytesProcess,
     start_proxy,
@@ -182,9 +182,7 @@ class TestShutdownTiming:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             start_time = time.monotonic()
             proxy_proc.send_signal(signal.SIGTERM)
@@ -226,9 +224,7 @@ class TestLogVerification:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert wait_for_proxy("127.0.0.1", proxy_port, timeout=5.0), (
-                "Proxy server failed to start"
-            )
+            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)

@@ -11,7 +11,7 @@ from tests.fixtures.chain_scenario import ChainRequest, run_proxy_chain_test
 from tests.fixtures.configuration import JsonValue, StringMap
 from tests.fixtures.forward_scenario import ForwardNode, write_forward_node
 from tests.fixtures.http_echo import http_echo_handler
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.tcp_peer import managed_target_servers
 
 
@@ -101,7 +101,7 @@ def test_chain_capture_records_system_dns_and_tcp_stage_timings(tmp_path: Path) 
         ) as capture:
             directory = capture.directory
             process = capture.start_proxy("entry", config)
-            assert wait_for_proxy("127.0.0.1", port, timeout=2, proc=process)
+            assert process.wait_ready(timeout=2)
             result = capture.run_curl(
                 [
                     "curl",

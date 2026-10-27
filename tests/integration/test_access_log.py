@@ -26,7 +26,7 @@ from tests.fixtures.access_log_scenario import (
 )
 from tests.fixtures.configuration import ConfigDict, JsonValue, dict_to_yaml
 from tests.fixtures.curl import curl_request
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import (
     terminate_process,
     wait_for_process_exit,
@@ -60,7 +60,7 @@ class TestAccessLogTextFormat:
         )
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert wait_for_proxy("127.0.0.1", test_env.proxy_port)
+            assert proc.wait_ready(timeout=5.0)
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -84,7 +84,7 @@ class TestAccessLogTextFormat:
         )
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert wait_for_proxy("127.0.0.1", test_env.proxy_port)
+            assert proc.wait_ready(timeout=5.0)
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -117,7 +117,7 @@ class TestAccessLogTextFormat:
         )
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert wait_for_proxy("127.0.0.1", test_env.proxy_port)
+            assert proc.wait_ready(timeout=5.0)
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -148,7 +148,7 @@ class TestAccessLogGracefulShutdown:
         )
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert wait_for_proxy("127.0.0.1", test_env.proxy_port)
+            assert proc.wait_ready(timeout=5.0)
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -180,7 +180,7 @@ class TestAccessLogContextFields:
         )
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert wait_for_proxy("127.0.0.1", test_env.proxy_port)
+            assert proc.wait_ready(timeout=5.0)
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -213,7 +213,7 @@ class TestAccessLogContent:
         )
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert wait_for_proxy("127.0.0.1", test_env.proxy_port)
+            assert proc.wait_ready(timeout=5.0)
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -248,7 +248,7 @@ class TestAccessLogDisabled:
         )
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert wait_for_proxy("127.0.0.1", test_env.proxy_port)
+            assert proc.wait_ready(timeout=5.0)
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -282,7 +282,7 @@ class TestAccessLogNamedWriters:
 
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert wait_for_proxy("127.0.0.1", test_env.proxy_port)
+            assert proc.wait_ready(timeout=5.0)
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -368,8 +368,8 @@ class TestAccessLogNamedWriters:
 
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert wait_for_proxy("127.0.0.1", test_env.proxy_port)
-            assert wait_for_proxy("127.0.0.1", port2)
+            assert proc.wait_ready(timeout=5.0)
+            assert proc.wait_ready(timeout=5.0)
 
             status1 = curl_request("http://example.com/", test_env.proxy_port)
             assert status1 == 200
@@ -464,7 +464,7 @@ class TestAccessLogNamedWriters:
 
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert wait_for_proxy("127.0.0.1", test_env.proxy_port)
+            assert proc.wait_ready(timeout=5.0)
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -572,7 +572,7 @@ class TestAccessLogNamedWriters:
 
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert wait_for_proxy("127.0.0.1", test_env.proxy_port)
+            assert proc.wait_ready(timeout=5.0)
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -620,7 +620,7 @@ class TestAccessLogNamedWriters:
 
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert wait_for_proxy("127.0.0.1", test_env.proxy_port)
+            assert proc.wait_ready(timeout=5.0)
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -736,7 +736,7 @@ class TestAccessLogContextFieldValues:
 
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert wait_for_proxy("127.0.0.1", port)
+            assert proc.wait_ready(timeout=5.0)
 
             # Send request WITHOUT auth - should get 407
             status = curl_request("http://example.com/", port)
@@ -842,7 +842,7 @@ class TestAccessLogContextFieldValues:
 
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert wait_for_proxy("127.0.0.1", port)
+            assert proc.wait_ready(timeout=5.0)
 
             # Authenticate with valid credentials
             creds = base64.b64encode(b"admin:secret").decode()

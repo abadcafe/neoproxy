@@ -4,7 +4,7 @@ import resource
 from pathlib import Path
 
 from tests.fixtures.http_configuration import create_echo_config, create_invalid_config
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import (
     BytesProcess,
     managed_processes,
@@ -28,7 +28,7 @@ def test_managed_processes_reaps_all_children_and_closes_pipes(tmp_path: Path) -
             port = get_unique_port()
             process = start(create_echo_config(port, str(directory)))
             processes.append(process)
-            assert wait_for_proxy("127.0.0.1", port, timeout=2, proc=process)
+            assert process.wait_ready(timeout=2)
         assert all(process.poll() is None for process in processes)
     for process in processes:
         assert_reaped(process)
@@ -46,7 +46,7 @@ def test_start_proxy_limits_descriptors_without_changing_parent(tmp_path: Path) 
     port = get_unique_port()
     process = start_proxy(create_echo_config(port, str(tmp_path)), nofile_limit=64)
     try:
-        assert wait_for_proxy("127.0.0.1", port, timeout=2, proc=process)
+        assert process.wait_ready(timeout=2)
         assert resource.getrlimit(resource.RLIMIT_NOFILE) == original
     finally:
         terminate_process(process)

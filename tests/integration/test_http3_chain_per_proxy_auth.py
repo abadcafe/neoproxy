@@ -28,11 +28,7 @@ from tests.fixtures.h3_configuration import (
     create_http3_listener_config_with_password_auth,
     create_http3_listener_config_with_tls_client_cert,
 )
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy
 from tests.fixtures.tcp_peer import create_target_server, one_shot_echo_handler
 
@@ -79,7 +75,7 @@ class TestHTTP3ChainPerProxyPasswordAuth:
                 users=[("proxy_user", "proxy_pass")],
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0)
+            assert h3_proc.wait_ready(timeout=5.0)
 
             # Start chain service with per-proxy password auth
             user_yaml = """
@@ -93,7 +89,7 @@ class TestHTTP3ChainPerProxyPasswordAuth:
                 temp_dir=temp_dir2,
             )
             chain_proc = start_proxy(chain_config)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
+            assert chain_proc.wait_ready(timeout=5.0)
 
             # Test data transmission
             # Clear no_proxy to force proxy usage for localhost
@@ -185,7 +181,7 @@ class TestHTTP3ChainPerProxyTlsCertAuth:
                 temp_dir=temp_dir1,
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0)
+            assert h3_proc.wait_ready(timeout=5.0)
 
             # Start chain service with per-proxy TLS cert auth
             tls_yaml = f"""
@@ -199,7 +195,7 @@ class TestHTTP3ChainPerProxyTlsCertAuth:
                 temp_dir=temp_dir2,
             )
             chain_proc = start_proxy(chain_config)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
+            assert chain_proc.wait_ready(timeout=5.0)
 
             # Test data transmission
             # Clear no_proxy to force proxy usage for localhost
@@ -285,7 +281,7 @@ class TestHTTP3ChainAuthInheritance:
                 users=[("inherited_user", "inherited_pass")],
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0)
+            assert h3_proc.wait_ready(timeout=5.0)
 
             # Proxy has NO user field - should inherit from default_user
             chain_config = create_http3_chain_config_with_per_proxy_auth(
@@ -301,7 +297,7 @@ class TestHTTP3ChainAuthInheritance:
                 ),  # Will be inherited
             )
             chain_proc = start_proxy(chain_config)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
+            assert chain_proc.wait_ready(timeout=5.0)
 
             # Clear no_proxy to force proxy usage for localhost
             env = get_curl_env_without_no_proxy()
@@ -385,7 +381,7 @@ class TestHTTP3ChainAuthFailure:
                 users=[("correct_user", "correct_pass")],
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0)
+            assert h3_proc.wait_ready(timeout=5.0)
 
             # Configure WRONG credentials in user
             user_yaml = """
@@ -399,7 +395,7 @@ class TestHTTP3ChainAuthFailure:
                 temp_dir=temp_dir2,
             )
             chain_proc = start_proxy(chain_config)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
+            assert chain_proc.wait_ready(timeout=5.0)
 
             # Clear no_proxy to force proxy usage for localhost
             env = get_curl_env_without_no_proxy()
@@ -480,7 +476,7 @@ class TestTlsDeepMerge:
                 temp_dir=temp_dir1,
             )
             h3_proc = start_proxy(h3_config)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0)
+            assert h3_proc.wait_ready(timeout=5.0)
 
             # Chain: plugin-level certificates with correct CA
             # (New config format: certificates are global, not per-address)
@@ -519,7 +515,7 @@ servers:
                 _ = f.write(config_content)
 
             chain_proc = start_proxy(config_path)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0)
+            assert chain_proc.wait_ready(timeout=5.0)
 
             env = get_curl_env_without_no_proxy()
             result = subprocess.run(

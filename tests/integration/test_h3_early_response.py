@@ -16,7 +16,7 @@ from aioquic.quic.events import QuicEvent, StopSendingReceived
 from tests.fixtures.certificates import generate_test_certificates
 from tests.fixtures.h3_configuration import create_http3_chain_config
 from tests.fixtures.h3_protocol import H3ProtocolBase
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import managed_processes
 from tests.fixtures.stream_cleanup import close_writer
 
@@ -71,7 +71,7 @@ async def test_final_response_survives_peer_stopping_upload(tmp_path: Path) -> N
     try:
         with managed_processes() as start:
             process = start(config)
-            assert wait_for_proxy("127.0.0.1", entry, timeout=3, proc=process)
+            assert process.wait_ready(timeout=3)
             reader, writer = await asyncio.open_connection("127.0.0.1", entry)
             try:
                 writer.write(

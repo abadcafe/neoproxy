@@ -15,9 +15,10 @@ from collections.abc import Callable, Generator, Mapping
 from contextlib import ExitStack, contextmanager
 
 from .binary import NEOPROXY_BINARY
+from .notified_process import ProxyProcess
 
 type BytesProcess = subprocess.Popen[bytes]
-type ProcessFactory = Callable[[str], BytesProcess]
+type ProcessFactory = Callable[[str], ProxyProcess]
 
 
 # Listener and upstream task waits: (3s + 2s) + (3s + 2s).
@@ -30,7 +31,7 @@ def start_proxy(
     *,
     nofile_limit: int | None = None,
     env: Mapping[str, str] | None = None,
-) -> BytesProcess:
+) -> ProxyProcess:
     """
     Start proxy server process.
 
@@ -57,7 +58,7 @@ resource.setrlimit(resource.RLIMIT_NOFILE, (limit, limits[1]))
 os.execv(sys.argv[2], sys.argv[2:])
 """
         command = [sys.executable, "-c", launcher, str(nofile_limit), *command]
-    proc = subprocess.Popen(
+    proc = ProxyProcess(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -73,7 +74,7 @@ def managed_processes() -> Generator[ProcessFactory, None, None]:
     """Own all proxy children created through a factory until context exit."""
     with ExitStack() as resources:
 
-        def start(config_path: str) -> BytesProcess:
+        def start(config_path: str) -> ProxyProcess:
             process = resources.enter_context(start_proxy(config_path))
             # Terminate and reap before Popen's context closes its pipes.
             # ExitStack also runs these actions when the caller fails.

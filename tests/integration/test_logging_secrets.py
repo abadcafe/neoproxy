@@ -10,7 +10,8 @@ from typing import Literal
 import pytest
 
 from tests.fixtures.binary import NEOPROXY_BINARY
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.notified_process import ProxyProcess
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import terminate_process
 
 CLIENT_USER = "np-live-private-client-user"
@@ -93,7 +94,7 @@ def test_startup_logs_mask_passwords_preserve_fields_and_authentication_works(
 ) -> None:
     port = get_unique_port()
     config = _configuration(tmp_path, port)
-    process = subprocess.Popen(
+    process = ProxyProcess(
         [NEOPROXY_BINARY, "--config", str(config)],
         cwd=tmp_path,
         env=dict(os.environ, NEOPROXY_LOG=log_filter),
@@ -101,7 +102,7 @@ def test_startup_logs_mask_passwords_preserve_fields_and_authentication_works(
         stderr=subprocess.PIPE,
     )
     try:
-        assert wait_for_proxy("127.0.0.1", port, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         assert _request(port, None).startswith(b"HTTP/1.1 407 ")
         assert _request(port, _credentials()).startswith(b"HTTP/1.1 200 ")
     finally:

@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 
 from tests.fixtures.binary import NEOPROXY_BINARY
+from tests.fixtures.notified_process import ProxyProcess
 from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import wait_for_process_running
 
@@ -313,7 +314,7 @@ servers:
         _ = temp_file.write(config)
         temp_file.close()
 
-        proc = subprocess.Popen(
+        proc = ProxyProcess(
             [NEOPROXY_BINARY, "--config", temp_file.name],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -936,7 +937,7 @@ servers:
   listeners: ["socks_main"]
   service: direct
 """
-        proc = subprocess.Popen(
+        proc = ProxyProcess(
             [NEOPROXY_BINARY, "--config", self._write_config(config)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -981,7 +982,7 @@ servers:
   listeners: ["http_wildcard"]
   service: echo
 """
-        proc = subprocess.Popen(
+        proc = ProxyProcess(
             [NEOPROXY_BINARY, "--config", self._write_config(config)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1026,7 +1027,7 @@ servers:
   listeners: ["http_a"]
   service: echo
 """
-        proc = subprocess.Popen(
+        proc = ProxyProcess(
             [NEOPROXY_BINARY, "--config", self._write_config(config)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

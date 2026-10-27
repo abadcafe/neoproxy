@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from tests.fixtures.binary import NEOPROXY_BINARY, PROJECT_ROOT
 from tests.fixtures.curl import get_curl_env_without_no_proxy
+from tests.fixtures.notified_process import ProxyProcess
 from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 from tests.fixtures.socket_trace import SocketTrace
 
@@ -62,7 +63,7 @@ class ChainCapture:
     def directory(self) -> Path:
         return self._directory
 
-    def start_proxy(self, role: str, config: str) -> BytesProcess:
+    def start_proxy(self, role: str, config: str) -> ProxyProcess:
         """Drain both child pipes continuously and flush logs on shutdown."""
         destination = self.directory / role
         destination.mkdir(exist_ok=True)

@@ -19,7 +19,7 @@ from aioquic.quic.connection import QuicConnection
 from aioquic.quic.events import QuicEvent
 
 from tests.fixtures.certificates import generate_test_certificates
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import start_proxy, terminate_process
 from tests.fixtures.stream_cleanup import close_writer
 
@@ -62,7 +62,7 @@ servers:
 """)
     process = start_proxy(str(config))
     try:
-        assert wait_for_proxy("127.0.0.1", entry, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         reader, writer = await asyncio.open_connection("127.0.0.1", entry)
         try:
             async with asyncio.timeout(3):

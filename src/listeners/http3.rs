@@ -128,7 +128,7 @@ impl Http3Listener {
 }
 
 impl Listening for Http3Listener {
-  fn start(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+  fn start(&self) -> Result<Pin<Box<dyn Future<Output = Result<()>>>>> {
     let addresses = self.addresses.clone();
     let tls_config = self.tls_config.clone();
     let quic_config = self.quic_config.clone();
@@ -138,65 +138,63 @@ impl Listening for Http3Listener {
     let shutdown_handle = self.shutdown_handle.clone();
     let server_router = self.server_router.clone();
 
-    Box::pin(async move {
-      // Create Quinn server config
-      let quic_server_config =
-        QuicServerConfig::try_from(tls_config.as_ref().clone())?;
-      let mut server_config =
-        quinn::ServerConfig::with_crypto(Arc::new(quic_server_config));
+    // Create Quinn server config
+    let quic_server_config =
+      QuicServerConfig::try_from(tls_config.as_ref().clone())?;
+    let mut server_config =
+      quinn::ServerConfig::with_crypto(Arc::new(quic_server_config));
 
-      // Apply QUIC parameters
-      let mut transport_config = quinn::TransportConfig::default();
-      transport_config
-        .max_concurrent_bidi_streams(
-          quinn::VarInt::try_from(
-            quic_config.max_concurrent_bidi_streams,
-          )
-          .map_err(|e| {
-            anyhow!("Invalid max_concurrent_bidi_streams: {}", e)
-          })?,
+    // Apply QUIC parameters
+    let mut transport_config = quinn::TransportConfig::default();
+    transport_config
+      .max_concurrent_bidi_streams(
+        quinn::VarInt::try_from(
+          quic_config.max_concurrent_bidi_streams,
         )
-        .max_idle_timeout(Some(
-          quinn::VarInt::try_from(quic_config.max_idle_timeout_ms)
-            .map_err(|e| anyhow!("Invalid max_idle_timeout_ms: {}", e))?
-            .into(),
-        ))
-        .initial_mtu(quic_config.initial_mtu)
-        .send_window(quic_config.send_window)
-        .receive_window(
-          quinn::VarInt::try_from(quic_config.receive_window)
-            .map_err(|e| anyhow!("Invalid receive_window: {}", e))?,
-        );
+        .map_err(|e| {
+          anyhow!("Invalid max_concurrent_bidi_streams: {}", e)
+        })?,
+      )
+      .max_idle_timeout(Some(
+        quinn::VarInt::try_from(quic_config.max_idle_timeout_ms)
+          .map_err(|e| anyhow!("Invalid max_idle_timeout_ms: {}", e))?
+          .into(),
+      ))
+      .initial_mtu(quic_config.initial_mtu)
+      .send_window(quic_config.send_window)
+      .receive_window(
+        quinn::VarInt::try_from(quic_config.receive_window)
+          .map_err(|e| anyhow!("Invalid receive_window: {}", e))?,
+      );
 
-      server_config.transport_config(Arc::new(transport_config));
+    server_config.transport_config(Arc::new(transport_config));
 
-      // Create endpoints for all addresses
-      let mut endpoints: Vec<quinn::Endpoint> = Vec::new();
-      for address in &addresses {
-        let endpoint =
-          transport.bind(*address, server_config.clone())?;
-        endpoints.push(endpoint);
-      }
+    // Create endpoints for all addresses
+    let mut endpoints: Vec<quinn::Endpoint> = Vec::new();
+    for address in &addresses {
+      let endpoint = transport.bind(*address, server_config.clone())?;
+      endpoints.push(endpoint);
+    }
 
-      // Log all bound addresses
-      let addrs_str: Vec<String> =
-        addresses.iter().map(|a| a.to_string()).collect();
-      info!("HTTP/3 Listener started on {}", addrs_str.join(", "));
+    // Log all bound addresses
+    let addrs_str: Vec<String> =
+      addresses.iter().map(|a| a.to_string()).collect();
+    info!("HTTP/3 Listener started on {}", addrs_str.join(", "));
 
-      // Channel to receive incoming connections from all endpoints
-      let (conn_tx, mut conn_rx) =
-        tokio::sync::mpsc::channel::<(SocketAddr, quinn::Incoming)>(32);
+    // Channel to receive incoming connections from all endpoints
+    let (conn_tx, mut conn_rx) =
+      tokio::sync::mpsc::channel::<(SocketAddr, quinn::Incoming)>(32);
 
-      // Spawn accept task for each endpoint
-      // These clones stay within this worker. Other workers bind
-      // independent sockets and own independent endpoint drivers.
-      let endpoints: Vec<Arc<quinn::Endpoint>> =
-        endpoints.into_iter().map(Arc::new).collect();
-      for endpoint in endpoints.clone() {
-        let conn_tx = conn_tx.clone();
-        let shutdown_handle = shutdown_handle.clone();
-        let local_addr = endpoint.local_addr()?;
-        transport.spawn(async move {
+    // Spawn accept task for each endpoint
+    // These clones stay within this worker. Other workers bind
+    // independent sockets and own independent endpoint drivers.
+    let endpoints: Vec<Arc<quinn::Endpoint>> =
+      endpoints.into_iter().map(Arc::new).collect();
+    for endpoint in endpoints.clone() {
+      let conn_tx = conn_tx.clone();
+      let shutdown_handle = shutdown_handle.clone();
+      let local_addr = endpoint.local_addr()?;
+      transport.spawn(async move {
           loop {
             tokio::select! {
               biased;
@@ -214,11 +212,12 @@ impl Listening for Http3Listener {
             }
           }
         });
-      }
-      // Drop the original sender so conn_rx will end when all spawn
-      // tasks end
-      drop(conn_tx);
+    }
+    // Drop the original sender so conn_rx will end when all spawn
+    // tasks end
+    drop(conn_tx);
 
+    Ok(Box::pin(async move {
       // Accept connections loop
       loop {
         let accept_result = tokio::select! {
@@ -309,7 +308,7 @@ impl Listening for Http3Listener {
 
       info!("HTTP/3 Listener requests drained");
       Ok(())
-    })
+    }))
   }
 
   fn stop(&self) {

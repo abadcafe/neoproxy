@@ -14,7 +14,7 @@ import shutil
 import socket
 import tempfile
 
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 from tests.fixtures.socks5_client import (
     socks5_connect_domain,
@@ -93,9 +93,7 @@ class TestSocks5UpgradeConnectTcp:
         config = create_socks5_connect_tcp_config(port, self.temp_dir)
         proc = start_proxy(config)
         self.processes.append(proc)
-        assert wait_for_proxy("127.0.0.1", port, timeout=10.0), (
-            "Proxy did not start in time"
-        )
+        assert proc.wait_ready(timeout=10.0), "Proxy did not start in time"
 
     def _create_echo_target(self, port: int) -> None:
         """Create a TCP echo server on the given port."""

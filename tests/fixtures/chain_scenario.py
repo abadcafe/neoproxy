@@ -25,10 +25,6 @@ from tests.fixtures.chain_configuration import (
 from tests.fixtures.chain_diagnostics import record_chain
 from tests.fixtures.configuration import StringMap
 from tests.fixtures.http_echo import http_echo_handler
-from tests.fixtures.ports import (
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
 from tests.fixtures.tcp_peer import create_target_server
 
 type EntryKind = Literal["http", "socks5"]
@@ -173,8 +169,8 @@ def run_proxy_chain_test(
                     "upstream.error.message",
                 ],
             )
-            _ = diagnostics.start_proxy("upstream", upstream_config)
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
+            upstream_process = diagnostics.start_proxy("upstream", upstream_config)
+            assert upstream_process.wait_ready(timeout=5.0), (
                 "Upstream HTTP/3 listener failed to start"
             )
 
@@ -223,8 +219,8 @@ def run_proxy_chain_test(
                     "upstream.error.message",
                 ],
             )
-            _ = diagnostics.start_proxy("entry", entry_config)
-            assert wait_for_proxy("127.0.0.1", http_port, timeout=5.0), (
+            entry_process = diagnostics.start_proxy("entry", entry_config)
+            assert entry_process.wait_ready(timeout=5.0), (
                 "Entry listener failed to start"
             )
 

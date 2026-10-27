@@ -10,12 +10,13 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from tests.fixtures.binary import NEOPROXY_BINARY
-from tests.fixtures.ports import get_unique_port, wait_for_proxy
+from tests.fixtures.notified_process import ProxyProcess
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import terminate_process
 
 
 def _run_requests(config: Path, port: int, timezone: str, indices: range) -> None:
-    process = subprocess.Popen(
+    process = ProxyProcess(
         [NEOPROXY_BINARY, "--config", str(config)],
         cwd=config.parent,
         env=dict(os.environ, TZ=timezone),
@@ -23,7 +24,7 @@ def _run_requests(config: Path, port: int, timezone: str, indices: range) -> Non
         stderr=subprocess.PIPE,
     )
     try:
-        assert wait_for_proxy("127.0.0.1", port, timeout=3, proc=process)
+        assert process.wait_ready(timeout=3)
         for index in indices:
             with socket.create_connection(("127.0.0.1", port), timeout=3) as client:
                 client.sendall(

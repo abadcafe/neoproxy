@@ -22,11 +22,8 @@ from tests.fixtures.h3_configuration import (
 )
 from tests.fixtures.http_echo import http_echo_handler
 from tests.fixtures.http_request import establish_connect_tunnel
-from tests.fixtures.ports import (
-    get_unique_port,
-    wait_for_proxy,
-    wait_for_udp_port_bound,
-)
+from tests.fixtures.notified_process import ProxyProcess
+from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import (
     BytesProcess,
     terminate_process,
@@ -94,13 +91,13 @@ class TestConnectionReuseWithinService:
             upstream_config_path = create_http3_listener_config(
                 h3_port, cert_path, key_path, temp_dir
             )
-            upstream_proc = subprocess.Popen(
+            upstream_proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", upstream_config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
+            assert upstream_proc.wait_ready(timeout=5.0), (
                 "Upstream H3 listener did not start"
             )
 
@@ -112,7 +109,7 @@ class TestConnectionReuseWithinService:
                 upstream_name="reuse_upstream",
             )
 
-            entry_proc = subprocess.Popen(
+            entry_proc = ProxyProcess(
                 [
                     os.path.abspath(NEOPROXY_BINARY),
                     "--config",
@@ -122,7 +119,7 @@ class TestConnectionReuseWithinService:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            _ = wait_for_proxy("127.0.0.1", http_port, timeout=10)
+            _ = entry_proc.wait_ready(timeout=10)
 
             # Use local echo target to avoid external network
             _, target_socket = create_target_server(
@@ -176,13 +173,13 @@ class TestMultipleServicesShareUpstream:
             upstream_config_path = create_http3_listener_config(
                 h3_port, cert_path, key_path, temp_dir
             )
-            upstream_proc = subprocess.Popen(
+            upstream_proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", upstream_config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
+            assert upstream_proc.wait_ready(timeout=5.0), (
                 "Upstream H3 listener did not start"
             )
 
@@ -233,14 +230,14 @@ servers:
             with open(config_path, "w") as f:
                 _ = f.write(config_content)
 
-            entry_proc = subprocess.Popen(
+            entry_proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            _ = wait_for_proxy("127.0.0.1", http_port_1, timeout=10)
-            _ = wait_for_proxy("127.0.0.1", http_port_2, timeout=5)
+            _ = entry_proc.wait_ready(timeout=10)
+            _ = entry_proc.wait_ready(timeout=5)
 
             # Both services should work
             _, target_socket = create_target_server(
@@ -300,13 +297,13 @@ class TestThreeLevelConfigInheritance:
                 temp_dir=temp_dir,
                 users=[("addr_user", "addr_pass")],
             )
-            upstream_proc = subprocess.Popen(
+            upstream_proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", upstream_config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
+            assert upstream_proc.wait_ready(timeout=5.0), (
                 "Upstream H3 listener did not start"
             )
 
@@ -352,13 +349,13 @@ servers:
             with open(config_path, "w") as f:
                 _ = f.write(config_content)
 
-            entry_proc = subprocess.Popen(
+            entry_proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            _ = wait_for_proxy("127.0.0.1", http_port, timeout=10)
+            _ = entry_proc.wait_ready(timeout=10)
 
             _, target_socket = create_target_server(
                 "127.0.0.1", target_port, http_echo_handler
@@ -405,13 +402,13 @@ servers:
                 temp_dir=temp_dir,
                 users=[("plugin_user", "plugin_pass")],
             )
-            upstream_proc = subprocess.Popen(
+            upstream_proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", upstream_config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
+            assert upstream_proc.wait_ready(timeout=5.0), (
                 "Upstream H3 listener did not start"
             )
 
@@ -454,13 +451,13 @@ servers:
             with open(config_path, "w") as f:
                 _ = f.write(config_content)
 
-            entry_proc = subprocess.Popen(
+            entry_proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            _ = wait_for_proxy("127.0.0.1", http_port, timeout=10)
+            _ = entry_proc.wait_ready(timeout=10)
 
             _, target_socket = create_target_server(
                 "127.0.0.1", target_port, http_echo_handler
@@ -506,13 +503,13 @@ servers:
                 temp_dir=temp_dir,
                 users=[("upstream_user", "upstream_pass")],
             )
-            upstream_proc = subprocess.Popen(
+            upstream_proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", upstream_config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port, timeout=5.0), (
+            assert upstream_proc.wait_ready(timeout=5.0), (
                 "Upstream H3 listener did not start"
             )
 
@@ -559,13 +556,13 @@ servers:
             with open(config_path, "w") as f:
                 _ = f.write(config_content)
 
-            entry_proc = subprocess.Popen(
+            entry_proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            _ = wait_for_proxy("127.0.0.1", http_port, timeout=10)
+            _ = entry_proc.wait_ready(timeout=10)
 
             _, target_socket = create_target_server(
                 "127.0.0.1", target_port, http_echo_handler
@@ -619,28 +616,24 @@ class TestWRRLoadBalancingWithPool:
             upstream_config_1 = create_http3_listener_config(
                 h3_port_1, cert_path, key_path, temp_dir
             )
-            upstream_proc_1 = subprocess.Popen(
+            upstream_proc_1 = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", upstream_config_1],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port_1, timeout=5.0), (
-                "Upstream 1 did not start"
-            )
+            assert upstream_proc_1.wait_ready(timeout=5.0), "Upstream 1 did not start"
 
             upstream_config_2 = create_http3_listener_config(
                 h3_port_2, cert_path, key_path, temp_dir
             )
-            upstream_proc_2 = subprocess.Popen(
+            upstream_proc_2 = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", upstream_config_2],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert wait_for_udp_port_bound("127.0.0.1", h3_port_2, timeout=5.0), (
-                "Upstream 2 did not start"
-            )
+            assert upstream_proc_2.wait_ready(timeout=5.0), "Upstream 2 did not start"
 
             # Config with two addresses, weights 2:1
             config_content = f"""server_threads: 2
@@ -681,13 +674,13 @@ servers:
             with open(config_path, "w") as f:
                 _ = f.write(config_content)
 
-            entry_proc = subprocess.Popen(
+            entry_proc = ProxyProcess(
                 [NEOPROXY_BINARY, "--config", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            _ = wait_for_proxy("127.0.0.1", http_port, timeout=10)
+            _ = entry_proc.wait_ready(timeout=10)
 
             # Send 6 requests to local echo target
             _, target_socket = create_target_server(
@@ -767,7 +760,7 @@ servers:
         with open(config_path, "w") as f:
             _ = f.write(config_content)
 
-        proc = subprocess.Popen(
+        proc = ProxyProcess(
             [NEOPROXY_BINARY, "--config", config_path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -775,9 +768,11 @@ servers:
         )
         try:
             # Proxy should NOT start — upstream validation fails at startup
-            assert not wait_for_proxy("127.0.0.1", port, timeout=5.0), (
+            assert not proc.wait_ready(timeout=5.0), (
                 "Proxy should NOT start with missing upstream"
             )
+            stdout, stderr = proc.communicate(timeout=5)
+            assert proc.returncode == 2, (stdout, stderr)
         finally:
             terminate_process(proc, timeout=5, force=True)
 
@@ -816,7 +811,7 @@ servers:
         with open(config_path, "w") as f:
             _ = f.write(config_content)
 
-        proc = subprocess.Popen(
+        proc = ProxyProcess(
             [NEOPROXY_BINARY, "--config", config_path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -875,16 +870,14 @@ servers:
         path = os.path.join(temp_dir, "quic.yaml")
         with open(path, "w") as f:
             _ = f.write(config)
-        proc = subprocess.Popen(
+        proc = ProxyProcess(
             [NEOPROXY_BINARY, "--config", path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=False,
         )
         try:
-            assert wait_for_proxy("127.0.0.1", port, timeout=5.0), (
-                "Should start with quic: sub-block"
-            )
+            assert proc.wait_ready(timeout=5.0), "Should start with quic: sub-block"
         finally:
             terminate_process(proc, timeout=5, force=True)
 
@@ -920,7 +913,7 @@ servers:
         path = os.path.join(temp_dir, "unknown_field.yaml")
         with open(path, "w") as f:
             _ = f.write(config)
-        proc = subprocess.Popen(
+        proc = ProxyProcess(
             [NEOPROXY_BINARY, "--config", path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -956,16 +949,14 @@ servers:
         path = os.path.join(temp_dir, "tcp_idle.yaml")
         with open(path, "w") as f:
             _ = f.write(config)
-        proc = subprocess.Popen(
+        proc = ProxyProcess(
             [NEOPROXY_BINARY, "--config", path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=False,
         )
         try:
-            assert wait_for_proxy("127.0.0.1", port, timeout=5.0), (
-                "Should start with max_idle_timeout"
-            )
+            assert proc.wait_ready(timeout=5.0), "Should start with max_idle_timeout"
         finally:
             terminate_process(proc, timeout=5, force=True)
 
@@ -996,7 +987,7 @@ servers:
         path = os.path.join(temp_dir, "tcp_unknown.yaml")
         with open(path, "w") as f:
             _ = f.write(config)
-        proc = subprocess.Popen(
+        proc = ProxyProcess(
             [NEOPROXY_BINARY, "--config", path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1037,7 +1028,7 @@ servers:
         path = os.path.join(temp_dir, "unknown_plugin_field.yaml")
         with open(path, "w") as f:
             _ = f.write(config)
-        proc = subprocess.Popen(
+        proc = ProxyProcess(
             [NEOPROXY_BINARY, "--config", path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

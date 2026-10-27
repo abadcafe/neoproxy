@@ -483,7 +483,7 @@ class TestTlsDeepMerge:
             config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: "{ca_path}"
     upstreams:
@@ -501,7 +501,7 @@ listeners:
 
 services:
 - name: upstream
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: test_upstream
 

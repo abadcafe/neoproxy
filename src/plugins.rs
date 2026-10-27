@@ -25,9 +25,9 @@ mod auth_tests;
 pub(crate) mod echo;
 #[cfg(test)]
 mod echo_tests;
-pub(crate) mod http_upstream;
+pub(crate) mod upstream;
 #[cfg(test)]
-mod http_upstream_tests;
+mod upstream_tests;
 
 type CreateFn =
   fn(Option<&SerializedArgs>) -> Result<Box<dyn plugin::Plugin>>;
@@ -55,7 +55,7 @@ impl PluginManager {
       (echo::plugin_name(), echo::create_plugin),
       (auth::plugin_name(), auth::create_plugin),
       (access_log::plugin_name(), access_log::create_plugin),
-      (http_upstream::plugin_name(), http_upstream::create_plugin),
+      (upstream::plugin_name(), upstream::create_plugin),
     ];
 
     let mut plugins: HashMap<String, Box<dyn plugin::Plugin>> =

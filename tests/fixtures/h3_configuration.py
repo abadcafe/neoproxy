@@ -49,7 +49,7 @@ def create_http3_listener_config(
     config_content = f"""server_threads: {server_threads}
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
@@ -60,7 +60,7 @@ listeners:
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 
@@ -117,7 +117,7 @@ def create_http3_chain_config(
     config_content = f"""server_threads: {server_threads}
 
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: "{ca_path}"
     upstreams:
@@ -132,7 +132,7 @@ listeners:
 
 services:
 - name: upstream
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: {upstream_name}
 
@@ -190,14 +190,14 @@ def create_http3_listener_config_with_password_auth(
     config_content = f"""server_threads: {server_threads}
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
   auth:
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
   layers:
@@ -262,13 +262,13 @@ def create_http3_listener_config_with_tls_client_cert(
     config_content = f"""server_threads: {server_threads}
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 
@@ -343,14 +343,14 @@ def create_http3_listener_config_with_mtls_and_password(
     config_content = f"""server_threads: {server_threads}
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
   auth:
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
   layers:
@@ -463,7 +463,7 @@ def create_http3_chain_config_with_per_proxy_auth(
     config_content = f"""server_threads: {server_threads}
 
 plugins:
-  http_upstream:
+  upstream:
 {plugin_user_section}{plugin_tls_section}    upstreams:
       - name: {upstream_name}
         addresses:
@@ -476,7 +476,7 @@ listeners:
 
 services:
 - name: upstream
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: {upstream_name}
 

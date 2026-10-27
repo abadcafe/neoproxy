@@ -64,13 +64,13 @@ def create_socks5_config(
     config_content = f"""server_threads: {server_threads}
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct{auth_plugin_line}
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct{layers_yaml}
 

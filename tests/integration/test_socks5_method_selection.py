@@ -1,4 +1,4 @@
-"""SOCKS5 method selection follows the configured service authentication policy."""
+"""SOCKS5 method negotiation is independent of CONNECT authentication policy."""
 
 import socket
 from pathlib import Path
@@ -40,7 +40,7 @@ def _receive_exact(client: socket.socket, size: int) -> bytes:
         pytest.param(b"wrong", id="invalid-credentials"),
     ],
 )
-def test_socks5_selects_only_the_configured_authentication_method(
+def test_socks5_selects_offered_method_and_authenticates_only_connect(
     tmp_path: Path, methods: bytes, password: bytes | None
 ) -> None:
     proxy_port = get_unique_port()
@@ -51,9 +51,11 @@ def test_socks5_selects_only_the_configured_authentication_method(
         auth_type="password" if password is not None else None,
         users=[{"username": "user", "password": "correct"}],
     )
-    required_method = 0x02 if password is not None else 0x00
-    accepted = required_method in methods
-    authorized = accepted and password in (None, b"correct")
+    selected_method = 0x02 if 0x02 in methods else 0x00
+    accepted = selected_method in methods
+    authorized = accepted and (
+        password is None or (selected_method == 0x02 and password == b"correct")
+    )
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as target:
         target.bind(("127.0.0.1", target_port))
@@ -65,17 +67,22 @@ def test_socks5_selects_only_the_configured_authentication_method(
             with socket.create_connection(
                 ("127.0.0.1", proxy_port), timeout=2
             ) as client:
-                # Classic tsocks always offers both 00 and 02, even without a
-                # configured password. The server must select its configured mode.
+                # Product contract: negotiation collects offered credentials;
+                # only the subsequent CONNECT middleware decides admission.
                 client.sendall(bytes([5, len(methods)]) + methods)
                 assert _receive_exact(client, 2) == bytes(
-                    [5, required_method if accepted else 0xFF]
+                    [5, selected_method if accepted else 0xFF]
                 )
-                if accepted and password is not None:
-                    client.sendall(b"\x01\x04user" + bytes([len(password)]) + password)
+                if accepted and selected_method == 0x02:
+                    supplied_password = password or b"unverified"
+                    client.sendall(
+                        b"\x01\x04user"
+                        + bytes([len(supplied_password)])
+                        + supplied_password
+                    )
                     reply = _receive_exact(client, 2)
                     assert reply[0] == 1
-                    assert (reply[1] == 0) is authorized
+                    assert reply[1] == 0
 
                 if authorized:
                     reply = socks5_connect_ipv4(client, "127.0.0.1", target_port)
@@ -89,6 +96,10 @@ def test_socks5_selects_only_the_configured_authentication_method(
                         origin.sendall(b"response")
                         assert _receive_exact(client, 8) == b"response"
                 else:
+                    if accepted:
+                        reply = socks5_connect_ipv4(client, "127.0.0.1", target_port)
+                        assert isinstance(reply, CommandReply)
+                        assert reply.code is ReplyCode.CONNECTION_NOT_ALLOWED
                     assert client.recv(1) == b"", "rejected handshake remained open"
         finally:
             terminate_process(process)

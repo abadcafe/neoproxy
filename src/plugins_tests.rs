@@ -5,7 +5,7 @@ use crate::plugins::{PluginManager, auth};
 
 fn all_plugins_config() -> HashMap<String, SerializedArgs> {
   const ALL_PLUGINS: &[&str] =
-    &["echo", "auth", "access_log", "http_upstream"];
+    &["echo", "auth", "access_log", "upstream"];
   let mut m = HashMap::new();
   for &name in ALL_PLUGINS {
     let cfg = serde_yaml::Value::Null;
@@ -30,7 +30,7 @@ fn test_plugin_manager_empty_config_loads_nothing() {
 #[test]
 fn test_plugin_manager_all_plugins_config() {
   const ALL_PLUGINS: &[&str] =
-    &["echo", "auth", "access_log", "http_upstream"];
+    &["echo", "auth", "access_log", "upstream"];
   let (pm, errors) = PluginManager::new(all_plugins_config(), None);
   assert!(errors.is_empty());
   for &name in ALL_PLUGINS {
@@ -47,7 +47,7 @@ fn test_plugin_manager_partial_config() {
   assert!(pm.plugins.contains_key("echo"));
   assert!(pm.plugins.contains_key("auth"));
   assert!(!pm.plugins.contains_key("access_log"));
-  assert!(!pm.plugins.contains_key("http_upstream"));
+  assert!(!pm.plugins.contains_key("upstream"));
 }
 
 #[test]

@@ -33,7 +33,7 @@ async def test_origin_records_successful_dns_metadata(
             config: ConfigDict = {
                 "server_threads": 1,
                 "plugins": {
-                    "http_upstream": {
+                    "upstream": {
                         "certificates": {"server_ca_path": ca},
                         "dns_servers": [f"127.0.0.1:{dns.port}"],
                         "upstreams": [{"name": "direct"}],
@@ -49,7 +49,7 @@ async def test_origin_records_successful_dns_metadata(
                 "services": [
                     {
                         "name": "forward",
-                        "kind": "http_upstream.upstream",
+                        "kind": "upstream.upstream",
                         "args": {"upstream": "direct"},
                     }
                 ],

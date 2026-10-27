@@ -35,7 +35,7 @@ async def _forward_request(
     config = directory / "entry.yaml"
     _ = config.write_text(f"""server_threads: 1
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: {ca}
     upstreams:
@@ -50,7 +50,7 @@ listeners:
   addresses: ["127.0.0.1:{entry}"]
 services:
 - name: relay
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: relay
 servers:

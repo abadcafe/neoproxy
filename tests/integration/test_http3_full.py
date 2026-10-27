@@ -665,7 +665,7 @@ class TestHTTP3ErrorHandling:
             config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
         tcp_connect_timeout: 1s
@@ -677,7 +677,7 @@ listeners:
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 
@@ -849,14 +849,14 @@ class TestHTTP3ConfigValidationFull:
             config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
   auth:
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
   layers:

@@ -17,7 +17,7 @@ def configuration(ca: str, dns_port: int, addresses: list[ConfigDict]) -> Config
     return {
         "server_threads": 1,
         "plugins": {
-            "http_upstream": {
+            "upstream": {
                 "certificates": {"server_ca_path": ca},
                 "dns_servers": [f"127.0.0.1:{dns_port}"],
                 "dns_resolve_timeout": "200ms",
@@ -35,7 +35,7 @@ def configuration(ca: str, dns_port: int, addresses: list[ConfigDict]) -> Config
         "services": [
             {
                 "name": "main",
-                "kind": "http_upstream.upstream",
+                "kind": "upstream.upstream",
                 "args": {"upstream": "main"},
             }
         ],

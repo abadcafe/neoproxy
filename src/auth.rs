@@ -9,8 +9,9 @@
 //! Shared authentication types.
 //!
 //! Contains credential types and verification for request middleware.
-//! Protocol adapters verify credentials through the composed service's
-//! public authentication contract and carry them into HTTP middleware.
+//! Protocol adapters only collect credentials. The shared request
+//! middleware is the sole verifier for both HTTP and converted SOCKS5
+//! CONNECT requests.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -83,12 +84,6 @@ fn verify_password(
 #[derive(Clone)]
 pub(crate) struct UserPasswordAuth {
   users: Option<Arc<HashMap<String, String>>>,
-}
-
-impl crate::authentication::CredentialVerifier for UserPasswordAuth {
-  fn accepts(&self, username: &str, password: &str) -> bool {
-    self.verify_credentials(username, password).is_ok()
-  }
 }
 
 impl std::fmt::Debug for UserPasswordAuth {

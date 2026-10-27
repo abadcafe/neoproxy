@@ -34,13 +34,13 @@ def create_socks5_connect_tcp_config(
     config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 

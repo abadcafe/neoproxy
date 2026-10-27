@@ -189,7 +189,7 @@ class TestMultipleServicesShareUpstream:
             config_content = f"""server_threads: 2
 
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: "{ca_path}"
     upstreams:
@@ -210,11 +210,11 @@ listeners:
 
 services:
   - name: chain_1
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: shared_upstream
   - name: chain_2
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: shared_upstream
 
@@ -311,7 +311,7 @@ class TestThreeLevelConfigInheritance:
             config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: "{ca_path}"
     user:
@@ -335,7 +335,7 @@ listeners:
 
 services:
   - name: chain
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: test_upstream
 
@@ -415,7 +415,7 @@ servers:
             config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: "{ca_path}"
     user:
@@ -436,7 +436,7 @@ listeners:
 
 services:
   - name: chain
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: test_upstream
 
@@ -516,7 +516,7 @@ servers:
             config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: "{ca_path}"
     user:
@@ -540,7 +540,7 @@ listeners:
 
 services:
   - name: chain
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: test_upstream
 
@@ -636,7 +636,7 @@ class TestWRRLoadBalancingWithPool:
             config_content = f"""server_threads: 2
 
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: "{ca_path}"
     upstreams:
@@ -658,7 +658,7 @@ listeners:
 
 services:
   - name: chain
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: wrr_upstream
 
@@ -734,7 +734,7 @@ class TestUpstreamPoolConfigValidation:
         config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams: []
 
 listeners:
@@ -744,7 +744,7 @@ listeners:
 
 services:
   - name: chain
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: nonexistent_upstream
 
@@ -783,7 +783,7 @@ servers:
         config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: valid_upstream
         addresses: []
@@ -795,7 +795,7 @@ listeners:
 
 services:
   - name: chain
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: ""
 
@@ -837,7 +837,7 @@ class TestQuicConnectionConfig:
 
         config = f"""server_threads: 1
 plugins:
-  http_upstream:
+  upstream:
     tunnel_idle_timeout: "5m"
     quic_connection_keep_alive_interval: "3s"
     quic_connection_idle_timeout: "30s"
@@ -854,7 +854,7 @@ listeners:
     addresses: ["0.0.0.0:{port}"]
 services:
   - name: c
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: u
 servers:
@@ -884,7 +884,7 @@ servers:
         port = get_unique_port()
         config = f"""server_threads: 1
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: u
         addresses:
@@ -898,7 +898,7 @@ listeners:
     addresses: ["0.0.0.0:{port}"]
 services:
   - name: c
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: u
       unknown_field: "x"
@@ -925,7 +925,7 @@ servers:
         port = get_unique_port()
         config = f"""server_threads: 1
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
         tunnel_idle_timeout: "30s"
@@ -935,7 +935,7 @@ listeners:
     addresses: ["0.0.0.0:{port}"]
 services:
   - name: tcp
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: direct
 servers:
@@ -963,7 +963,7 @@ servers:
         port = get_unique_port()
         config = f"""server_threads: 1
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 listeners:
@@ -972,7 +972,7 @@ listeners:
     addresses: ["0.0.0.0:{port}"]
 services:
   - name: tcp
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: direct
       unknown_field: "x"
@@ -999,7 +999,7 @@ servers:
         port = get_unique_port()
         config = f"""server_threads: 1
 plugins:
-  http_upstream:
+  upstream:
     unknown_field: "x"
     upstreams:
       - name: u
@@ -1014,7 +1014,7 @@ listeners:
     addresses: ["0.0.0.0:{port}"]
 services:
   - name: c
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: u
 servers:

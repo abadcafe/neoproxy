@@ -199,14 +199,14 @@ class TestServerLevelConfig:
             config: ConfigDict = {
                 "server_threads": 1,
                 "plugins": {
-                    "http_upstream": {
+                    "upstream": {
                         "upstreams": [{"name": "direct"}],
                     }
                 },
                 "services": [
                     {
                         "name": "direct",
-                        "kind": "http_upstream.upstream",
+                        "kind": "upstream.upstream",
                         "args": {"upstream": "direct"},
                     }
                 ],

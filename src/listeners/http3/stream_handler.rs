@@ -11,6 +11,7 @@ use bytes::Bytes;
 use h3::server;
 use tracing::warn;
 
+use super::body_boundary::BodyBoundary;
 use super::recv_body::H3RecvBody;
 use super::request_stream::CancellableStream;
 use super::upgrade::H3UpgradeTrigger;
@@ -33,6 +34,11 @@ pub(super) async fn handle_h3_stream(
   client_cert_presented: bool,
 ) -> () {
   let method = req.method().clone();
+  let content_length = req
+    .headers()
+    .get(http::header::CONTENT_LENGTH)
+    .and_then(|value| value.to_str().ok())
+    .and_then(|value| value.parse::<u64>().ok());
 
   let service = HttpService::new_tls(
     server_router,
@@ -60,7 +66,7 @@ pub(super) async fn handle_h3_stream(
       // half for response
       let (send_stream, recv_stream) = stream.split();
       let body = RequestBody::new(BytesBufBodyWrapper::new(
-        H3RecvBody::new(recv_stream),
+        BodyBoundary::new(H3RecvBody::new(recv_stream), content_length),
       ));
       (body, Some(ResponseWriter::new(send_stream)), None)
     };

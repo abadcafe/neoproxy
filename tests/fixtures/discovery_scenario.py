@@ -61,14 +61,14 @@ def direct_proxy(
                 plugin["dns_servers"] = [f"127.0.0.1:{dns_port}"]
             config: ConfigDict = {
                 "server_threads": 1,
-                "plugins": {"http_upstream": plugin},
+                "plugins": {"upstream": plugin},
                 "listeners": [
                     {"name": "main", "kind": "http", "addresses": [f"127.0.0.1:{port}"]}
                 ],
                 "services": [
                     {
                         "name": "forward",
-                        "kind": "http_upstream.upstream",
+                        "kind": "upstream.upstream",
                         "args": {"upstream": upstream["name"]},
                     }
                 ],

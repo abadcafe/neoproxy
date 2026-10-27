@@ -123,7 +123,7 @@ async def _exercise_connection_sharing(directory: Path, kind: RequestKind) -> No
     config = directory / "entry.yaml"
     _ = config.write_text(f"""server_threads: 1
 plugins:
-  http_upstream:
+  upstream:
     upstream_request_timeout: 10s
     certificates:
       server_ca_path: {ca}
@@ -139,7 +139,7 @@ listeners:
   addresses: ["127.0.0.1:{entry}"]
 services:
 - name: relay
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: relay
 servers:

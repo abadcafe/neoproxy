@@ -1,7 +1,7 @@
 //! module: listeners::socks5::handshake
-//! responsibility: negotiate authenticated SOCKS5 sessions
-//! public operations: DEFAULT_HANDSHAKE_TIMEOUT, HandshakeResult,
-//! HandshakeError, perform_handshake
+//! responsibility: negotiate SOCKS5 methods and collect unverified
+//! credentials public operations: DEFAULT_HANDSHAKE_TIMEOUT,
+//! HandshakeResult, HandshakeError, perform_handshake
 //! data entities: HandshakeResult, HandshakeError
 //! tests: handshake_tests.rs
 
@@ -9,11 +9,7 @@
 
 use std::time::Duration;
 
-use fast_socks5::server::{
-  NoAuthentication, PasswordAuthentication, StandardAuthentication,
-};
-
-use crate::authentication::Authentication;
+use fast_socks5::server::StandardAuthentication;
 
 /// Default handshake timeout.
 pub(super) const DEFAULT_HANDSHAKE_TIMEOUT: Duration =
@@ -22,9 +18,11 @@ pub(super) const DEFAULT_HANDSHAKE_TIMEOUT: Duration =
 /// Result of a successful SOCKS5 handshake.
 ///
 /// Contains the completed subnegotiation and optional credentials.
-/// Credentials have passed the composed service policy before success.
+/// Credentials are collected only; auth.basic_auth decides CONNECT
+/// admission.
 pub(super) struct HandshakeResult {
-  /// Subnegotiation completed after credential verification.
+  /// Subnegotiation acknowledged receipt, without credential
+  /// verification.
   pub(super) proto: fast_socks5::server::Socks5ServerProtocol<
     tokio::net::TcpStream,
     fast_socks5::server::states::Authenticated,
@@ -59,8 +57,6 @@ pub(crate) enum HandshakeError {
   /// Authentication method not acceptable.
   MethodNotAcceptable(Vec<u8>),
 
-  InvalidCredentials,
-
   /// Client disconnected during handshake.
   ClientDisconnected,
 
@@ -78,7 +74,6 @@ impl std::fmt::Display for HandshakeError {
       Self::MethodNotAcceptable(methods) => {
         write!(f, "authentication method not acceptable: {:?}", methods)
       }
-      Self::InvalidCredentials => write!(f, "invalid credentials"),
       Self::ClientDisconnected => {
         write!(f, "client disconnected during handshake")
       }
@@ -126,22 +121,18 @@ impl From<fast_socks5::server::SocksServerError> for HandshakeError {
 pub(super) async fn perform_handshake(
   stream: tokio::net::TcpStream,
   timeout_duration: Duration,
-  authentication: &Authentication,
 ) -> Result<HandshakeResult, HandshakeError> {
   let handshake_fut = async {
     let proto =
       fast_socks5::server::Socks5ServerProtocol::start(stream);
 
-    // Advertise exactly the method required by the service policy.
-    // allow_no_auth(true) would also enable and prefer password auth.
-    let methods = if authentication.requires_credentials() {
-      [StandardAuthentication::PasswordAuthentication(
-        PasswordAuthentication,
-      )]
-    } else {
-      [StandardAuthentication::NoAuthentication(NoAuthentication)]
-    };
-    let auth_state = proto.negotiate_auth(&methods).await?;
+    // PRODUCT CONTRACT: SOCKS5 and HTTP share one request middleware
+    // pipeline. This listener MUST NOT validate credentials or inspect
+    // auth policy. Prefer password when offered to carry credentials
+    // into CONNECT; otherwise accept no-auth. auth.basic_auth alone
+    // decides admission.
+    let methods = StandardAuthentication::allow_no_auth(true);
+    let auth_state = proto.negotiate_auth(methods).await?;
 
     match auth_state {
       fast_socks5::server::StandardAuthenticationStarted::NoAuthentication(
@@ -163,10 +154,15 @@ pub(super) async fn perform_handshake(
         let (username, password, auth_impl) =
           auth_state.read_username_password().await?;
 
-        if !authentication.accepts(&username, &password) {
-          auth_impl.reject().await?;
-          return Err(HandshakeError::InvalidCredentials);
-        }
+        // PRODUCT CONTRACT — intentional and mandatory, not a defect/TODO:
+        // acknowledge credential receipt BEFORE reading CONNECT, without
+        // checking username/password. The client waits for this reply before
+        // sending its target. The converted CONNECT then follows exactly the
+        // HTTP auth.basic_auth middleware pipeline. Invalid/missing credentials
+        // produce HTTP 407, mapped to SOCKS5 CONNECT REP=0x02; no tunnel opens.
+        // This deliberately differs from RFC 1929's authentication-success
+        // semantics. Do not "fix" it by adding handshake verification or a
+        // separate authentication path: this is the required product behavior.
         let finished = auth_impl.accept().await?;
         let authenticated =
           fast_socks5::server::Socks5ServerProtocol::finish_auth(
@@ -174,7 +170,7 @@ pub(super) async fn perform_handshake(
           );
 
         tracing::info!(
-          "SOCKS5 credentials verified for user {:?}",
+          "SOCKS5 credentials received for user {:?}; verification deferred to CONNECT",
           username
         );
 

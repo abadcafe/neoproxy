@@ -6,6 +6,9 @@
 
 use crate::config::ListenerPropertyValues;
 mod accepting_connection;
+mod body_boundary;
+#[cfg(test)]
+mod body_boundary_tests;
 mod connection;
 mod quic_bind;
 mod quic_config;

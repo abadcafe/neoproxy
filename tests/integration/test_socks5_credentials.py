@@ -1,4 +1,4 @@
-"""Wire contracts for SOCKS5 authentication before command admission."""
+"""SOCKS5 collects credentials; the CONNECT auth middleware decides admission."""
 
 import socket
 from pathlib import Path
@@ -35,19 +35,32 @@ def _receive_exact(client: socket.socket, size: int) -> bytes:
     return received
 
 
+@pytest.mark.parametrize("auth_enabled", [True, False])
 @pytest.mark.parametrize(
     "credentials", ["valid", "wrong", "unknown", "missing", "colon"]
 )
-def test_socks5_verifies_credentials_before_authentication_success(
-    tmp_path: Path, credentials: Credentials
+def test_socks5_defers_credential_verification_to_connect(
+    tmp_path: Path, credentials: Credentials, auth_enabled: bool
 ) -> None:
     proxy_port = get_unique_port()
     target_port = get_unique_port()
     config = tmp_path / "proxy.yaml"
+    auth_layer = (
+        """  - kind: auth.basic_auth
+    args:
+      users:
+      - username: user
+        password: correct
+      - username: "user:with:colon"
+        password: "pass:word"
+"""
+        if auth_enabled
+        else ""
+    )
     _ = config.write_text(f"""server_threads: 1
 plugins:
   auth: {{}}
-  http_upstream:
+  upstream:
     upstreams:
     - name: direct
   access_log:
@@ -61,26 +74,19 @@ listeners:
   addresses: ["127.0.0.1:{proxy_port}"]
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
   layers:
   - kind: access_log.file
     args:
       writer: logs/access
-  - kind: auth.basic_auth
-    args:
-      users:
-      - username: user
-        password: correct
-      - username: "user:with:colon"
-        password: "pass:word"
-servers:
+{auth_layer}servers:
 - name: main
   service: direct
   listeners: [main]
 """)
-    authorized = credentials in ("valid", "colon")
+    authorized = not auth_enabled or credentials in ("valid", "colon")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as target:
         target.bind(("127.0.0.1", target_port))
         target.listen(1)
@@ -93,7 +99,7 @@ servers:
             ) as client:
                 if credentials == "missing":
                     assert socks5_handshake_no_auth(client) == MethodReply(
-                        AuthMethod.NO_ACCEPTABLE
+                        AuthMethod.NONE
                     )
                 else:
                     username = "unknown" if credentials == "unknown" else "user"
@@ -102,12 +108,10 @@ servers:
                         username, password = "user:with:colon", "pass:word"
                     status = socks5_handshake_password(client, username, password)
                     assert isinstance(status, AuthReply)
-                    assert status.status is (
-                        AuthStatus.SUCCESS if authorized else AuthStatus.FAILURE
-                    )
+                    assert status.status is AuthStatus.SUCCESS
+                reply = socks5_connect_ipv4(client, "127.0.0.1", target_port)
+                assert isinstance(reply, CommandReply)
                 if authorized:
-                    reply = socks5_connect_ipv4(client, "127.0.0.1", target_port)
-                    assert isinstance(reply, CommandReply)
                     assert reply.code is ReplyCode.SUCCESS
                     origin = target.accept()[0]
                     with origin:
@@ -117,6 +121,7 @@ servers:
                         origin.sendall(b"response")
                         assert _receive_exact(client, 8) == b"response"
                 else:
+                    assert reply.code is ReplyCode.CONNECTION_NOT_ALLOWED
                     assert client.recv(1) == b"", (
                         "rejected authentication remained open"
                     )
@@ -137,8 +142,7 @@ servers:
         if log.exists()
         else []
     )
-    assert len(entries) == (1 if authorized else 0)
-    if authorized:
-        assert entries[0].method == "CONNECT"
-        assert entries[0].target == f"127.0.0.1:{target_port}"
-        assert entries[0].status == 200
+    assert len(entries) == 1
+    assert entries[0].method == "CONNECT"
+    assert entries[0].target == f"127.0.0.1:{target_port}"
+    assert entries[0].status == (200 if authorized else 407)

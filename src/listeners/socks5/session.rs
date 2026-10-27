@@ -25,60 +25,53 @@ pub(super) async fn serve(
   tracing::info!("SOCKS5 connection established from {peer_addr}");
   // Step 1: Perform SOCKS5 handshake with timeout
   // protection
-  let handshake_result = match perform_handshake(
-    stream,
-    handshake_timeout,
-    &service.authentication(),
-  )
-  .await
-  {
-    Ok(result) => result,
-    Err(e) => {
-      // Handle handshake errors
-      match e {
-        HandshakeError::Timeout => {
-          // Timeout - do not send response, just close
-          // connection
-          tracing::warn!("SOCKS5 handshake timeout from {}", peer_addr);
+  let handshake_result =
+    match perform_handshake(stream, handshake_timeout).await {
+      Ok(result) => result,
+      Err(e) => {
+        // Handle handshake errors
+        match e {
+          HandshakeError::Timeout => {
+            // Timeout - do not send response, just close
+            // connection
+            tracing::warn!(
+              "SOCKS5 handshake timeout from {}",
+              peer_addr
+            );
+          }
+          HandshakeError::InvalidVersion(v) => {
+            // Invalid version - do not send response
+            tracing::warn!(
+              "SOCKS5 invalid version {} from {}",
+              v,
+              peer_addr
+            );
+          }
+          HandshakeError::MethodNotAcceptable(_) => {
+            // METHOD=0xFF was already sent
+            tracing::warn!(
+              "SOCKS5 method not acceptable from {}",
+              peer_addr
+            );
+          }
+          HandshakeError::ClientDisconnected => {
+            tracing::info!(
+              "SOCKS5 connection disconnected from {}",
+              peer_addr
+            );
+          }
+          HandshakeError::IoError(e) => {
+            tracing::warn!(
+              "SOCKS5 handshake IO error from {}: {}",
+              peer_addr,
+              e
+            );
+          }
         }
-        HandshakeError::InvalidVersion(v) => {
-          // Invalid version - do not send response
-          tracing::warn!(
-            "SOCKS5 invalid version {} from {}",
-            v,
-            peer_addr
-          );
-        }
-        HandshakeError::MethodNotAcceptable(_) => {
-          // METHOD=0xFF was already sent
-          tracing::warn!(
-            "SOCKS5 method not acceptable from {}",
-            peer_addr
-          );
-        }
-        HandshakeError::InvalidCredentials => {
-          tracing::warn!(
-            "SOCKS5 authentication rejected from {peer_addr}"
-          );
-        }
-        HandshakeError::ClientDisconnected => {
-          tracing::info!(
-            "SOCKS5 connection disconnected from {}",
-            peer_addr
-          );
-        }
-        HandshakeError::IoError(e) => {
-          tracing::warn!(
-            "SOCKS5 handshake IO error from {}: {}",
-            peer_addr,
-            e
-          );
-        }
+        // Connection is already closed by the error handler
+        return;
       }
-      // Connection is already closed by the error handler
-      return;
-    }
-  };
+    };
 
   // Bound the command phase as well as authentication.
   let command = match tokio::time::timeout(
@@ -158,8 +151,9 @@ pub(super) async fn serve(
     }
   };
 
-  // Carry verified credentials into the HTTP middleware.
-  // Typed fields
+  // PRODUCT CONTRACT: carry unverified credentials into the shared
+  // auth.basic_auth middleware; this is the sole credential validation
+  // path. Typed fields
   // also preserve SOCKS5 usernames containing
   // ':' that HTTP Basic cannot encode without
   // changing the username/password boundary.

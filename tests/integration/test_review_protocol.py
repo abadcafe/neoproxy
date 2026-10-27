@@ -114,7 +114,7 @@ def test_http3_chain_streams_response_before_upload_eof(tmp_path: Path) -> None:
     tls = f"  tls:\n    certificates:\n    - cert_path: {cert}\n      key_path: {key}"
     chain = f"""server_threads: 1
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: {ca}
     upstreams:
@@ -129,7 +129,7 @@ listeners:
   addresses: ["127.0.0.1:{entry}"]
 services:
 - name: relay
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: relay
 servers:
@@ -177,7 +177,7 @@ def test_http_chain_connect_response_has_a_deadline(
     _ = target_server(upstream, silent_proxy)
     config = f"""server_threads: 1
 plugins:
-  http_upstream:
+  upstream:
     upstream_request_timeout: 100ms
     upstreams:
     - name: relay
@@ -190,7 +190,7 @@ listeners:
   addresses: ["127.0.0.1:{entry}"]
 services:
 - name: relay
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: relay
 servers:
@@ -278,7 +278,7 @@ def test_chain_uses_selected_address_request_timeout(
         _ = target_server(port, delayed_proxy)
     config = f"""server_threads: 1
 plugins:
-  http_upstream:
+  upstream:
     upstream_request_timeout: 2s
     upstreams:
     - name: relay
@@ -295,7 +295,7 @@ listeners:
   addresses: ["127.0.0.1:{entry}"]
 services:
 - name: relay
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: relay
 servers:

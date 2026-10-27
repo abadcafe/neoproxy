@@ -46,12 +46,12 @@ def test_pool_idle_timeout_closes_unused_connection(
         ]
     config: ConfigDict = {
         "server_threads": 1,
-        "plugins": {"http_upstream": {"upstreams": [relay]}},
+        "plugins": {"upstream": {"upstreams": [relay]}},
         "listeners": [{"name": "main", "kind": "http"}],
         "services": [
             {
                 "name": "relay",
-                "kind": "http_upstream.upstream",
+                "kind": "upstream.upstream",
                 "args": {"upstream": "relay"},
             }
         ],
@@ -106,7 +106,7 @@ def test_proxy_pool_reuses_one_connection_across_origin_authorities(
     config: ConfigDict = {
         "server_threads": 1,
         "plugins": {
-            "http_upstream": {
+            "upstream": {
                 "certificates": {"server_ca_path": ca},
                 "upstreams": [
                     {
@@ -126,7 +126,7 @@ def test_proxy_pool_reuses_one_connection_across_origin_authorities(
         "services": [
             {
                 "name": "relay",
-                "kind": "http_upstream.upstream",
+                "kind": "upstream.upstream",
                 "args": {"upstream": "relay"},
             }
         ],

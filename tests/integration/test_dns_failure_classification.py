@@ -24,12 +24,12 @@ def test_dns_failure_returns_bad_gateway_with_dns_diagnostic(
         ]
     config: ConfigDict = {
         "server_threads": 1,
-        "plugins": {"http_upstream": {"upstreams": [upstream]}},
+        "plugins": {"upstream": {"upstreams": [upstream]}},
         "listeners": [{"name": "main", "kind": "http"}],
         "services": [
             {
                 "name": "relay",
-                "kind": "http_upstream.upstream",
+                "kind": "upstream.upstream",
                 "args": {"upstream": "relay"},
             }
         ],

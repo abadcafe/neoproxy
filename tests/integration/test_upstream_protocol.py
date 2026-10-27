@@ -54,7 +54,7 @@ def test_failover_records_the_last_selected_protocol(
     config: ConfigDict = {
         "server_threads": 1,
         "plugins": {
-            "http_upstream": {
+            "upstream": {
                 "certificates": {"server_ca_path": ca},
                 "upstreams": [
                     {
@@ -79,7 +79,7 @@ def test_failover_records_the_last_selected_protocol(
         "services": [
             {
                 "name": "forward",
-                "kind": "http_upstream.upstream",
+                "kind": "upstream.upstream",
                 "args": {"upstream": "route"},
             }
         ],

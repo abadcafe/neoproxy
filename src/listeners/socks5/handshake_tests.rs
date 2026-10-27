@@ -7,7 +7,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::handshake::{HandshakeError, perform_handshake};
-use crate::authentication::Authentication;
 
 async fn handshake_streams() -> (TcpStream, TcpStream) {
   let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -18,13 +17,13 @@ async fn handshake_streams() -> (TcpStream, TcpStream) {
 }
 
 #[tokio::test]
-async fn test_perform_handshake_selects_no_auth_for_tsocks_offer() {
+async fn test_perform_handshake_accepts_no_auth_without_service_policy()
+{
   let (mut client, server) = handshake_streams().await;
-  let authentication = Authentication::default();
   let (result, ()) = tokio::join!(
-    perform_handshake(server, Duration::from_secs(2), &authentication),
+    perform_handshake(server, Duration::from_secs(2)),
     async {
-      client.write_all(&[5, 2, 0, 2]).await.unwrap();
+      client.write_all(&[5, 1, 0]).await.unwrap();
       let mut reply = [0; 2];
       client.read_exact(&mut reply).await.unwrap();
       assert_eq!(reply, [5, 0]);
@@ -36,22 +35,46 @@ async fn test_perform_handshake_selects_no_auth_for_tsocks_offer() {
 }
 
 #[tokio::test]
-async fn test_perform_handshake_rejects_password_without_auth() {
+async fn test_perform_handshake_collects_credentials_without_verifying()
+{
+  // Prefer password when offered, so clients can carry credentials to
+  // the request middleware. Method selection never inspects service
+  // configuration.
+  for offer in [vec![5, 1, 2], vec![5, 2, 0, 2], vec![5, 2, 2, 0]] {
+    let (mut client, server) = handshake_streams().await;
+    let (result, ()) = tokio::join!(
+      perform_handshake(server, Duration::from_secs(2)),
+      async {
+        client.write_all(&offer).await.unwrap();
+        let mut reply = [0; 2];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, [5, 2]);
+        client.write_all(b"\x01\x04user\x05wrong").await.unwrap();
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, [1, 0]);
+      }
+    );
+    let result = result.unwrap();
+    assert_eq!(result.username.as_deref(), Some("user"));
+    assert_eq!(result.password.as_deref(), Some("wrong"));
+  }
+}
+
+#[tokio::test]
+async fn test_perform_handshake_rejects_unsupported_method() {
   let (mut client, server) = handshake_streams().await;
-  let authentication = Authentication::default();
   let (result, ()) = tokio::join!(
-    perform_handshake(server, Duration::from_secs(2), &authentication),
+    perform_handshake(server, Duration::from_secs(2)),
     async {
-      client.write_all(&[5, 1, 2]).await.unwrap();
+      client.write_all(&[5, 1, 1]).await.unwrap();
       let mut reply = [0; 2];
       client.read_exact(&mut reply).await.unwrap();
-      assert_eq!(reply, [5, 0xff]);
-      assert_eq!(client.read(&mut [0]).await.unwrap(), 0);
+      assert_eq!(reply, [5, 255]);
     }
   );
   assert!(matches!(
     result,
-    Err(HandshakeError::MethodNotAcceptable(methods)) if methods == [2]
+    Err(HandshakeError::MethodNotAcceptable(_))
   ));
 }
 

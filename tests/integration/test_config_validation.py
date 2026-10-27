@@ -348,13 +348,13 @@ class TestFieldValidation:
         config = """server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 
@@ -398,13 +398,13 @@ servers:
         config = """server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 
@@ -485,13 +485,13 @@ servers:
         config = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 
@@ -534,13 +534,13 @@ servers:
         """
         TC-CERT-REFACTOR-007: Unknown field at service level is rejected.
 
-        After refactoring, http_upstream.upstream rejects ca_path at service
+        After refactoring, upstream.upstream rejects ca_path at service
         level because the struct uses #[serde(deny_unknown_fields)].
         """
         config = """server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: test
 
@@ -551,7 +551,7 @@ listeners:
 
 services:
 - name: upstream
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: test
     ca_path: "/tmp/ca.pem"
@@ -594,13 +594,13 @@ servers:
         config = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 
@@ -651,13 +651,13 @@ servers:
         config = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 
@@ -873,13 +873,13 @@ servers:
         config = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 
@@ -916,13 +916,13 @@ servers:
         config = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 

@@ -546,7 +546,7 @@ class TestAccessLogErrorHandling:
             "services": [
                 {
                     "name": "tcp_svc",
-                    "kind": "http_upstream.upstream",
+                    "kind": "upstream.upstream",
                     "args": {"upstream": "direct"},
                     "layers": [
                         {
@@ -558,7 +558,7 @@ class TestAccessLogErrorHandling:
             ],
             "plugins": {
                 **_access_log_plugins(),
-                "http_upstream": {
+                "upstream": {
                     "upstreams": [{"name": "direct"}],
                 },
             },

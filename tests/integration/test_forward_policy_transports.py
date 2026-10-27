@@ -24,7 +24,7 @@ async def test_forwarding_policy_is_consistent_across_proxy_transports(
         config: ConfigDict = {
             "server_threads": 1,
             "plugins": {
-                "http_upstream": {
+                "upstream": {
                     "certificates": {"server_ca_path": ca},
                     "upstreams": [
                         {
@@ -45,7 +45,7 @@ async def test_forwarding_policy_is_consistent_across_proxy_transports(
             "services": [
                 {
                     "name": "relay",
-                    "kind": "http_upstream.upstream",
+                    "kind": "upstream.upstream",
                     "args": {"upstream": "relay"},
                 }
             ],

@@ -22,7 +22,7 @@ async def test_chain_h3_pool_respects_reuse_policy(
         config: ConfigDict = {
             "server_threads": 1,
             "plugins": {
-                "http_upstream": {
+                "upstream": {
                     "certificates": {"server_ca_path": ca},
                     "upstreams": [
                         {
@@ -45,7 +45,7 @@ async def test_chain_h3_pool_respects_reuse_policy(
             "services": [
                 {
                     "name": "relay",
-                    "kind": "http_upstream.upstream",
+                    "kind": "upstream.upstream",
                     "args": {"upstream": "relay"},
                 }
             ],
@@ -66,7 +66,7 @@ async def test_chain_h3_pool_expires_without_subsequent_request(tmp_path: Path) 
         config: ConfigDict = {
             "server_threads": 1,
             "plugins": {
-                "http_upstream": {
+                "upstream": {
                     "certificates": {"server_ca_path": ca},
                     "upstreams": [
                         {
@@ -86,7 +86,7 @@ async def test_chain_h3_pool_expires_without_subsequent_request(tmp_path: Path) 
             "services": [
                 {
                     "name": "relay",
-                    "kind": "http_upstream.upstream",
+                    "kind": "upstream.upstream",
                     "args": {"upstream": "relay"},
                 }
             ],

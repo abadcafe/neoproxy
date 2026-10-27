@@ -85,8 +85,9 @@ pub(crate) fn http_status_to_socks5_error(
       fast_socks5::ReplyError::ConnectionNotAllowed
     }
     http::StatusCode::PROXY_AUTHENTICATION_REQUIRED => {
-      // Request-level policy can still deny an authenticated
-      // connection.
+      // PRODUCT CONTRACT: auth.basic_auth validates the converted
+      // CONNECT. Handshake success acknowledged receipt only; denial
+      // closes the command without establishing an upstream tunnel.
       fast_socks5::ReplyError::ConnectionNotAllowed
     }
     _ => fast_socks5::ReplyError::GeneralFailure,

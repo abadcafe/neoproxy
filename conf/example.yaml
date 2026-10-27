@@ -50,10 +50,10 @@ plugins:
         # rotate_daily: true           # Rotate at date boundary (default: true)
         # format: "text"               # Log format: text / json (default: text)
 
-  # HTTP Upstream Plugin - unified proxy service configuration
+  # Upstream Plugin - HTTP/HTTPS/H3/SOCKS5 proxy configuration
   # Defines upstream pools with three-level inheritance:
   #   Plugin → Upstream → Address
-  http_upstream:
+  upstream:
     dns_resolve_timeout: 5s
     dns_refresh_retry_interval: 30s
     address_protocol: https
@@ -100,7 +100,7 @@ services:
 
   # Chain proxy service (through upstream H3 proxy)
   - name: chain
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: local_relay
     layers:
@@ -116,7 +116,7 @@ services:
 
   # Direct proxy service with basic auth layer
   - name: direct_proxy
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: direct
     layers:

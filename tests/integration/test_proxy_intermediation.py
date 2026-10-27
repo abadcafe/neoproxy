@@ -78,7 +78,7 @@ def test_proxy_controls_forwarding_and_records_received_versions(
     path = tmp_path / "proxy.yaml"
     _ = path.write_text(f"""server_threads: 1
 plugins:
-  http_upstream:
+  upstream:
     upstreams: [{{name: direct}}]
 listeners:
 - name: main
@@ -86,7 +86,7 @@ listeners:
   addresses: ["127.0.0.1:{port}"]
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args: {{upstream: direct}}
 servers:
 - name: main

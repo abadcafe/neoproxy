@@ -18,9 +18,6 @@ use crate::config::{Config, ConfigErrorCollector};
 use crate::shutdown::ShutdownHandle;
 
 mod auth;
-mod authentication;
-#[cfg(test)]
-mod authentication_tests;
 mod certificate;
 #[cfg(test)]
 mod certificate_tests;

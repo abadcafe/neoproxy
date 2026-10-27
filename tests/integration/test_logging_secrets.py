@@ -26,7 +26,7 @@ def _configuration(directory: Path, port: int, listener_kind: str = "http") -> P
 plugins:
   echo: {{}}
   auth: {{}}
-  http_upstream:
+  upstream:
     user:
       username: {UPSTREAM_USER}
       password: {UPSTREAM_PASSWORD}

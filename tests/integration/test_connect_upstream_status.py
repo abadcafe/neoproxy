@@ -37,7 +37,7 @@ async def _check_entry(
     config = directory / "entry.yaml"
     _ = config.write_text(f"""server_threads: 1
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: {ca}
     upstreams:
@@ -52,7 +52,7 @@ listeners:
   addresses: ["127.0.0.1:{entry}"]
 services:
 - name: relay
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: relay
 servers:
@@ -109,7 +109,7 @@ servers:
         terminate_process(process, force=True)
 
 
-async def _check_http_upstream(
+async def _check_upstream(
     directory: Path, kind: Literal["http", "https"], status: int
 ) -> None:
     cert, key, ca, _ = generate_test_certificates(str(directory))
@@ -173,10 +173,10 @@ async def _check_http_upstream(
 
 @pytest.mark.parametrize("status", [200, 201, 299, 300, 407, 502])
 @pytest.mark.parametrize("kind", ["http", "https"])
-def test_connect_http_upstream_status(
+def test_connect_upstream_status(
     tmp_path: Path, kind: Literal["http", "https"], status: int
 ) -> None:
-    asyncio.run(_check_http_upstream(tmp_path, kind, status))
+    asyncio.run(_check_upstream(tmp_path, kind, status))
 
 
 @pytest.mark.parametrize("kind", ["http", "https"])
@@ -184,7 +184,7 @@ def test_hyper_dependency_connect_204_fails_to_upgrade(
     tmp_path: Path, kind: Literal["http", "https"]
 ) -> None:
     """RFC 9110 §9.3.6 requires success; Hyper 1.6.0 does not expose the I/O."""
-    asyncio.run(_check_http_upstream(tmp_path, kind, 204))
+    asyncio.run(_check_upstream(tmp_path, kind, 204))
 
 
 async def _check_h3_upstream(directory: Path, status: int) -> None:

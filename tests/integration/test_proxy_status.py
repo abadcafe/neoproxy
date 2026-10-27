@@ -198,7 +198,7 @@ class TestProxyStatus:
             config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
         tunnel_idle_timeout: 60s
@@ -211,7 +211,7 @@ listeners:
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 

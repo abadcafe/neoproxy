@@ -49,10 +49,10 @@ def write_forward_node(directory: Path, node: ForwardNode) -> str:
         plugin["certificates"] = {"server_ca_path": node.ca}
     service: ConfigDict = {
         "name": "forward",
-        "kind": "http_upstream.upstream",
+        "kind": "upstream.upstream",
         "args": {"upstream": "route"},
     }
-    plugins: ConfigDict = {"http_upstream": plugin}
+    plugins: ConfigDict = {"upstream": plugin}
     if node.username is not None:
         plugins["auth"] = {}
         service["layers"] = [

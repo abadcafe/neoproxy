@@ -165,8 +165,8 @@ class TestHTTP3ChainProxy:
         """
         TC-CHAIN-004: HTTP/3 Chain with missing CA certificate.
 
-        Target: Verify http_upstream plugin fails to start when CA file is missing.
-        The new http_upstream plugin validates the CA path eagerly at startup.
+        Target: Verify upstream plugin fails to start when CA file is missing.
+        The new upstream plugin validates the CA path eagerly at startup.
         """
         temp_dir = tempfile.mkdtemp()
         http_port = get_unique_port()
@@ -177,7 +177,7 @@ class TestHTTP3ChainProxy:
             config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: "/nonexistent/ca.pem"
     upstreams:
@@ -199,7 +199,7 @@ listeners:
 
 services:
 - name: upstream
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: test_upstream
 
@@ -219,7 +219,7 @@ servers:
                 text=False,
             )
 
-            # http_upstream validates CA path eagerly at startup,
+            # upstream validates CA path eagerly at startup,
             # so the process should exit with an error
             try:
                 exit_code = proc.wait(timeout=5.0)

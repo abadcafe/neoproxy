@@ -1,0 +1,359 @@
+//! module: plugins::upstream::service
+//! responsibility: dispatch validated requests to upstream
+//! transports
+//! public operations: UpstreamService, build
+//! data entities: UpstreamService
+//! tests: service_tests.rs
+
+use std::pin::Pin;
+use std::rc::Rc;
+use std::task::{Context as TaskContext, Poll};
+use std::time::Duration;
+
+use anyhow::Result;
+use tracing::warn;
+
+use super::client::UpstreamRegistry;
+use super::client::protocol::ConnectResult;
+use super::error::UpstreamError;
+use super::target_parser::{
+  self, ConnectTargetError, ForwardTargetError,
+};
+use crate::context::RequestContext;
+use crate::http_message::{
+  Request, RequestBody, Response, build_empty_response,
+  build_error_response,
+};
+use crate::proxy_status::{
+  append_proxy_status, build_proxy_status_with_status,
+};
+use crate::service::Service;
+use crate::stream::{self, Io};
+use crate::tracker::StreamTracker;
+
+// ============================================================================
+// Upstream Service (unified: chain mode when upstream is Some, direct
+// when None)
+// ============================================================================
+
+#[derive(Clone)]
+pub(crate) struct UpstreamService {
+  upstream_name: String,
+  stream_tracker: Rc<StreamTracker>,
+  registry: Rc<UpstreamRegistry>,
+}
+
+impl UpstreamService {
+  pub(crate) fn build(
+    sargs: crate::config::SerializedArgs,
+    stream_tracker: Rc<StreamTracker>,
+    registry: Rc<UpstreamRegistry>,
+  ) -> Result<Service> {
+    let args: super::config::UpstreamServiceArgs =
+      serde_yaml::from_value(sargs)?;
+
+    // Validate upstream exists in registry
+    if !registry.contains_upstream(&args.upstream) {
+      anyhow::bail!(
+        "upstream '{}' not found in registry",
+        args.upstream
+      );
+    }
+
+    Ok(Service::new(Self {
+      upstream_name: args.upstream,
+      stream_tracker,
+      registry,
+    }))
+  }
+
+  fn is_shutting_down(&self) -> bool {
+    self.stream_tracker.shutdown_handle().is_shutdown()
+  }
+}
+
+impl tower::Service<Request> for UpstreamService {
+  type Error = anyhow::Error;
+  type Future =
+    Pin<Box<dyn std::future::Future<Output = Result<Response>>>>;
+  type Response = Response;
+
+  fn poll_ready(
+    &mut self,
+    _cx: &mut TaskContext<'_>,
+  ) -> Poll<Result<(), Self::Error>> {
+    Poll::Ready(Ok(()))
+  }
+
+  fn call(&mut self, mut req: Request) -> Self::Future {
+    if let Some(response) = crate::max_forwards::apply(&mut req) {
+      return Box::pin(async { Ok(response) });
+    }
+    let upstream_name = self.upstream_name.clone();
+    let st = self.stream_tracker.clone();
+    let registry = self.registry.clone();
+    let is_shutting_down = self.is_shutting_down();
+
+    let ctx = match req.extensions().get::<RequestContext>().cloned() {
+      Some(ctx) => ctx,
+      None => {
+        warn!("UpstreamService: missing RequestContext");
+        return Box::pin(async {
+          Ok(
+            UpstreamError::ProxyInternalError(
+              "missing request context".into(),
+            )
+            .to_response(&RequestContext::new()),
+          )
+        });
+      }
+    };
+
+    let upgrade = stream::extract_upgrade(&mut req);
+    let (req_headers, req_body) = req.into_parts();
+
+    Box::pin(async move {
+      if is_shutting_down {
+        warn!("UpstreamService: rejecting request during shutdown");
+        return Ok(
+          UpstreamError::ProxyInternalError("shutting down".into())
+            .to_response(&ctx),
+        );
+      }
+
+      if req_headers.method == http::Method::CONNECT {
+        chain_connect(
+          &upstream_name,
+          &registry,
+          &st,
+          req_headers,
+          upgrade,
+          &ctx,
+        )
+        .await
+      } else {
+        chain_forward(
+          &upstream_name,
+          &registry,
+          req_headers,
+          req_body,
+          &ctx,
+        )
+        .await
+      }
+    })
+  }
+}
+
+// ============================================================================
+// Chain Mode: CONNECT
+// ============================================================================
+
+async fn chain_connect(
+  upstream_name: &str,
+  registry: &Rc<UpstreamRegistry>,
+  st: &Rc<StreamTracker>,
+  req_headers: http::request::Parts,
+  upgrade: Option<stream::UpgradeFuture>,
+  ctx: &RequestContext,
+) -> Result<Response> {
+  let target = match target_parser::parse_connect_target(&req_headers) {
+    Ok(result) => result,
+    Err(ConnectTargetError::NotConnectMethod) => {
+      return Ok(build_error_response(
+        http::StatusCode::METHOD_NOT_ALLOWED,
+        "Only CONNECT method is supported",
+      ));
+    }
+    Err(_) => {
+      return Ok(build_error_response(
+        http::StatusCode::BAD_REQUEST,
+        "Invalid target address",
+      ));
+    }
+  };
+  let (tls_config, tracker) = {
+    let reg = registry;
+    (reg.tls_config(), reg.tracker())
+  };
+
+  let connect_start = std::time::Instant::now();
+  let upstream = match registry.get_upstream(upstream_name) {
+    Ok(upstream) => upstream,
+    Err(e) => return Ok(e.to_response(ctx)),
+  };
+  let result = upstream
+    .connect_for_tunnel(&target, &req_headers, &tls_config, &tracker)
+    .await;
+  let result = match result {
+    Ok(r) => r,
+    Err(e) => {
+      return Ok(e.to_response(ctx));
+    }
+  };
+  ctx.set(
+    crate::context::fields::upstream::CONNECT_TIME,
+    connect_start.elapsed(),
+  );
+
+  let ConnectResult {
+    transport,
+    upstream_addr,
+    upstream_response,
+    tunnel_idle_timeout,
+  } = result;
+
+  let target_io: Box<dyn Io> = transport;
+
+  let completion = super::tunnel_log::TunnelLog::new(
+    ctx,
+    &target.to_string(),
+    upstream_addr,
+  );
+
+  complete_tunnel(
+    target_io,
+    st,
+    upgrade,
+    ctx,
+    upstream_response,
+    tunnel_idle_timeout,
+    completion,
+  )
+  .await
+}
+
+/// Complete a CONNECT tunnel by building the 200 response and
+/// registering bidirectional transfer.
+///
+/// Unlike ordinary response bodies, upgraded I/O leaves the listener's
+/// HTTP driver. The plugin tracks this task across the upgrade handoff
+/// and stops its transfer when the plugin is uninstalled.
+async fn complete_tunnel(
+  target: Box<dyn Io>,
+  st: &Rc<StreamTracker>,
+  upgrade: Option<stream::UpgradeFuture>,
+  ctx: &RequestContext,
+  upstream_response: Option<http::response::Parts>,
+  tunnel_idle_timeout: Duration,
+  completion: super::tunnel_log::TunnelLog,
+) -> Result<Response> {
+  let mut resp = build_tunnel_response();
+  if let Some(mut upstream) = upstream_response {
+    drop(crate::hop_headers::strip_connection_headers(
+      &mut upstream.headers,
+    ));
+    crate::via::append(&mut upstream.headers, upstream.version);
+    upstream.headers.remove(http::header::CONTENT_LENGTH);
+    upstream.headers.remove(http::header::TRAILER);
+    upstream.headers.remove(http::header::PROXY_AUTHENTICATE);
+    upstream.headers.remove(http::header::PROXY_AUTHORIZATION);
+    upstream.headers.remove("alt-svc");
+    *resp.headers_mut() = upstream.headers;
+  }
+  let upstream_proxy_status =
+    crate::proxy_status::take_proxy_status(resp.headers_mut());
+  if let Some(ref id) =
+    ctx.server_addr().map(|address| address.to_string())
+  {
+    let our_entry = build_proxy_status_with_status(id, 200);
+    resp.headers_mut().insert(
+      http::header::HeaderName::from_static("proxy-status"),
+      append_proxy_status(upstream_proxy_status.as_ref(), &our_entry),
+    );
+  }
+
+  if !resp.headers().contains_key("proxy-status")
+    && let Some(status) = upstream_proxy_status
+  {
+    resp.headers_mut().insert("proxy-status", status);
+  }
+
+  let shutdown_handle = st.shutdown_handle();
+
+  st.register(async move {
+    let client = match upgrade {
+      Some(u) => match u.await {
+        Ok(c) => c,
+        Err(e) => {
+          completion.upgrade_failed(&e);
+          return;
+        }
+      },
+      None => {
+        completion.upgrade_failed(&"no upgrade available");
+        return;
+      }
+    };
+
+    let end = stream::run_tunnel(
+      client,
+      target,
+      shutdown_handle,
+      tunnel_idle_timeout,
+      completion.progress(),
+    )
+    .await;
+    completion.finish(end);
+  });
+
+  Ok(resp)
+}
+
+fn build_tunnel_response() -> Response {
+  build_empty_response(http::StatusCode::OK)
+}
+
+// ============================================================================
+// Chain Mode: Forward
+// ============================================================================
+
+async fn chain_forward(
+  upstream_name: &str,
+  registry: &Rc<UpstreamRegistry>,
+  req_headers: http::request::Parts,
+  req_body: RequestBody,
+  ctx: &RequestContext,
+) -> Result<Response> {
+  // Validate forward target
+  let target = match target_parser::parse_forward_target(&req_headers) {
+    Ok(target) => target,
+    Err(ForwardTargetError::ConnectMethod) => {
+      return Ok(build_error_response(
+        http::StatusCode::METHOD_NOT_ALLOWED,
+        "CONNECT method not allowed for forward proxy",
+      ));
+    }
+    Err(ForwardTargetError::UnsupportedScheme) => {
+      return Ok(build_error_response(
+        http::StatusCode::BAD_REQUEST,
+        "Only http:// and https:// schemes supported for forward proxy",
+      ));
+    }
+    Err(_) => {
+      return Ok(build_error_response(
+        http::StatusCode::BAD_REQUEST,
+        "Invalid target address",
+      ));
+    }
+  };
+
+  let (tls_config, tracker) = {
+    let reg = registry;
+    (reg.tls_config(), reg.tracker())
+  };
+
+  let upstream = match registry.get_upstream(upstream_name) {
+    Ok(upstream) => upstream,
+    Err(e) => {
+      return Ok(e.to_response(ctx));
+    }
+  };
+  match upstream
+    .forward(&tls_config, &tracker, &target, req_headers, req_body, ctx)
+    .await
+  {
+    Ok(resp) => Ok(resp),
+    Err(e) => Ok(e.to_response(ctx)),
+  }
+}

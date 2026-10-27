@@ -22,14 +22,14 @@ def create_upstream_password_config(
     config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:{trust}
+  upstream:{trust}
     upstreams:
       - name: direct
   auth:
 
 services:
   - name: tunnel
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: direct
     layers:
@@ -77,13 +77,13 @@ def create_upstream_tls_cert_config(
     config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:{trust}
+  upstream:{trust}
     upstreams:
       - name: direct
 
 services:
   - name: tunnel
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: direct
 
@@ -116,7 +116,7 @@ def create_entry_http_password_config(
     config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: "{ca_path}"
     upstreams:
@@ -133,7 +133,7 @@ plugins:
 
 services:
   - name: proxy_chain
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: test_upstream
     layers:
@@ -171,7 +171,7 @@ def create_entry_http_tls_cert_config(
     config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       client_cert_path: "{client_cert_path}"
       client_key_path: "{client_key_path}"
@@ -187,7 +187,7 @@ plugins:
 
 services:
   - name: proxy_chain
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: test_upstream
     layers:
@@ -222,7 +222,7 @@ def create_entry_socks5_password_config(
     config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: "{ca_path}"
     upstreams:
@@ -239,7 +239,7 @@ plugins:
 
 services:
   - name: proxy_chain
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: test_upstream
     layers:
@@ -279,7 +279,7 @@ def create_entry_socks5_tls_cert_config(
     config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       client_cert_path: "{client_cert_path}"
       client_key_path: "{client_key_path}"
@@ -295,7 +295,7 @@ plugins:
 
 services:
   - name: proxy_chain
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: test_upstream
     layers:
@@ -329,7 +329,7 @@ def create_entry_http_no_upstream_auth_config(
     config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: "{ca_path}"
     upstreams:
@@ -343,7 +343,7 @@ plugins:
 
 services:
   - name: proxy_chain
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: test_upstream
     layers:
@@ -376,7 +376,7 @@ def create_entry_socks5_no_upstream_auth_config(
     config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: "{ca_path}"
     upstreams:
@@ -390,7 +390,7 @@ plugins:
 
 services:
   - name: proxy_chain
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: test_upstream
     layers:
@@ -424,7 +424,7 @@ def create_entry_http_wrong_upstream_auth_config(
     config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: "{ca_path}"
     upstreams:
@@ -441,7 +441,7 @@ plugins:
 
 services:
   - name: proxy_chain
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: test_upstream
     layers:
@@ -474,13 +474,13 @@ def create_upstream_no_auth_config(
     config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
 services:
   - name: tunnel
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: direct
 

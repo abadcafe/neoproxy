@@ -21,7 +21,7 @@ def create_test_config(proxy_port: int, temp_dir: str, server_threads: int = 1) 
     config_content = f"""server_threads: {server_threads}
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
@@ -32,7 +32,7 @@ listeners:
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 

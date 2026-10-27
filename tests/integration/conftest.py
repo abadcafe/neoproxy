@@ -16,6 +16,7 @@ from tests.fixtures.certificates import (
 )
 from tests.fixtures.configuration import StringMap
 from tests.fixtures.http_scenario import ProxyWithConfig, running_proxy
+from tests.fixtures.matrix_model import CertificateFiles
 from tests.fixtures.proxy_process import ProcessFactory, managed_processes
 from tests.fixtures.tcp_peer import TargetServerFactory, managed_target_servers
 
@@ -63,3 +64,23 @@ def shared_client_cert(
         shared_test_certs["ca_key_path"],
     )
     return {"client_cert_path": cert, "client_key_path": key}
+
+
+@pytest.fixture(scope="session")
+def matrix_certificates(
+    tmp_path_factory: pytest.TempPathFactory,
+    shared_test_certs: StringMap,
+    shared_client_cert: StringMap,
+) -> "CertificateFiles":
+    directory = tmp_path_factory.mktemp("matrix_alien_ca")
+    _, _, ca, ca_key = generate_test_certificates(str(directory))
+    alien_cert, alien_key = generate_client_cert(str(directory), ca, ca_key)
+    return CertificateFiles(
+        server_cert=shared_test_certs["cert_path"],
+        server_key=shared_test_certs["key_path"],
+        ca=shared_test_certs["ca_path"],
+        client_cert=shared_client_cert["client_cert_path"],
+        client_key=shared_client_cert["client_key_path"],
+        alien_cert=alien_cert,
+        alien_key=alien_key,
+    )

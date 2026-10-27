@@ -10,7 +10,7 @@
 | Listener | `https` | HTTPS (HTTP/1.1 over TLS) 监听器，支持 SNI 证书选择和客户端证书认证 |
 | Listener | `http3` | HTTP/3 (QUIC) 监听器 |
 | Listener | `socks5` | SOCKS5 监听器，支持用户名/密码认证 |
-| Service | `http_upstream.upstream` | 统一代理服务，支持直连模式（连接目标）和链式模式（通过上游代理） |
+| Service | `upstream.upstream` | 统一代理服务，支持直连模式（连接目标）和链式模式（通过上游代理） |
 | Service | `echo` | 回显服务（测试用） |
 | Layer | `auth.basic_auth` | HTTP Basic 代理认证层 |
 | Layer | `access_log.file` | 访问日志层，支持多 writer、缓冲写入、文件轮转 |
@@ -111,18 +111,24 @@ plugins:
 
 `flush_interval` 由日志接收线程统一计时。缓冲区达到大小阈值提前刷新后，下一次定时刷新仍按期执行；持续收到日志也不会重置这个时限。空缓冲区的定时刷新不执行文件写入。
 
-### 2. http_upstream 插件
+### 2. upstream 插件
+
+插件配置使用 `plugins.upstream`，服务类型使用 `upstream.upstream`。
 
 统一代理插件，定义上游代理池和直连配置。支持三级继承配置：**Plugin → Upstream → Address**。
-低层级覆盖高层级同名参数。`upstream_request_timeout` 按插件、upstream、address 三级继承；链式请求使用调度选中地址的超时。链式地址通过 `address_protocol: http`、`address_protocol: https` 或 `address_protocol: http3` 选择单一协议；`address_protocol` 支持三级继承，默认 `https`。TCP keepalive 的三个字段均已生效，省略时保持系统默认；配置任一项即启用 TCP keepalive。
+低层级覆盖高层级同名参数。`upstream_request_timeout` 按插件、upstream、address 三级继承；链式请求使用调度选中地址的超时。链式地址通过 `address_protocol: http`、`address_protocol: https` 、`address_protocol: http3` 或 `address_protocol: socks5` 选择单一协议；`address_protocol` 支持三级继承，默认 `https`。TCP keepalive 的三个字段均已生效，省略时保持系统默认；配置任一项即启用 TCP keepalive。
+
+SOCKS5 上游仅承接 CONNECT，目标解析复用 HTTP CONNECT：域名交给上游解析，IPv4/IPv6 按对应类型发送。普通 GET/POST 等请求只选择 HTTP/HTTPS/HTTP3 节点；没有可用节点时返回与节点全部不可用相同的 502，协议不适用不计健康检查失败。SOCKS5 握手与认证包含在 `upstream_request_timeout` 内，成功后的隧道复用 `tunnel_idle_timeout`，每条隧道独立使用 TCP 连接。
+
+认证复用三级继承的 `user: {username: ..., password: ...}`。未配置凭据时提供无认证；配置后同时提供无认证与用户名密码，由 SOCKS5 服务端选择。用户名和密码各为 1–255 字节。认证拒绝映射为上游 407（对下游返回 502），规则拒绝映射 403，TTL 到期映射 504，命令不支持映射 501，其余 CONNECT 失败映射 502。这些明确响应复用 HTTP CONNECT 的响应错误处理，不摘除节点、不重试；连接、握手 I/O 失败和超时沿用现有被动健康检查和重试规则。
 
 **直连模式**：upstream 不配置 `addresses`，代理直接连接目标服务器。
 **链式模式**：upstream 配置 `addresses`，代理通过上游代理服务器转发。
 
 ```yaml
 plugins:
-  http_upstream:
-    certificates:                          # TLS 配置（链式模式需要）
+  upstream:
+    certificates:                          # 可选 TLS 信任库和客户端证书
       server_ca_path: conf/certs/server-ca.crt
       client_cert_path: conf/certs/client.crt
       client_key_path: conf/certs/client.key
@@ -158,7 +164,17 @@ plugins:
           - address: "host:port"           # 上游代理地址
             hostname: "sni.example.com"    # 连接上游时使用的 SNI（需匹配上游证书 SAN）
             weight: 1                      # 负载均衡权重
-            address_protocol: http                 # http、https 或 http3
+            address_protocol: http                 # http、https、http3 或 socks5
+
+      # SOCKS5 链式模式（仅 CONNECT）
+      - name: socks_relay
+        address_protocol: socks5
+        user:                              # 可省略；复用三级继承
+          username: example
+          password: secret
+        addresses:
+          - address: "socks.example.com:1080"
+            weight: 1
 ```
 
 ---
@@ -324,7 +340,7 @@ TLS 证书通过服务器级别的 `tls` 配置（同 https 监听器），http3
 
 ### 4. socks5 (SOCKS5)
 
-SOCKS5 监听器，兼容 RFC 1928 和 RFC 1929。
+SOCKS5 监听器，使用 RFC 1928/1929 报文；认证执行时机遵循下述产品约束。
 
 #### 配置参数
 
@@ -334,7 +350,21 @@ SOCKS5 监听器，兼容 RFC 1928 和 RFC 1929。
 | `handshake_timeout` | `Duration` | 否 | `3s` | 协议握手、后续命令读取各自的超时 |
 | `accept_retry_delay` | `Duration` | 否 | `1s` | accept 资源耗尽或未知 I/O 错误后的重试退避，必须大于零且能安全计时 |
 
-认证策略由所关联服务的 `auth.basic_auth` 层声明，监听器不接受独立的 `users` 参数。服务组合时显式合并认证要求，并通过传输无关的只读接口提供给 SOCKS5 握手。未配置认证时只接受无认证方法（`0x00`），配置认证后只接受用户名/密码方法（`0x02`）；客户端同时提供两种方法时也按此策略选择，与客户端排列顺序无关。客户端未提供所需方法时返回 `0xFF` 并关闭连接。凭据必须满足所有认证层，才发送 RFC 1929 成功应答。凭据错误时先发送认证失败应答并关闭连接，不读取 CONNECT 目标。成功后再将 SOCKS5 CONNECT 转成 HTTP CONNECT，执行服务中间件和访问日志；凭据通过类型化扩展传递，保留用户名中的冒号。
+**不可违背的产品约束：SOCKS5 与 HTTP 必须统一经过请求中间件认证。**
+这是一项有意的产品设计，不是缺陷、临时兼容或待修复项，不得改成握手阶段验证凭据，
+也不得另建 listener 认证旁路。认证配置只放在所关联服务的 `auth.basic_auth` 层；
+保留该名称，listener 不提供 `users`、`username` 或 `password` 配置。
+
+握手只协商方法并收取凭据，不读取服务认证策略。客户端提供用户名/密码方法（`0x02`）
+时优先选择它；否则选择其提供的无认证方法（`0x00`）；两者都未提供时返回 `0xFF`。
+收到合法格式的用户名/密码报文后直接返回成功，**仅确认凭据收取完成，不表示认证通过**。
+这是有意区别于 RFC 1929 认证成功语义的产品行为。
+
+随后读取目标，将 SOCKS5 CONNECT 转成内部 HTTP CONNECT，统一执行 `auth.basic_auth`
+及其他中间件。配置认证时，缺失或错误凭据在此返回 HTTP 407，映射成 SOCKS5 CONNECT
+`REP=0x02` 并关闭连接，不建立上游隧道；未配置认证时无需验证凭据。
+凭据通过类型化扩展传递，保留用户名中的冒号；访问日志可记录被拒绝的 CONNECT。
+
 
 服务层 `users` 条目格式：
 
@@ -367,12 +397,12 @@ listeners:
 
 plugins:
   auth: {}
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 services:
   - name: proxy
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: direct
     layers:
@@ -401,7 +431,7 @@ curl --socks5 127.0.0.1:1080 --proxy-user admin:secret123 https://example.com
 
 ## Service 详解
 
-### 1. http_upstream.upstream
+### 1. upstream.upstream
 
 统一代理服务，支持两种模式：
 - **直连模式**：upstream 无 addresses，代理直接连接目标服务器
@@ -429,9 +459,9 @@ direct 从请求目标构造一个权重为 1 的 address，链式模式使用�
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `upstream` | `String` | 是 | 上游名称，引用 `plugins.http_upstream.upstreams[].name` |
+| `upstream` | `String` | 是 | 上游名称，引用 `plugins.upstream.upstreams[].name` |
 
-直连模式的超时和连接池配置在 upstream 定义中设置：`tcp_connect_timeout` 用于 TCP 建连；`tls_handshake_timeout` 用于 TCP 上的 TLS 握手；`upstream_request_timeout` 限制响应头或隧道建立的等待时间。普通转发的连接池按 scheme、目标主机和端口区分，配置项为 `pool`；隧道使用 `tunnel_idle_timeout`。HTTPS 目标使用系统信任库，并可通过 `plugins.http_upstream.certificates.server_ca_path` 添加 CA，客户端证书沿用该配置中的 `client_cert_path` 和 `client_key_path`。
+直连模式的超时和连接池配置在 upstream 定义中设置：`tcp_connect_timeout` 用于 TCP 建连；`tls_handshake_timeout` 用于 TCP 上的 TLS 握手；`upstream_request_timeout` 限制响应头或隧道建立的等待时间。普通转发的连接池按 scheme、目标主机和端口区分，配置项为 `pool`；隧道使用 `tunnel_idle_timeout`。HTTPS 目标使用系统信任库，并可通过 `plugins.upstream.certificates.server_ca_path` 添加 CA，客户端证书沿用该配置中的 `client_cert_path` 和 `client_key_path`。
 
 显式 CA 文件必须包含有效证书；空文件、只有私钥或无证书内容会导致配置失败，系统信任库不会掩盖该错误。
 
@@ -443,7 +473,7 @@ direct 从请求目标构造一个权重为 1 的 address，链式模式使用�
 
 ```yaml
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
         tunnel_idle_timeout: "60s"
@@ -452,7 +482,7 @@ plugins:
 
 services:
   - name: tunnel
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: direct
 
@@ -475,7 +505,7 @@ servers:
 
 ```yaml
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: conf/certs/server-ca.crt
     upstreams:
@@ -493,7 +523,7 @@ listeners:
 
 services:
   - name: chain
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: remote_relay
 
@@ -508,7 +538,7 @@ servers:
 
 ```yaml
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
@@ -519,7 +549,7 @@ listeners:
 
 services:
   - name: tunnel
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: direct
 
@@ -585,7 +615,7 @@ HTTP Basic 代理认证层，验证 `Proxy-Authorization` 请求头。
 ```yaml
 services:
   - name: tunnel
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: direct
     layers:
@@ -608,7 +638,7 @@ services:
 ```yaml
 services:
   - name: tunnel
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: direct
     layers:
@@ -710,7 +740,7 @@ plugins:
   access_log:
     writers:
       - path_prefix: "logs/access.log"
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
         tcp_connect_timeout: "10s"
@@ -723,7 +753,7 @@ listeners:
 
 services:
   - name: tunnel
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: direct
     layers:
@@ -751,7 +781,7 @@ servers:
 server_threads: 4
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
@@ -762,7 +792,7 @@ listeners:
 
 services:
   - name: tunnel
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: direct
 
@@ -779,7 +809,7 @@ servers:
 server_threads: 4
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
@@ -795,7 +825,7 @@ listeners:
 
 services:
   - name: tunnel
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: direct
     layers:
@@ -827,7 +857,7 @@ servers:
 server_threads: 4
 
 plugins:
-  http_upstream:
+  upstream:
     certificates:
       server_ca_path: /etc/neoproxy/ca.pem
     upstreams:
@@ -845,7 +875,7 @@ listeners:
 
 services:
   - name: chain
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: remote
 
@@ -862,7 +892,7 @@ servers:
 server_threads: 4
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
@@ -873,7 +903,7 @@ listeners:
 
 services:
   - name: tunnel
-    kind: http_upstream.upstream
+    kind: upstream.upstream
     args:
       upstream: direct
 
@@ -1066,3 +1096,36 @@ uv run pytest
 ```
 
 当前 h3 0.0.8 的经典 CONNECT 编码会额外发送 `:scheme` 和 `:path`，严格上游可能拒绝。此第三方限制不在项目内打补丁；[失败场景测试](tests/integration/test_dependency_h3.py) 记录了实际报文和拒绝结果。普通 H3 转发不受此限制。审查根因和架构判断见 [REVIEW.txt](REVIEW.txt)。
+
+### 四协议两跳 curl 矩阵
+
+链路固定为 `curl → 入口代理 → 中转代理 → 目标`。入口与中转分别取
+HTTP、HTTPS、HTTP/3、SOCKS5，隧道覆盖全部 16 种组合；普通转发覆盖不含
+SOCKS5 的 9 种组合（SOCKS5 仅支持隧道）。
+
+| 目标/行为 | 覆盖范围 | 用例数 |
+|---|---|---:|
+| 本地 HTTP/HTTPS | 隧道及普通转发，GET/HEAD/POST，二进制 body 校验 | 150 |
+| 百度 HTTP/HTTPS | 隧道及普通转发，GET/HEAD | 100 |
+| 两跳认证 | 每跳分别配置密码、客户端证书或双重认证，成功/缺失/错误凭据 | 224 |
+| 空闲超时 | 16 种隧道空闲关闭、16 种活跃隧道保持、9 种普通响应不受隧道超时影响 | 41 |
+
+认证用例仅对 HTTPS/HTTP3 使用客户端证书。矩阵通过访问日志验证实际经过的两跳
+及所选中转协议；本地目标另验证接收的方法、路径和请求内容。
+
+HTTP/3 入口隧道需要带实验性 `proxy-HTTP3` 功能的 curl。仓库提供独立构建脚本，
+需要 C 编译器、Perl、make、CMake，以及下载依赖的网络连接：
+
+```bash
+scripts/build-matrix-curl.sh
+uv run pytest tests/integration/test_chain_matrix_local.py tests/integration/test_chain_matrix_baidu.py tests/integration/test_chain_matrix_auth.py tests/integration/test_chain_matrix_idle.py
+```
+
+脚本校验固定版本源码的 SHA256，安装到忽略目录 `tmp/curl-h3/prefix`，不替换系统
+curl。测试优先使用 `NEOPROXY_MATRIX_CURL` 指定的二进制，否则使用该独立构建，再
+回退到 PATH 中的 curl；缺少所需功能会失败，不跳过测试。百度用例需要外网可达。
+
+H3 隧道使用 curl `--proxy-http3`；H3 普通转发使用 `--http3-only` 连接入口，
+以绝对 URL 的 `--request-target` 生成目标伪头，不添加额外桥接代理。目标 TLS 验证
+使用其对应的信任根，百度目标保留公共 CA 信任。
+配置、curl 命令、响应头、指标与两跳日志保存在 `tmp/test-artifacts/proxy-chain/`。

@@ -193,7 +193,7 @@ class TestHTTP3ErrorHandling:
             config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
@@ -204,7 +204,7 @@ listeners:
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 
@@ -258,7 +258,7 @@ servers:
             config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
@@ -269,7 +269,7 @@ listeners:
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 
@@ -335,7 +335,7 @@ servers:
             config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
@@ -346,7 +346,7 @@ listeners:
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 
@@ -457,7 +457,7 @@ class TestHTTP3ConfigValidation:
             config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
@@ -468,7 +468,7 @@ listeners:
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 
@@ -517,7 +517,7 @@ servers:
             config_content = f"""server_threads: 1
 
 plugins:
-  http_upstream:
+  upstream:
     upstreams:
       - name: direct
 
@@ -528,7 +528,7 @@ listeners:
 
 services:
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 

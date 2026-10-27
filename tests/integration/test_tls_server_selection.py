@@ -98,14 +98,14 @@ def _proxy(
     port = get_unique_port()
     config: ConfigDict = {
         "server_threads": 2,
-        "plugins": {"http_upstream": {"upstreams": [{"name": "direct"}]}},
+        "plugins": {"upstream": {"upstreams": [{"name": "direct"}]}},
         "listeners": [
             {"name": "main", "kind": kind, "addresses": [f"127.0.0.1:{port}"]}
         ],
         "services": [
             {
                 "name": "direct",
-                "kind": "http_upstream.upstream",
+                "kind": "upstream.upstream",
                 "args": {"upstream": "direct"},
             }
         ],

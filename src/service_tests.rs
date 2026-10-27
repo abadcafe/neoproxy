@@ -51,23 +51,3 @@ fn test_layer_wraps_service() {
   let _wrapped = layer.layer(inner);
   // Wrapped service is created successfully
 }
-
-#[test]
-fn test_layer_preserves_composed_authentication_through_cloning() {
-  struct Verifier;
-  impl crate::authentication::CredentialVerifier for Verifier {
-    fn accepts(&self, username: &str, password: &str) -> bool {
-      username == "user" && password == "secret"
-    }
-  }
-  let layer = Layer::with_authentication(
-    TestLayer,
-    std::sync::Arc::new(Verifier),
-  );
-  let service = layer.layer(placeholder_service());
-  let service = Layer::new(TestLayer).layer(service).clone();
-  let authentication = service.authentication();
-  assert!(authentication.requires_credentials());
-  assert!(authentication.accepts("user", "secret"));
-  assert!(!authentication.accepts("user", "wrong"));
-}

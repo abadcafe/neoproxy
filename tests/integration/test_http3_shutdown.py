@@ -40,7 +40,7 @@ def running_proxy(
     _ = config.write_text(f"""server_threads: {workers}
 plugins:
   echo: {{}}
-  http_upstream:
+  upstream:
     upstreams:
     - name: direct
 listeners:
@@ -51,7 +51,7 @@ services:
 - name: echo
   kind: echo.echo
 - name: direct
-  kind: http_upstream.upstream
+  kind: upstream.upstream
   args:
     upstream: direct
 servers:

@@ -4,9 +4,10 @@ HTTP/3 Chain proxy integration tests.
 Test target: Verify neoproxy HTTP/3 Chain service behavior
 Test nature: Black-box testing through external interface (HTTP)
 
-This test module covers:
-- 7.2 Proxy chain complete scenarios
-- 7.4 Graceful Shutdown scenarios (http3_chain specific)
+Basic protocol exchanges belong to chain_matrix_local. This module retains
+missing upstream trust, idle/active shutdown, observable WRR distribution and
+connection-reuse metadata. Configuration-only startup and duplicate idle
+shutdown cases are subsumed by these stronger process contracts.
 
 """
 
@@ -16,461 +17,115 @@ import signal
 import socket
 import subprocess
 import tempfile
-import time
+import threading
+from contextlib import ExitStack
 from pathlib import Path
 
+import pytest
 from pydantic import BaseModel, Field
 
 from tests.fixtures.access_log_configuration import enable_access_log
-from tests.fixtures.binary import NEOPROXY_BINARY
 from tests.fixtures.configuration import StringMap
+from tests.fixtures.curl import get_curl_env_without_no_proxy
 from tests.fixtures.h3_configuration import (
     create_http3_chain_config,
     create_http3_listener_config,
 )
 from tests.fixtures.http_echo import http_echo_handler
-from tests.fixtures.notified_process import ProxyProcess
+from tests.fixtures.http_request import establish_connect_tunnel
+from tests.fixtures.matrix_observation import read_access
 from tests.fixtures.ports import get_unique_port
-from tests.fixtures.proxy_process import BytesProcess, start_proxy
+from tests.fixtures.proxy_process import BytesProcess, managed_processes, start_proxy
 from tests.fixtures.tcp_peer import create_target_server
 
-# ==============================================================================
-# Test cases - 7.2 Proxy chain complete scenarios
-# ==============================================================================
+
+def test_chain_missing_server_ca_prevents_readiness(tmp_path: Path) -> None:
+    """Startup must fail for the trust file, with no timeout-success escape."""
+    ca = tmp_path / "missing-ca.pem"
+    config = create_http3_chain_config(
+        get_unique_port(), [("127.0.0.1", get_unique_port(), 1)], str(ca), str(tmp_path)
+    )
+    with managed_processes() as start:
+        process = start(config)
+        assert not process.wait_ready(timeout=3)
+        assert process.wait(timeout=3) == 2
+    logs = "".join(
+        path.read_text() for path in (tmp_path / "logs").glob("neoproxy.log*")
+    )
+    assert "server_ca_path" in logs
+    assert str(ca) in logs
+    assert "plugin initialization failed: upstream: server_ca_path" in logs
 
 
-class TestHTTP3ChainProxy:
-    """Test 7.2: HTTP/3 Chain proxy scenarios."""
+@pytest.mark.parametrize("active", [False, True], ids=["idle", "active-tunnel"])
+def test_chain_shutdown_releases_connections(
+    tmp_path: Path, shared_test_certs: StringMap, active: bool
+) -> None:
+    """Collapse idle shutdown duplicates and prove the active case has a tunnel."""
+    entry_port, relay_port, target_port = (
+        get_unique_port(),
+        get_unique_port(),
+        get_unique_port(),
+    )
+    target_closed = threading.Event()
 
-    def test_http3_chain_graceful_shutdown(self, shared_test_certs: StringMap) -> None:
-        """
-        TC-CHAIN-002: HTTP/3 Chain graceful shutdown.
-
-        Target: Verify http3_chain service shuts down gracefully
-        """
-        temp_dir = tempfile.mkdtemp()
-        http_port = get_unique_port()
-        h3_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-
+    def echo(conn: socket.socket) -> None:
         try:
-            ca_path = shared_test_certs["ca_path"]
-
-            config_path = create_http3_chain_config(
-                http_port=http_port,
-                proxy_group=[("127.0.0.1", h3_port, 1)],
-                ca_path=ca_path,
-                temp_dir=temp_dir,
-            )
-
-            proxy_proc = start_proxy(config_path)
-
-            assert proxy_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
-
-            start_time = time.monotonic()
-            proxy_proc.send_signal(signal.SIGTERM)
-
-            return_code = proxy_proc.wait(timeout=10)
-            elapsed = time.monotonic() - start_time
-
-            assert return_code == 0, f"Expected exit code 0, got {return_code}"
-
-            # Should complete within reasonable time for graceful shutdown
-            # The http3_chain service may need time to close idle connections
-            assert elapsed < 8.0, f"Shutdown took too long: {elapsed:.2f}s"
-
+            conn.settimeout(10)
+            while data := conn.recv(1024):
+                conn.sendall(data)
+        except ConnectionResetError:
+            pass
         finally:
-            if proxy_proc and proxy_proc.poll() is None:
-                proxy_proc.terminate()
-                _ = proxy_proc.wait(timeout=5)
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            conn.close()
+            target_closed.set()
 
-    def test_http3_chain_multiple_proxies(self, shared_test_certs: StringMap) -> None:
-        """
-        TC-CHAIN-003: HTTP/3 Chain with multiple proxy servers.
-
-        Target: Verify http3_chain service handles multiple proxy configs
-        """
-        temp_dir = tempfile.mkdtemp()
-        http_port = get_unique_port()
-        h3_port1 = get_unique_port()
-        h3_port2 = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-
-        try:
-            ca_path = shared_test_certs["ca_path"]
-
-            # Multiple proxy servers with WRR weights
-            config_path = create_http3_chain_config(
-                http_port=http_port,
-                proxy_group=[
-                    ("127.0.0.1", h3_port1, 2),
-                    ("127.0.0.1", h3_port2, 1),
-                ],
-                ca_path=ca_path,
-                temp_dir=temp_dir,
+    with ExitStack() as resources:
+        relay_dir, entry_dir = tmp_path / "relay", tmp_path / "entry"
+        relay_dir.mkdir()
+        entry_dir.mkdir()
+        start = resources.enter_context(managed_processes())
+        relay = start(
+            create_http3_listener_config(
+                relay_port,
+                shared_test_certs["cert_path"],
+                shared_test_certs["key_path"],
+                str(relay_dir),
             )
-
-            proxy_proc = start_proxy(config_path)
-
-            assert proxy_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
-
-            # Verify process is running
-            assert proxy_proc.poll() is None, "HTTP/3 chain service should be running"
-
-        finally:
-            if proxy_proc:
-                proxy_proc.kill()
-                _ = proxy_proc.wait(timeout=5)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_http3_chain_missing_ca(self) -> None:
-        """
-        TC-CHAIN-004: HTTP/3 Chain with missing CA certificate.
-
-        Target: Verify upstream plugin fails to start when CA file is missing.
-        The new upstream plugin validates the CA path eagerly at startup.
-        """
-        temp_dir = tempfile.mkdtemp()
-        http_port = get_unique_port()
-        h3_port = get_unique_port()
-        proc: BytesProcess | None = None
-
-        try:
-            config_content = f"""server_threads: 1
-
-plugins:
-  upstream:
-    certificates:
-      server_ca_path: "/nonexistent/ca.pem"
-    upstreams:
-      - name: test_upstream
-        addresses:
-          - address: 127.0.0.1:{h3_port}
-            hostname: localhost
-            weight: 1
-            address_protocol: http3
-
-listeners:
-- name: http_main
-  kind: http
-  addresses: [ "0.0.0.0:{http_port}" ]
-  args:
-    protocols: [ http ]
-    hostnames: []
-    certificates: []
-
-services:
-- name: upstream
-  kind: upstream.upstream
-  args:
-    upstream: test_upstream
-
-servers:
-- name: http_proxy
-  listeners: ["http_main"]
-  service: upstream
-"""
-            config_path = os.path.join(temp_dir, "missing_ca.yaml")
-            with open(config_path, "w") as f:
-                _ = f.write(config_content)
-
-            proc = ProxyProcess(
-                [NEOPROXY_BINARY, "--config", config_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=False,
+        )
+        assert relay.wait_ready(timeout=3)
+        entry = start(
+            create_http3_chain_config(
+                entry_port,
+                [("127.0.0.1", relay_port, 1)],
+                shared_test_certs["ca_path"],
+                str(entry_dir),
             )
-
-            # upstream validates CA path eagerly at startup,
-            # so the process should exit with an error
-            try:
-                exit_code = proc.wait(timeout=5.0)
-                assert exit_code != 0, "Expected non-zero exit code for missing CA file"
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                _ = proc.wait()
-
-        finally:
-            if proc and proc.poll() is None:
-                proc.terminate()
-                _ = proc.wait(timeout=2)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-# ==============================================================================
-# Test cases - Full proxy chain (HTTP -> HTTP/3 -> Target)
-# ==============================================================================
-
-
-class TestFullProxyChain:
-    """Test complete proxy chain scenarios."""
-
-    def test_full_chain_graceful_shutdown(self, shared_test_certs: StringMap) -> None:
-        """
-        TC-FULL-CHAIN-002: Full proxy chain graceful shutdown.
-
-        Target: Verify both components shut down gracefully
-        """
-        temp_dir1 = tempfile.mkdtemp()
-        temp_dir2 = tempfile.mkdtemp()
-
-        http_port = get_unique_port()
-        h3_port = get_unique_port()
-
-        chain_proc: BytesProcess | None = None
-        h3_proc: BytesProcess | None = None
-
-        try:
-            cert_path = shared_test_certs["cert_path"]
-            key_path = shared_test_certs["key_path"]
-            ca_path = shared_test_certs["ca_path"]
-
-            # Start HTTP/3 listener
-            h3_config = create_http3_listener_config(
-                proxy_port=h3_port,
-                cert_path=cert_path,
-                key_path=key_path,
-                temp_dir=temp_dir1,
+        )
+        assert entry.wait_ready(timeout=3)
+        if active:
+            _, target = create_target_server("127.0.0.1", target_port, echo)
+            _ = resources.enter_context(target)
+            tunnel = establish_connect_tunnel(
+                "127.0.0.1", entry_port, "127.0.0.1", target_port
             )
-            h3_proc = start_proxy(h3_config)
-
-            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
-
-            # Start chain service
-            chain_config = create_http3_chain_config(
-                http_port=http_port,
-                proxy_group=[("127.0.0.1", h3_port, 1)],
-                ca_path=ca_path,
-                temp_dir=temp_dir2,
-            )
-            chain_proc = start_proxy(chain_config)
-
-            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
-
-            # Shutdown chain first
-            chain_proc.send_signal(signal.SIGTERM)
-            return_code1 = chain_proc.wait(timeout=5)
-
-            # Shutdown H3 listener
-            h3_proc.send_signal(signal.SIGTERM)
-            return_code2 = h3_proc.wait(timeout=5)
-
-            assert return_code1 == 0, f"Chain exit code: {return_code1}"
-            assert return_code2 == 0, f"H3 listener exit code: {return_code2}"
-
-        finally:
-            if chain_proc and chain_proc.poll() is None:
-                chain_proc.terminate()
-                _ = chain_proc.wait(timeout=5)
-            if h3_proc and h3_proc.poll() is None:
-                h3_proc.terminate()
-                _ = h3_proc.wait(timeout=5)
-            shutil.rmtree(temp_dir1, ignore_errors=True)
-            shutil.rmtree(temp_dir2, ignore_errors=True)
-
-
-# ==============================================================================
-# Test cases - 7.4 HTTP/3 Chain Graceful Shutdown with Active Streams
-# ==============================================================================
-
-
-class TestHTTP3ChainGracefulShutdown:
-    """Test 7.4: HTTP/3 chain graceful shutdown with active streams."""
-
-    def test_chain_uninstall_no_active_streams(
-        self, shared_test_certs: StringMap
-    ) -> None:
-        """
-        TC-CHAIN-UNINSTALL-001: http3_chain uninstall with no active streams.
-
-        Target: Verify http3_chain uninstalls immediately when no streams are active.
-        """
-        temp_dir = tempfile.mkdtemp()
-        http_port = get_unique_port()
-        h3_port = get_unique_port()
-
-        chain_proc: BytesProcess | None = None
-        h3_proc: BytesProcess | None = None
-
-        try:
-            cert_path = shared_test_certs["cert_path"]
-            key_path = shared_test_certs["key_path"]
-            ca_path = shared_test_certs["ca_path"]
-
-            # Start HTTP/3 listener
-            h3_config = create_http3_listener_config(
-                proxy_port=h3_port,
-                cert_path=cert_path,
-                key_path=key_path,
-                temp_dir=temp_dir,
-            )
-            h3_proc = start_proxy(h3_config)
-
-            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
-
-            # Start chain service
-            chain_config = create_http3_chain_config(
-                http_port=http_port,
-                proxy_group=[("127.0.0.1", h3_port, 1)],
-                ca_path=ca_path,
-                temp_dir=temp_dir,
-            )
-            chain_proc = start_proxy(chain_config)
-
-            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
-
-            # Shutdown chain (no active streams)
-            start_time = time.monotonic()
-            chain_proc.send_signal(signal.SIGTERM)
-            return_code = chain_proc.wait(timeout=5)
-            elapsed = time.monotonic() - start_time
-
-            assert return_code == 0, f"Chain exit code: {return_code}"
-            # Should complete quickly when no active streams
-            assert elapsed < 3.0, (
-                f"Shutdown took too long with no active streams: {elapsed:.2f}s"
-            )
-
-        finally:
-            if chain_proc and chain_proc.poll() is None:
-                chain_proc.terminate()
-                _ = chain_proc.wait(timeout=5)
-            if h3_proc:
-                h3_proc.kill()
-                _ = h3_proc.wait(timeout=5)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_chain_uninstall_with_active_stream(
-        self, shared_test_certs: StringMap
-    ) -> None:
-        """
-        TC-CHAIN-UNINSTALL-002: http3_chain uninstall with potential active stream.
-
-        Target: Verify http3_chain service handles shutdown gracefully
-        even when there may be connection attempts in progress.
-
-        Note: This test verifies that the chain service shuts down cleanly.
-        The actual tunnel establishment through the chain depends on proper
-        http3_chain implementation.
-        """
-        temp_dir1 = tempfile.mkdtemp()
-        temp_dir2 = tempfile.mkdtemp()
-
-        http_port = get_unique_port()
-        h3_port = get_unique_port()
-        target_port = get_unique_port()
-
-        chain_proc: BytesProcess | None = None
-        h3_proc: BytesProcess | None = None
-        target_socket: socket.socket | None = None
-
-        try:
-            cert_path = shared_test_certs["cert_path"]
-            key_path = shared_test_certs["key_path"]
-            ca_path = shared_test_certs["ca_path"]
-
-            # Start HTTP/3 listener
-            h3_config = create_http3_listener_config(
-                proxy_port=h3_port,
-                cert_path=cert_path,
-                key_path=key_path,
-                temp_dir=temp_dir1,
-            )
-            h3_proc = start_proxy(h3_config)
-
-            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
-
-            # Create a target server that accepts connection
-            def handler(conn: socket.socket) -> None:
-                try:
-                    time.sleep(5)
-                except OSError:
-                    pass
-                finally:
-                    conn.close()
-
-            _, target_socket = create_target_server("127.0.0.1", target_port, handler)
-
-            # Start chain service
-            chain_config = create_http3_chain_config(
-                http_port=http_port,
-                proxy_group=[("127.0.0.1", h3_port, 1)],
-                ca_path=ca_path,
-                temp_dir=temp_dir2,
-            )
-            chain_proc = start_proxy(chain_config)
-
-            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
-
-            # Trigger shutdown while server is running
-            start_time = time.monotonic()
-            chain_proc.send_signal(signal.SIGTERM)
-            return_code = chain_proc.wait(timeout=15)
-            elapsed = time.monotonic() - start_time
-
-            assert return_code == 0, f"Chain exit code: {return_code}"
-            # Should complete within timeout + buffer (5s timeout + buffer)
-            assert elapsed < 10.0, f"Shutdown took too long: {elapsed:.2f}s"
-
-        finally:
-            if chain_proc and chain_proc.poll() is None:
-                chain_proc.terminate()
-                _ = chain_proc.wait(timeout=5)
-            if h3_proc:
-                h3_proc.kill()
-                _ = h3_proc.wait(timeout=5)
-            if target_socket:
-                target_socket.close()
-            shutil.rmtree(temp_dir1, ignore_errors=True)
-            shutil.rmtree(temp_dir2, ignore_errors=True)
-
-
-# ==============================================================================
-# Test cases - WRR Load Balancing
-# ==============================================================================
+            assert tunnel is not None
+            _ = resources.enter_context(tunnel)
+            tunnel.sendall(b"live-tunnel")
+            assert tunnel.recv(11) == b"live-tunnel"
+            assert not target_closed.is_set()
+        entry.send_signal(signal.SIGTERM)
+        assert entry.wait(timeout=10 if active else 3) == 0
+        if active:
+            assert target_closed.wait(timeout=2), "shutdown left the origin tunnel open"
+        relay.send_signal(signal.SIGTERM)
+        assert relay.wait(timeout=5) == 0
 
 
 class TestWRRLoadBalancing:
-    """
-    Test Weighted Round-Robin load balancing for http3_chain.
-
-    Note: Black-box testing of WRR weight distribution is limited because:
-    1. HTTP/3 listeners don't log per-request transfer completions at consistent times
-    2. UDP/QUIC connections don't have observable connection state like TCP
-    3. The WRR selection happens internally in http3_chain with no external
-    observability
-
-    The WRR algorithm itself is verified by unit tests in src/plugins/http3_chain.rs:
-    - test_proxy_group_schedule_wrr_single: Single proxy always returns index 0
-    - test_proxy_group_schedule_wrr_two_proxies_weight_2_to_1: 2:1 weight distribution
-    - test_proxy_group_schedule_wrr_two_proxies_weight_3_to_1: 3:1 weight distribution
-    - test_proxy_group_schedule_wrr_three_proxies: Multiple proxies with different
-    weights
-    - test_proxy_group_schedule_wrr_equal_weights: Equal weight distribution
-    - test_proxy_group_schedule_wrr_deterministic: Repeatability of WRR selections
-
-    This black-box test verifies that:
-    - Requests succeed when multiple upstreams are configured
-    - The chain service starts correctly with weighted proxy groups
-    - All configured upstreams are reachable
-    """
+    """Real H3 relays must receive the configured 2:1 request distribution."""
 
     def test_wrr_weight_distribution(self, shared_test_certs: StringMap) -> None:
-        """
-        TC-WRR-001: WRR with multiple weighted upstreams.
-
-        Target: Verify http3_chain works with multiple weighted upstream proxies.
-        Verifies that:
-        1. Chain service starts with weighted proxy group configuration
-        2. Requests succeed through the chain with multiple upstreams
-        3. Both upstream listeners are running and reachable
-
-        Note: Precise weight distribution verification requires internal observability
-        which is not available in black-box testing. The WRR algorithm correctness
-        is verified by unit tests in src/plugins/http3_chain.rs
-        (test_proxy_group_schedule_wrr_*).
-        """
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
         temp_dir3 = tempfile.mkdtemp()
@@ -516,6 +171,8 @@ class TestWRRLoadBalancing:
             h3_proc2 = start_proxy(h3_config2)
             assert h3_proc2.wait_ready(timeout=5.0), "HTTP/3 listener 2 failed to start"
 
+            # Observe selected peers on completed CONNECT requests.
+            # Startup alone cannot prove that both relays receive traffic.
             # Start chain service with weights 2:1
             chain_config = create_http3_chain_config(
                 http_port=http_port,
@@ -526,12 +183,12 @@ class TestWRRLoadBalancing:
                 ca_path=ca_path,
                 temp_dir=temp_dir3,
             )
+            enable_access_log(chain_config, ["upstream.connection.peer"])
             chain_proc = start_proxy(chain_config)
             assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
 
             # Send multiple requests through the chain
             # WRR should distribute these across both upstreams
-            successful_requests = 0
             for i in range(6):
                 result = subprocess.run(
                     [
@@ -543,20 +200,26 @@ class TestWRRLoadBalancing:
                         f"http://127.0.0.1:{target_port}/",
                         "-d",
                         f"request_{i}",
-                        "--connect-timeout",
-                        "10",
+                        "--max-time",
+                        "5",
                     ],
                     capture_output=True,
                     text=True,
+                    env=get_curl_env_without_no_proxy(),
+                    timeout=10,
                 )
-                if f"request_{i}" in result.stdout:
-                    successful_requests += 1
+                assert result.returncode == 0, result.stderr
+                assert f"request_{i}" in result.stdout
 
-            # Verify that requests succeeded through the chain
-            # This proves the chain can use the weighted proxy group
-            assert successful_requests >= 4, (
-                f"Expected at least 4 successful requests, got {successful_requests}"
-            )
+            chain_proc.send_signal(signal.SIGTERM)
+            assert chain_proc.wait(timeout=10) == 0
+            peers = [
+                entry.extensions["upstream.connection.peer"]
+                for entry in read_access(Path(temp_dir3))
+            ]
+            assert len(peers) == 6
+            assert peers.count(f"127.0.0.1:{h3_port1}") == 4
+            assert peers.count(f"127.0.0.1:{h3_port2}") == 2
 
             # Verify both listeners are still running (not crashed)
             assert h3_proc1.poll() is None, "HTTP/3 listener 1 should still be running"

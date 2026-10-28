@@ -83,6 +83,25 @@ print(json.dumps(ports))
         assert len(allocated) == len(set(allocated)) == 48
 
 
+def test_get_unique_port_allows_simultaneous_tcp_and_udp_bindings() -> None:
+    """Allocated ports support both transports in both IP families.
+
+    Process startup is covered by running_proxy consumers; uniqueness by the
+    independent-process coordination test above.
+    """
+    with ExitStack() as resources:
+        for _ in range(5):
+            port = get_unique_port()
+            for family, host in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
+                for transport in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+                    listener = resources.enter_context(socket.socket(family, transport))
+                    if family == socket.AF_INET6:
+                        listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                    listener.bind((host, port))
+                    if transport == socket.SOCK_STREAM:
+                        listener.listen()
+
+
 def test_wait_for_port_released_supports_ipv6() -> None:
     port = get_unique_port()
     with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as listener:

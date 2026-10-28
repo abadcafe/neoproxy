@@ -1,312 +1,110 @@
-"""
-HTTP/3 chain forward proxy integration tests.
+"""H3 chain validation and server-side deadlines.
 
-Test target: Verify http3_chain service handles non-CONNECT HTTP requests
-as a forward proxy (GET/POST/etc. with absolute-form URIs).
-
-Test nature: Black-box testing through external interface (HTTP)
-
-Expected behavior:
-- GET / HTTP/1.1 (origin-form) -> 400 Bad Request
-- GET ftp://target/ -> 400 Bad Request (unsupported scheme)
-- GET http://target/ with unreachable upstream -> fails gracefully (no crash)
-- CONNECT method still works alongside forward proxy
-- Proxy does not crash on any of the above
-
-Note on unreachable-upstream tests: QUIC uses UDP, so connection attempts to
-a port with nothing listening are silently dropped rather than immediately
-refused. The proxy waits for the QUIC idle timeout before returning 502, which
-can take tens of seconds. Tests that exercise this path use curl with a short
---max-time and verify graceful failure (non-zero exit or non-200 status) rather
-than asserting a specific status code within a tight deadline.
+Successful GET/HEAD/POST and CONNECT dispatch belong to chain_matrix_local.
+These cases retain malformed-target rejection and require an actual proxy error
+when QUIC cannot connect, rather than accepting curl's own timeout as success.
 """
 
-import re
-import shutil
-import subprocess
-import tempfile
-from collections.abc import Generator
-from contextlib import contextmanager
+import socket
+from pathlib import Path
+from typing import Literal
 
-from tests.fixtures.certificates import generate_test_certificates
-from tests.fixtures.configuration import StringMap
-from tests.fixtures.h3_configuration import create_http3_chain_config
+import pytest
+
+from tests.fixtures.configuration import ConfigDict, StringMap
 from tests.fixtures.http_request import send_raw_request
+from tests.fixtures.http_scenario import running_proxy
 from tests.fixtures.ports import get_unique_port
-from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 
 
-def parse_http_response(
-    response: bytes,
-) -> tuple[int, str, dict[str, str], bytes]:
-    """Parse raw HTTP response into (status_code, status_text, headers, body)."""
-    if b"\r\n\r\n" in response:
-        header_part, body = response.split(b"\r\n\r\n", 1)
-    else:
-        header_part = response
-        body = b""
-
-    lines = header_part.decode("utf-8", errors="ignore").split("\r\n")
-    status_line = lines[0] if lines else ""
-
-    status_match = re.match(r"HTTP/\d\.\d\s+(\d+)\s*(.*)", status_line)
-    if status_match:
-        status_code = int(status_match.group(1))
-        status_text = status_match.group(2).strip()
-    else:
-        status_code = 0
-        status_text = ""
-
-    headers: dict[str, str] = {}
-    for line in lines[1:]:
-        if ":" in line:
-            key, value = line.split(":", 1)
-            headers[key.strip().lower()] = value.strip()
-
-    return status_code, status_text, headers, body
-
-
-@contextmanager
-def chain_service_context(
-    http_port: int,
-    h3_port: int,
-    shared_test_certs: StringMap | None = None,
-) -> Generator[tuple[str, BytesProcess], None, None]:
-    """Context manager for http3_chain service setup and teardown."""
-    temp_dir = tempfile.mkdtemp()
-    proxy_proc: BytesProcess | None = None
-
-    try:
-        if shared_test_certs:
-            ca_path = shared_test_certs["ca_path"]
-        else:
-            _, _, ca_path, _ = generate_test_certificates(temp_dir)
-
-        config_path = create_http3_chain_config(
-            http_port=http_port,
-            proxy_group=[("127.0.0.1", h3_port, 1)],
-            ca_path=ca_path,
-            temp_dir=temp_dir,
-        )
-        proxy_proc = start_proxy(config_path)
-        assert proxy_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
-
-        yield temp_dir, proxy_proc
-
-    finally:
-        if proxy_proc:
-            terminate_process(proxy_proc, timeout=10)
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-class TestHTTP3ChainForwardProxy:
-    """
-    Black-box tests for http3_chain forward proxy (non-CONNECT) behavior.
-
-    These tests verify that the http3_chain service correctly handles
-    absolute-form HTTP requests as a forward proxy.
-    """
-
-    def test_origin_form_returns_400(self, shared_test_certs: StringMap) -> None:
-        """
-        TC-CHAIN-FWD-001: Origin-form URI returns 400.
-
-        GET / HTTP/1.1 is not an absolute-form URI. The forward proxy
-        path requires http://host/path form, so origin-form is rejected
-        with 400 Bad Request.
-        """
-        http_port = get_unique_port()
-        h3_port = get_unique_port()
-
-        with chain_service_context(http_port, h3_port, shared_test_certs) as (_, _proc):
-            request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
-            response = send_raw_request("127.0.0.1", http_port, request)
-            status_code, _, _, _ = parse_http_response(response)
-
-            assert status_code == 400, (
-                f"Expected 400 for origin-form GET, got {status_code}. Response:"
-                + f" {response.decode(errors='ignore')}"
-            )
-
-    def test_unsupported_scheme_returns_400(self, shared_test_certs: StringMap) -> None:
-        """
-        TC-CHAIN-FWD-002: ftp:// scheme returns 400.
-
-        The forward proxy supports http:// and https:// URIs. ftp:// is rejected
-        with 400 Bad Request (UnsupportedScheme).
-        """
-        http_port = get_unique_port()
-        h3_port = get_unique_port()
-
-        with chain_service_context(http_port, h3_port, shared_test_certs) as (_, _proc):
-            request = b"GET ftp://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n"
-            response = send_raw_request("127.0.0.1", http_port, request)
-            status_code, _, _, _ = parse_http_response(response)
-
-            assert status_code == 400, (
-                f"Expected 400 for ftp:// scheme, got {status_code}. Response:"
-                + f" {response.decode(errors='ignore')}"
-            )
-
-    def test_absolute_form_with_unreachable_upstream_fails_gracefully(
-        self, shared_test_certs: StringMap
-    ) -> None:
-        """
-        TC-CHAIN-FWD-003: Valid absolute-form URI with unreachable upstream fails
-        gracefully.
-
-        A well-formed http:// forward request passes validation and reaches
-        the upstream connection step. When the upstream H3 proxy is not
-        reachable (UDP silently dropped), the proxy eventually returns an
-        error. We verify graceful failure: the proxy does not crash and curl
-        exits cleanly (not a hang).
-        """
-        http_port = get_unique_port()
-        h3_port = get_unique_port()  # nothing listening here
-
-        with chain_service_context(http_port, h3_port, shared_test_certs) as (_, proc):
-            result = subprocess.run(
-                [
-                    "curl",
-                    "-s",
-                    "-o",
-                    "/dev/null",
-                    "-w",
-                    "%{http_code}",
-                    "-x",
-                    f"http://127.0.0.1:{http_port}",
-                    "--max-time",
-                    "3",
-                    "http://example.com/",
+def _configuration(ca: str, relay_port: int) -> ConfigDict:
+    return {
+        "server_threads": 1,
+        "plugins": {
+            "upstream": {
+                "certificates": {"server_ca_path": ca},
+                "quic_connection_connect_timeout": "100ms",
+                "upstreams": [
+                    {
+                        "name": "relay",
+                        "addresses": [
+                            {
+                                "address": f"127.0.0.1:{relay_port}",
+                                "hostname": "localhost",
+                                "address_protocol": "http3",
+                            }
+                        ],
+                    }
                 ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            # Proxy must still be running (no crash/panic)
-            assert proc.poll() is None, (
-                "Proxy crashed while handling forward request to unreachable upstream"
-            )
-            # curl must exit cleanly (not hang); non-200 or curl error both acceptable
-            status = (
-                int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
-            )
-            assert status != 200, (
-                f"Expected non-200 for unreachable upstream, got {status}"
-            )
+            }
+        },
+        "listeners": [{"name": "main", "kind": "http"}],
+        "services": [
+            {
+                "name": "relay",
+                "kind": "upstream.upstream",
+                "args": {"upstream": "relay"},
+            }
+        ],
+        "servers": [{"name": "main", "listeners": ["main"], "service": "relay"}],
+    }
 
-    def test_proxy_stays_alive_after_forward_and_connect_requests(
-        self, shared_test_certs: StringMap
-    ) -> None:
-        """
-        TC-CHAIN-FWD-004: Proxy stays alive after receiving both forward and CONNECT
-        requests.
 
-        Sends an origin-form GET (→ 400) and an ftp-scheme GET (→ 400) and
-        verifies the proxy process is still running after each. This confirms
-        the forward proxy path does not panic or crash on validation errors.
-        """
-        http_port = get_unique_port()
-        h3_port = get_unique_port()
-
-        with chain_service_context(http_port, h3_port, shared_test_certs) as (_, proc):
-            for request in [
-                b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
-                b"GET ftp://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n",
-            ]:
-                response = send_raw_request("127.0.0.1", http_port, request)
-                status_code, _, _, _ = parse_http_response(response)
-                assert status_code == 400, (
-                    f"Expected 400, got {status_code}:"
-                    + f" {response.decode(errors='ignore')}"
+def test_chain_rejects_invalid_targets_without_contacting_upstream(
+    tmp_path: Path, shared_test_certs: StringMap
+) -> None:
+    relay_port = get_unique_port()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as relay:
+        relay.bind(("127.0.0.1", relay_port))
+        with running_proxy(
+            tmp_path,
+            _configuration(shared_test_certs["ca_path"], relay_port),
+        ) as proxy:
+            for target in (b"/", b"ftp://example.test/"):
+                response = send_raw_request(
+                    "127.0.0.1",
+                    proxy.port,
+                    b"GET " + target + b" HTTP/1.1\r\nHost: example.test\r\n\r\n",
                 )
-                assert proc.poll() is None, (
-                    "Proxy crashed after receiving a validation-error request"
-                )
+                assert response.split(b"\r\n", 1)[0].split()[1] == b"400"
+                assert proxy.process.poll() is None
+            relay.settimeout(0.05)
+            try:
+                datagram = relay.recv(65535)
+            except TimeoutError:
+                datagram = b""
+            assert datagram == b"", "invalid requests must not reach the relay"
 
-    def test_connect_dispatch_unaffected_by_forward_proxy(
-        self, shared_test_certs: StringMap
-    ) -> None:
-        """
-        TC-CHAIN-FWD-005: CONNECT requests are dispatched via CONNECT path, not forward
-        path.
 
-        Adding forward proxy support must not break CONNECT dispatch.
-        A CONNECT request with an unreachable upstream should fail gracefully
-        (proxy stays alive, curl exits), not return 400 (which would indicate
-        it was incorrectly routed to the forward proxy path).
-        """
-        http_port = get_unique_port()
-        h3_port = get_unique_port()  # nothing listening here
-
-        with chain_service_context(http_port, h3_port, shared_test_certs) as (_, proc):
-            _result = subprocess.run(
-                [
-                    "curl",
-                    "-s",
-                    "-p",
-                    "-x",
-                    f"http://127.0.0.1:{http_port}",
-                    "--max-time",
-                    "3",
-                    "https://example.com/",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
+@pytest.mark.parametrize("method", ["GET", "POST", "CONNECT"])
+def test_chain_unreachable_upstream_returns_timeout_response(
+    tmp_path: Path,
+    shared_test_certs: StringMap,
+    method: Literal["GET", "POST", "CONNECT"],
+) -> None:
+    # A bound, silent UDP peer gives a deterministic QUIC handshake timeout,
+    # independent of external routing and ICMP port-unreachable behavior.
+    relay_port = get_unique_port()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as relay:
+        relay.bind(("127.0.0.1", relay_port))
+        with running_proxy(
+            tmp_path,
+            _configuration(shared_test_certs["ca_path"], relay_port),
+        ) as proxy:
+            target = (
+                "example.test:80" if method == "CONNECT" else "http://example.test/"
             )
-            # Proxy must still be running (no crash/panic)
-            assert proc.poll() is None, (
-                "Proxy crashed while handling CONNECT to unreachable upstream"
+            response = send_raw_request(
+                "127.0.0.1",
+                proxy.port,
+                (
+                    f"{method} {target} HTTP/1.1\r\nHost: example.test:80\r\n"
+                    "Content-Length: 0\r\nConnection: close\r\n\r\n"
+                ).encode(),
+                timeout=2,
             )
-            # curl must exit (not hang); any non-zero or non-200 is acceptable
-            # The key invariant: this did NOT return 400 (which would mean the
-            # request was wrongly routed to the forward proxy validation path)
-
-    def test_post_absolute_form_with_unreachable_upstream_fails_gracefully(
-        self, shared_test_certs: StringMap
-    ) -> None:
-        """
-        TC-CHAIN-FWD-006: POST with absolute-form URI and unreachable upstream fails
-        gracefully.
-
-        POST requests are handled by the forward proxy path. With an unreachable
-        upstream, the proxy should fail gracefully without crashing.
-        """
-        http_port = get_unique_port()
-        h3_port = get_unique_port()  # nothing listening here
-
-        with chain_service_context(http_port, h3_port, shared_test_certs) as (_, proc):
-            result = subprocess.run(
-                [
-                    "curl",
-                    "-s",
-                    "-o",
-                    "/dev/null",
-                    "-w",
-                    "%{http_code}",
-                    "-x",
-                    f"http://127.0.0.1:{http_port}",
-                    "-X",
-                    "POST",
-                    "-d",
-                    "key=value",
-                    "--max-time",
-                    "3",
-                    "http://example.com/submit",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            # Proxy must still be running (no crash/panic)
-            assert proc.poll() is None, (
-                "Proxy crashed while handling POST forward request to unreachable"
-                + " upstream"
-            )
-            status = (
-                int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
-            )
-            assert status != 200, (
-                f"Expected non-200 for unreachable upstream, got {status}"
-            )
+            assert response.split(b"\r\n", 1)[0].split()[1] == b"504", response
+            assert b"error=connection_timeout" in response.lower()
+            relay.settimeout(1)
+            assert relay.recv(65535), "the proxy must attempt the QUIC handshake"
+            assert proxy.process.poll() is None

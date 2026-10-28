@@ -14,10 +14,10 @@ This test module covers the following scenarios from design document section 7:
 - 7.7 Panic and error exit mixed scenarios
 - 7.8 CONNECT tunnel scenarios
 - 7.9 Resource cleanup scenarios
-- 7.10 Initialization failure scenarios
+
+Initialization failures are covered by test_config_validation.py.
 """
 
-import os
 import shutil
 import signal
 import socket
@@ -25,10 +25,8 @@ import subprocess
 import tempfile
 import time
 
-from tests.fixtures.binary import NEOPROXY_BINARY
 from tests.fixtures.http_configuration import create_echo_config, create_test_config
 from tests.fixtures.http_request import establish_connect_tunnel
-from tests.fixtures.notified_process import ProxyProcess
 from tests.fixtures.ports import get_unique_port, wait_for_port_released
 from tests.fixtures.proxy_process import MAX_SHUTDOWN_TIME, BytesProcess, start_proxy
 from tests.fixtures.tcp_peer import create_target_server
@@ -479,117 +477,3 @@ class TestResourceCleanup:
                 proxy_proc.terminate()
                 _ = proxy_proc.wait(timeout=2)
             shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-# ==============================================================================
-# Test cases - 7.10 Initialization failure scenarios
-# ==============================================================================
-
-
-class TestInitializationFailure:
-    """Test 7.10: Initialization failure scenarios."""
-
-    def test_invalid_config_yaml(self) -> None:
-        """
-        TC-INIT-001: Invalid YAML configuration causes init failure.
-
-        Target: Verify that invalid YAML causes exit with code 1
-        """
-        temp_dir = tempfile.mkdtemp()
-        config_path = os.path.join(temp_dir, "invalid.yaml")
-
-        # Write invalid YAML
-        with open(config_path, "w") as f:
-            _ = f.write("server_threads: [\n  invalid yaml\n")
-
-        try:
-            proc = ProxyProcess(
-                [NEOPROXY_BINARY, "--config", config_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=False,
-            )
-
-            try:
-                return_code = proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                _ = proc.wait()
-                assert False, "Process did not exit within expected time"
-
-            # Verify exit code is 1 (config error)
-            assert return_code == 1, f"Expected exit code 1, got {return_code}"
-
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_config_file_not_found(self) -> None:
-        """
-        TC-INIT-002: Missing config file causes init failure.
-
-        Target: Verify that missing config file causes exit with code 1
-        """
-        proc = ProxyProcess(
-            [NEOPROXY_BINARY, "--config", "/nonexistent/config.yaml"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=False,
-        )
-
-        try:
-            return_code = proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            _ = proc.wait()
-            assert False, "Process did not exit within expected time"
-
-        # Verify exit code is 1 (file not found)
-        assert return_code == 1, f"Expected exit code 1, got {return_code}"
-
-    def test_invalid_service_kind(self) -> None:
-        """
-        TC-INIT-003: Invalid service kind causes init failure.
-
-        Target: Verify that invalid service kind causes exit with code 1
-        """
-        temp_dir = tempfile.mkdtemp()
-        config_content = """server_threads: 1
-
-services:
-- name: test_service
-  kind: nonexistent.service
-
-servers:
-- name: test_server
-  listeners: []
-  service: test_service
-"""
-        config_path = os.path.join(temp_dir, "invalid.yaml")
-        with open(config_path, "w") as f:
-            _ = f.write(config_content)
-
-        try:
-            proc = ProxyProcess(
-                [NEOPROXY_BINARY, "--config", config_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=False,
-            )
-
-            try:
-                return_code = proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                _ = proc.wait()
-                assert False, "Process did not exit within expected time"
-
-            # Verify exit code is non-zero (config error)
-            assert return_code != 0, f"Expected non-zero exit code, got {return_code}"
-
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-# ==============================================================================
-# Test cases - Multiple worker threads scenarios
-# ==============================================================================

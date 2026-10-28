@@ -13,6 +13,7 @@ from tests.fixtures.binary import (
     check_binary_exists,
 )
 from tests.fixtures.curl_capability import check_http3_proxy
+from tests.fixtures.network_preflight import check_baidu
 
 
 def pytest_xdist_auto_num_workers() -> int:
@@ -21,12 +22,14 @@ def pytest_xdist_auto_num_workers() -> int:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Check the prebuilt artifact and curl before starting workers."""
+    """Check the artifact, curl and direct origin network before starting workers."""
     if "PYTEST_XDIST_WORKER" not in os.environ:
         failures: list[str] = []
         if not check_binary_exists():
             failures.append(f"NeoProxy artifact missing: {NEOPROXY_BINARY}")
         if (failure := check_http3_proxy()) is not None:
+            failures.append(failure)
+        elif (failure := check_baidu()) is not None:
             failures.append(failure)
         if failures:
             pytest.exit("\n".join(failures), returncode=1)

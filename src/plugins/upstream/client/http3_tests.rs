@@ -117,7 +117,6 @@ async fn test_http3_client_reconnects_after_goaway_without_quic_close()
       let endpoint_copy = endpoint.clone();
       let server = tokio::task::spawn_local(async move {
         let mut connections = Vec::new();
-        let mut streams = Vec::new();
         for _ in 0..2 {
           let connection =
             endpoint_copy.accept().await.unwrap().await.unwrap();
@@ -133,12 +132,9 @@ async fn test_http3_client_reconnects_after_goaway_without_quic_close()
           // imply that the H3 connection still admits requests.
           h3.shutdown(1).await.unwrap();
           stream.send_response(http::Response::new(())).await.unwrap();
-          streams.push(stream);
-          connections.push(h3);
-        }
-        for mut stream in streams {
           stream.send_data(Bytes::from_static(b"OK")).await.unwrap();
           stream.finish().await.unwrap();
+          connections.push(h3);
         }
         connections
       });
@@ -151,7 +147,7 @@ async fn test_http3_client_reconnects_after_goaway_without_quic_close()
         Default::default(),
       );
       let tracker = Rc::new(StreamTracker::new());
-      let mut bodies = Vec::new();
+
       for _ in 0..2 {
         let request = http::Request::builder()
           .uri("http://example.test/")
@@ -177,11 +173,11 @@ async fn test_http3_client_reconnects_after_goaway_without_quic_close()
         .unwrap()
         .unwrap();
         assert_eq!(response.status(), http::StatusCode::OK);
-        bodies.push(response.into_body());
+        assert_eq!(
+          response.into_body().collect().await.unwrap().to_bytes(),
+          "OK"
+        );
         tokio::task::yield_now().await;
-      }
-      for body in bodies {
-        assert_eq!(body.collect().await.unwrap().to_bytes(), "OK");
       }
       let connections = server.await.unwrap();
       drop(connections);

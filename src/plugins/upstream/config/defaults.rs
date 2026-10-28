@@ -34,7 +34,7 @@ pub(super) fn default_max_idle_per_host() -> usize {
 }
 
 pub(super) fn default_idle_timeout() -> Duration {
-  Duration::from_secs(90)
+  Duration::from_secs(3600)
 }
 
 pub(super) fn default_dns_resolve_timeout() -> Duration {

@@ -22,8 +22,6 @@ def _configuration(ca: str, relay_port: int) -> ConfigDict:
         "server_threads": 1,
         "plugins": {
             "upstream": {
-                "certificates": {"server_ca_path": ca},
-                "quic_connection_connect_timeout": "100ms",
                 "upstreams": [
                     {
                         "name": "relay",
@@ -36,15 +34,18 @@ def _configuration(ca: str, relay_port: int) -> ConfigDict:
                         ],
                     }
                 ],
+                "connection_pools": [
+                    {
+                        "name": "default",
+                        "certificates": {"server_ca_path": ca},
+                        "quic_connection_connect_timeout": "100ms",
+                    }
+                ],
             }
         },
         "listeners": [{"name": "main", "kind": "http"}],
         "services": [
-            {
-                "name": "relay",
-                "kind": "upstream.upstream",
-                "upstream": "relay",
-            }
+            {"name": "relay", "kind": "upstream.upstream", "upstream": "relay"}
         ],
         "servers": [{"name": "main", "listeners": ["main"], "service": "relay"}],
     }

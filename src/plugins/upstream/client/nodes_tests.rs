@@ -75,3 +75,48 @@ async fn test_nodes_failure_threshold_and_successful_probe_reset() {
   nodes.failed(&a.key);
   assert_eq!(nodes.select(std::slice::from_ref(&b.key)), Some(a.key));
 }
+
+#[test]
+fn test_shared_nodes_preserve_weights_and_health_across_threads() {
+  let nodes = std::sync::Arc::new(super::nodes::SharedNodes::default());
+  let first = policy(0, 2);
+  nodes.update(vec![first.clone(), policy(1, 1)]);
+  let counts = std::thread::scope(|scope| {
+    let handles: Vec<_> = (0..4)
+      .map(|_| {
+        let nodes = nodes.clone();
+        scope.spawn(move || {
+          let mut counts = [0; 2];
+          for _ in 0..75 {
+            counts[nodes.select(&[], &[]).unwrap().owner] += 1;
+          }
+          counts
+        })
+      })
+      .collect();
+    handles.into_iter().fold([0; 2], |mut total, handle| {
+      let counts = handle.join().unwrap();
+      total[0] += counts[0];
+      total[1] += counts[1];
+      total
+    })
+  });
+  assert_eq!(counts, [200, 100]);
+  let reporting = nodes.clone();
+  std::thread::spawn(move || reporting.failed(&first.key))
+    .join()
+    .unwrap();
+  assert_eq!(nodes.select(&[], &[]).unwrap().owner, 1);
+}
+
+#[test]
+fn test_shared_nodes_exclude_protocol_owner_after_dns_refresh() {
+  let nodes = super::nodes::SharedNodes::default();
+  nodes.update(vec![policy(0, 1), policy(1, 10)]);
+  let mut refreshed = policy(1, 10);
+  refreshed.key.address = "127.0.0.2:8001".parse().unwrap();
+  nodes.update(vec![policy(0, 1), refreshed]);
+  for _ in 0..10 {
+    assert_eq!(nodes.select(&[], &[1]).unwrap().owner, 0);
+  }
+}

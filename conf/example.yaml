@@ -51,29 +51,40 @@ plugins:
         # format: "text"               # Log format: text / json (default: text)
 
   # Upstream Plugin - HTTP/HTTPS/H3/SOCKS5 proxy configuration
-  # Defines upstream pools with three-level inheritance:
-  #   Plugin → Upstream → Address
+  # Business policy and use_connection_pool inherit plugin/upstream/address.
+  # DNS, TLS and transport settings belong only to named connection pools.
   upstream:
-    dns_resolve_timeout: 5s
-    dns_refresh_retry_interval: 30s
+    use_connection_pool: default
+    connection_pools:
+      - name: default
+        tcp_connect_timeout: 10s
+        http_pool_max_idle_connections: 32
+        http_pool_idle_timeout: 60m
+        https_pool_max_idle_connections: 32
+        https_pool_idle_timeout: 60m
+        http3_pool_io_threads: 1
+        http3_pool_max_connections_per_host: 2
+        http3_pool_idle_timeout: 60m
+        # tcp_keep_alive_time: 60s
+        # tcp_keep_alive_interval: 10s
+        # tcp_keep_alive_retries: 3
+        # quic_connection_send_window: 10MiB
+        # quic_connection_receive_window: 10MiB
+        # quic_stream_receive_window: 1MiB
+        dns_resolve_timeout: 5s
+        dns_refresh_retry_interval: 30s
+        certificates:
+          client_cert_path: conf/certs/client.crt
+          client_key_path: conf/certs/client.key
+          server_ca_path: conf/certs/server-ca.crt
     address_protocol: https
     address_max_fails: 1
     address_fail_timeout: 10s
-    # tcp_keep_alive_time: 60s
-    # tcp_keep_alive_interval: 10s
-    # tcp_keep_alive_retries: 3
-    # quic_connection_send_window: 10MiB
-    # quic_connection_receive_window: 10MiB
-    # quic_stream_receive_window: 1MiB  # inherited by upstream/address
-    certificates:
-      client_cert_path: conf/certs/client.crt
-      client_key_path: conf/certs/client.key
-      server_ca_path: conf/certs/server-ca.crt
     upstreams:
       # Direct mode (no addresses) - connects directly to target
       - name: direct
         tunnel_idle_timeout: "60s"
-        tcp_connect_timeout: "10s"
+        use_connection_pool: default
 
       # Chain mode (with addresses) - connects through upstream proxy
       - name: local_relay

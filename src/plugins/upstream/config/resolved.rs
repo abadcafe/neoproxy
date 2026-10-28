@@ -9,7 +9,7 @@
 use std::path;
 use std::time::Duration;
 
-use super::protocol::{PoolConfig, ProtocolKind};
+use super::protocol::ProtocolKind;
 use crate::config::UserCredential;
 
 /// Client certificate credential for TLS authentication.
@@ -19,7 +19,7 @@ pub(crate) struct ClientCertCredential {
   pub(crate) key_path: Option<path::PathBuf>,
 }
 
-/// Resolved QUIC config from field-level three-level merge.
+/// Resolved QUIC settings from the selected connection pool.
 #[derive(Clone, Debug)]
 pub(crate) struct QuicResolved {
   pub(crate) max_idle_timeout: Option<Duration>,
@@ -54,6 +54,7 @@ impl Protocol {
 /// Resolved address after three-level inheritance.
 #[derive(Clone, Debug)]
 pub(crate) struct Address {
+  pub(crate) use_connection_pool: String,
   pub(crate) address_max_fails: usize,
   pub(crate) address_fail_timeout: Duration,
   pub(crate) tcp_keep_alive_time: Option<Duration>,
@@ -72,19 +73,16 @@ pub(crate) struct Address {
 /// Resolved upstream after three-level inheritance.
 #[derive(Clone, Debug)]
 pub(crate) struct Upstream {
+  pub(crate) use_connection_pool: String,
   pub(crate) address_max_fails: usize,
   pub(crate) address_fail_timeout: Duration,
   pub(crate) tcp_keep_alive_time: Option<Duration>,
   pub(crate) tcp_keep_alive_interval: Option<Duration>,
   pub(crate) tcp_keep_alive_retries: Option<u32>,
-  pub(crate) dns_refresh_retry_interval: Duration,
-  pub(crate) dns_servers: Option<Vec<std::net::SocketAddr>>,
   pub(crate) addresses: Vec<Address>,
-  pub(crate) pool_config: PoolConfig,
   /// Direct-mode fields (used when addresses is empty):
   pub(crate) connect_timeout: Duration,
   pub(crate) tls_handshake_timeout: Duration,
   pub(crate) tunnel_idle_timeout: Duration,
-  pub(crate) dns_resolve_timeout: Duration,
   pub(crate) upstream_request_timeout: Duration,
 }

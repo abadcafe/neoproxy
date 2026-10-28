@@ -53,11 +53,6 @@ macro_rules! validate_transport_fields {
     if $config.tcp_keep_alive_retries == Some(0) {
       bail!("tcp_keep_alive_retries must be positive");
     }
-    validate_duration_positive(
-      $config.address_fail_timeout,
-      $location,
-      "address_fail_timeout",
-    )?;
     if let Some(value) = $config.quic_connection_idle_timeout
       && (value.as_millis() == 0
         || value.as_millis()
@@ -156,12 +151,6 @@ pub(crate) fn validate_address_format(s: &str) -> Result<()> {
 pub(crate) fn validate_plugin_config(
   plugin: &UpstreamPluginConfig,
 ) -> Result<()> {
-  validate_dns_servers(plugin.dns_servers.as_deref())?;
-  validate_duration_positive(
-    plugin.dns_refresh_retry_interval,
-    "plugin",
-    "dns_refresh_retry_interval",
-  )?;
   let mut upstream_names: HashSet<&str> = HashSet::new();
 
   validate_duration_positive(
@@ -176,12 +165,15 @@ pub(crate) fn validate_plugin_config(
     "upstream_request_timeout",
   )?;
   validate_duration_positive(
-    plugin.dns_resolve_timeout,
+    plugin.address_fail_timeout,
     "plugin",
-    "dns_resolve_timeout",
+    "address_fail_timeout",
   )?;
-  validate_transport_fields!(plugin, "plugin");
-
+  for pool in
+    super::connection_pool::resolve_connection_pools(plugin)?.values()
+  {
+    validate_connection_pool(pool)?;
+  }
   for upstream in &plugin.upstreams {
     validate_upstream_config(upstream)?;
     if !upstream_names.insert(upstream.name.as_str()) {
@@ -198,19 +190,17 @@ fn validate_upstream_config(upstream: &UpstreamConfig) -> Result<()> {
     &upstream.name,
     "tunnel_idle_timeout",
   )?;
-  if let Some(pool) = &upstream.pool {
-    validate_duration_positive(
-      Some(pool.idle_timeout),
-      &upstream.name,
-      "pool.idle_timeout",
-    )?;
-  }
+
   validate_duration_positive(
     upstream.upstream_request_timeout,
     &upstream.name,
     "upstream_request_timeout",
   )?;
-  validate_transport_fields!(upstream, &upstream.name);
+  validate_duration_positive(
+    upstream.address_fail_timeout,
+    &upstream.name,
+    "address_fail_timeout",
+  )?;
   if upstream.name.is_empty() {
     bail!("upstream name must not be empty");
   }
@@ -261,7 +251,11 @@ fn validate_address_config(
     upstream_name,
     "upstream_request_timeout",
   )?;
-  validate_transport_fields!(addr, upstream_name);
+  validate_duration_positive(
+    addr.address_fail_timeout,
+    upstream_name,
+    "address_fail_timeout",
+  )?;
   validate_address_format(&addr.address)?;
 
   if addr.weight == 0 {
@@ -285,6 +279,37 @@ fn validate_duration_positive(
       || std::time::Instant::now().checked_add(value).is_none())
   {
     bail!("{location} {field} must be positive and representable");
+  }
+  Ok(())
+}
+
+fn validate_connection_pool(
+  pool: &super::connection_pool::ConnectionPoolConfig,
+) -> Result<()> {
+  validate_transport_fields!(pool, &pool.name);
+  validate_dns_servers(pool.dns_servers.as_deref())?;
+  for (name, value) in [
+    ("dns_refresh_retry_interval", pool.dns_refresh_retry_interval),
+    ("dns_resolve_timeout", pool.dns_resolve_timeout),
+  ] {
+    validate_duration_positive(value, &pool.name, name)?;
+  }
+  if let Some(certs) = &pool.certificates {
+    certs.validate()?;
+  }
+  let limits = pool.limits();
+  if limits.h3_threads == 0 || limits.h3_connections == 0 {
+    bail!(
+      "http3_pool_io_threads and http3_pool_max_connections_per_host \
+       must be positive"
+    );
+  }
+  for (name, value) in [
+    ("http_pool_idle_timeout", limits.http.idle_timeout),
+    ("https_pool_idle_timeout", limits.https.idle_timeout),
+    ("http3_pool_idle_timeout", limits.h3_idle_timeout),
+  ] {
+    validate_duration_positive(Some(value), &pool.name, name)?;
   }
   Ok(())
 }

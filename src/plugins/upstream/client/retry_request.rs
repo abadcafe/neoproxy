@@ -14,8 +14,16 @@ use http_body::{Body, Frame, SizeHint};
 use crate::http_message::RequestBody;
 
 #[derive(Clone, Default)]
-pub(super) struct Progress(Arc<AtomicBool>);
+pub(super) struct Progress(Arc<AtomicBool>, Arc<AtomicBool>);
 impl Progress {
+  pub(super) fn waiting(&self, value: bool) {
+    self.1.store(value, Ordering::Relaxed);
+  }
+
+  pub(super) fn is_waiting(&self) -> bool {
+    self.1.load(Ordering::Relaxed)
+  }
+
   pub(super) fn mark(&self) {
     self.0.store(true, Ordering::Relaxed);
   }

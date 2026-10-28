@@ -39,21 +39,24 @@ def test_pool_idle_timeout_closes_unused_connection(
                 return
 
     _ = target_server(port, upstream)
-    relay: ConfigDict = {"name": "relay", "pool": {"idle_timeout": "100ms"}}
+    relay: ConfigDict = {"name": "relay"}
     if chained:
         relay["addresses"] = [
             {"address": f"127.0.0.1:{port}", "address_protocol": "http"}
         ]
     config: ConfigDict = {
-        "server_threads": 1,
-        "plugins": {"upstream": {"upstreams": [relay]}},
+        "server_threads": 4,
+        "plugins": {
+            "upstream": {
+                "upstreams": [relay],
+                "connection_pools": [
+                    {"name": "default", "http_pool_idle_timeout": "100ms"}
+                ],
+            }
+        },
         "listeners": [{"name": "main", "kind": "http"}],
         "services": [
-            {
-                "name": "relay",
-                "kind": "upstream.upstream",
-                "upstream": "relay",
-            }
+            {"name": "relay", "kind": "upstream.upstream", "upstream": "relay"}
         ],
         "servers": [{"name": "relay", "service": "relay", "listeners": ["main"]}],
     }
@@ -72,8 +75,9 @@ def test_pool_idle_timeout_closes_unused_connection(
 
 
 @pytest.mark.parametrize("encrypted", [False, True])
+@pytest.mark.parametrize("max_idle", [0, 32])
 def test_proxy_pool_reuses_one_connection_across_origin_authorities(
-    tmp_path: Path, target_server: TargetServerFactory, encrypted: bool
+    tmp_path: Path, target_server: TargetServerFactory, encrypted: bool, max_idle: int
 ) -> None:
     port = get_unique_port()
     connections: list[socket.socket] = []
@@ -104,10 +108,9 @@ def test_proxy_pool_reuses_one_connection_across_origin_authorities(
     _ = target_server(port, upstream)
     protocol = "https" if encrypted else "http"
     config: ConfigDict = {
-        "server_threads": 1,
+        "server_threads": 4,
         "plugins": {
             "upstream": {
-                "certificates": {"server_ca_path": ca},
                 "upstreams": [
                     {
                         "name": "relay",
@@ -120,18 +123,53 @@ def test_proxy_pool_reuses_one_connection_across_origin_authorities(
                         ],
                     }
                 ],
+                "connection_pools": [
+                    {
+                        "name": "default",
+                        "certificates": {"server_ca_path": ca},
+                        "http_pool_max_idle_connections": max_idle,
+                        "https_pool_max_idle_connections": max_idle,
+                    }
+                ],
             }
         },
         "listeners": [{"name": "main", "kind": "http"}],
         "services": [
-            {
-                "name": "relay",
-                "kind": "upstream.upstream",
-                "upstream": "relay",
-            }
+            {"name": "relay", "kind": "upstream.upstream", "upstream": "relay"}
         ],
         "servers": [{"name": "relay", "service": "relay", "listeners": ["main"]}],
     }
+    plugins = config["plugins"]
+    assert isinstance(plugins, dict)
+    plugin = plugins["upstream"]
+    assert isinstance(plugin, dict)
+    upstreams = plugin["upstreams"]
+    assert isinstance(upstreams, list)
+    upstreams.append(
+        {
+            "name": "other",
+            "addresses": [
+                {
+                    "address": f"127.0.0.1:{port}",
+                    "hostname": "localhost",
+                    "address_protocol": protocol,
+                }
+            ],
+        }
+    )
+    services = config["services"]
+    assert isinstance(services, list)
+    services.append({"name": "other", "kind": "upstream.upstream", "upstream": "other"})
+    servers = config["servers"]
+    assert isinstance(servers, list)
+    servers.append(
+        {
+            "name": "other",
+            "hostnames": ["first.example"],
+            "service": "other",
+            "listeners": ["main"],
+        }
+    )
     with running_proxy(tmp_path, config) as proxy:
         client = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=3)
         try:
@@ -141,6 +179,8 @@ def test_proxy_pool_reuses_one_connection_across_origin_authorities(
                 "https://third.example/",
             ]
             for target in targets:
+                client.close()
+                client = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=3)
                 client.request("GET", target)
                 response = client.getresponse()
                 assert response.status == 200
@@ -149,7 +189,7 @@ def test_proxy_pool_reuses_one_connection_across_origin_authorities(
                 assert request_lines == [
                     f"GET {target} HTTP/1.1".encode() for target in targets
                 ]
-                assert len(connections) == 1, (
+                assert len(connections) == (len(targets) if max_idle == 0 else 1), (
                     "pool was keyed by origin instead of proxy transport"
                 )
         finally:

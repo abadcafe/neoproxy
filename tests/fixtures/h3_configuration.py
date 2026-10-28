@@ -81,6 +81,7 @@ def create_http3_chain_config(
     temp_dir: str,
     server_threads: int = 1,
     upstream_name: str = "test_upstream",
+    max_connections: int = 2,
 ) -> str:
     """
     Create HTTP/3 Chain service configuration file (new upstream format).
@@ -113,8 +114,11 @@ def create_http3_chain_config(
 
 plugins:
   upstream:
-    certificates:
-      server_ca_path: "{ca_path}"
+    connection_pools:
+      - name: default
+        http3_pool_max_connections_per_host: {max_connections}
+        certificates:
+          server_ca_path: "{ca_path}"
     upstreams:
       - name: {upstream_name}
         addresses:
@@ -288,11 +292,15 @@ def create_http3_chain_config_with_per_proxy_auth(
     plugin_tls_section = ""
     if effective_tls:
         plugin_tls_section = (
-            "    certificates:\n      server_ca_path:"
-            + f' "{ca_path}"\n{indent(effective_tls, 6)}\n'
+            "    connection_pools:\n    - name: default\n"
+            + "      certificates:\n        server_ca_path:"
+            + f' "{ca_path}"\n{indent(effective_tls, 8)}\n'
         )
     else:
-        plugin_tls_section = f'    certificates:\n      server_ca_path: "{ca_path}"\n'
+        plugin_tls_section = (
+            "    connection_pools:\n    - name: default\n      certificates:\n"
+            + f'        server_ca_path: "{ca_path}"\n'
+        )
 
     config_content = f"""server_threads: {server_threads}
 

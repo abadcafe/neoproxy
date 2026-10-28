@@ -18,27 +18,26 @@ def configuration(ca: str, dns_port: int, addresses: list[ConfigDict]) -> Config
         "server_threads": 1,
         "plugins": {
             "upstream": {
-                "certificates": {"server_ca_path": ca},
-                "dns_servers": [f"127.0.0.1:{dns_port}"],
-                "dns_resolve_timeout": "200ms",
                 "address_protocol": "http3" if not addresses else "https",
-                "dns_refresh_retry_interval": "500ms",
                 "address_fail_timeout": "500ms",
                 "upstream_request_timeout": "300ms",
-                "tcp_keep_alive_time": "30s",
-                "tcp_keep_alive_interval": "5s",
-                "tcp_keep_alive_retries": 3,
                 "upstreams": [{"name": "main", "addresses": list(addresses)}],
+                "connection_pools": [
+                    {
+                        "name": "default",
+                        "certificates": {"server_ca_path": ca},
+                        "dns_servers": [f"127.0.0.1:{dns_port}"],
+                        "dns_resolve_timeout": "200ms",
+                        "dns_refresh_retry_interval": "500ms",
+                        "tcp_keep_alive_time": "30s",
+                        "tcp_keep_alive_interval": "5s",
+                        "tcp_keep_alive_retries": 3,
+                    }
+                ],
             }
         },
         "listeners": [{"name": "main", "kind": "http"}],
-        "services": [
-            {
-                "name": "main",
-                "kind": "upstream.upstream",
-                "upstream": "main",
-            }
-        ],
+        "services": [{"name": "main", "kind": "upstream.upstream", "upstream": "main"}],
         "servers": [{"name": "main", "listeners": ["main"], "service": "main"}],
     }
 

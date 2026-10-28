@@ -34,9 +34,14 @@ async def test_origin_records_successful_dns_metadata(
                 "server_threads": 1,
                 "plugins": {
                     "upstream": {
-                        "certificates": {"server_ca_path": ca},
-                        "dns_servers": [f"127.0.0.1:{dns.port}"],
                         "upstreams": [{"name": "direct"}],
+                        "connection_pools": [
+                            {
+                                "name": "default",
+                                "certificates": {"server_ca_path": ca},
+                                "dns_servers": [f"127.0.0.1:{dns.port}"],
+                            }
+                        ],
                     }
                 },
                 "listeners": [

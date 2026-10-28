@@ -48,13 +48,13 @@ def test_chain_missing_server_ca_prevents_readiness(tmp_path: Path) -> None:
     with managed_processes() as start:
         process = start(config)
         assert not process.wait_ready()
-        assert process.wait(timeout=3) == 2
+        assert process.wait(timeout=3) == 1
     logs = "".join(
         path.read_text() for path in (tmp_path / "logs").glob("neoproxy.log*")
     )
     assert "server_ca_path" in logs
     assert str(ca) in logs
-    assert "plugin initialization failed: upstream: server_ca_path" in logs
+    assert "connection pool initialization failed: connection_pools[default]" in logs
 
 
 @pytest.mark.parametrize("active", [False, True], ids=["idle", "active-tunnel"])
@@ -303,6 +303,7 @@ class TestConnectionReuse:
                 proxy_group=[("127.0.0.1", h3_port, 1)],
                 ca_path=ca_path,
                 temp_dir=temp_dir2,
+                max_connections=1,
             )
             enable_access_log(
                 chain_config,

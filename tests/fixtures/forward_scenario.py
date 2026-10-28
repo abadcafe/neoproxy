@@ -25,6 +25,7 @@ class ForwardNode(BaseModel):
     upstream_username: str | None = None
     handshake_timeout: str = "1s"
     request_timeout: str = "3s"
+    h3_max_connections: int = 2
 
 
 def write_forward_node(directory: Path, node: ForwardNode) -> str:
@@ -39,14 +40,23 @@ def write_forward_node(directory: Path, node: ForwardNode) -> str:
         if node.upstream_username is not None:
             address["user"] = {"username": node.upstream_username, "password": "secret"}
         upstream["addresses"] = [address]
-    else:
-        upstream["tls_handshake_timeout"] = node.handshake_timeout
     plugin: ConfigDict = {
         "upstreams": [upstream],
         "upstream_request_timeout": node.request_timeout,
+        "connection_pools": [
+            {
+                "name": "default",
+                "http3_pool_max_connections_per_host": node.h3_max_connections,
+            }
+        ],
     }
+    pools = plugin["connection_pools"]
+    assert isinstance(pools, list)
+    pool = pools[0]
+    assert isinstance(pool, dict)
+    pool["tls_handshake_timeout"] = node.handshake_timeout
     if node.ca is not None:
-        plugin["certificates"] = {"server_ca_path": node.ca}
+        pool["certificates"] = {"server_ca_path": node.ca}
     service: ConfigDict = {
         "name": "forward",
         "kind": "upstream.upstream",

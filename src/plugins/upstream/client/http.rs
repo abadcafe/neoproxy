@@ -24,6 +24,7 @@ use super::connect_request::build_connect_request;
 use super::forward::forward_request;
 use super::http_pool::ProxyPool;
 use super::protocol::{ClientProtocol, ConnectResult};
+pub(super) use super::transport_io::ProxyIo;
 use crate::context::RequestContext;
 use crate::http_message::{BytesBufBodyWrapper, RequestBody, Response};
 use crate::plugins::upstream::error::UpstreamError;
@@ -31,16 +32,6 @@ use crate::plugins::upstream::target_parser::{
   ConnectTarget, ForwardTarget,
 };
 use crate::tracker::StreamTracker;
-
-/// The HTTP adapter only needs HTTP I/O and the connected peer
-/// identity. Concrete TCP/TLS connectors implement this consumer-owned
-/// contract.
-pub(super) trait ProxyIo:
-  hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static
-{
-  fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr>;
-  fn observation(&self) -> super::observation::ConnectionObservation;
-}
 
 pub(super) struct HttpProxyClient<C> {
   client: ProxyPool<C>,

@@ -16,17 +16,23 @@ fn test_merge_chain_config_resolves_direct_upstream() {
 }
 
 #[test]
-fn test_merge_chain_config_prefers_address_level_timeout() {
+fn test_merge_chain_config_uses_address_selected_connection_pool() {
   let config: UpstreamPluginConfig = serde_yaml::from_str(
     r#"
-tcp_connect_timeout: "30s"
 upstreams:
 - name: chain
-  tcp_connect_timeout: "20s"
   addresses:
-  - address: "127.0.0.1:8080"
+  - address: 127.0.0.1:8080
     address_protocol: http
-    tcp_connect_timeout: "5s"
+    use_connection_pool: address_pool_2
+  use_connection_pool: upstream_pool_1
+connection_pools:
+- name: default
+  tcp_connect_timeout: 30s
+- name: upstream_pool_1
+  tcp_connect_timeout: 20s
+- name: address_pool_2
+  tcp_connect_timeout: 5s
 "#,
   )
   .unwrap();
@@ -57,17 +63,21 @@ upstreams:
 }
 
 #[test]
-fn test_merge_chain_config_partial_quic_preserves_inherited_keep_alive()
-{
+fn test_merge_chain_config_reads_quic_from_selected_connection_pool() {
   let config: UpstreamPluginConfig = serde_yaml::from_str(
     r#"
-quic_connection_keep_alive_interval: 11s
 upstreams:
 - name: chain
   addresses:
   - address: localhost:443
     address_protocol: http3
-    quic_connection_initial_mtu: 1400
+    use_connection_pool: address_pool_1
+connection_pools:
+- name: default
+  quic_connection_keep_alive_interval: 11s
+- name: address_pool_1
+  quic_connection_keep_alive_interval: 11s
+  quic_connection_initial_mtu: 1400
 "#,
   )
   .unwrap();
@@ -94,9 +104,11 @@ fn test_merge_chain_config_inherits_request_deadline() {
 #[test]
 fn test_merge_chain_config_resolves_direct_https_policy() {
   let config: UpstreamPluginConfig = serde_yaml::from_str(
-    "tcp_connect_timeout: 3s\ntls_handshake_timeout: \
-     4s\nupstreams:\n- name: inherited\n- name: overridden\n  \
-     tcp_connect_timeout: 1s\n  tls_handshake_timeout: 2s",
+    "upstreams:\n- name: inherited\n- name: overridden\n  \
+     use_connection_pool: upstream_pool_1\nconnection_pools:\n- name: \
+     default\n  tcp_connect_timeout: 3s\n  tls_handshake_timeout: \
+     4s\n- name: upstream_pool_1\n  tcp_connect_timeout: 1s\n  \
+     tls_handshake_timeout: 2s\n",
   )
   .unwrap();
   let resolved = merge_chain_config(&config).unwrap();
@@ -179,9 +191,6 @@ fn test_merge_chain_config_inherits_address_policy_and_tcp_keepalive() {
 address_protocol: http3
 address_max_fails: 3
 address_fail_timeout: 20s
-tcp_keep_alive_time: 60s
-tcp_keep_alive_interval: 10s
-tcp_keep_alive_retries: 5
 upstreams:
 - name: chain
   address_protocol: http
@@ -191,8 +200,17 @@ upstreams:
   - address: b.test:443
     address_protocol: https
     address_fail_timeout: 5s
-    tcp_keep_alive_retries: 7
+    use_connection_pool: address_pool_1
 - name: direct
+connection_pools:
+- name: default
+  tcp_keep_alive_time: 60s
+  tcp_keep_alive_interval: 10s
+  tcp_keep_alive_retries: 5
+- name: address_pool_1
+  tcp_keep_alive_time: 60s
+  tcp_keep_alive_interval: 10s
+  tcp_keep_alive_retries: 7
 "#,
   )
   .unwrap();
@@ -223,7 +241,10 @@ upstreams:
   assert_eq!(addresses[1].tcp_keep_alive_retries, Some(7));
   assert_eq!(result["direct"].address_max_fails, 3);
   assert_eq!(
-    result["direct"].dns_refresh_retry_interval,
+    super::connection_pool::resolve_connection_pools(&plugin).unwrap()
+      ["default"]
+      .dns_refresh_retry_interval
+      .unwrap_or(Duration::from_secs(30)),
     Duration::from_secs(30)
   );
 }
@@ -233,7 +254,8 @@ fn test_merge_chain_config_socks5_inherits_and_validates_credentials() {
   for length in [0, 1, 255, 256] {
     let yaml = format!(
       "address_protocol: socks5\nuser: {{username: '{}', password: \
-       secret}}\ntcp_connect_timeout: 2s\nupstreams: [{{name: chain, \
+       secret}}\nconnection_pools: [{{name: default, \
+       tcp_connect_timeout: 2s}}]\nupstreams: [{{name: chain, \
        addresses: [{{address: 'proxy.test:1080'}}]}}]",
       "a".repeat(length)
     );

@@ -30,6 +30,8 @@ async fn test_http_client_direct_tunnel_connects_to_target() {
     &upstreams["direct"],
     std::sync::Arc::new(tls),
     addr,
+    std::rc::Rc::new(crate::tracker::StreamTracker::new()),
+    super::ConnectionPool::new(Default::default()).unwrap(),
   )
   .unwrap();
   let tracker = Rc::new(StreamTracker::new());

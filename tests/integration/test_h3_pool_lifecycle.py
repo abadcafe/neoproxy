@@ -13,24 +13,19 @@ from tests.fixtures.origin_peer import PeerConfig, origin_peer
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("max_idle", [0, 1])
+@pytest.mark.parametrize("max_connections", [1, 2])
 async def test_chain_h3_pool_respects_reuse_policy(
-    tmp_path: Path, max_idle: int
+    tmp_path: Path, max_connections: int
 ) -> None:
     cert, key, ca, _ = generate_test_certificates(str(tmp_path))
     async with origin_peer(PeerConfig(certificate=cert, key=key, wire="h3")) as peer:
         config: ConfigDict = {
-            "server_threads": 1,
+            "server_threads": 4,
             "plugins": {
                 "upstream": {
-                    "certificates": {"server_ca_path": ca},
                     "upstreams": [
                         {
                             "name": "relay",
-                            "pool": {
-                                "max_idle_per_host": max_idle,
-                                "idle_timeout": "90s",
-                            },
                             "addresses": [
                                 {
                                     "address": f"127.0.0.1:{peer.port}",
@@ -39,23 +34,68 @@ async def test_chain_h3_pool_respects_reuse_policy(
                             ],
                         }
                     ],
+                    "connection_pools": [
+                        {
+                            "name": "default",
+                            "certificates": {"server_ca_path": ca},
+                            "http3_pool_max_connections_per_host": max_connections,
+                        }
+                    ],
                 }
             },
             "listeners": [{"name": "main", "kind": "http"}],
             "services": [
-                {
-                    "name": "relay",
-                    "kind": "upstream.upstream",
-                    "upstream": "relay",
-                }
+                {"name": "relay", "kind": "upstream.upstream", "upstream": "relay"}
             ],
             "servers": [{"name": "relay", "service": "relay", "listeners": ["main"]}],
         }
+        plugins = config["plugins"]
+        assert isinstance(plugins, dict)
+        plugin = plugins["upstream"]
+        assert isinstance(plugin, dict)
+        upstreams = plugin["upstreams"]
+        assert isinstance(upstreams, list)
+        upstreams.append(
+            {
+                "name": "other",
+                "addresses": [
+                    {"address": f"127.0.0.1:{peer.port}", "address_protocol": "http3"}
+                ],
+            }
+        )
+        services = config["services"]
+        assert isinstance(services, list)
+        services.append(
+            {"name": "other", "kind": "upstream.upstream", "upstream": "other"}
+        )
+        servers = config["servers"]
+        assert isinstance(servers, list)
+        servers.append(
+            {
+                "name": "other",
+                "hostnames": ["other.test"],
+                "service": "other",
+                "listeners": ["main"],
+            }
+        )
         with running_proxy(tmp_path, config) as proxy:
-            for _ in range(2):
-                assert (await curl_forward(proxy.port, "http://origin.test/"))[0] == 200
-            assert len({request.connection for request in peer.requests}) == (
-                2 if max_idle == 0 else 1
+            for index in range(8):
+                target = (
+                    "http://origin.test/" if index % 2 == 0 else "http://other.test/"
+                )
+                assert (await curl_forward(proxy.port, target))[0] == 200
+            connections = [request.connection for request in peer.requests]
+            assert len(set(connections)) == max_connections
+            if max_connections == 2:
+                assert connections[::2] == [connections[0]] * 4
+                assert connections[1::2] == [connections[1]] * 4
+            responses = await asyncio.gather(
+                *(curl_forward(proxy.port, "http://origin.test/") for _ in range(12))
+            )
+            assert all(response[0] == 200 for response in responses)
+            assert (
+                len({request.connection for request in peer.requests})
+                == max_connections
             )
 
 
@@ -64,14 +104,12 @@ async def test_chain_h3_pool_expires_without_subsequent_request(tmp_path: Path) 
     cert, key, ca, _ = generate_test_certificates(str(tmp_path))
     async with origin_peer(PeerConfig(certificate=cert, key=key, wire="h3")) as peer:
         config: ConfigDict = {
-            "server_threads": 1,
+            "server_threads": 4,
             "plugins": {
                 "upstream": {
-                    "certificates": {"server_ca_path": ca},
                     "upstreams": [
                         {
                             "name": "relay",
-                            "pool": {"idle_timeout": "100ms"},
                             "addresses": [
                                 {
                                     "address": f"127.0.0.1:{peer.port}",
@@ -80,15 +118,18 @@ async def test_chain_h3_pool_expires_without_subsequent_request(tmp_path: Path) 
                             ],
                         }
                     ],
+                    "connection_pools": [
+                        {
+                            "name": "default",
+                            "certificates": {"server_ca_path": ca},
+                            "http3_pool_idle_timeout": "100ms",
+                        }
+                    ],
                 }
             },
             "listeners": [{"name": "main", "kind": "http"}],
             "services": [
-                {
-                    "name": "relay",
-                    "kind": "upstream.upstream",
-                    "upstream": "relay",
-                }
+                {"name": "relay", "kind": "upstream.upstream", "upstream": "relay"}
             ],
             "servers": [{"name": "relay", "service": "relay", "listeners": ["main"]}],
         }

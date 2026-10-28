@@ -172,19 +172,13 @@ async fn chain_connect(
       ));
     }
   };
-  let (tls_config, tracker) = {
-    let reg = registry;
-    (reg.tls_config(), reg.tracker())
-  };
 
   let connect_start = std::time::Instant::now();
   let upstream = match registry.get_upstream(upstream_name) {
     Ok(upstream) => upstream,
     Err(e) => return Ok(e.to_response(ctx)),
   };
-  let result = upstream
-    .connect_for_tunnel(&target, &req_headers, &tls_config, &tracker)
-    .await;
+  let result = upstream.connect_for_tunnel(&target, &req_headers).await;
   let result = match result {
     Ok(r) => r,
     Err(e) => {
@@ -338,21 +332,13 @@ async fn chain_forward(
     }
   };
 
-  let (tls_config, tracker) = {
-    let reg = registry;
-    (reg.tls_config(), reg.tracker())
-  };
-
   let upstream = match registry.get_upstream(upstream_name) {
     Ok(upstream) => upstream,
     Err(e) => {
       return Ok(e.to_response(ctx));
     }
   };
-  match upstream
-    .forward(&tls_config, &tracker, &target, req_headers, req_body, ctx)
-    .await
-  {
+  match upstream.forward(&target, req_headers, req_body, ctx).await {
     Ok(resp) => Ok(resp),
     Err(e) => Ok(e.to_response(ctx)),
   }

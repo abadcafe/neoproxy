@@ -6,10 +6,14 @@
 //! H3ResponseBody, Http3Client, H3Sender
 //! tests: http3_tests.rs
 
+mod establish;
+mod lease;
 mod quic_connect;
 #[cfg(test)]
 mod quic_connect_tests;
 mod session;
+mod sessions;
+pub(super) use sessions::Store;
 #[cfg(test)]
 mod session_tests;
 mod upload;

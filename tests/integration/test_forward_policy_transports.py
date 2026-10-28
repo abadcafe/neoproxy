@@ -25,7 +25,6 @@ async def test_forwarding_policy_is_consistent_across_proxy_transports(
             "server_threads": 1,
             "plugins": {
                 "upstream": {
-                    "certificates": {"server_ca_path": ca},
                     "upstreams": [
                         {
                             "name": "relay",
@@ -39,15 +38,14 @@ async def test_forwarding_policy_is_consistent_across_proxy_transports(
                             ],
                         }
                     ],
+                    "connection_pools": [
+                        {"name": "default", "certificates": {"server_ca_path": ca}}
+                    ],
                 }
             },
             "listeners": [{"name": "main", "kind": "http"}],
             "services": [
-                {
-                    "name": "relay",
-                    "kind": "upstream.upstream",
-                    "upstream": "relay",
-                }
+                {"name": "relay", "kind": "upstream.upstream", "upstream": "relay"}
             ],
             "servers": [{"name": "relay", "service": "relay", "listeners": ["main"]}],
         }

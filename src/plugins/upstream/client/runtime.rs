@@ -8,8 +8,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use super::dns_cache::DnsCache;
-use super::nodes::{NodeKey, NodePolicy, Nodes};
+use super::nodes::{NodeKey, NodePolicy, SharedNodes};
 use super::protocol::ConnectResult;
 use super::retry_request::{Progress, RetryRequest};
 use super::transport_factory::{self, ClientEntry};
@@ -24,8 +23,9 @@ use crate::tracker::StreamTracker;
 
 #[derive(Default)]
 struct Group {
-  nodes: Nodes,
+  nodes: Arc<SharedNodes>,
   clients: HashMap<NodeKey, Rc<ClientEntry>>,
+  addresses: Vec<config::Address>,
 }
 impl Group {
   fn failed(&mut self, key: &NodeKey, selected: &Rc<ClientEntry>) {
@@ -49,23 +49,23 @@ impl Group {
   }
 }
 pub(crate) struct Upstream {
+  connection_pools: Arc<super::ConnectionPools>,
+  name: String,
   config: config::Upstream,
-  dns: Rc<DnsCache>,
-  tls: Option<Arc<rustls::ClientConfig>>,
   tracker: Rc<StreamTracker>,
   groups: RefCell<HashMap<String, Rc<RefCell<Group>>>>,
 }
 impl Upstream {
   pub(super) fn new(
     config: config::Upstream,
-    dns: Rc<DnsCache>,
-    tls: Option<Arc<rustls::ClientConfig>>,
     tracker: Rc<StreamTracker>,
+    connection_pools: Arc<super::ConnectionPools>,
+    name: String,
   ) -> Self {
     Self {
+      connection_pools,
+      name,
       config,
-      dns,
-      tls,
       tracker,
       groups: RefCell::new(HashMap::new()),
     }
@@ -82,6 +82,7 @@ impl Upstream {
       authority.port_u16().unwrap_or(if https { 443 } else { 80 });
     let address = format!("{}:{port}", authority.host());
     vec![config::Address {
+      use_connection_pool: self.config.use_connection_pool.clone(),
       address,
       hostname: None,
       weight: 1,
@@ -121,11 +122,16 @@ impl Upstream {
     } else {
       String::new()
     };
-    let results = futures_util::future::join_all(
-      addresses
-        .iter()
-        .map(|address| self.dns.resolve(&address.address, ctx)),
-    )
+    let results = futures_util::future::join_all(addresses.iter().map(
+      |address| async move {
+        self
+          .connection_pools
+          .get(&address.use_connection_pool)
+          .dns
+          .resolve(&address.address, ctx)
+          .await
+      },
+    ))
     .await;
     let mut policies = Vec::new();
     let mut error = None;
@@ -153,8 +159,20 @@ impl Upstream {
         UpstreamError::DnsError("no upstream addresses".into())
       }));
     }
-    let group =
-      self.groups.borrow_mut().entry(key).or_default().clone();
+    let group = self
+      .groups
+      .borrow_mut()
+      .entry(key.clone())
+      .or_insert_with(|| {
+        Rc::new(RefCell::new(Group {
+          nodes: self
+            .connection_pools
+            .nodes((self.name.clone(), key.clone())),
+          clients: HashMap::new(),
+          addresses: addresses.clone(),
+        }))
+      })
+      .clone();
     {
       let mut group = group.borrow_mut();
       group.clients.retain(|key, _| {
@@ -166,8 +184,8 @@ impl Upstream {
             &self.config,
             &addresses[policy.key.owner],
             policy.key.address,
-            &self.tls,
             &self.tracker,
+            &self.connection_pools,
           )?;
           group.clients.insert(policy.key.clone(), Rc::new(client));
         }
@@ -179,8 +197,6 @@ impl Upstream {
 
   pub(crate) async fn forward(
     &self,
-    tls_config: &Option<Arc<rustls::ClientConfig>>,
-    tracker: &Rc<StreamTracker>,
     target: &ForwardTarget,
     req_headers: http::request::Parts,
     req_body: RequestBody,
@@ -213,98 +229,92 @@ impl Upstream {
     let request = RetryRequest::new(req_body);
     // Incompatible peers are excluded without changing health or
     // weights.
-    let mut tried: Vec<NodeKey> = group
-      .borrow()
-      .clients
+    let excluded: Vec<usize> = self
+      .config
+      .addresses
       .iter()
-      .filter(|(_, client)| {
-        client.protocol == config::protocol::ProtocolKind::Socks5
+      .enumerate()
+      .filter_map(|(owner, address)| {
+        matches!(
+          address.address_protocol,
+          config::Protocol::Socks5 { .. }
+        )
+        .then_some(owner)
       })
-      .map(|(key, _)| key.clone())
       .collect();
-    let mut last_error = None;
-    loop {
-      let Some(key) = group.borrow_mut().nodes.select(&tried) else {
-        return Err(last_error.unwrap_or_else(|| {
-          UpstreamError::DestinationUnavailable(
-            "no available upstream peers".into(),
-          )
-        }));
-      };
-      tried.push(key.clone());
-      let selected = group.borrow().clients[&key].clone();
-      ctx.set(
-        crate::context::fields::upstream::PROTOCOL,
-        Arc::from(selected.protocol.as_str()),
-      );
-      let mut parts = req_headers.clone();
-      let progress = Progress::default();
-      parts.extensions.insert(progress.clone());
-      let result = tokio::time::timeout(
-        selected.request_timeout,
-        selected.client.forward(
-          tls_config,
-          tracker,
-          target,
-          parts,
-          request.body(),
-          ctx,
-        ),
+    self
+      .dispatch(
+        group,
+        excluded,
+        Some(ctx),
+        |progress| request.can_retry(progress),
+        async |selected, progress| {
+          let mut parts = req_headers.clone();
+          parts.extensions.insert(progress);
+          selected
+            .client
+            .forward(
+              &Some(selected.tls.clone()),
+              &self.tracker,
+              target,
+              parts,
+              request.body(),
+              ctx,
+            )
+            .await
+        },
       )
-      .await;
-      let timed_out = result.is_err();
-      let result = match result {
-        Ok(result) => result,
-        Err(_) => Err(UpstreamError::ConnectionTimeout(
-          "upstream response header deadline exceeded".into(),
-        )),
-      };
-      match result {
-        Ok(response) => {
-          group.borrow_mut().succeeded(&key, &selected);
-          return Ok(response);
-        }
-        Err(error) => {
-          if counts_failure(&error) {
-            group.borrow_mut().failed(&key, &selected);
-          } else {
-            if matches!(
-              error,
-              UpstreamError::UpstreamConnectError { .. }
-                | UpstreamError::InvalidResponse(_)
-            ) {
-              group.borrow_mut().succeeded(&key, &selected);
-            }
-            return Err(error);
-          }
-          if !request.can_retry(&progress) {
-            if timed_out {
-              ctx.set(
-                crate::context::fields::upstream::ERROR_PHASE,
-                Arc::from("response_headers"),
-              );
-            }
-            return Err(error);
-          }
-          last_error = Some(error);
-        }
-      }
-    }
+      .await
   }
 
   pub(crate) async fn connect_for_tunnel(
     &self,
     target: &ConnectTarget,
     request: &http::request::Parts,
-    tls_config: &Option<Arc<rustls::ClientConfig>>,
-    tracker: &Rc<StreamTracker>,
   ) -> Result<ConnectResult, UpstreamError> {
     let ctx = request.extensions.get::<RequestContext>();
     let group = self.group(&target.uri(), ctx).await?;
+    self
+      .dispatch(
+        group,
+        Vec::new(),
+        ctx,
+        |_| true,
+        async |selected, progress| {
+          let mut request = request.clone();
+          request.extensions.insert(progress);
+          selected
+            .client
+            .connect_for_tunnel(
+              target,
+              &request,
+              &Some(selected.tls.clone()),
+              &self.tracker,
+            )
+            .await
+        },
+      )
+      .await
+  }
+
+  async fn dispatch<T, F, R>(
+    &self,
+    group: Rc<RefCell<Group>>,
+    excluded: Vec<usize>,
+    ctx: Option<&RequestContext>,
+    replayable: R,
+    mut execute: F,
+  ) -> Result<T, UpstreamError>
+  where
+    F:
+      AsyncFnMut(Rc<ClientEntry>, Progress) -> Result<T, UpstreamError>,
+    R: Fn(&Progress) -> bool,
+  {
     let mut tried = Vec::new();
     let mut last_error = None;
     loop {
-      let Some(key) = group.borrow_mut().nodes.select(&tried) else {
+      let key = group.borrow().nodes.select(&tried, &excluded);
+      let Some(key) = key else {
         return Err(last_error.unwrap_or_else(|| {
           UpstreamError::DestinationUnavailable(
             "no available upstream peers".into(),
@@ -312,33 +322,64 @@ impl Upstream {
         }));
       };
       tried.push(key.clone());
-      let selected = group.borrow().clients[&key].clone();
-      if !self.config.addresses.is_empty()
-        && let Some(ctx) = ctx
+      // Another worker may have refreshed DNS after this worker's
+      // group snapshot. Instantiate the selected connection_pools peer
+      // locally instead of indexing a potentially older client map.
+      let selected = {
+        let mut group = group.borrow_mut();
+        if !group.clients.contains_key(&key) {
+          let client = transport_factory::build(
+            &self.config,
+            &group.addresses[key.owner],
+            key.address,
+            &self.tracker,
+            &self.connection_pools,
+          )?;
+          group.clients.insert(key.clone(), Rc::new(client));
+        }
+        group.clients[&key].clone()
+      };
+      if let Some(ctx) = ctx
+        && (!self.config.addresses.is_empty()
+          || !matches!(
+            selected.protocol,
+            config::protocol::ProtocolKind::Http
+          ))
       {
         ctx.set(
           crate::context::fields::upstream::PROTOCOL,
           Arc::from(selected.protocol.as_str()),
         );
       }
+      let progress = Progress::default();
       let result = tokio::time::timeout(
         selected.request_timeout,
-        selected
-          .client
-          .connect_for_tunnel(target, request, tls_config, tracker),
+        execute(selected.clone(), progress.clone()),
       )
-      .await
-      .unwrap_or_else(|_| {
+      .await;
+      let timed_out = result.is_err();
+      let waiting = timed_out && progress.is_waiting();
+      let result = result.unwrap_or_else(|_| {
         Err(UpstreamError::ConnectionTimeout(
-          "upstream tunnel establishment deadline exceeded".into(),
+          if waiting {
+            "local H3 pool capacity deadline exceeded"
+          } else {
+            "upstream response header deadline exceeded"
+          }
+          .into(),
         ))
       });
       match result {
-        Ok(result) => {
+        Ok(value) => {
           group.borrow_mut().succeeded(&key, &selected);
-          return Ok(result);
+          return Ok(value);
         }
         Err(error) => {
+          // Local capacity and downstream cancellation never penalize a
+          // peer.
+          if waiting {
+            return Err(error);
+          }
           if !counts_failure(&error) {
             if matches!(
               error,
@@ -350,6 +391,15 @@ impl Upstream {
             return Err(error);
           }
           group.borrow_mut().failed(&key, &selected);
+          if !replayable(&progress) {
+            if timed_out && let Some(ctx) = ctx {
+              ctx.set(
+                crate::context::fields::upstream::ERROR_PHASE,
+                Arc::from("response_headers"),
+              );
+            }
+            return Err(error);
+          }
           last_error = Some(error);
         }
       }

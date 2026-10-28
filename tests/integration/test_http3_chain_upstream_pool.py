@@ -186,8 +186,10 @@ class TestMultipleServicesShareUpstream:
 
 plugins:
   upstream:
-    certificates:
-      server_ca_path: "{ca_path}"
+    connection_pools:
+      - name: default
+        certificates:
+          server_ca_path: "{ca_path}"
     upstreams:
       - name: shared_upstream
         addresses:
@@ -303,8 +305,10 @@ class TestThreeLevelConfigInheritance:
 
 plugins:
   upstream:
-    certificates:
-      server_ca_path: "{ca_path}"
+    connection_pools:
+      - name: default
+        certificates:
+          server_ca_path: "{ca_path}"
     user:
       username: "wrong_user"
       password: "wrong_pass"
@@ -403,8 +407,10 @@ servers:
 
 plugins:
   upstream:
-    certificates:
-      server_ca_path: "{ca_path}"
+    connection_pools:
+      - name: default
+        certificates:
+          server_ca_path: "{ca_path}"
     user:
       username: "plugin_user"
       password: "plugin_pass"
@@ -500,8 +506,10 @@ servers:
 
 plugins:
   upstream:
-    certificates:
-      server_ca_path: "{ca_path}"
+    connection_pools:
+      - name: default
+        certificates:
+          server_ca_path: "{ca_path}"
     user:
       username: "wrong_plugin_user"
       password: "wrong_plugin_pass"
@@ -618,8 +626,10 @@ class TestWRRLoadBalancingWithPool:
 
 plugins:
   upstream:
-    certificates:
-      server_ca_path: "{ca_path}"
+    connection_pools:
+      - name: default
+        certificates:
+          server_ca_path: "{ca_path}"
     upstreams:
       - name: wrr_upstream
         addresses:
@@ -811,9 +821,11 @@ class TestQuicConnectionConfig:
         config = f"""server_threads: 1
 plugins:
   upstream:
+    connection_pools:
+      - name: default
+        quic_connection_keep_alive_interval: "3s"
+        quic_connection_idle_timeout: "30s"
     tunnel_idle_timeout: "5m"
-    quic_connection_keep_alive_interval: "3s"
-    quic_connection_idle_timeout: "30s"
     upstreams:
       - name: u
         addresses:

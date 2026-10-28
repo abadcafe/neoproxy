@@ -98,7 +98,9 @@ def _method(kind: RequestKind, index: int) -> bytes:
     return b"GET"
 
 
-async def _exercise_connection_sharing(directory: Path, kind: RequestKind) -> None:
+async def _exercise_connection_sharing(
+    directory: Path, kind: RequestKind, maximum: int
+) -> None:
     certificate, key, ca, _ = generate_test_certificates(str(directory))
     observations = Observations()
     peers: list[CountingPeer] = []
@@ -121,12 +123,15 @@ async def _exercise_connection_sharing(directory: Path, kind: RequestKind) -> No
     )
     entry = get_unique_port()
     config = directory / "entry.yaml"
-    _ = config.write_text(f"""server_threads: 1
+    _ = config.write_text(f"""server_threads: 4
 plugins:
   upstream:
+    connection_pools:
+      - name: default
+        http3_pool_max_connections_per_host: {maximum}
+        certificates:
+          server_ca_path: {ca}
     upstream_request_timeout: 10s
-    certificates:
-      server_ca_path: {ca}
     upstreams:
     - name: relay
       addresses:
@@ -196,8 +201,8 @@ servers:
                 # its H3 stream. Holding a connection-state lock during
                 # request/response handling would stall at this barrier.
                 _ = await observations.all_cold_requests.wait()
-                assert observations.connections == 1, observations
-                assert observations.handshakes == 1, observations
+                assert observations.connections == maximum, observations
+                assert observations.handshakes == maximum, observations
                 assert (
                     len({(conn, stream) for conn, stream, _ in observations.requests})
                     == COLD_REQUESTS
@@ -210,8 +215,8 @@ servers:
                 for index in range(COLD_REQUESTS, COLD_REQUESTS + WARM_REQUESTS):
                     _ = tasks.create_task(request(index))
 
-        assert observations.connections == 1, observations
-        assert observations.handshakes == 1, observations
+        assert observations.connections == maximum, observations
+        assert observations.handshakes == maximum, observations
         assert len(observations.requests) == COLD_REQUESTS + WARM_REQUESTS
         expected_methods = [
             _method(kind, index) for index in range(COLD_REQUESTS + WARM_REQUESTS)
@@ -225,8 +230,9 @@ servers:
         server.close()
 
 
+@pytest.mark.parametrize("maximum", [1, 2])
 @pytest.mark.parametrize("kind", ["forward", "tunnel", "mixed"])
-def test_concurrent_requests_share_one_upstream_quic_connection(
-    tmp_path: Path, kind: RequestKind
+def test_concurrent_requests_share_bounded_upstream_quic_connections(
+    tmp_path: Path, kind: RequestKind, maximum: int
 ) -> None:
-    asyncio.run(_exercise_connection_sharing(tmp_path, kind))
+    asyncio.run(_exercise_connection_sharing(tmp_path, kind, maximum))

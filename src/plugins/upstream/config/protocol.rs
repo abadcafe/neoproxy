@@ -32,8 +32,7 @@ impl ProtocolKind {
   }
 }
 
-/// Connection pool configuration. At upstream level only, NOT
-/// inherited.
+/// Resolved idle-cache policy for one process-wide HTTP pool.
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PoolConfig {
@@ -48,6 +47,27 @@ impl Default for PoolConfig {
     Self {
       max_idle_per_host: default_max_idle_per_host(),
       idle_timeout: default_idle_timeout(),
+    }
+  }
+}
+
+/// Process-wide pool policy; never inherited by addresses.
+#[derive(Clone, Debug)]
+pub(crate) struct PoolsConfig {
+  pub(crate) http: PoolConfig,
+  pub(crate) https: PoolConfig,
+  pub(crate) h3_threads: usize,
+  pub(crate) h3_connections: usize,
+  pub(crate) h3_idle_timeout: Duration,
+}
+impl Default for PoolsConfig {
+  fn default() -> Self {
+    Self {
+      http: PoolConfig::default(),
+      https: PoolConfig::default(),
+      h3_threads: 1,
+      h3_connections: 2,
+      h3_idle_timeout: Duration::from_secs(3600),
     }
   }
 }

@@ -144,22 +144,40 @@ pub(crate) fn plugin_name() -> &'static str {
 pub(crate) fn create_plugin(
   config: Option<&SerializedArgs>,
 ) -> Result<Box<dyn Plugin>> {
+  let connection_pools = build_connection_pools(config)?;
+  create_pooled_plugin(config, connection_pools)
+}
+
+pub(crate) use client::ConnectionPools;
+pub(crate) fn build_connection_pools(
+  config: Option<&SerializedArgs>,
+) -> Result<std::sync::Arc<ConnectionPools>> {
+  let config: UpstreamPluginConfig = config
+    .map(|args| serde_yaml::from_value(args.clone()))
+    .transpose()?
+    .unwrap_or_default();
+  config::merge_chain_config(&config)?;
+  ConnectionPools::new(
+    config::connection_pool::resolve_connection_pools(&config)?,
+  )
+}
+
+pub(crate) fn create_pooled_plugin(
+  config: Option<&SerializedArgs>,
+  connection_pools: std::sync::Arc<ConnectionPools>,
+) -> Result<Box<dyn Plugin>> {
   let plugin_config: UpstreamPluginConfig = match config {
     Some(args) => serde_yaml::from_value(args.clone())?,
     None => UpstreamPluginConfig::default(),
   };
 
-  if let Some(ref certs) = plugin_config.certificates {
-    certs.validate()?;
-  }
-
   let upstreams = config::merge_chain_config(&plugin_config)?;
 
   let tracker = Rc::new(StreamTracker::new());
-  let registry = UpstreamRegistry::new(
+  let registry = UpstreamRegistry::with_connection_pools(
     upstreams,
-    plugin_config.certificates.as_ref(),
     tracker.clone(),
+    connection_pools,
   )?;
 
   info!("upstream: initialized with {} upstream(s)", registry.len());

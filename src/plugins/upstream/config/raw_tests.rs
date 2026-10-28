@@ -47,7 +47,7 @@ fn test_pool_config_default_uses_pool_defaults() {
   let pool = PoolConfig::default();
 
   assert_eq!(pool.max_idle_per_host, 32);
-  assert_eq!(pool.idle_timeout, std::time::Duration::from_secs(90));
+  assert_eq!(pool.idle_timeout, std::time::Duration::from_secs(3600));
 }
 
 #[test]
@@ -57,4 +57,39 @@ fn test_upstream_service_args_requires_upstream_name() {
 
   assert_eq!(args.upstream, "chain");
   assert!(serde_yaml::from_str::<UpstreamServiceArgs>("{}").is_err());
+}
+
+#[test]
+fn test_plugin_pool_configuration_defaults_and_overrides() {
+  let config: super::raw::UpstreamPluginConfig =
+    serde_yaml::from_str("{}").unwrap();
+  let pools = crate::plugins::upstream::config::connection_pool::resolve_connection_pools(&config).unwrap()["default"].limits();
+  assert_eq!(pools.http.max_idle_per_host, 32);
+  assert_eq!(
+    pools.https.idle_timeout,
+    std::time::Duration::from_secs(3600)
+  );
+  assert_eq!(pools.h3_connections, 2);
+  assert_eq!(pools.h3_threads, 1);
+  let config: super::raw::UpstreamPluginConfig = serde_yaml::from_str(
+    "connection_pools:\n- name: default\n  \
+     http_pool_max_idle_connections: 0\n  http3_pool_io_threads: 3\n  \
+     http3_pool_idle_timeout: 60m\n",
+  )
+  .unwrap();
+  assert_eq!(crate::plugins::upstream::config::connection_pool::resolve_connection_pools(&config).unwrap()["default"].limits().http.max_idle_per_host, 0);
+  assert_eq!(crate::plugins::upstream::config::connection_pool::resolve_connection_pools(&config).unwrap()["default"].limits().h3_threads, 3);
+}
+
+#[test]
+fn test_plugin_pool_rejects_zero_h3_capacity_and_threads() {
+  for field in
+    ["http3_pool_io_threads", "http3_pool_max_connections_per_host"]
+  {
+    let config = serde_yaml::from_str(&format!(
+      "connection_pools:\n- name: default\n  {field}: 0"
+    ))
+    .unwrap();
+    assert!(super::merge_chain_config(&config).is_err());
+  }
 }

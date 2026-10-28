@@ -303,8 +303,10 @@ class TestHTTP3ChainAddressResolution:
 
 plugins:
   upstream:
-    certificates:
-      server_ca_path: "{ca_path}"
+    connection_pools:
+      - name: default
+        certificates:
+          server_ca_path: "{ca_path}"
     upstreams:
       - name: test_upstream
         addresses:

@@ -82,38 +82,45 @@ fn test_merge_chain_config_basic() {
 fn test_merge_chain_config_pool_config() {
   let config: UpstreamPluginConfig = serde_yaml::from_str(
     r#"
-    upstreams:
-      - name: test
-        pool:
-          max_idle_per_host: 16
-          idle_timeout: 30s
-        addresses:
-          - address: proxy.example.com:8080
-            address_protocol: http
-    "#,
+upstreams:
+- name: test
+  addresses:
+  - address: proxy.example.com:8080
+    address_protocol: http
+connection_pools:
+- name: default
+  http_pool_max_idle_connections: 16
+  http_pool_idle_timeout: 30s
+"#,
   )
   .unwrap();
   let resolved = merge_chain_config(&config).unwrap();
-  let upstream = resolved.get("test").unwrap();
-  assert_eq!(upstream.pool_config.max_idle_per_host, 16);
+  assert!(resolved.contains_key("test"));
+  assert_eq!(crate::plugins::upstream::config::connection_pool::resolve_connection_pools(&config).unwrap()["default"].limits().http.max_idle_per_host, 16);
 }
 
 #[test]
 fn test_merge_chain_config_three_level_inheritance() {
   let config: UpstreamPluginConfig = serde_yaml::from_str(
     r#"
-    tunnel_idle_timeout: 90s
-    tcp_connect_timeout: 5s
-    upstreams:
-      - name: test
-        tcp_connect_timeout: 3s
-        addresses:
-          - address: proxy.example.com:8080
-            address_protocol: http
-            tcp_connect_timeout: 1s
-          - address: proxy2.example.com:8080
-            address_protocol: http
-    "#,
+tunnel_idle_timeout: 90s
+upstreams:
+- name: test
+  addresses:
+  - address: proxy.example.com:8080
+    address_protocol: http
+    use_connection_pool: address_pool_2
+  - address: proxy2.example.com:8080
+    address_protocol: http
+  use_connection_pool: upstream_pool_1
+connection_pools:
+- name: default
+  tcp_connect_timeout: 5s
+- name: upstream_pool_1
+  tcp_connect_timeout: 3s
+- name: address_pool_2
+  tcp_connect_timeout: 1s
+"#,
   )
   .unwrap();
   let resolved = merge_chain_config(&config).unwrap();
@@ -173,11 +180,14 @@ fn test_upstream_service_args_deny_unknown_fields() {
 fn test_resolve_direct_upstream() {
   let config: UpstreamPluginConfig = serde_yaml::from_str(
     r#"
-    upstreams:
-      - name: direct
-        tcp_connect_timeout: 3s
-        tunnel_idle_timeout: 45s
-    "#,
+upstreams:
+- name: direct
+  tunnel_idle_timeout: 45s
+  use_connection_pool: upstream_pool_1
+connection_pools:
+- name: upstream_pool_1
+  tcp_connect_timeout: 3s
+"#,
   )
   .unwrap();
   let resolved = merge_chain_config(&config).unwrap();
@@ -191,10 +201,12 @@ fn test_resolve_direct_upstream() {
 fn test_resolve_direct_upstream_inherits_plugin_defaults() {
   let config: UpstreamPluginConfig = serde_yaml::from_str(
     r#"
-    tcp_connect_timeout: 7s
-    upstreams:
-      - name: direct
-    "#,
+upstreams:
+- name: direct
+connection_pools:
+- name: default
+  tcp_connect_timeout: 7s
+"#,
   )
   .unwrap();
   let resolved = merge_chain_config(&config).unwrap();
@@ -226,26 +238,31 @@ fn test_pool_config_defaults() {
   .unwrap();
 
   let resolved = merge_chain_config(&config).unwrap();
-  let upstream = resolved.get("test").unwrap();
-  assert_eq!(upstream.pool_config.max_idle_per_host, 32);
+  assert!(resolved.contains_key("test"));
+  assert_eq!(crate::plugins::upstream::config::connection_pool::resolve_connection_pools(&config).unwrap()["default"].limits().http.max_idle_per_host, 32);
   assert_eq!(
-    upstream.pool_config.idle_timeout,
-    Duration::from_secs(90)
+    crate::plugins::upstream::config::connection_pool::resolve_connection_pools(&config).unwrap()["default"].limits().http.idle_timeout,
+    Duration::from_secs(3600)
   );
 }
 
 #[test]
-fn test_merge_chain_config_stream_window_inherits_three_levels() {
-  let config: UpstreamPluginConfig = serde_yaml::from_str(
-    "quic_stream_receive_window: 1024\nupstreams:\n- name: \
-     inherited\n  addresses:\n  - address: '127.0.0.1:443'\n    \
-     address_protocol: http3\n- name: overridden\n  \
-     quic_stream_receive_window: 2048\n  addresses:\n  - address: \
-     '127.0.0.1:443'\n    address_protocol: http3\n  - address: \
-     '127.0.0.1:444'\n    address_protocol: http3\n    \
-     quic_stream_receive_window: 4096",
-  )
-  .unwrap();
+fn test_merge_chain_config_stream_window_uses_selected_connection_pool()
+{
+  let config: UpstreamPluginConfig =
+    serde_yaml::from_str(
+      "upstreams:\n- name: inherited\n  addresses:\n  - address: \
+       127.0.0.1:443\n    address_protocol: http3\n- name: \
+       overridden\n  addresses:\n  - address: 127.0.0.1:443\n    \
+       address_protocol: http3\n  - address: 127.0.0.1:444\n    \
+       address_protocol: http3\n    use_connection_pool: \
+       address_pool_2\n  use_connection_pool: \
+       upstream_pool_1\nconnection_pools:\n- name: default\n  \
+       quic_stream_receive_window: 1024\n- name: upstream_pool_1\n  \
+       quic_stream_receive_window: 2048\n- name: address_pool_2\n  \
+       quic_stream_receive_window: 4096\n",
+    )
+    .unwrap();
   let resolved = merge_chain_config(&config).unwrap();
   for (name, index, expected) in [
     ("inherited", 0, 1024),
@@ -264,33 +281,41 @@ fn test_merge_chain_config_stream_window_inherits_three_levels() {
 #[test]
 fn test_merge_chain_config_validates_quic_stream_and_count_bounds() {
   for (fields, valid) in [
-    ("quic_connection_max_concurrent_bidi_streams: 10001", true),
     (
-      "quic_connection_max_concurrent_bidi_streams: \
-       1152921504606846976",
+      "connection_pools:\n- name: default\n  \
+       quic_connection_max_concurrent_bidi_streams: 10001\n",
       true,
     ),
     (
-      "quic_connection_max_concurrent_bidi_streams: \
-       1152921504606846977",
+      "connection_pools:\n- name: default\n  \
+       quic_connection_max_concurrent_bidi_streams: \
+       1152921504606846976\n",
+      true,
+    ),
+    (
+      "connection_pools:\n- name: default\n  \
+       quic_connection_max_concurrent_bidi_streams: \
+       1152921504606846977\n",
       false,
     ),
-    ("quic_stream_receive_window: 0", false),
-    ("quic_stream_receive_window: 4611686018427387904", false),
-    ("quic_stream_receive_window: 4096", true),
+    (
+      "connection_pools:\n- name: default\n  \
+       quic_stream_receive_window: 0\n",
+      false,
+    ),
+    (
+      "connection_pools:\n- name: default\n  \
+       quic_stream_receive_window: 4611686018427387904\n",
+      false,
+    ),
+    (
+      "connection_pools:\n- name: default\n  \
+       quic_stream_receive_window: 4096\n",
+      true,
+    ),
   ] {
-    for yaml in [
-      format!("{fields}\nupstreams: [{{name: direct}}]"),
-      format!("upstreams:\n- name: direct\n  {fields}"),
-      format!(
-        "upstreams:\n- name: chain\n  addresses:\n  - address: \
-         '127.0.0.1:443'\n    address_protocol: http3\n    {fields}"
-      ),
-    ] {
-      let config: UpstreamPluginConfig =
-        serde_yaml::from_str(&yaml).unwrap();
-      assert_eq!(merge_chain_config(&config).is_ok(), valid, "{yaml}");
-    }
+    let config = serde_yaml::from_str(fields).unwrap();
+    assert_eq!(merge_chain_config(&config).is_ok(), valid, "{fields}");
   }
 }
 
@@ -308,12 +333,14 @@ fn test_merge_chain_config_window_units_and_integer_bytes() {
     ] {
       let config: UpstreamPluginConfig =
         serde_yaml::from_str(&format!(
-          "{field}: {value}\nupstreams:\n- name: inherited\n  \
+          "connection_pools:\n- name: default\n  {field}: {value}\n- \
+           name: override\n  {field}: 2MiB\n- name: small\n  {field}: \
+           4KiB\nupstreams:\n- name: inherited\n  addresses:\n  - \
+           address: '127.0.0.1:443'\n    address_protocol: http3\n- \
+           name: override\n  use_connection_pool: override\n  \
            addresses:\n  - address: '127.0.0.1:443'\n    \
-           address_protocol: http3\n- name: override\n  {field}: \
-           2MiB\n  addresses:\n  - address: '127.0.0.1:443'\n    \
            address_protocol: http3\n  - address: '127.0.0.1:444'\n    \
-           address_protocol: http3\n    {field}: 4KiB"
+           address_protocol: http3\n    use_connection_pool: small"
         ))
         .unwrap();
       let resolved = merge_chain_config(&config).unwrap();
@@ -350,9 +377,11 @@ fn test_merge_chain_config_window_units_reject_invalid_sizes() {
     "quic_stream_receive_window",
   ] {
     for value in ["0MiB", "-1MiB", "garbage", "18446744073709551616B"] {
-      let parsed = serde_yaml::from_str::<UpstreamPluginConfig>(
-        &format!("{field}: {value}\nupstreams: [{{name: direct}}]"),
-      );
+      let parsed =
+        serde_yaml::from_str::<UpstreamPluginConfig>(&format!(
+          "connection_pools:\n- name: default\n  {field}: \
+           {value}\nupstreams: [{{name: direct}}]"
+        ));
       assert!(
         parsed
           .and_then(|config| merge_chain_config(&config)
@@ -366,9 +395,52 @@ fn test_merge_chain_config_window_units_reject_invalid_sizes() {
     ["quic_connection_receive_window", "quic_stream_receive_window"]
   {
     let parsed: UpstreamPluginConfig = serde_yaml::from_str(&format!(
-      "{field}: 4EiB\nupstreams: [{{name: direct}}]"
+      "connection_pools:\n- name: default\n  {field}: \
+       4EiB\nupstreams: [{{name: direct}}]"
     ))
     .unwrap();
     assert!(merge_chain_config(&parsed).is_err());
+  }
+}
+
+#[test]
+fn test_connection_pool_selection_inherits_and_creates_default() {
+  let config = serde_yaml::from_str(
+    "use_connection_pool: a\nconnection_pools: [{name: a, \
+     tcp_connect_timeout: 2s}, {name: b, tcp_connect_timeout: \
+     4s}]\nupstreams:\n- name: inherited\n- name: overridden\n  \
+     use_connection_pool: b\n  addresses:\n  - address: \
+     example.test:80\n    address_protocol: http\n  - address: \
+     example.test:81\n    address_protocol: http\n    \
+     use_connection_pool: default\n",
+  )
+  .unwrap();
+  let upstreams = merge_chain_config(&config).unwrap();
+  assert_eq!(upstreams["inherited"].use_connection_pool, "a");
+  assert_eq!(
+    upstreams["inherited"].connect_timeout,
+    Duration::from_secs(2)
+  );
+  assert_eq!(
+    upstreams["overridden"].addresses[0].use_connection_pool,
+    "b"
+  );
+  assert_eq!(
+    upstreams["overridden"].addresses[1].use_connection_pool,
+    "default"
+  );
+}
+
+#[test]
+fn test_connection_pool_selection_rejects_missing_and_duplicate_names()
+{
+  for yaml in [
+    "use_connection_pool: missing",
+    "connection_pools: [{name: a}, {name: a}]",
+    "connection_pools: [{name: ''}]",
+    "upstreams: [{name: direct, use_connection_pool: missing}]",
+  ] {
+    let config = serde_yaml::from_str(yaml).unwrap();
+    assert!(merge_chain_config(&config).is_err(), "accepted {yaml}");
   }
 }

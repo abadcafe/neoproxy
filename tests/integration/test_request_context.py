@@ -79,6 +79,7 @@ def test_request_id_propagates_and_tunnel_logs_only_after_transfer(
             ca=ca,
             upstream_port=upstream_port,
             upstream_kind=upstream_kind,
+            h3_max_connections=1,
         ),
     )
     fields = [

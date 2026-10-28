@@ -56,8 +56,6 @@ def write_node(
             "address_protocol": kind,
             "tunnel_idle_timeout": tunnel_idle_timeout,
         }
-        if kind == "http3":
-            address["quic_stream_receive_window"] = "4KiB"
         if (user := supplied_user(next_auth)) is not None:
             address["user"] = user
         upstream["addresses"] = [address]
@@ -78,12 +76,18 @@ def write_node(
     ]
     plugins: ConfigDict = {
         "upstream": {
-            "certificates": trust,
             "upstream_request_timeout": "10s",
             "tunnel_idle_timeout": "10s"
             if next_peer is not None
             else tunnel_idle_timeout,
             "upstreams": [upstream],
+            "connection_pools": [
+                {
+                    "name": "default",
+                    "certificates": trust,
+                    "quic_stream_receive_window": "4KiB",
+                }
+            ],
         },
         "access_log": {
             "writers": [

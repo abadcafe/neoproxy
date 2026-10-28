@@ -79,8 +79,10 @@ def _write_https_upstream_config(
 
 plugins:
   upstream:
-    certificates:
-      server_ca_path: "{ca_path}"
+    connection_pools:
+      - name: default
+        certificates:
+          server_ca_path: "{ca_path}"
     upstreams:
       - name: https_chain
         addresses:

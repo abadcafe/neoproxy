@@ -158,6 +158,19 @@ fn main() -> Result<std::process::ExitCode> {
   } else {
     None
   };
+  let connection_pools = config
+    .plugins()
+    .get("upstream")
+    .map(|args| {
+      plugins::upstream::build_connection_pools(Some(args)).inspect_err(
+        |error| {
+          tracing::error!(
+            "connection pool initialization failed: {error:#}"
+          )
+        },
+      )
+    })
+    .transpose()?;
   // Create shutdown signal
   let shutdown = ShutdownHandle::new();
 
@@ -184,6 +197,7 @@ fn main() -> Result<std::process::ExitCode> {
     .enumerate();
     while let Some((i, (worker, readiness))) = workers.next() {
       let log_registry = log_registry.clone();
+      let connection_pools = connection_pools.clone();
       if let Err(error) = supervisor.spawn(
         scope,
         &format!("neoproxy-server-{i}"),
@@ -191,6 +205,7 @@ fn main() -> Result<std::process::ExitCode> {
           server_thread::run_server_thread(
             config,
             log_registry,
+            connection_pools,
             worker,
             readiness,
             i,
@@ -208,6 +223,10 @@ fn main() -> Result<std::process::ExitCode> {
     // Supervise and explicitly join workers within their borrow scope.
     Ok(rt.block_on(supervisor.run(process::shutdown_signal())))
   })?;
+
+  if let Some(shared) = &connection_pools {
+    shared.shutdown();
+  }
 
   // Drop the process-owned writers before the diagnostic log guard.
   drop(log_registry);

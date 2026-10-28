@@ -45,11 +45,22 @@ pub(crate) struct PluginManager {
 }
 
 impl PluginManager {
+  #[cfg(test)]
   pub(crate) fn new(
     plugins_config: HashMap<String, SerializedArgs>,
     log_registry: Option<
       std::sync::Arc<access_log::registry::WriterRegistry>,
     >,
+  ) -> (Self, Vec<PluginLoadError>) {
+    Self::with_upstream(plugins_config, log_registry, None)
+  }
+
+  pub(crate) fn with_upstream(
+    plugins_config: HashMap<String, SerializedArgs>,
+    log_registry: Option<
+      std::sync::Arc<access_log::registry::WriterRegistry>,
+    >,
+    connection_pools: Option<std::sync::Arc<upstream::ConnectionPools>>,
   ) -> (Self, Vec<PluginLoadError>) {
     let known_plugins: &[(&str, CreateFn)] = &[
       (echo::plugin_name(), echo::create_plugin),
@@ -70,6 +81,20 @@ impl PluginManager {
           name,
           access_log::create_shared_plugin(registry.clone()),
         );
+        continue;
+      }
+      if name == upstream::plugin_name()
+        && let Some(shared) = &connection_pools
+      {
+        match upstream::create_pooled_plugin(
+          Some(&args),
+          shared.clone(),
+        ) {
+          Ok(plugin) => {
+            plugins.insert(name, plugin);
+          }
+          Err(source) => errors.push(PluginLoadError { name, source }),
+        }
         continue;
       }
       match known_plugins.iter().find(|(n, _)| *n == name.as_str()) {

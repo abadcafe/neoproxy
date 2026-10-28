@@ -133,6 +133,9 @@ pub(crate) fn run_server_thread(
   log_registry: Option<
     Arc<crate::plugins::access_log::registry::WriterRegistry>,
   >,
+  connection_pools: Option<
+    Arc<crate::plugins::upstream::ConnectionPools>,
+  >,
   mut worker: WorkerShutdown,
   mut readiness: crate::startup::WorkerReadiness,
   thread_id: usize,
@@ -141,7 +144,11 @@ pub(crate) fn run_server_thread(
   crate::worker_runtime::run(async {
     // Each thread builds its own PluginManager and listeners
     let (mut plugin_manager, plugin_errors) =
-      PluginManager::new(config.plugins().clone(), log_registry);
+      PluginManager::with_upstream(
+        config.plugins().clone(),
+        log_registry,
+        connection_pools.clone(),
+      );
     for err in &plugin_errors {
       warn!("plugin load error: {}: {}", err.name, err.source);
     }
@@ -247,6 +254,9 @@ pub(crate) fn run_server_thread(
        release transports"
     );
     worker.finish().await;
+    if let Some(shared) = &connection_pools {
+      shared.close();
+    }
     drop(listeners);
 
     match failure {

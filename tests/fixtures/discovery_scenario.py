@@ -35,10 +35,6 @@ def direct_proxy(
             port = get_unique_port()
             upstream: ConfigDict = {
                 "name": "direct",
-                "pool": {
-                    "idle_timeout": idle_timeout,
-                    "max_idle_per_host": max_idle_per_host,
-                },
             }
             if upstream_port is not None:
                 upstream = {
@@ -51,14 +47,27 @@ def direct_proxy(
                     ],
                 }
             plugin: ConfigDict = {
-                "certificates": {"server_ca_path": ca},
                 "upstreams": [upstream],
-                "dns_resolve_timeout": "1s",
                 "upstream_request_timeout": "4s",
-                "tls_handshake_timeout": tls_handshake_timeout,
+                "connection_pools": [
+                    {
+                        "name": "default",
+                        "http_pool_idle_timeout": idle_timeout,
+                        "https_pool_idle_timeout": idle_timeout,
+                        "http_pool_max_idle_connections": max_idle_per_host,
+                        "https_pool_max_idle_connections": max_idle_per_host,
+                        "certificates": {"server_ca_path": ca},
+                        "dns_resolve_timeout": "1s",
+                        "tls_handshake_timeout": tls_handshake_timeout,
+                    }
+                ],
             }
             if dns_port is not None:
-                plugin["dns_servers"] = [f"127.0.0.1:{dns_port}"]
+                pools = plugin["connection_pools"]
+                assert isinstance(pools, list)
+                pool = pools[0]
+                assert isinstance(pool, dict)
+                pool["dns_servers"] = [f"127.0.0.1:{dns_port}"]
             config: ConfigDict = {
                 "server_threads": 1,
                 "plugins": {"upstream": plugin},

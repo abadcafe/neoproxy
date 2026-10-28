@@ -3,10 +3,9 @@
 //! on failure public operations: DnsCache::{new,resolve}
 //! data entities: DnsCache, Entry
 //! tests: dns_cache_tests.rs; test_upstream_nodes.py
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use hickory_resolver::config::{
@@ -31,7 +30,7 @@ pub(super) struct DnsCache {
   resolver: TokioResolver,
   timeout: Duration,
   retry: Duration,
-  entries: RefCell<HashMap<String, Rc<Mutex<Entry>>>>,
+  entries: std::sync::Mutex<HashMap<String, Arc<Mutex<Entry>>>>,
 }
 impl DnsCache {
   pub(super) fn new(
@@ -65,7 +64,7 @@ impl DnsCache {
       resolver: builder.build()?,
       timeout,
       retry,
-      entries: RefCell::new(HashMap::new()),
+      entries: std::sync::Mutex::new(HashMap::new()),
     })
   }
 
@@ -88,10 +87,11 @@ impl DnsCache {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     let slot = self
       .entries
-      .borrow_mut()
+      .lock()
+      .expect("DNS cache poisoned")
       .entry(host.clone())
       .or_insert_with(|| {
-        Rc::new(Mutex::new(Entry {
+        Arc::new(Mutex::new(Entry {
           addresses: Vec::new(),
           refresh: Instant::now(),
           updated: Instant::now(),

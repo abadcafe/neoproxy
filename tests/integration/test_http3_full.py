@@ -170,9 +170,11 @@ class TestHTTP3ErrorHandling:
 
 plugins:
   upstream:
+    connection_pools:
+    - name: default
+      tcp_connect_timeout: 1s
     upstreams:
       - name: direct
-        tcp_connect_timeout: 1s
 
 listeners:
 - name: h3_main

@@ -134,3 +134,55 @@ async fn test_session_pool_peer_closure_during_h3_setup_is_bad_gateway()
     endpoint.close(0_u32.into(), b"done");
   }).await;
 }
+
+#[tokio::test]
+async fn test_session_pool_cancelled_handshake_releases_capacity() {
+  let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+  let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+    rustls::crypto::ring::default_provider(),
+  ))
+  .with_safe_default_protocol_versions()
+  .unwrap()
+  .with_root_certificates(rustls::RootCertStore::empty())
+  .with_no_client_auth();
+  let pool = SessionPool::new(
+    peer.local_addr().unwrap(),
+    Some("localhost".into()),
+    QuicConfig {
+      max_idle_timeout: None,
+      keep_alive_interval: Duration::from_secs(3),
+      max_concurrent_bidi_streams: None,
+      initial_mtu: None,
+      send_window: None,
+      receive_window: None,
+      stream_receive_window: None,
+    },
+    Duration::from_secs(30),
+    Default::default(),
+  );
+  let tracker = Rc::new(StreamTracker::new());
+  let mut bytes = [0; 2048];
+  let first_address = {
+    let request = pool.open(http::Request::new(()), &tls, &tracker);
+    tokio::pin!(request);
+    tokio::select! {
+      result = &mut request => panic!("handshake completed unexpectedly: {}", result.is_ok()),
+      packet = peer.recv_from(&mut bytes) => packet.unwrap().1,
+    }
+  };
+  let second = async {
+    let request = pool.open(http::Request::new(()), &tls, &tracker);
+    tokio::pin!(request);
+    loop {
+      tokio::select! {
+        result = &mut request => panic!("handshake completed unexpectedly: {}", result.is_ok()),
+        packet = peer.recv_from(&mut bytes) => {
+          if packet.unwrap().1 != first_address { break; }
+        }
+      }
+    }
+  };
+  tokio::time::timeout(Duration::from_secs(2), second)
+    .await
+    .expect("cancelled handshake retained the only pool slot");
+}

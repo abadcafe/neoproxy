@@ -107,10 +107,15 @@ def configuration(
         "address_protocol": "socks5",
         "address_fail_timeout": "30s",
         "upstream_request_timeout": "200ms",
-        "tcp_keep_alive_time": "30s",
-        "tcp_keep_alive_interval": "5s",
-        "tcp_keep_alive_retries": 3,
         "upstreams": [{"name": "main", "addresses": list(addresses)}],
+        "connection_pools": [
+            {
+                "name": "default",
+                "tcp_keep_alive_time": "30s",
+                "tcp_keep_alive_interval": "5s",
+                "tcp_keep_alive_retries": 3,
+            }
+        ],
     }
     if user is not None:
         plugin["user"] = user

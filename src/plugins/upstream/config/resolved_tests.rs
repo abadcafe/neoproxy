@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use super::protocol::{PoolConfig, ProtocolKind};
+use super::protocol::ProtocolKind;
 use super::resolved::{
   Address, ClientCertCredential, Protocol, QuicResolved, Upstream,
 };
@@ -14,6 +14,7 @@ fn test_protocol_kind_equality_distinguishes_protocols() {
 #[test]
 fn test_resolved_address_preserves_runtime_fields() {
   let address = Address {
+    use_connection_pool: "default".into(),
     address_max_fails: 1,
     address_fail_timeout: Duration::from_secs(10),
     tcp_keep_alive_time: None,
@@ -55,24 +56,20 @@ fn test_quic_resolved_preserves_optional_transport_fields() {
 #[test]
 fn test_upstream_preserves_direct_mode_defaults() {
   let upstream = Upstream {
+    use_connection_pool: "default".into(),
     address_max_fails: 1,
     address_fail_timeout: Duration::from_secs(10),
     tcp_keep_alive_time: None,
     tcp_keep_alive_interval: None,
     tcp_keep_alive_retries: None,
-    dns_refresh_retry_interval: Duration::from_secs(30),
-    dns_servers: None,
     addresses: vec![],
-    pool_config: PoolConfig::default(),
     connect_timeout: Duration::from_secs(10),
     tls_handshake_timeout: Duration::from_secs(10),
     tunnel_idle_timeout: Duration::from_secs(60),
-    dns_resolve_timeout: Duration::from_secs(5),
     upstream_request_timeout: Duration::from_secs(30),
   };
 
   assert!(upstream.addresses.is_empty());
-  assert_eq!(upstream.pool_config.max_idle_per_host, 32);
   assert_eq!(upstream.connect_timeout, Duration::from_secs(10));
 }
 

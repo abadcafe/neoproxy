@@ -23,10 +23,9 @@ use crate::plugins::upstream::target_parser::{
 use crate::tracker::StreamTracker;
 
 pub(super) struct DirectClient {
-  client: hyper_util::client::legacy::Client<
-    super::origin_connector::OriginConnector,
-    RequestBody,
-  >,
+  connector: super::origin_connector::OriginConnector,
+  tracker: Rc<StreamTracker>,
+  shared: Arc<super::ConnectionPool>,
   connect_timeout: Duration,
   tunnel_idle_timeout: Duration,
   endpoint: std::net::SocketAddr,
@@ -37,17 +36,15 @@ impl DirectClient {
     config: &config::Upstream,
     tls: Arc<rustls::ClientConfig>,
     endpoint: std::net::SocketAddr,
+    tracker: Rc<StreamTracker>,
+    shared: Arc<super::ConnectionPool>,
   ) -> anyhow::Result<Self> {
     Ok(Self {
-      client: hyper_util::client::legacy::Client::builder(
-        hyper_util::rt::TokioExecutor::new(),
-      )
-      .pool_timer(hyper_util::rt::TokioTimer::new())
-      .pool_max_idle_per_host(config.pool_config.max_idle_per_host)
-      .pool_idle_timeout(config.pool_config.idle_timeout)
-      .build(super::origin_connector::OriginConnector::new(
+      connector: super::origin_connector::OriginConnector::new(
         config, tls, endpoint,
-      )?),
+      )?,
+      tracker,
+      shared,
       connect_timeout: config.connect_timeout,
       tunnel_idle_timeout: config.tunnel_idle_timeout,
       endpoint,
@@ -73,7 +70,34 @@ impl ClientProtocol for DirectClient {
     Box::pin(async move {
       req_headers.headers.remove("alt-used");
       forward_request(
-        self.client.clone(),
+        super::http_pool::ProxyPool::shared(
+          self.connector.clone(),
+          if target.absolute_uri().scheme_str() == Some("https") {
+            self.shared.https.clone()
+          } else {
+            self.shared.http.clone()
+          },
+          super::http_cache::Key {
+            endpoint: self.endpoint,
+            server_name: (target.absolute_uri().scheme_str()
+              == Some("https"))
+            .then(|| {
+              target
+                .absolute_uri()
+                .host()
+                .expect("validated host")
+                .to_owned()
+            }),
+            origin: Some(
+              target
+                .absolute_uri()
+                .authority()
+                .expect("validated authority")
+                .to_string(),
+            ),
+          },
+          self.tracker.clone(),
+        ),
         &None,
         target,
         req_headers,

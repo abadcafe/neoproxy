@@ -122,3 +122,38 @@ impl Nodes {
     }
   }
 }
+
+/// Cross-worker scheduling preserves weights and health within one
+/// upstream.
+#[derive(Default)]
+pub(super) struct SharedNodes(std::sync::Mutex<Nodes>);
+impl SharedNodes {
+  pub(super) fn update(&self, policies: Vec<NodePolicy>) {
+    self.0.lock().expect("nodes poisoned").update(policies);
+  }
+
+  pub(super) fn select(
+    &self,
+    tried: &[NodeKey],
+    excluded_owners: &[usize],
+  ) -> Option<NodeKey> {
+    let mut nodes = self.0.lock().expect("nodes poisoned");
+    let mut excluded = tried.to_vec();
+    excluded.extend(
+      nodes
+        .order
+        .iter()
+        .filter(|key| excluded_owners.contains(&key.owner))
+        .cloned(),
+    );
+    nodes.select(&excluded)
+  }
+
+  pub(super) fn failed(&self, key: &NodeKey) {
+    self.0.lock().expect("nodes poisoned").failed(key);
+  }
+
+  pub(super) fn succeeded(&self, key: &NodeKey) {
+    self.0.lock().expect("nodes poisoned").succeeded(key);
+  }
+}

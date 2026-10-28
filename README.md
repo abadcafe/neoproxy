@@ -109,12 +109,14 @@ plugins:
 
 插件配置使用 `plugins.upstream`，服务类型使用 `upstream.upstream`。
 
-统一代理插件，定义上游代理池和直连配置。支持三级继承配置：**Plugin → Upstream → Address**。
+统一代理插件，通过 `connection_pools` 定义命名连接资源，通过 `upstreams` 定义路由节点。业务参数及 `use_connection_pool` 支持三级继承：**Plugin → Upstream → Address**。
 低层级覆盖高层级同名参数。`upstream_request_timeout` 按插件、upstream、address 三级继承；链式请求使用调度选中地址的超时。链式地址通过 `address_protocol: http`、`address_protocol: https` 、`address_protocol: http3` 或 `address_protocol: socks5` 选择单一协议；`address_protocol` 支持三级继承，默认 `https`。TCP keepalive 的三个字段均已生效，省略时保持系统默认；配置任一项即启用 TCP keepalive。
 
 SOCKS5 上游仅承接 CONNECT，目标解析复用 HTTP CONNECT：域名交给上游解析，IPv4/IPv6 按对应类型发送。普通 GET/POST 等请求只选择 HTTP/HTTPS/HTTP3 节点；没有可用节点时返回与节点全部不可用相同的 502，协议不适用不计健康检查失败。SOCKS5 握手与认证包含在 `upstream_request_timeout` 内，成功后的隧道复用 `tunnel_idle_timeout`，每条隧道独立使用 TCP 连接。
 
 认证复用三级继承的 `user: {username: ..., password: ...}`。未配置凭据时提供无认证；配置后同时提供无认证与用户名密码，由 SOCKS5 服务端选择。用户名和密码各为 1–255 字节。认证拒绝映射为上游 407（对下游返回 502），规则拒绝映射 403，TTL 到期映射 504，命令不支持映射 501，其余 CONNECT 失败映射 502。这些明确响应复用 HTTP CONNECT 的响应错误处理，不摘除节点、不重试；连接、握手 I/O 失败和超时沿用现有被动健康检查和重试规则。
+
+`use_connection_pool` 按 address → upstream → plugin → `default` 解析。未声明 `default` 时自动创建全部采用默认值的连接池；显式声明时未填写的参数使用内置默认值。空名称、重复名称及引用不存在的池都会在启动时拒绝。不同池不继承配置，也不共享连接、DNS 缓存或 TLS 身份。同一个池跨 worker、跨 upstream 共享，支持 HTTP、HTTPS、H3 和 SOCKS5；H3 线程数和连接上限按池独立计算。
 
 **直连模式**：upstream 不配置 `addresses`，代理直接连接目标服务器。
 **链式模式**：upstream 配置 `addresses`，代理通过上游代理服务器转发。
@@ -122,38 +124,44 @@ SOCKS5 上游仅承接 CONNECT，目标解析复用 HTTP CONNECT：域名交给�
 ```yaml
 plugins:
   upstream:
-    certificates:                          # 可选 TLS 信任库和客户端证书
-      server_ca_path: conf/certs/server-ca.crt
-      client_cert_path: conf/certs/client.crt
-      client_key_path: conf/certs/client.key
-    dns_servers: null                 # 仅插件级；未配置时读取系统 DNS 服务器
-    dns_resolve_timeout: 5s            # 仅插件级
-    dns_refresh_retry_interval: 30s    # 仅插件级；刷新失败后重试间隔
+    connection_pools:
+      - name: default
+        certificates:                          # 可选 TLS 信任库和客户端证书
+          server_ca_path: conf/certs/server-ca.crt
+          client_cert_path: conf/certs/client.crt
+          client_key_path: conf/certs/client.key
+        dns_servers: null                 # 仅连接池级；未配置时读取系统 DNS 服务器
+        dns_resolve_timeout: 5s            # 仅连接池级
+        dns_refresh_retry_interval: 30s    # 仅连接池级；刷新失败后重试间隔
+        http_pool_max_idle_connections: 32 # 本连接池的 HTTP 空闲缓存上限；0 禁用缓存
+        http_pool_idle_timeout: 60m
+        https_pool_max_idle_connections: 32 # HTTPS 池独立计数；0 禁用缓存
+        https_pool_idle_timeout: 60m
+        http3_pool_io_threads: 1            # H3 池独立 I/O runtime 的线程数，至少 1
+        http3_pool_max_connections_per_host: 2 # 同一 IP:port 的连接上限，至少 1
+        http3_pool_idle_timeout: 60m
+        tcp_keep_alive_time: null          # 连接池级；开始探测前的空闲时间
+        tcp_keep_alive_interval: null      # 连接池级；探测间隔
+        tcp_keep_alive_retries: null       # 连接池级；探测重试次数
+        tcp_connect_timeout: 10s
+        tls_handshake_timeout: 5s
+        quic_connection_connect_timeout: 10s
+        quic_connection_keep_alive_interval: "3s"
     address_protocol: https           # 三级继承；direct 普通请求由 URL scheme 决定
     address_max_fails: 1               # 三级继承；0 禁用被动失败摘除
     address_fail_timeout: 10s          # 三级继承；失败统计及摘除时长
-    tcp_keep_alive_time: null          # 三级继承；开始探测前的空闲时间
-    tcp_keep_alive_interval: null      # 三级继承；探测间隔
-    tcp_keep_alive_retries: null       # 三级继承；探测重试次数
     upstream_request_timeout: 30s      # 每次上游尝试收到响应头/完成 CONNECT 的时限
     tunnel_idle_timeout: 60s           # 插件级默认配置
-    tcp_connect_timeout: 10s
-    tls_handshake_timeout: 5s
-    quic_connection_connect_timeout: 10s
-    quic_connection_keep_alive_interval: "3s"
     upstreams:
       # 直连模式（无 addresses）
       - name: direct
         tunnel_idle_timeout: 60s
-        tcp_connect_timeout: 10s
-        pool:
-          max_idle_per_host: 32            # 连接池最大空闲连接数（默认: 32）
-          idle_timeout: 90s                # 连接池空闲超时（默认: 90s）
+        use_connection_pool: default
 
       # 链式模式（有 addresses）
       - name: remote_relay
         tunnel_idle_timeout: 60s
-        quic_connection_keep_alive_interval: "5s"
+        use_connection_pool: default
         addresses:
           - address: "host:port"           # 上游代理地址
             hostname: "sni.example.com"    # 连接上游时使用的 SNI（需匹配上游证书 SAN）
@@ -219,10 +227,10 @@ servers:
 
 upstream 的 `quic_connection_send_window`、`quic_connection_receive_window` 和
 `quic_stream_receive_window` 统一支持 `10MiB`、`1MiB` 等尺寸字符串，也支持字节整数，
-与 listener 使用相同格式。这三个字段均按插件 → upstream → address 继承。
+与 listener 使用相同格式。这三个字段只在 `connection_pools[]` 中配置。
 其中 `quic_stream_receive_window`
 未配置时沿用 Quinn 默认值。它控制从上游接收的单条流，包括普通响应及 CONNECT 隧道。
-例如插件级 `quic_stream_receive_window: 1MiB`，可在 upstream 或 address 同名字段覆盖。
+需要不同窗口策略时定义不同连接池，通过三级 `use_connection_pool` 选择。
 `1MiB` 等于 1048576 字节；`1MB` 等于 1000000 字节。upstream 的
 `quic_connection_max_concurrent_bidi_streams` 同样取消 10000 上限，使用 `1..=2^60` 范围。
 
@@ -501,13 +509,17 @@ curl --socks5 127.0.0.1:1080 --proxy-user admin:secret123 https://example.com
 
 Service 按方法处理请求：`CONNECT host:port` 建立透明隧道；其他方法统一转发完整的 HTTP 请求，目标 URL 支持 `http://` 和 `https://`。直连时，HTTP 目标使用 TCP，HTTPS 目标使用 TLS 并校验证书和目标主机名；链式模式将目标 scheme、authority、path、方法和消息体交给下一跳，不在中继节点建立目标 TLS。到 proxy 的连接地址、TLS 主机名与请求目标独立。GET/POST 的响应保留 HTTP 消息语义，CONNECT 成功后才转入双向字节传输。
 
-末端直连客户端只使用 HTTP/1.1：HTTP 目标走 TCP，HTTPS 目标走 TLS，ALPN 仅提供 `http/1.1`，并保留证书和主机名校验。连接池按目标 scheme、host、port 隔离，由 `pool.max_idle_per_host` 和 `pool.idle_timeout` 控制。直连不使用 HTTP/2、HTTP/3，不解析或缓存 Alt-Svc，也不查询 DNS HTTPS 记录。
+末端直连客户端只使用 HTTP/1.1：HTTP 目标走 TCP，HTTPS 目标走 TLS，ALPN 仅提供 `http/1.1`，并保留证书和主机名校验。连接池在进程内跨 worker、跨 upstream 共享，HTTP/HTTPS 分别由连接池级 `http_pool_*` / `https_pool_*` 控制。直连按目标 authority 及选中 IP:port 隔离；代理连接按代理 IP:port 复用，TLS 另匹配 server_name。直连不使用 HTTP/2、HTTP/3，不解析或缓存 Alt-Svc，也不查询 DNS HTTPS 记录。
 
 direct 从请求目标构造一个权重为 1 的 address，链式模式使用配置的全部 addresses；各域名先解析为所有 A/AAAA 地址，再对全部 IP 节点做平滑加权轮询。每个 IP 继承所属 address 的完整权重、协议、认证及超时配置。同一 IP 属于不同 address 时保持不同身份。连接池按选中节点及目标身份隔离，复用连接也先经过节点调度，不再做 IP 并发竞速。所有 TCP 监听和上游连接均启用 `TCP_NODELAY`；`quic_connection_*` 只作用于 HTTP/3 链式上游。
 
-节点健康状态按 worker、upstream 和目标分别维护。`address_max_fails` 默认 1，`address_fail_timeout` 默认 10s，采用 Nginx 风格的被动失败计数、有效权重恢复和到期重试；只有一个 IP 节点时不因失败摘除，`address_max_fails: 0` 禁用摘除。失败只统计建连（含 TLS/QUIC 握手）、发送请求、等待响应头阶段的传输错误或超时，不按 HTTP 4xx/5xx 状态摘除，不统计非法响应头、客户端请求体错误、响应 body 或已建立隧道的后续错误。未提交请求的建连失败可尝试同组其他节点；已经提交的普通请求不自动重放。主动健康探测不启用。
+节点健康和权重状态跨 worker 共享，按 upstream 和目标隔离。`address_max_fails` 默认 1，`address_fail_timeout` 默认 10s，采用 Nginx 风格的被动失败计数、有效权重恢复和到期重试；只有一个 IP 节点时不因失败摘除，`address_max_fails: 0` 禁用摘除。失败只统计建连（含 TLS/QUIC 握手）、发送请求、等待响应头阶段的传输错误或超时，不按 HTTP 4xx/5xx 状态摘除，不统计非法响应头、客户端请求体错误、响应 body 或已建立隧道的后续错误。未提交请求的建连失败可尝试同组其他节点；已经提交的普通请求不自动重放。主动健康探测不启用。
 
-链式 H3 上游同样遵守 `pool`：`max_idle_per_host: 0` 禁用跨请求连接复用，非零值允许复用一个多路复用会话，`idle_timeout` 从最后一个活跃响应或隧道释放后计算。池销毁会立即取消自己的维护任务；池索引不会因一个响应持续时间较长而淘汰仍活跃的 H3 会话。日志 writer 的活动文件和轮转归档必须拥有互不重叠的路径命名空间。
+HTTP/HTTPS 普通转发独占借出完整连接，由当前 worker 驱动。请求和响应完整结束且协议状态允许复用时才归还；异常、取消、状态不确定则关闭。空闲超时从归还时起算，池上限只限制空闲缓存。HTTP/HTTPS CONNECT、SOCKS5 和 direct CONNECT 使用专用连接，不进入缓存池。
+
+H3 池内部持有独立多线程 runtime，负责 QUIC/H3 建联、驱动和回收。按需创建至每个 IP:port 的连接上限后轮流打开 stream，普通转发和 CONNECT 共用轮转。创建中及仍有活跃 stream 的排空连接计入上限；GOAWAY 不接受新请求，已有 stream 排空。容量等待纳入请求超时，不计为节点健康失败。池空闲超时从最后一个活跃响应或隧道结束后起算；QUIC keepalive 不重置池空闲时间。`quic_connection_idle_timeout` 是独立的传输层空闲超时，仍可能终止活跃 stream。
+
+TLS 信任和客户端证书使用连接池级统一配置；连接参数仅在新建时生效，复用沿用原连接参数。进程停止新请求并排空业务后关闭共享池，再退出 H3 runtime 和 worker runtime。日志 writer 的活动文件和轮转归档必须拥有互不重叠的路径命名空间。
 
 普通转发响应移除 `Alt-Svc`，中继同样不保留该响应头；响应 trailers 也会移除该字段。CONNECT 保持字节透传，不解析隧道内的 TLS 或 HTTP。
 
@@ -525,7 +537,7 @@ direct 从请求目标构造一个权重为 1 的 address，链式模式使用�
 
 显式 CA 文件必须包含有效证书；空文件、只有私钥或无证书内容会导致配置失败，系统信任库不会掩盖该错误。
 
-`dns_servers`、`dns_resolve_timeout` 和 `dns_refresh_retry_interval` 仅可在插件级配置。`dns_servers` 例如 `["127.0.0.1:5353", "[::1]:5353"]`；未配置时读取系统 DNS 服务器，由同一解析器服务 direct、CONNECT 和链式上游。遵守 DNS TTL，到期由后续请求触发刷新，同域名并发查询合并。刷新失败（包括无可用地址）保留上次成功结果，默认 30s 后允许再次刷新，不强制废弃旧结果；首次失败且无缓存则返回 DNS 错误。DNS 更新保留未变化 IP 的健康状态，移除节点停止接收新请求，已有响应与隧道继续完成。
+`dns_servers`、`dns_resolve_timeout` 和 `dns_refresh_retry_interval` 仅可在 `connection_pools[]` 配置。`dns_servers` 例如 `["127.0.0.1:5353", "[::1]:5353"]`；未配置时读取系统 DNS 服务器，由同一解析器服务 direct、CONNECT 和链式上游。遵守 DNS TTL，到期由后续请求触发刷新，同域名并发查询合并。刷新失败（包括无可用地址）保留上次成功结果，默认 30s 后允许再次刷新，不强制废弃旧结果；首次失败且无缓存则返回 DNS 错误。DNS 更新保留未变化 IP 的健康状态，移除节点停止接收新请求，已有响应与隧道继续完成。
 
 `tunnel_idle_timeout` 按整个隧道的双向字节进展计时，任一方向成功读取或接受写入新字节都会刷新期限；EOF、空读写和反复轮询不算活动。一个独立计时器覆盖整个传输过程，包括双方读到 EOF 后仍在等待的 H3 `flush`/`finish`。单向半关闭会继续传输另一方向的数据，直到正常完成、空闲超时或服务关闭。H3 适配器每次最多缓冲 64 KiB，接受数据后立即确认本次字节数，`flush`/`shutdown` 推进发送并传播错误。
 
@@ -564,8 +576,10 @@ servers:
 ```yaml
 plugins:
   upstream:
-    certificates:
-      server_ca_path: conf/certs/server-ca.crt
+    connection_pools:
+      - name: default
+        certificates:
+          server_ca_path: conf/certs/server-ca.crt
     upstreams:
       - name: remote_relay
         addresses:
@@ -894,8 +908,10 @@ server_threads: 4
 
 plugins:
   upstream:
-    certificates:
-      server_ca_path: /etc/neoproxy/ca.pem
+    connection_pools:
+      - name: default
+        certificates:
+          server_ca_path: /etc/neoproxy/ca.pem
     upstreams:
       - name: remote
         addresses:

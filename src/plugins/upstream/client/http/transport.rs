@@ -24,8 +24,8 @@ impl<T> ProxyTransport<T> {
     (self.io.into_inner(), self.observation)
   }
 }
-impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> super::ProxyIo
-  for ProxyTransport<T>
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>
+  super::super::transport_io::ProxyIo for ProxyTransport<T>
 {
   fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {
     self.observation.peer().ok_or_else(|| {

@@ -220,3 +220,16 @@ impl AsyncWrite for OriginConnection {
     Pin::new(self.io()).poll_shutdown(cx)
   }
 }
+
+impl super::transport_io::ProxyIo for TokioIo<OriginConnection> {
+  fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
+    match &self.inner().transport {
+      Transport::Tcp(stream) => stream.peer_addr(),
+      Transport::Tls(stream) => stream.get_ref().0.peer_addr(),
+    }
+  }
+
+  fn observation(&self) -> ConnectionObservation {
+    self.inner().observation.clone()
+  }
+}

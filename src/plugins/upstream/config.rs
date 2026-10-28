@@ -4,6 +4,7 @@
 //! data entities: none
 //! tests: config_tests.rs
 
+pub(crate) mod connection_pool;
 mod defaults;
 #[cfg(test)]
 mod defaults_tests;

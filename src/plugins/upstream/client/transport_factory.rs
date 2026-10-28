@@ -17,6 +17,7 @@ use crate::plugins::upstream::error::UpstreamError;
 use crate::tracker::StreamTracker;
 
 pub(super) struct ClientEntry {
+  pub(super) tls: Arc<rustls::ClientConfig>,
   pub(super) client: Box<dyn ClientProtocol>,
   pub(super) request_timeout: Duration,
   pub(super) protocol: config::protocol::ProtocolKind,
@@ -25,23 +26,21 @@ pub(super) fn build(
   config: &config::Upstream,
   address: &Address,
   endpoint: SocketAddr,
-  tls: &Option<Arc<rustls::ClientConfig>>,
   tracker: &Rc<StreamTracker>,
+  connection_pools: &Arc<super::ConnectionPools>,
 ) -> Result<ClientEntry, UpstreamError> {
-  let required_tls = || {
-    tls.clone().ok_or_else(|| {
-      UpstreamError::ProxyInternalError(
-        "missing TLS configuration".into(),
-      )
-    })
-  };
+  let shared = connection_pools.get(&address.use_connection_pool);
+  let tls = shared.tls.clone();
   if config.addresses.is_empty() {
     return Ok(ClientEntry {
+      tls: tls.clone(),
       client: Box::new(
         super::direct::DirectClient::new(
           config,
-          required_tls()?,
+          tls.clone(),
           endpoint,
+          tracker.clone(),
+          shared.clone(),
         )
         .map_err(|error| {
           UpstreamError::ProxyInternalError(error.to_string())
@@ -80,10 +79,14 @@ pub(super) fn build(
     Protocol::Http { connect_timeout } => {
       let connector = ProxyConnector::new(endpoint, *connect_timeout)
         .with_tcp_options(options);
-      let pool = super::http_pool::ProxyPool::new(
+      let pool = super::http_pool::ProxyPool::shared(
         connector,
-        config.pool_config.max_idle_per_host,
-        config.pool_config.idle_timeout,
+        shared.http.clone(),
+        super::http_cache::Key {
+          endpoint,
+          server_name: None,
+          origin: None,
+        },
         tracker.clone(),
       );
       Box::new(HttpProxyClient::new(
@@ -97,14 +100,18 @@ pub(super) fn build(
         .with_tcp_options(options);
       let connector = TlsProxyConnector::new(
         inner,
-        required_tls()?,
-        hostname,
+        tls.clone(),
+        hostname.clone(),
         *tls_handshake_timeout,
       );
-      let pool = super::http_pool::ProxyPool::new(
+      let pool = super::http_pool::ProxyPool::shared(
         connector,
-        config.pool_config.max_idle_per_host,
-        config.pool_config.idle_timeout,
+        shared.https.clone(),
+        super::http_cache::Key {
+          endpoint,
+          server_name: Some(hostname),
+          origin: None,
+        },
         tracker.clone(),
       );
       Box::new(HttpProxyClient::new(
@@ -114,7 +121,7 @@ pub(super) fn build(
       ))
     }
     Protocol::Http3 { tls_handshake_timeout, quic } => {
-      let session = SessionPool::new(
+      let session = SessionPool::shared(
         endpoint,
         Some(hostname),
         QuicConfig {
@@ -127,7 +134,8 @@ pub(super) fn build(
           stream_receive_window: quic.stream_receive_window,
         },
         *tls_handshake_timeout,
-        config.pool_config.clone(),
+        shared.h3.clone(),
+        shared.h3_runtime.clone(),
       );
       Box::new(Http3Client {
         session,
@@ -137,6 +145,7 @@ pub(super) fn build(
     }
   };
   Ok(ClientEntry {
+    tls,
     client,
     request_timeout: address.upstream_request_timeout,
     protocol: address.address_protocol.kind(),

@@ -55,7 +55,6 @@ def test_failover_records_the_last_selected_protocol(
         "server_threads": 1,
         "plugins": {
             "upstream": {
-                "certificates": {"server_ca_path": ca},
                 "upstreams": [
                     {
                         "name": "route",
@@ -71,17 +70,16 @@ def test_failover_records_the_last_selected_protocol(
                         ],
                     }
                 ],
+                "connection_pools": [
+                    {"name": "default", "certificates": {"server_ca_path": ca}}
+                ],
             }
         },
         "listeners": [
             {"name": "main", "kind": "http", "addresses": [f"127.0.0.1:{entry_port}"]}
         ],
         "services": [
-            {
-                "name": "forward",
-                "kind": "upstream.upstream",
-                "upstream": "route",
-            }
+            {"name": "forward", "kind": "upstream.upstream", "upstream": "route"}
         ],
         "servers": [{"name": "forward", "listeners": ["main"], "service": "forward"}],
     }

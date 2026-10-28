@@ -51,8 +51,10 @@ async def verify_upload_cancellation(directory: Path) -> None:
     _ = path.write_text(f"""server_threads: 1
 plugins:
   upstream:
-    certificates:
-      server_ca_path: {ca}
+    connection_pools:
+      - name: default
+        certificates:
+          server_ca_path: {ca}
     upstreams:
     - name: relay
       addresses:

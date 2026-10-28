@@ -115,8 +115,10 @@ def test_http3_chain_streams_response_before_upload_eof(tmp_path: Path) -> None:
     chain = f"""server_threads: 1
 plugins:
   upstream:
-    certificates:
-      server_ca_path: {ca}
+    connection_pools:
+      - name: default
+        certificates:
+          server_ca_path: {ca}
     upstreams:
     - name: relay
       addresses:

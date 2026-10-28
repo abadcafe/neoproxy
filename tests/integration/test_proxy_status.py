@@ -199,10 +199,12 @@ class TestProxyStatus:
 
 plugins:
   upstream:
+    connection_pools:
+    - name: default
+      tcp_connect_timeout: 1s
     upstreams:
       - name: direct
         tunnel_idle_timeout: 60s
-        tcp_connect_timeout: 1s
 
 listeners:
 - name: http_main

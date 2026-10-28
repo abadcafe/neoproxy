@@ -8,6 +8,7 @@ import ssl
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from itertools import count
 from typing import Literal, override
 
 from aioquic.asyncio.protocol import QuicConnectionProtocol, QuicStreamHandler
@@ -56,6 +57,9 @@ class OriginPeer:
 @asynccontextmanager
 async def origin_peer(config: PeerConfig) -> AsyncGenerator[OriginPeer]:
     peer = OriginPeer(config.port or get_unique_port())
+    # Python object IDs may be reused after a connection is destroyed.
+    # Assign identities for the lifetime of this observable peer instead.
+    connection_ids = count(1)
 
     def response_fields(body: bytes) -> list[tuple[bytes, bytes]]:
         return [
@@ -69,6 +73,7 @@ async def origin_peer(config: PeerConfig) -> AsyncGenerator[OriginPeer]:
             self, quic: QuicConnection, stream_handler: QuicStreamHandler | None = None
         ) -> None:
             super().__init__(quic, stream_handler)
+            self.connection_id: int = next(connection_ids)
             self.connection: QuicConnection = quic
             self.http: H3Connection = H3Connection(quic)
             self.headers: dict[int, dict[str, str]] = {}
@@ -101,7 +106,9 @@ async def origin_peer(config: PeerConfig) -> AsyncGenerator[OriginPeer]:
 
         def respond(self, stream: int) -> None:
             body = bytes(self.bodies.pop(stream))
-            peer.requests.append(SeenRequest(self.headers.pop(stream), body, id(self)))
+            peer.requests.append(
+                SeenRequest(self.headers.pop(stream), body, self.connection_id)
+            )
             if peer.abort_response:
                 self.connection.reset_stream(stream, 0x102)
                 self.transmit()
@@ -134,6 +141,7 @@ async def origin_peer(config: PeerConfig) -> AsyncGenerator[OriginPeer]:
     async def http_peer(
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        connection_id = next(connection_ids)
         try:
             tls_connection = TypeAdapter(object).validate_python(
                 writer.get_extra_info("ssl_object")
@@ -156,7 +164,7 @@ async def origin_peer(config: PeerConfig) -> AsyncGenerator[OriginPeer]:
                     SeenRequest(
                         fields,
                         body,
-                        id(writer),
+                        connection_id,
                         tls_connection.selected_alpn_protocol(),
                     )
                 )

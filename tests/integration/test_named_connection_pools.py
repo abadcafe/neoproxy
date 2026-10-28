@@ -74,7 +74,6 @@ async def test_named_connection_pools_isolate_cached_connections_and_dns(
                 "name": name,
                 "dns_servers": [f"127.0.0.1:{dns.port}"],
                 "certificates": {"server_ca_path": ca},
-                "http3_pool_max_connections_per_host": 1,
             }
             for name, dns in [("a", a), ("b", b)]
         ]

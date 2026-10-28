@@ -260,7 +260,7 @@ class TestHTTP3ConfigValidationFull:
 
             # Test with zero timeout (invalid, rejected at startup)
             quic_config = """      quic_connection_max_concurrent_bidi_streams: 100
-      quic_connection_idle_timeout: '0s'"""
+      quic_connection_max_idle_timeout: '0s'"""
 
             config_path = create_http3_listener_config(
                 proxy_port,
@@ -302,7 +302,7 @@ class TestHTTP3ConfigValidationFull:
 
             # Test minimum valid values
             quic_config = """      quic_connection_max_concurrent_bidi_streams: 1
-      quic_connection_idle_timeout: '1ms'
+      quic_connection_max_idle_timeout: '1ms'
       quic_connection_initial_mtu: 1200
       quic_connection_send_window: '1B'
       quic_connection_receive_window: '1B'"""
@@ -351,7 +351,7 @@ class TestHTTP3ConfigValidationFull:
 
             # Test maximum valid values per design doc
             quic_config = """      quic_connection_max_concurrent_bidi_streams: 10000
-      quic_connection_idle_timeout: '300s'
+      quic_connection_max_idle_timeout: '300s'
       quic_connection_initial_mtu: 9000
       quic_connection_send_window: '100MiB'
       quic_connection_receive_window: '100MiB'"""

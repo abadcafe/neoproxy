@@ -31,12 +31,11 @@ mod handshake_tests;
 
 use std::future::Future;
 use std::net::SocketAddr;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
-use handshake::DEFAULT_HANDSHAKE_TIMEOUT;
 use serde::Deserialize;
 
+use super::header_deadline::HeaderDeadline;
 use super::tcp_accept::AcceptRetryDelay;
 use super::tcp_listener_base::TcpListenerBase;
 use crate::config::{ListenerPropertyValues, SerializedArgs};
@@ -44,8 +43,6 @@ use crate::listener::{
   BuildListener, Listener, Listening, TransportLayer,
 };
 use crate::service::Service as RuntimeService;
-
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// SOCKS5 listener implementation.
 ///
@@ -59,11 +56,8 @@ struct Socks5Listener {
   base: TcpListenerBase,
   /// Associated service for handling connections.
   service: RuntimeService,
-  /// Handshake timeout duration.
-  socks5_handshake_timeout: Duration,
-  /// Deadline for reading the client CONNECT command, not upstream
-  /// dialing.
-  socks5_connect_timeout: Duration,
+  /// Total deadline for negotiation, credentials and CONNECT command.
+  header_read_timeout: HeaderDeadline,
   tcp_accept_retry_delay: AcceptRetryDelay,
   /// Service name for identification in logs.
   service_name: String,
@@ -76,16 +70,6 @@ impl Socks5Listener {
     args: Socks5ListenerArgs,
     server_routing_table: Vec<crate::server::Server>,
   ) -> Result<Listener> {
-    for (name, timeout) in [
-      ("socks5_handshake_timeout", args.socks5_handshake_timeout),
-      ("socks5_connect_timeout", args.socks5_connect_timeout),
-    ] {
-      anyhow::ensure!(
-        !timeout.is_zero()
-          && std::time::Instant::now().checked_add(timeout).is_some(),
-        "{name} must be positive and representable"
-      );
-    }
     let addresses = resolve_addresses(&addresses)?;
 
     let service = server_routing_table
@@ -103,8 +87,7 @@ impl Socks5Listener {
       addresses,
       base: TcpListenerBase::new().with_tcp_options(args.tcp_options),
       service,
-      socks5_handshake_timeout: args.socks5_handshake_timeout,
-      socks5_connect_timeout: args.socks5_connect_timeout,
+      header_read_timeout: args.header_read_timeout,
       tcp_accept_retry_delay: args.tcp_accept_retry_delay,
       service_name,
     }))
@@ -117,8 +100,7 @@ impl Listening for Socks5Listener {
   ) -> Result<std::pin::Pin<Box<dyn Future<Output = Result<()>>>>> {
     let service = self.service.clone();
     let service_name = self.service_name.clone();
-    let socks5_handshake_timeout = self.socks5_handshake_timeout;
-    let socks5_connect_timeout = self.socks5_connect_timeout;
+    let header_read_timeout = self.header_read_timeout;
     self.base.start(
       &self.addresses,
       "SOCKS5",
@@ -127,8 +109,7 @@ impl Listening for Socks5Listener {
         session::serve(
           connection,
           service.clone(),
-          socks5_handshake_timeout,
-          socks5_connect_timeout,
+          tokio::time::Instant::now() + header_read_timeout.duration(),
           service_name.clone(),
         )
       },
@@ -147,8 +128,7 @@ impl Clone for Socks5Listener {
       addresses: self.addresses.clone(),
       base: TcpListenerBase::new().with_tcp_options(self.tcp_options),
       service: self.service.clone(),
-      socks5_handshake_timeout: self.socks5_handshake_timeout,
-      socks5_connect_timeout: self.socks5_connect_timeout,
+      header_read_timeout: self.header_read_timeout,
       tcp_accept_retry_delay: self.tcp_accept_retry_delay,
       service_name: self.service_name.clone(),
     }
@@ -156,26 +136,12 @@ impl Clone for Socks5Listener {
 }
 
 /// SOCKS5 listener configuration arguments.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct Socks5ListenerArgs {
   tcp_options: crate::tcp_options::TcpOptions,
-  /// Handshake timeout duration.
-  socks5_handshake_timeout: Duration,
-  /// Deadline for reading the client CONNECT command, not upstream
-  /// dialing.
-  socks5_connect_timeout: Duration,
+  /// Total deadline for negotiation, credentials and CONNECT command.
+  header_read_timeout: HeaderDeadline,
   tcp_accept_retry_delay: AcceptRetryDelay,
-}
-
-impl Default for Socks5ListenerArgs {
-  fn default() -> Self {
-    Self {
-      tcp_options: Default::default(),
-      socks5_handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
-      socks5_connect_timeout: DEFAULT_CONNECT_TIMEOUT,
-      tcp_accept_retry_delay: Default::default(),
-    }
-  }
 }
 
 /// Parses SOCKS5 listener configuration from YAML.
@@ -185,26 +151,10 @@ fn parse_config(args: SerializedArgs) -> Result<Socks5ListenerArgs> {
   struct ConfigYaml {
     #[serde(flatten)]
     tcp_options: crate::tcp_options::TcpOptions,
-    #[serde(
-      with = "humantime_serde",
-      default = "default_socks5_handshake_timeout"
-    )]
-    socks5_handshake_timeout: Duration,
-    #[serde(
-      with = "humantime_serde",
-      default = "default_socks5_connect_timeout"
-    )]
-    socks5_connect_timeout: Duration,
+    #[serde(default)]
+    header_read_timeout: HeaderDeadline,
     #[serde(default)]
     tcp_accept_retry_delay: AcceptRetryDelay,
-  }
-
-  fn default_socks5_handshake_timeout() -> Duration {
-    DEFAULT_HANDSHAKE_TIMEOUT
-  }
-
-  fn default_socks5_connect_timeout() -> Duration {
-    DEFAULT_CONNECT_TIMEOUT
   }
 
   let config: ConfigYaml = serde_yaml::from_value(args)
@@ -212,8 +162,7 @@ fn parse_config(args: SerializedArgs) -> Result<Socks5ListenerArgs> {
 
   Ok(Socks5ListenerArgs {
     tcp_options: config.tcp_options,
-    socks5_handshake_timeout: config.socks5_handshake_timeout,
-    socks5_connect_timeout: config.socks5_connect_timeout,
+    header_read_timeout: config.header_read_timeout,
     tcp_accept_retry_delay: config.tcp_accept_retry_delay,
   })
 }

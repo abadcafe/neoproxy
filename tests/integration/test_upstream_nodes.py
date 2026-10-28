@@ -20,7 +20,7 @@ def configuration(ca: str, dns_port: int, addresses: list[ConfigDict]) -> Config
             "upstream": {
                 "address_protocol": "http3" if not addresses else "https",
                 "address_fail_timeout": "500ms",
-                "upstream_request_timeout": "300ms",
+                "upstream_read_timeout": "300ms",
                 "upstreams": [{"name": "main", "addresses": list(addresses)}],
                 "connection_pools": [
                     {

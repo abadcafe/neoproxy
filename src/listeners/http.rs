@@ -22,13 +22,26 @@ use crate::listeners::tcp_listener_base::TcpListenerBase;
 use crate::server::{Server, ServerRouter};
 
 /// HTTP Listener configuration arguments.
-#[derive(Deserialize, Default, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug)]
 #[serde(default, deny_unknown_fields)]
 struct HttpListenerArgs {
   #[serde(flatten)]
   tcp_options: crate::tcp_options::TcpOptions,
+  #[serde(default = "super::http_connection::default_keep_alive")]
+  keep_alive: bool,
   header_read_timeout: super::header_deadline::HeaderDeadline,
   tcp_accept_retry_delay: AcceptRetryDelay,
+}
+
+impl Default for HttpListenerArgs {
+  fn default() -> Self {
+    Self {
+      tcp_options: Default::default(),
+      header_read_timeout: Default::default(),
+      tcp_accept_retry_delay: Default::default(),
+      keep_alive: true,
+    }
+  }
 }
 
 /// HTTP Listener implementation with shared-address routing support.
@@ -40,6 +53,7 @@ struct HttpListener {
   /// Shared TCP listener base for lifecycle management
   base: TcpListenerBase,
   header_deadline: super::header_deadline::HeaderDeadline,
+  keep_alive: bool,
   tcp_accept_retry_delay: AcceptRetryDelay,
 }
 
@@ -65,6 +79,7 @@ impl HttpListener {
       server_router: ServerRouter::build(server_routing_table),
       base: TcpListenerBase::new().with_tcp_options(args.tcp_options),
       header_deadline: args.header_read_timeout,
+      keep_alive: args.keep_alive,
       tcp_accept_retry_delay: args.tcp_accept_retry_delay,
     })
   }
@@ -87,6 +102,7 @@ impl Listening for HttpListener {
   fn start(&self) -> Result<Pin<Box<dyn Future<Output = Result<()>>>>> {
     let server_router = self.server_router.clone();
     let header_deadline = self.header_deadline;
+    let keep_alive = self.keep_alive;
     self.base.start(
       &self.addresses,
       "HTTP",
@@ -102,6 +118,7 @@ impl Listening for HttpListener {
             connection.stream,
             service,
             header_deadline,
+            keep_alive,
             connection.shutdown,
           )
           .await

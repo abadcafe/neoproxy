@@ -17,10 +17,10 @@ fn test_quic_config_default_values_succeeds() {
   let args = parse_args(r#"{}"#);
   let config = args.validate_and_apply_defaults().unwrap();
   assert_eq!(config.max_concurrent_bidi_streams, 100);
-  assert_eq!(config.max_idle_timeout_ms, 5000);
+  assert_eq!(config.max_idle_timeout_ms, None);
   assert_eq!(config.initial_mtu, 1200);
-  assert_eq!(config.send_window, 10 * 1024 * 1024);
-  assert_eq!(config.receive_window, 10 * 1024 * 1024);
+  assert_eq!(config.send_window, None);
+  assert_eq!(config.receive_window, None);
 }
 
 #[test]
@@ -28,7 +28,7 @@ fn test_quic_config_custom_values_succeeds() {
   let args = parse_args(
     r#"
 quic_connection_max_concurrent_bidi_streams: 200
-quic_connection_idle_timeout: "60s"
+quic_connection_max_idle_timeout: "60s"
 quic_connection_initial_mtu: 1400
 quic_connection_send_window: "20MiB"
 quic_connection_receive_window: "20MiB"
@@ -36,10 +36,10 @@ quic_connection_receive_window: "20MiB"
   );
   let config = args.validate_and_apply_defaults().unwrap();
   assert_eq!(config.max_concurrent_bidi_streams, 200);
-  assert_eq!(config.max_idle_timeout_ms, 60000);
+  assert_eq!(config.max_idle_timeout_ms, Some(60000));
   assert_eq!(config.initial_mtu, 1400);
-  assert_eq!(config.send_window, 20 * 1024 * 1024);
-  assert_eq!(config.receive_window, 20 * 1024 * 1024);
+  assert_eq!(config.send_window, Some(20 * 1024 * 1024));
+  assert_eq!(config.receive_window, Some(20 * 1024 * 1024));
 }
 
 // ========== Boundary values (valid) ==========
@@ -100,9 +100,9 @@ fn test_quic_config_bidi_streams_too_high_rejected() {
 
 #[test]
 fn test_quic_config_idle_timeout_zero_rejected() {
-  let args = parse_args(r#"quic_connection_idle_timeout: "0ms""#);
+  let args = parse_args(r#"quic_connection_max_idle_timeout: "0ms""#);
   let err = args.validate_and_apply_defaults().unwrap_err();
-  assert!(err.to_string().contains("quic_connection_idle_timeout"));
+  assert!(err.to_string().contains("quic_connection_max_idle_timeout"));
 }
 
 #[test]
@@ -143,20 +143,17 @@ fn test_quic_config_default_trait_matches_constants() {
     config.max_concurrent_bidi_streams,
     DEFAULT_MAX_CONCURRENT_BIDI_STREAMS
   );
-  assert_eq!(
-    config.max_idle_timeout_ms,
-    DEFAULT_MAX_IDLE_TIMEOUT.as_millis() as u64
-  );
+  assert_eq!(config.max_idle_timeout_ms, None);
   assert_eq!(config.initial_mtu, DEFAULT_INITIAL_MTU);
-  assert_eq!(config.send_window, DEFAULT_SEND_WINDOW.as_u64());
-  assert_eq!(config.receive_window, DEFAULT_RECEIVE_WINDOW.as_u64());
+  assert_eq!(config.send_window, None);
+  assert_eq!(config.receive_window, None);
 }
 
 #[test]
 fn test_quic_config_rejects_unrepresentable_values() {
   for yaml in [
-    "quic_connection_idle_timeout: 18446744073709552s",
-    "quic_connection_idle_timeout: 4611686018427388s",
+    "quic_connection_max_idle_timeout: 18446744073709552s",
+    "quic_connection_max_idle_timeout: 4611686018427388s",
     "quic_connection_receive_window: 4611686018427387904B",
   ] {
     assert!(

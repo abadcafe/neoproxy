@@ -16,19 +16,15 @@ use super::raw::{CertificateConfig, UpstreamPluginConfig};
 pub(crate) struct ConnectionPoolConfig {
   pub(crate) name: String,
   #[serde(default)]
-  pub(crate) http_pool_max_idle_connections: Option<usize>,
-  #[serde(default)]
-  pub(crate) https_pool_max_idle_connections: Option<usize>,
+  pub(crate) http_max_idle_connections: Option<usize>,
   #[serde(with = "humantime_serde", default)]
-  pub(crate) http_pool_idle_timeout: Option<Duration>,
-  #[serde(with = "humantime_serde", default)]
-  pub(crate) https_pool_idle_timeout: Option<Duration>,
+  pub(crate) http_connection_idle_timeout: Option<Duration>,
   #[serde(default)]
   pub(crate) http3_pool_io_threads: Option<usize>,
   #[serde(default)]
   pub(crate) http3_pool_max_connections_per_host: Option<usize>,
   #[serde(with = "humantime_serde", default)]
-  pub(crate) http3_pool_idle_timeout: Option<Duration>,
+  pub(crate) http3_connection_idle_timeout: Option<Duration>,
   #[serde(with = "humantime_serde", default)]
   pub(crate) dns_refresh_retry_interval: Option<Duration>,
   #[serde(default)]
@@ -52,7 +48,7 @@ pub(crate) struct ConnectionPoolConfig {
   #[serde(with = "humantime_serde", default)]
   pub(crate) quic_connection_keep_alive_interval: Option<Duration>,
   #[serde(with = "humantime_serde", default)]
-  pub(crate) quic_connection_idle_timeout: Option<Duration>,
+  pub(crate) quic_connection_max_idle_timeout: Option<Duration>,
   #[serde(default)]
   pub(crate) quic_connection_max_concurrent_bidi_streams: Option<u64>,
   #[serde(default)]
@@ -75,27 +71,27 @@ impl ConnectionPoolConfig {
     super::protocol::PoolsConfig {
       http: PoolConfig {
         max_idle_per_host: self
-          .http_pool_max_idle_connections
-          .unwrap_or(32),
+          .http_max_idle_connections
+          .unwrap_or_else(super::defaults::default_max_idle_per_host),
         idle_timeout: self
-          .http_pool_idle_timeout
-          .unwrap_or(Duration::from_secs(3600)),
+          .http_connection_idle_timeout
+          .unwrap_or_else(super::defaults::default_idle_timeout),
       },
       https: PoolConfig {
         max_idle_per_host: self
-          .https_pool_max_idle_connections
-          .unwrap_or(32),
+          .http_max_idle_connections
+          .unwrap_or_else(super::defaults::default_max_idle_per_host),
         idle_timeout: self
-          .https_pool_idle_timeout
-          .unwrap_or(Duration::from_secs(3600)),
+          .http_connection_idle_timeout
+          .unwrap_or_else(super::defaults::default_idle_timeout),
       },
       h3_threads: self.http3_pool_io_threads.unwrap_or(1),
       h3_connections: self
         .http3_pool_max_connections_per_host
-        .unwrap_or(2),
+        .unwrap_or(1),
       h3_idle_timeout: self
-        .http3_pool_idle_timeout
-        .unwrap_or(Duration::from_secs(3600)),
+        .http3_connection_idle_timeout
+        .unwrap_or(Duration::from_secs(60)),
     }
   }
 }

@@ -27,7 +27,8 @@ fn test_resolved_address_preserves_runtime_fields() {
       connect_timeout: Duration::from_secs(2),
     },
     tunnel_idle_timeout: Duration::from_secs(30),
-    upstream_request_timeout: Duration::from_secs(30),
+    upstream_read_timeout: Duration::from_secs(10),
+    upstream_send_timeout: Duration::from_secs(10),
     user: None,
   };
 
@@ -66,7 +67,8 @@ fn test_upstream_preserves_direct_mode_defaults() {
     connect_timeout: Duration::from_secs(10),
     tls_handshake_timeout: Duration::from_secs(10),
     tunnel_idle_timeout: Duration::from_secs(60),
-    upstream_request_timeout: Duration::from_secs(30),
+    upstream_read_timeout: Duration::from_secs(10),
+    upstream_send_timeout: Duration::from_secs(10),
   };
 
   assert!(upstream.addresses.is_empty());

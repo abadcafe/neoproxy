@@ -122,7 +122,7 @@ async def test_chain_h3_pool_expires_without_subsequent_request(tmp_path: Path) 
                         {
                             "name": "default",
                             "certificates": {"server_ca_path": ca},
-                            "http3_pool_idle_timeout": "100ms",
+                            "http3_connection_idle_timeout": "100ms",
                         }
                     ],
                 }

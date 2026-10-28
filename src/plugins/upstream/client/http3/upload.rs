@@ -8,11 +8,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use bytes::Bytes;
 use http_body_util::BodyExt;
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
+use super::io_progress::{Progress, SendBuffer};
 use crate::http_message::RequestBody;
 use crate::plugins::upstream::error::UpstreamError;
 use crate::tracker::StreamTracker;
@@ -23,7 +23,10 @@ pub(super) struct Upload {
 }
 
 struct RequestWriter {
-  stream: h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
+  stream: h3::client::RequestStream<
+    h3_quinn::SendStream<SendBuffer>,
+    SendBuffer,
+  >,
   finished: bool,
 }
 
@@ -32,6 +35,7 @@ struct RequestWriter {
 enum UploadError {
   Body(anyhow::Error),
   Transport(h3::error::StreamError),
+  Timeout,
 }
 
 impl RequestWriter {
@@ -51,6 +55,11 @@ impl RequestWriter {
       )) if code == h3::error::Code::H3_NO_ERROR => Ok(()),
       Err(UploadError::Transport(error)) => {
         Err(UpstreamError::ConnectionTerminated(error.to_string()))
+      }
+      Err(UploadError::Timeout) => {
+        Err(UpstreamError::ConnectionTimeout(
+          "upstream send inactivity timeout".into(),
+        ))
       }
       Err(UploadError::Body(error)) => {
         Err(UpstreamError::ProxyInternalError(error.to_string()))
@@ -72,12 +81,13 @@ impl Drop for RequestWriter {
 impl Upload {
   pub(super) fn start(
     stream: h3::client::RequestStream<
-      h3_quinn::SendStream<Bytes>,
-      Bytes,
+      h3_quinn::SendStream<SendBuffer>,
+      SendBuffer,
     >,
     mut body: RequestBody,
     tracker: &StreamTracker,
     request_id: Option<crate::request_id::RequestId>,
+    send_timeout: std::time::Duration,
   ) -> Self {
     let (sender, result) = oneshot::channel();
     // Construct before spawning: even cancellation before the first
@@ -96,10 +106,20 @@ impl Upload {
                 bytes,
                 "H3 request content sending"
               );
-              writer
-                .stream
-                .send_data(data)
+              // The Buf contract reports bytes consumed by the
+              // transport, including partial writes within a single
+              // large H3 frame.
+              let progress = Progress::default();
+              progress
+                .wait(
+                  writer.stream.send_data(SendBuffer::tracked(
+                    data,
+                    progress.clone(),
+                  )),
+                  send_timeout,
+                )
                 .await
+                .map_err(|_| UploadError::Timeout)?
                 .map_err(UploadError::Transport)?;
               tracing::trace!(
                 request_id =
@@ -113,17 +133,22 @@ impl Upload {
                 crate::hop_headers::strip_trailer_headers(
                   &mut trailers,
                 );
-                writer
-                  .stream
-                  .send_trailers(trailers)
-                  .await
-                  .map_err(UploadError::Transport)?;
+                tokio::time::timeout(
+                  send_timeout,
+                  writer.stream.send_trailers(trailers),
+                )
+                .await
+                .map_err(|_| UploadError::Timeout)?
+                .map_err(UploadError::Transport)?;
                 break;
               }
             }
           }
         }
-        writer.stream.finish().await.map_err(UploadError::Transport)?;
+        tokio::time::timeout(send_timeout, writer.stream.finish())
+          .await
+          .map_err(|_| UploadError::Timeout)?
+          .map_err(UploadError::Transport)?;
         Ok::<(), UploadError>(())
       }
       .await;

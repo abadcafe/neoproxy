@@ -17,7 +17,7 @@ from tests.fixtures.socks5_client import (
 from tests.fixtures.socks5_protocol import AuthMethod, AuthStatus, ReplyCode
 from tests.fixtures.socks5_result import AuthReply, CommandReply, MethodReply
 
-type Credentials = Literal["valid", "wrong", "unknown", "missing", "colon"]
+type Credentials = Literal["valid", "wrong", "unknown", "missing", "password_colon"]
 
 
 class AccessEntry(BaseModel):
@@ -37,7 +37,8 @@ def _receive_exact(client: socket.socket, size: int) -> bytes:
 
 @pytest.mark.parametrize("auth_enabled", [True, False])
 @pytest.mark.parametrize(
-    "credentials", ["valid", "wrong", "unknown", "missing", "colon"]
+    "credentials",
+    ["valid", "wrong", "unknown", "missing", "password_colon"],
 )
 def test_socks5_defers_credential_verification_to_connect(
     tmp_path: Path, credentials: Credentials, auth_enabled: bool
@@ -50,7 +51,7 @@ def test_socks5_defers_credential_verification_to_connect(
     users:
     - username: user
       password: correct
-    - username: "user:with:colon"
+    - username: password_colon
       password: "pass:word"
 """
         if auth_enabled
@@ -83,7 +84,7 @@ services:
   service: direct
   listeners: [main]
 """)
-    authorized = not auth_enabled or credentials in ("valid", "colon")
+    authorized = not auth_enabled or credentials in ("valid", "password_colon")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as target:
         target.bind(("127.0.0.1", target_port))
         target.listen(1)
@@ -101,8 +102,8 @@ services:
                 else:
                     username = "unknown" if credentials == "unknown" else "user"
                     password = "wrong" if credentials == "wrong" else "correct"
-                    if credentials == "colon":
-                        username, password = "user:with:colon", "pass:word"
+                    if credentials == "password_colon":
+                        username, password = "password_colon", "pass:word"
                     status = socks5_handshake_password(client, username, password)
                     assert isinstance(status, AuthReply)
                     assert status.status is AuthStatus.SUCCESS
@@ -143,3 +144,37 @@ services:
     assert entries[0].method == "CONNECT"
     assert entries[0].target == f"127.0.0.1:{target_port}"
     assert entries[0].status == (200 if authorized else 407)
+
+
+@pytest.mark.parametrize("auth_enabled", [True, False])
+@pytest.mark.parametrize(
+    "username,password",
+    [
+        ("collision:suffix", "secret"),
+        ("us\ner", "secret"),
+        ("user", "pass\0word"),
+        ("user", "pass\x7fword"),
+    ],
+)
+def test_socks5_rejects_non_basic_syntax_before_connect(
+    tmp_path: Path, username: str, password: str, auth_enabled: bool
+) -> None:
+    from tests.fixtures.socks5_configuration import create_socks5_config
+
+    port = get_unique_port()
+    config = create_socks5_config(
+        port,
+        str(tmp_path),
+        auth_type="password" if auth_enabled else None,
+        users=[{"username": "collision", "password": "suffix:secret"}],
+    )
+    process = start_proxy(config)
+    try:
+        assert process.wait_ready()
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+            assert socks5_handshake_password(client, username, password) == AuthReply(
+                AuthStatus.FAILURE
+            )
+            assert client.recv(1) == b""
+    finally:
+        terminate_process(process)

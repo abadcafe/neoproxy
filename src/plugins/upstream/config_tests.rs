@@ -89,8 +89,8 @@ upstreams:
     address_protocol: http
 connection_pools:
 - name: default
-  http_pool_max_idle_connections: 16
-  http_pool_idle_timeout: 30s
+  http_max_idle_connections: 16
+  http_connection_idle_timeout: 30s
 "#,
   )
   .unwrap();
@@ -239,10 +239,10 @@ fn test_pool_config_defaults() {
 
   let resolved = merge_chain_config(&config).unwrap();
   assert!(resolved.contains_key("test"));
-  assert_eq!(crate::plugins::upstream::config::connection_pool::resolve_connection_pools(&config).unwrap()["default"].limits().http.max_idle_per_host, 32);
+  assert_eq!(crate::plugins::upstream::config::connection_pool::resolve_connection_pools(&config).unwrap()["default"].limits().http.max_idle_per_host, 100);
   assert_eq!(
     crate::plugins::upstream::config::connection_pool::resolve_connection_pools(&config).unwrap()["default"].limits().http.idle_timeout,
-    Duration::from_secs(3600)
+    Duration::from_secs(60)
   );
 }
 

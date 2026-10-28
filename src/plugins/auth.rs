@@ -164,35 +164,24 @@ impl tower::Service<Request> for AuthMiddleware {
       }
     };
 
-    let credentials = req
-      .extensions()
-      .get::<crate::auth::ProxyCredentials>()
-      .cloned()
-      .or_else(|| {
-        let mut fields = req
-          .headers()
-          .get_all(http::header::PROXY_AUTHORIZATION)
-          .iter();
-        let field = fields.next()?;
-        if fields.next().is_some() {
-          return None;
-        }
-        let (username, password) = parse_basic_auth_header(field)?;
-        Some(crate::auth::ProxyCredentials::new(username, password))
-      });
-    if let Some(credentials) = credentials {
-      let (username, password) = credentials.parts();
-      if self.auth.verify_credentials(username, password).is_ok() {
-        ctx.set(
-          crate::context::fields::auth::USER,
-          std::sync::Arc::from(username),
-        );
-        ctx.set(
-          crate::context::fields::auth::AUTH_TYPE,
-          std::sync::Arc::from(AuthType::Password.to_string()),
-        );
-        return self.inner.call(req);
-      }
+    let mut fields =
+      req.headers().get_all(http::header::PROXY_AUTHORIZATION).iter();
+    let credentials = match (fields.next(), fields.next()) {
+      (Some(field), None) => parse_basic_auth_header(field),
+      _ => None,
+    };
+    if let Some((username, password)) = credentials
+      && self.auth.verify_credentials(&username, &password).is_ok()
+    {
+      ctx.set(
+        crate::context::fields::auth::USER,
+        std::sync::Arc::from(username),
+      );
+      ctx.set(
+        crate::context::fields::auth::AUTH_TYPE,
+        std::sync::Arc::from(AuthType::Password.to_string()),
+      );
+      return self.inner.call(req);
     }
 
     Box::pin(async move { Ok(build_407_response()) })

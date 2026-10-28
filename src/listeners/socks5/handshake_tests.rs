@@ -21,7 +21,10 @@ async fn test_perform_handshake_accepts_no_auth_without_service_policy()
 {
   let (mut client, server) = handshake_streams().await;
   let (result, ()) = tokio::join!(
-    perform_handshake(server, Duration::from_secs(2)),
+    perform_handshake(
+      server,
+      tokio::time::Instant::now() + Duration::from_secs(2)
+    ),
     async {
       client.write_all(&[5, 1, 0]).await.unwrap();
       let mut reply = [0; 2];
@@ -43,7 +46,10 @@ async fn test_perform_handshake_collects_credentials_without_verifying()
   for offer in [vec![5, 1, 2], vec![5, 2, 0, 2], vec![5, 2, 2, 0]] {
     let (mut client, server) = handshake_streams().await;
     let (result, ()) = tokio::join!(
-      perform_handshake(server, Duration::from_secs(2)),
+      perform_handshake(
+        server,
+        tokio::time::Instant::now() + Duration::from_secs(2)
+      ),
       async {
         client.write_all(&offer).await.unwrap();
         let mut reply = [0; 2];
@@ -64,7 +70,10 @@ async fn test_perform_handshake_collects_credentials_without_verifying()
 async fn test_perform_handshake_rejects_unsupported_method() {
   let (mut client, server) = handshake_streams().await;
   let (result, ()) = tokio::join!(
-    perform_handshake(server, Duration::from_secs(2)),
+    perform_handshake(
+      server,
+      tokio::time::Instant::now() + Duration::from_secs(2)
+    ),
     async {
       client.write_all(&[5, 1, 1]).await.unwrap();
       let mut reply = [0; 2];
@@ -164,4 +173,42 @@ fn test_handshake_error_from_socks_auth_method_unacceptable() {
   assert!(
     matches!(err, HandshakeError::MethodNotAcceptable(ref m) if m == &vec![0x00])
   );
+}
+
+#[tokio::test]
+async fn test_perform_handshake_rejects_non_basic_credential_syntax() {
+  for (username, password) in [
+    ("user:other", "secret"),
+    ("us\ner", "secret"),
+    ("user", "pass\0word"),
+    ("user", "pass\u{7f}word"),
+  ] {
+    let (mut client, server) = handshake_streams().await;
+    let (result, ()) = tokio::join!(
+      perform_handshake(
+        server,
+        tokio::time::Instant::now() + Duration::from_secs(2)
+      ),
+      async {
+        client.write_all(&[5, 1, 2]).await.unwrap();
+        let mut reply = [0; 2];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, [5, 2]);
+        let mut credentials =
+          vec![1, u8::try_from(username.len()).unwrap()];
+        credentials.extend_from_slice(username.as_bytes());
+        credentials.push(u8::try_from(password.len()).unwrap());
+        credentials.extend_from_slice(password.as_bytes());
+        client.write_all(&credentials).await.unwrap();
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply[0], 1);
+        assert_ne!(reply[1], 0);
+        assert_eq!(client.read(&mut [0]).await.unwrap(), 0);
+      }
+    );
+    assert!(matches!(
+      result,
+      Err(HandshakeError::InvalidCredentialFormat(_))
+    ));
+  }
 }

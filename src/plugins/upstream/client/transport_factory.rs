@@ -6,7 +6,6 @@
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::http::HttpProxyClient;
 use super::http::connector::{ProxyConnector, TlsProxyConnector};
@@ -19,7 +18,7 @@ use crate::tracker::StreamTracker;
 pub(super) struct ClientEntry {
   pub(super) tls: Arc<rustls::ClientConfig>,
   pub(super) client: Box<dyn ClientProtocol>,
-  pub(super) request_timeout: Duration,
+  pub(super) timeouts: super::exchange_timeout::Timeouts,
   pub(super) protocol: config::protocol::ProtocolKind,
 }
 pub(super) fn build(
@@ -46,7 +45,10 @@ pub(super) fn build(
           UpstreamError::ProxyInternalError(error.to_string())
         })?,
       ),
-      request_timeout: address.upstream_request_timeout,
+      timeouts: super::exchange_timeout::Timeouts {
+        read: address.upstream_read_timeout,
+        send: address.upstream_send_timeout,
+      },
       protocol: address.address_protocol.kind(),
     });
   }
@@ -147,7 +149,10 @@ pub(super) fn build(
   Ok(ClientEntry {
     tls,
     client,
-    request_timeout: address.upstream_request_timeout,
+    timeouts: super::exchange_timeout::Timeouts {
+      read: address.upstream_read_timeout,
+      send: address.upstream_send_timeout,
+    },
     protocol: address.address_protocol.kind(),
   })
 }

@@ -66,8 +66,8 @@ impl Default for PoolsConfig {
       http: PoolConfig::default(),
       https: PoolConfig::default(),
       h3_threads: 1,
-      h3_connections: 2,
-      h3_idle_timeout: Duration::from_secs(3600),
+      h3_connections: 1,
+      h3_idle_timeout: Duration::from_secs(60),
     }
   }
 }

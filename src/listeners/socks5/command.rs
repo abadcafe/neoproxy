@@ -74,6 +74,9 @@ impl From<HandshakeError> for CommandError {
       HandshakeError::MethodNotAcceptable(_) => Self::IoError(
         std::io::Error::other("authentication method not acceptable"),
       ),
+      HandshakeError::InvalidCredentialFormat(reason) => Self::IoError(
+        std::io::Error::new(std::io::ErrorKind::InvalidData, reason),
+      ),
       HandshakeError::ClientDisconnected => Self::ClientDisconnected,
       HandshakeError::IoError(e) => Self::from(e),
     }

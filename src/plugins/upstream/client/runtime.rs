@@ -101,7 +101,8 @@ impl Upstream {
       tcp_keep_alive_time: self.config.tcp_keep_alive_time,
       tcp_keep_alive_interval: self.config.tcp_keep_alive_interval,
       tcp_keep_alive_retries: self.config.tcp_keep_alive_retries,
-      upstream_request_timeout: self.config.upstream_request_timeout,
+      upstream_read_timeout: self.config.upstream_read_timeout,
+      upstream_send_timeout: self.config.upstream_send_timeout,
       tunnel_idle_timeout: self.config.tunnel_idle_timeout,
       user: None,
     }]
@@ -251,6 +252,7 @@ impl Upstream {
         async |selected, progress| {
           let mut parts = req_headers.clone();
           parts.extensions.insert(progress);
+          parts.extensions.insert(selected.timeouts);
           selected
             .client
             .forward(
@@ -283,6 +285,7 @@ impl Upstream {
         async |selected, progress| {
           let mut request = request.clone();
           request.extensions.insert(progress);
+          request.extensions.insert(selected.timeouts);
           selected
             .client
             .connect_for_tunnel(
@@ -352,23 +355,7 @@ impl Upstream {
         );
       }
       let progress = Progress::default();
-      let result = tokio::time::timeout(
-        selected.request_timeout,
-        execute(selected.clone(), progress.clone()),
-      )
-      .await;
-      let timed_out = result.is_err();
-      let waiting = timed_out && progress.is_waiting();
-      let result = result.unwrap_or_else(|_| {
-        Err(UpstreamError::ConnectionTimeout(
-          if waiting {
-            "local H3 pool capacity deadline exceeded"
-          } else {
-            "upstream response header deadline exceeded"
-          }
-          .into(),
-        ))
-      });
+      let result = execute(selected.clone(), progress.clone()).await;
       match result {
         Ok(value) => {
           group.borrow_mut().succeeded(&key, &selected);
@@ -377,9 +364,6 @@ impl Upstream {
         Err(error) => {
           // Local capacity and downstream cancellation never penalize a
           // peer.
-          if waiting {
-            return Err(error);
-          }
           if !counts_failure(&error) {
             if matches!(
               error,
@@ -392,12 +376,6 @@ impl Upstream {
           }
           group.borrow_mut().failed(&key, &selected);
           if !replayable(&progress) {
-            if timed_out && let Some(ctx) = ctx {
-              ctx.set(
-                crate::context::fields::upstream::ERROR_PHASE,
-                Arc::from("response_headers"),
-              );
-            }
             return Err(error);
           }
           last_error = Some(error);

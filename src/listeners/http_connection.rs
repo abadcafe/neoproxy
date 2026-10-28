@@ -26,6 +26,7 @@ pub(crate) async fn serve<I>(
   io: I,
   service: HttpService,
   deadline: HeaderDeadline,
+  keep_alive: bool,
   shutdown: ShutdownHandle,
 ) -> Result<()>
 where
@@ -35,6 +36,7 @@ where
     hyper_util::server::conn::auto::Builder::new(LocalExecutor);
   builder
     .http1()
+    .keep_alive(keep_alive)
     .timer(hyper_util::rt::TokioTimer::new())
     .header_read_timeout(deadline.duration());
   let connection = builder.serve_connection_with_upgrades(
@@ -54,4 +56,8 @@ where
   // tunnel task; this HTTP connection future then completes instead
   // of driving it.
   connection.await.map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+pub(super) fn default_keep_alive() -> bool {
+  true
 }

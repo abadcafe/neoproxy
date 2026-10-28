@@ -14,13 +14,11 @@ from tests.fixtures.socks5_protocol import AuthMethod, ReplyCode
 from tests.fixtures.socks5_result import CommandReply, MethodReply
 
 
-def test_socks5_command_has_its_own_timeout_after_subnegotiation(
+def test_socks5_command_uses_header_deadline_after_subnegotiation(
     tmp_path: Path,
 ) -> None:
     port = get_unique_port()
-    config = create_socks5_config(
-        port, str(tmp_path), handshake_timeout="2s", connect_timeout="300ms"
-    )
+    config = create_socks5_config(port, str(tmp_path), header_read_timeout="300ms")
     process = start_proxy(config)
     try:
         assert process.wait_ready()

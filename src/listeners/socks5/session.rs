@@ -4,7 +4,8 @@
 //! data entities: none
 //! tests: session_tests.rs; tests/integration/test_socks5*.py
 
-use std::time::Duration;
+use base64::Engine;
+use tokio::time::Instant;
 
 use super::command::{CommandError, read_command_and_target};
 use super::handshake::{HandshakeError, perform_handshake};
@@ -18,68 +19,69 @@ use crate::service::Service as RuntimeService;
 pub(super) async fn serve(
   connection: TcpConnection,
   service: RuntimeService,
-  handshake_timeout: Duration,
-  connect_timeout: Duration,
+  deadline: Instant,
   service_name: String,
 ) {
   let TcpConnection { stream, peer_addr, local_addr, .. } = connection;
   tracing::info!("SOCKS5 connection established from {peer_addr}");
-  // Step 1: Perform SOCKS5 handshake with timeout
-  // protection
-  let handshake_result =
-    match perform_handshake(stream, handshake_timeout).await {
-      Ok(result) => result,
-      Err(e) => {
-        // Handle handshake errors
-        match e {
-          HandshakeError::Timeout => {
-            // Timeout - do not send response, just close
-            // connection
-            tracing::warn!(
-              "SOCKS5 handshake timeout from {}",
-              peer_addr
-            );
-          }
-          HandshakeError::InvalidVersion(v) => {
-            // Invalid version - do not send response
-            tracing::warn!(
-              "SOCKS5 invalid version {} from {}",
-              v,
-              peer_addr
-            );
-          }
-          HandshakeError::MethodNotAcceptable(_) => {
-            // METHOD=0xFF was already sent
-            tracing::warn!(
-              "SOCKS5 method not acceptable from {}",
-              peer_addr
-            );
-          }
-          HandshakeError::ClientDisconnected => {
-            tracing::info!(
-              "SOCKS5 connection disconnected from {}",
-              peer_addr
-            );
-          }
-          HandshakeError::IoError(e) => {
-            tracing::warn!(
-              "SOCKS5 handshake IO error from {}: {}",
-              peer_addr,
-              e
-            );
-          }
+  // Negotiation, credential receipt/reply and command decoding are one
+  // request-header read. The accept callback supplies one absolute
+  // deadline; neither phase changes nor partial reads renew it.
+  let handshake_result = match perform_handshake(stream, deadline).await
+  {
+    Ok(result) => result,
+    Err(e) => {
+      // Handle handshake errors
+      match e {
+        HandshakeError::Timeout => {
+          // Timeout - do not send response, just close
+          // connection
+          tracing::warn!("SOCKS5 handshake timeout from {}", peer_addr);
         }
-        // Connection is already closed by the error handler
-        return;
+        HandshakeError::InvalidVersion(v) => {
+          // Invalid version - do not send response
+          tracing::warn!(
+            "SOCKS5 invalid version {} from {}",
+            v,
+            peer_addr
+          );
+        }
+        HandshakeError::MethodNotAcceptable(_) => {
+          // METHOD=0xFF was already sent
+          tracing::warn!(
+            "SOCKS5 method not acceptable from {}",
+            peer_addr
+          );
+        }
+        HandshakeError::InvalidCredentialFormat(reason) => {
+          tracing::warn!(
+            "SOCKS5 invalid credential format from {peer_addr}: \
+             {reason}"
+          );
+        }
+        HandshakeError::ClientDisconnected => {
+          tracing::info!(
+            "SOCKS5 connection disconnected from {}",
+            peer_addr
+          );
+        }
+        HandshakeError::IoError(e) => {
+          tracing::warn!(
+            "SOCKS5 handshake IO error from {}: {}",
+            peer_addr,
+            e
+          );
+        }
       }
-    };
+      // Connection is already closed by the error handler
+      return;
+    }
+  };
 
-  // Start an independent deadline after the handshake. This bounds the
-  // entire client CONNECT command read (including target address);
-  // partial reads do not reset it. Shared auth and upstream dialing run
-  // afterward and are deliberately outside socks5_connect_timeout.
-  let command = match tokio::time::timeout(
-    connect_timeout,
+  // Reuse the accept-time deadline. Shared auth and upstream dialing
+  // run only after the request is decoded and are outside this timeout.
+  let command = match tokio::time::timeout_at(
+    deadline,
     read_command_and_target(handshake_result.proto),
   )
   .await
@@ -155,18 +157,21 @@ pub(super) async fn serve(
     }
   };
 
-  // PRODUCT CONTRACT: carry unverified credentials into the shared
-  // auth.basic_auth middleware; this is the sole credential validation
-  // path. Typed fields
-  // also preserve SOCKS5 usernames containing
-  // ':' that HTTP Basic cannot encode without
-  // changing the username/password boundary.
+  // PRODUCT CONTRACT: construct the same Proxy-Authorization header as
+  // an HTTP CONNECT client. auth.basic_auth is the sole verifier; the
+  // SOCKS5 handshake only acknowledged receipt of credentials.
   if let (Some(username), Some(password)) =
     (handshake_result.username, handshake_result.password)
   {
+    let encoded = base64::engine::general_purpose::STANDARD
+      .encode(format!("{username}:{password}"));
+    let mut header =
+      http::HeaderValue::from_str(&format!("Basic {encoded}"))
+        .expect("Base64 is a valid HTTP header value");
+    header.set_sensitive(true);
     request
-      .extensions_mut()
-      .insert(crate::auth::ProxyCredentials::new(username, password));
+      .headers_mut()
+      .insert(http::header::PROXY_AUTHORIZATION, header);
   }
 
   request.extensions_mut().insert(on_upgrade);

@@ -29,8 +29,8 @@ macro_rules! validate_transport_fields {
         $config.quic_connection_keep_alive_interval,
       ),
       (
-        "quic_connection_idle_timeout",
-        $config.quic_connection_idle_timeout,
+        "quic_connection_max_idle_timeout",
+        $config.quic_connection_max_idle_timeout,
       ),
     ] {
       validate_duration_positive(value, $location, name)?;
@@ -53,13 +53,13 @@ macro_rules! validate_transport_fields {
     if $config.tcp_keep_alive_retries == Some(0) {
       bail!("tcp_keep_alive_retries must be positive");
     }
-    if let Some(value) = $config.quic_connection_idle_timeout
+    if let Some(value) = $config.quic_connection_max_idle_timeout
       && (value.as_millis() == 0
         || value.as_millis()
           > u128::from(quinn::VarInt::MAX.into_inner()))
     {
       bail!(
-        "{} quic_connection_idle_timeout must fit a positive QUIC \
+        "{} quic_connection_max_idle_timeout must fit a positive QUIC \
          millisecond value",
         $location
       );
@@ -160,9 +160,14 @@ pub(crate) fn validate_plugin_config(
   )?;
 
   validate_duration_positive(
-    plugin.upstream_request_timeout,
+    plugin.upstream_read_timeout,
     "plugin",
-    "upstream_request_timeout",
+    "upstream_read_timeout",
+  )?;
+  validate_duration_positive(
+    plugin.upstream_send_timeout,
+    "plugin",
+    "upstream_send_timeout",
   )?;
   validate_duration_positive(
     plugin.address_fail_timeout,
@@ -192,9 +197,14 @@ fn validate_upstream_config(upstream: &UpstreamConfig) -> Result<()> {
   )?;
 
   validate_duration_positive(
-    upstream.upstream_request_timeout,
+    upstream.upstream_read_timeout,
     &upstream.name,
-    "upstream_request_timeout",
+    "upstream_read_timeout",
+  )?;
+  validate_duration_positive(
+    upstream.upstream_send_timeout,
+    &upstream.name,
+    "upstream_send_timeout",
   )?;
   validate_duration_positive(
     upstream.address_fail_timeout,
@@ -247,9 +257,14 @@ fn validate_address_config(
     "tunnel_idle_timeout",
   )?;
   validate_duration_positive(
-    addr.upstream_request_timeout,
+    addr.upstream_read_timeout,
     upstream_name,
-    "upstream_request_timeout",
+    "upstream_read_timeout",
+  )?;
+  validate_duration_positive(
+    addr.upstream_send_timeout,
+    upstream_name,
+    "upstream_send_timeout",
   )?;
   validate_duration_positive(
     addr.address_fail_timeout,
@@ -305,9 +320,8 @@ fn validate_connection_pool(
     );
   }
   for (name, value) in [
-    ("http_pool_idle_timeout", limits.http.idle_timeout),
-    ("https_pool_idle_timeout", limits.https.idle_timeout),
-    ("http3_pool_idle_timeout", limits.h3_idle_timeout),
+    ("http_connection_idle_timeout", limits.http.idle_timeout),
+    ("http3_connection_idle_timeout", limits.h3_idle_timeout),
   ] {
     validate_duration_positive(Some(value), &pool.name, name)?;
   }

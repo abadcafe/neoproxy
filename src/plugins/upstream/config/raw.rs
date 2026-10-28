@@ -57,7 +57,9 @@ pub(crate) struct UpstreamAddressConfig {
   #[serde(with = "humantime_serde", default)]
   pub(super) tunnel_idle_timeout: Option<Duration>,
   #[serde(with = "humantime_serde", default)]
-  pub(super) upstream_request_timeout: Option<Duration>,
+  pub(super) upstream_read_timeout: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) upstream_send_timeout: Option<Duration>,
   #[serde(default)]
   pub(super) user: Option<UserCredential>,
   #[serde(default)]
@@ -88,7 +90,9 @@ pub(super) struct UpstreamConfig {
   #[serde(with = "humantime_serde", default)]
   pub(super) tunnel_idle_timeout: Option<Duration>,
   #[serde(with = "humantime_serde", default)]
-  pub(super) upstream_request_timeout: Option<Duration>,
+  pub(super) upstream_read_timeout: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) upstream_send_timeout: Option<Duration>,
   #[serde(default)]
   pub(super) user: Option<UserCredential>,
   #[serde(default)]
@@ -111,7 +115,9 @@ pub(crate) struct UpstreamPluginConfig {
   #[serde(with = "humantime_serde", default)]
   pub(super) tunnel_idle_timeout: Option<Duration>,
   #[serde(with = "humantime_serde", default)]
-  pub(super) upstream_request_timeout: Option<Duration>,
+  pub(super) upstream_read_timeout: Option<Duration>,
+  #[serde(with = "humantime_serde", default)]
+  pub(super) upstream_send_timeout: Option<Duration>,
   #[serde(default)]
   pub(super) user: Option<UserCredential>,
   #[serde(default)]

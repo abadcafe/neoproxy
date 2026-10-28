@@ -824,7 +824,7 @@ plugins:
     connection_pools:
       - name: default
         quic_connection_keep_alive_interval: "3s"
-        quic_connection_idle_timeout: "30s"
+        quic_connection_max_idle_timeout: "30s"
     tunnel_idle_timeout: "5m"
     upstreams:
       - name: u

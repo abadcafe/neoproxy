@@ -110,9 +110,9 @@ plugins:
 插件配置使用 `plugins.upstream`，服务类型使用 `upstream.upstream`。
 
 统一代理插件，通过 `connection_pools` 定义命名连接资源，通过 `upstreams` 定义路由节点。业务参数及 `use_connection_pool` 支持三级继承：**Plugin → Upstream → Address**。
-低层级覆盖高层级同名参数。`upstream_request_timeout` 按插件、upstream、address 三级继承；链式请求使用调度选中地址的超时。链式地址通过 `address_protocol: http`、`address_protocol: https` 、`address_protocol: http3` 或 `address_protocol: socks5` 选择单一协议；`address_protocol` 支持三级继承，默认 `https`。TCP keepalive 的三个字段均已生效，省略时保持系统默认；配置任一项即启用 TCP keepalive。
+低层级覆盖高层级同名参数。`upstream_send_timeout` 和 `upstream_read_timeout` 均默认 10s，按插件、upstream、address 三级继承；链式请求使用调度选中地址的超时。链式地址通过 `address_protocol: http`、`address_protocol: https` 、`address_protocol: http3` 或 `address_protocol: socks5` 选择单一协议；`address_protocol` 支持三级继承，默认 `https`。TCP keepalive 的三个字段均已生效，省略时保持系统默认；配置任一项即启用 TCP keepalive。
 
-SOCKS5 上游仅承接 CONNECT，目标解析复用 HTTP CONNECT：域名交给上游解析，IPv4/IPv6 按对应类型发送。普通 GET/POST 等请求只选择 HTTP/HTTPS/HTTP3 节点；没有可用节点时返回与节点全部不可用相同的 502，协议不适用不计健康检查失败。SOCKS5 握手与认证包含在 `upstream_request_timeout` 内，成功后的隧道复用 `tunnel_idle_timeout`，每条隧道独立使用 TCP 连接。
+SOCKS5 上游仅承接 CONNECT，目标解析复用 HTTP CONNECT：域名交给上游解析，IPv4/IPv6 按对应类型发送。普通 GET/POST 等请求只选择 HTTP/HTTPS/HTTP3 节点；没有可用节点时返回与节点全部不可用相同的 502，协议不适用不计健康检查失败。SOCKS5 握手、认证和 CONNECT 协商的读写分别使用 `upstream_read_timeout` 与 `upstream_send_timeout`，成功后的隧道复用 `tunnel_idle_timeout`，每条隧道独立使用 TCP 连接。
 
 认证复用三级继承的 `user: {username: ..., password: ...}`。未配置凭据时提供无认证；配置后同时提供无认证与用户名密码，由 SOCKS5 服务端选择。用户名和密码各为 1–255 字节。认证拒绝映射为上游 407（对下游返回 502），规则拒绝映射 403，TTL 到期映射 504，命令不支持映射 501，其余 CONNECT 失败映射 502。这些明确响应复用 HTTP CONNECT 的响应错误处理，不摘除节点、不重试；连接、握手 I/O 失败和超时沿用现有被动健康检查和重试规则。
 
@@ -133,13 +133,11 @@ plugins:
         dns_servers: null                 # 仅连接池级；未配置时读取系统 DNS 服务器
         dns_resolve_timeout: 5s            # 仅连接池级
         dns_refresh_retry_interval: 30s    # 仅连接池级；刷新失败后重试间隔
-        http_pool_max_idle_connections: 32 # 本连接池的 HTTP 空闲缓存上限；0 禁用缓存
-        http_pool_idle_timeout: 60m
-        https_pool_max_idle_connections: 32 # HTTPS 池独立计数；0 禁用缓存
-        https_pool_idle_timeout: 60m
+        http_max_idle_connections: 100 # HTTP/HTTPS 各自的空闲缓存上限；0 禁用缓存
+        http_connection_idle_timeout: 60s
         http3_pool_io_threads: 1            # H3 池独立 I/O runtime 的线程数，至少 1
-        http3_pool_max_connections_per_host: 2 # 同一 IP:port 的连接上限，至少 1
-        http3_pool_idle_timeout: 60m
+        http3_pool_max_connections_per_host: 1 # 同一 IP:port 的连接上限，至少 1
+        http3_connection_idle_timeout: 60s
         tcp_keep_alive_time: null          # 连接池级；开始探测前的空闲时间
         tcp_keep_alive_interval: null      # 连接池级；探测间隔
         tcp_keep_alive_retries: null       # 连接池级；探测重试次数
@@ -150,7 +148,8 @@ plugins:
     address_protocol: https           # 三级继承；direct 普通请求由 URL scheme 决定
     address_max_fails: 1               # 三级继承；0 禁用被动失败摘除
     address_fail_timeout: 10s          # 三级继承；失败统计及摘除时长
-    upstream_request_timeout: 30s      # 每次上游尝试收到响应头/完成 CONNECT 的时限
+    upstream_send_timeout: 10s         # 有数据待发送时，向上游写入无进展的时限
+    upstream_read_timeout: 10s         # 等待上游响应头及 body 时，读取无进展的时限
     tunnel_idle_timeout: 60s           # 插件级默认配置
     upstreams:
       # 直连模式（无 addresses）
@@ -214,7 +213,7 @@ listeners:
   - name: http
     kind: http
     addresses: ["127.0.0.1:8080"]
-    header_read_timeout: 30s
+    header_read_timeout: 75s
     tcp_accept_retry_delay: 1s
     tcp_keep_alive_time: 60s
     tcp_keep_alive_interval: 10s
@@ -236,7 +235,9 @@ upstream 的 `quic_connection_send_window`、`quic_connection_receive_window` �
 
 ## Listener 详解
 
-HTTP、HTTPS、HTTP/3 使用 `header_read_timeout` 限制请求头读取时间（默认 `30s`，必须为正且可表示的时长）。HTTP/3 超时只取消对应请求流，其他流继续处理。
+HTTP、HTTPS、HTTP/3 使用 `header_read_timeout` 限制请求头读取时间（默认 `75s`，必须为正且可表示的时长）。HTTP/3 超时只取消对应请求流，其他流继续处理。
+
+HTTP/HTTPS listener 的 `keep_alive` 默认为 `true`，控制 HTTP/1 连接是否可处理后续请求；设置 `false` 时普通响应完成后关闭连接，成功的 CONNECT 仍按隧道生命周期处理。它不控制 TCP 保活探测，也不作用于 H3。HTTP/1 的 `header_read_timeout` 同时覆盖 keep-alive 等待下一份请求头的时间。
 
 HTTP、HTTPS、SOCKS5 共用 TCP accept 恢复策略：连接中止、信号中断及待接收连接的网络错误立即继续，不做定时退避；文件描述符或内存资源耗尽时记 ERROR 日志，并按 `tcp_accept_retry_delay` 退避后重试（默认 `1s`）。监听描述符无效、不是 socket 或已不处于监听状态时，返回原始错误，由监督层停止服务并以非零状态退出。其他未知 I/O 错误记 ERROR 并退避，避免忙循环；所有等待均可被 shutdown 打断。
 
@@ -263,14 +264,15 @@ HTTP/1.1 监听器，支持 CONNECT 方法和基于 Host 头的虚拟主机路�
 1. 支持 HTTP/1.0 和 HTTP/1.1；HTTP/1.1 必须恰好有一个合法 Host 字段。
 2. 绝对 URI 和 CONNECT 使用目标 authority 路由；普通 origin-form 请求使用 Host。HTTP/1 绝对 URI 中的 authority 优先于 Host，转发时重新生成 Host。
 3. 重复 Host、非法 authority 返回 `400 Bad Request`；没有可确定 authority 的请求也返回 400。
-4. `header_read_timeout` 默认为 `30s`，限制请求头读取时间。
+4. `header_read_timeout` 默认为 `75s`，限制请求头读取时间。
 
 #### 配置参数
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `addresses` | `[String]` | 是 | 监听地址列表，格式 `host:port` |
-| `header_read_timeout` | `Duration` | 否 | HTTP/1 请求头读取超时，默认 `30s` |
+| `header_read_timeout` | `Duration` | 否 | HTTP/1 请求头读取超时，默认 `75s` |
+| `keep_alive` | `bool` | 否 | 默认 `true`；是否允许 HTTP/1 连接复用 |
 | `tcp_accept_retry_delay` | `Duration` | 否 | accept 资源耗尽或未知 I/O 错误后的重试退避，默认 `1s`；必须大于零且能安全计时 |
 
 #### 配置示例
@@ -303,7 +305,7 @@ HTTPS (HTTP/1.1 over TLS) 监听器，支持 SNI 证书选择和客户端证书�
 1. HTTP 路由和 Host 校验遵循上述 HTTP 规则。
 2. TLS 握手并发进行，不阻塞其他客户端连接。
 3. SNI 在当前 listener 的关联 Server 中按 `hostnames` 选择 Server，再选择该 Server 的证书；无 SNI 或未匹配时使用唯一的 `hostnames: []` 默认 Server，没有默认 Server 或选中 Server 没有兼容证书则握手失败。客户端 CA 仍由关联 Server 向 listener 汇总：提交的客户端证书在 TLS 握手中使用 CA 并集验证，不可信则握手失败；允许匿名握手。请求阶段按目标 authority/Host 在同一 listener 内另行选择 Server；其 `client_ca_certs` 非空但连接未提供证书时，由 listener 直接返回 `403 Forbidden`。Service 不重验证书，不要求请求目标等于 SNI。
-4. `header_read_timeout` 默认为 `30s`，独立于 TLS 握手超时。
+4. `header_read_timeout` 默认为 `75s`，独立于 TLS 握手超时。
 
 #### 配置参数
 
@@ -311,7 +313,8 @@ HTTPS (HTTP/1.1 over TLS) 监听器，支持 SNI 证书选择和客户端证书�
 |------|------|------|--------|------|
 | `addresses` | `[String]` | 是 | - | 监听地址列表 |
 | `tls_handshake_timeout` | `Duration` | 否 | `5s` | TLS 握手超时，防止慢客户端占用连接 |
-| `header_read_timeout` | `Duration` | 否 | `30s` | HTTP/1 请求头读取超时 |
+| `header_read_timeout` | `Duration` | 否 | `75s` | HTTP/1 请求头读取超时 |
+| `keep_alive` | `bool` | 否 | `true` | 是否允许 HTTP/1 连接复用 |
 | `tcp_accept_retry_delay` | `Duration` | 否 | `1s` | accept 资源耗尽或未知 I/O 错误后的重试退避，必须大于零且能安全计时 |
 
 TLS 证书在服务器（Server）级别配置，多个服务器可以共享同一监听器地址，通过 SNI 区分证书。
@@ -371,14 +374,14 @@ HTTP/3 (QUIC) 监听器，提供更快的连接建立和更好的弱网表现。
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `addresses` | `[String]` | 必填 | UDP 监听地址 |
-| `header_read_timeout` | `Duration` | `30s` | 每条请求流读取请求头的期限 |
+| `header_read_timeout` | `Duration` | `75s` | 每条请求流读取请求头的期限 |
 | `quic_connection_handshake_timeout` | `Duration` | `5s` | 接受连接后等待 QUIC/TLS 握手的期限，超时释放握手连接 |
 | `quic_connection_keep_alive_interval` | `Duration?` | 关闭 | 主动保活间隔；配置时必须为正且小于连接空闲超时 |
-| `quic_connection_idle_timeout` | `Duration` | `5s` | 连接空闲超时，实际期限还受对端参数约束 |
+| `quic_connection_max_idle_timeout` | `Duration?` | 沿用 Quinn，当前 `30s` | 连接空闲超时，实际期限还受对端参数约束 |
 | `quic_connection_max_concurrent_bidi_streams` | `u64` | `100` | 允许对端打开的并发双向流，范围 `1..=2^60`；不再限制为 10000 |
 | `quic_connection_initial_mtu` | `u16` | `1200` | 初始 MTU，范围 1200–9000 字节 |
-| `quic_connection_send_window` | `Byte` | `10MiB` | 连接级发送窗口 |
-| `quic_connection_receive_window` | `Byte` | `10MiB` | 连接级接收窗口 |
+| `quic_connection_send_window` | `Byte?` | 沿用 Quinn，当前 10,000,000 字节 | 连接级发送窗口 |
+| `quic_connection_receive_window` | `Byte?` | 沿用 Quinn，当前 2⁶²−1 字节 | 连接级接收窗口 |
 | `quic_stream_receive_window` | `Byte?` | Quinn 默认值 | 单条 stream 接收窗口，正值且可表示为 QUIC 可变整数 |
 
 连接级窗口在同一连接的请求及隧道之间共享，stream 接收窗口独立约束每条流。
@@ -391,15 +394,15 @@ listeners:
   - name: http3_main
     kind: http3
     addresses: ["0.0.0.0:443"]
-    header_read_timeout: 30s
+    header_read_timeout: 75s
     quic_connection_handshake_timeout: 5s
     quic_connection_keep_alive_interval: 3s
     quic_stream_receive_window: 1MiB
     quic_connection_max_concurrent_bidi_streams: 100
-    quic_connection_idle_timeout: "5s"
+    quic_connection_max_idle_timeout: null
     quic_connection_initial_mtu: 1200
-    quic_connection_send_window: "10MiB"
-    quic_connection_receive_window: "10MiB"
+    quic_connection_send_window: null
+    quic_connection_receive_window: null
 ```
 
 TLS 证书通过服务器级别的 `certificates`、`client_ca_certs` 配置（同 https 监听器），http3 依赖相同机制。
@@ -415,12 +418,10 @@ SOCKS5 监听器，使用 RFC 1928/1929 报文；认证执行时机遵循下述�
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | `addresses` | `[String]` | 是 | - | 监听地址列表 |
-| `socks5_handshake_timeout` | `Duration` | 否 | `3s` | 方法协商、凭据接收及确认回复的整体超时 |
-| `socks5_connect_timeout` | `Duration` | 否 | `3s` | 握手完成后，等待并读完客户端 CONNECT 命令及目标地址的整体超时，不包含上游建联 |
+| `header_read_timeout` | `Duration` | 否 | `75s` | 从 TCP accept 起，方法协商、凭据接收及确认回复、CONNECT 命令和目标地址读取共用的总期限 |
 | `tcp_accept_retry_delay` | `Duration` | 否 | `1s` | accept 资源耗尽或未知 I/O 错误后的重试退避，必须大于零且能安全计时 |
 
-两个超时独立配置、分阶段计时，阶段内收到部分报文不会重置截止时间。
-未配置 `socks5_connect_timeout` 时始终使用 `3s`，不继承 `socks5_handshake_timeout`。
+三个阶段及部分报文读取均不重置期限；超时关闭连接。该期限不包含后续 `auth.basic_auth` 验证、上游建联或隧道传输。
 
 **不可违背的产品约束：SOCKS5 与 HTTP 必须统一经过请求中间件认证。**
 这是一项有意的产品设计，不是缺陷、临时兼容或待修复项，不得改成握手阶段验证凭据，
@@ -435,7 +436,7 @@ SOCKS5 监听器，使用 RFC 1928/1929 报文；认证执行时机遵循下述�
 随后读取目标，将 SOCKS5 CONNECT 转成内部 HTTP CONNECT，统一执行 `auth.basic_auth`
 及其他中间件。配置认证时，缺失或错误凭据在此返回 HTTP 407，映射成 SOCKS5 CONNECT
 `REP=0x02` 并关闭连接，不建立上游隧道；未配置认证时无需验证凭据。
-凭据通过类型化扩展传递，保留用户名中的冒号；访问日志可记录被拒绝的 CONNECT。
+凭据在构造 CONNECT 时编码为 `Proxy-Authorization: Basic ...`，与 HTTP 请求使用同一认证入口，不通过 extensions 传递。密码中的冒号可以保留；用户名含冒号，或用户名／密码包含 ASCII 控制字符（0x00–0x1F、0x7F）时，在 SOCKS5 凭据收取阶段返回非零 STATUS 并关闭连接，服务端日志记录格式错误原因。这仅是 Basic 格式检查，不校验账号密码是否正确；有效格式的凭据仍统一交由 CONNECT 阶段的认证中间件验证。访问日志可记录被拒绝的 CONNECT。
 
 服务层 `users` 条目格式：
 
@@ -462,8 +463,7 @@ listeners:
   - name: socks5_main
     kind: socks5
     addresses: ["0.0.0.0:1080"]
-    socks5_handshake_timeout: "15s"
-    socks5_connect_timeout: "3s"
+    header_read_timeout: "75s"
     tcp_accept_retry_delay: "1s"
 plugins:
   auth: {}
@@ -509,7 +509,7 @@ curl --socks5 127.0.0.1:1080 --proxy-user admin:secret123 https://example.com
 
 Service 按方法处理请求：`CONNECT host:port` 建立透明隧道；其他方法统一转发完整的 HTTP 请求，目标 URL 支持 `http://` 和 `https://`。直连时，HTTP 目标使用 TCP，HTTPS 目标使用 TLS 并校验证书和目标主机名；链式模式将目标 scheme、authority、path、方法和消息体交给下一跳，不在中继节点建立目标 TLS。到 proxy 的连接地址、TLS 主机名与请求目标独立。GET/POST 的响应保留 HTTP 消息语义，CONNECT 成功后才转入双向字节传输。
 
-末端直连客户端只使用 HTTP/1.1：HTTP 目标走 TCP，HTTPS 目标走 TLS，ALPN 仅提供 `http/1.1`，并保留证书和主机名校验。连接池在进程内跨 worker、跨 upstream 共享，HTTP/HTTPS 分别由连接池级 `http_pool_*` / `https_pool_*` 控制。直连按目标 authority 及选中 IP:port 隔离；代理连接按代理 IP:port 复用，TLS 另匹配 server_name。直连不使用 HTTP/2、HTTP/3，不解析或缓存 Alt-Svc，也不查询 DNS HTTPS 记录。
+末端直连客户端只使用 HTTP/1.1：HTTP 目标走 TCP，HTTPS 目标走 TLS，ALPN 仅提供 `http/1.1`，并保留证书和主机名校验。连接池在进程内跨 worker、跨 upstream 共享，HTTP/HTTPS 共用连接池级 `http_max_idle_connections`（默认 100）和 `http_connection_idle_timeout`（默认 60s），但两种协议的连接缓存独立计数、隔离复用。直连按目标 authority 及选中 IP:port 隔离；代理连接按代理 IP:port 复用，TLS 另匹配 server_name。直连不使用 HTTP/2、HTTP/3，不解析或缓存 Alt-Svc，也不查询 DNS HTTPS 记录。
 
 direct 从请求目标构造一个权重为 1 的 address，链式模式使用配置的全部 addresses；各域名先解析为所有 A/AAAA 地址，再对全部 IP 节点做平滑加权轮询。每个 IP 继承所属 address 的完整权重、协议、认证及超时配置。同一 IP 属于不同 address 时保持不同身份。连接池按选中节点及目标身份隔离，复用连接也先经过节点调度，不再做 IP 并发竞速。所有 TCP 监听和上游连接均启用 `TCP_NODELAY`；`quic_connection_*` 只作用于 HTTP/3 链式上游。
 
@@ -517,7 +517,7 @@ direct 从请求目标构造一个权重为 1 的 address，链式模式使用�
 
 HTTP/HTTPS 普通转发独占借出完整连接，由当前 worker 驱动。请求和响应完整结束且协议状态允许复用时才归还；异常、取消、状态不确定则关闭。空闲超时从归还时起算，池上限只限制空闲缓存。HTTP/HTTPS CONNECT、SOCKS5 和 direct CONNECT 使用专用连接，不进入缓存池。
 
-H3 池内部持有独立多线程 runtime，负责 QUIC/H3 建联、驱动和回收。按需创建至每个 IP:port 的连接上限后轮流打开 stream，普通转发和 CONNECT 共用轮转。创建中及仍有活跃 stream 的排空连接计入上限；GOAWAY 不接受新请求，已有 stream 排空。容量等待纳入请求超时，不计为节点健康失败。池空闲超时从最后一个活跃响应或隧道结束后起算；QUIC keepalive 不重置池空闲时间。`quic_connection_idle_timeout` 是独立的传输层空闲超时，仍可能终止活跃 stream。
+H3 池内部持有独立多线程 runtime，负责 QUIC/H3 建联、驱动和回收。按需创建至每个 IP:port 的连接上限后轮流打开 stream，普通转发和 CONNECT 共用轮转。创建中及仍有活跃 stream 的排空连接计入上限；GOAWAY 不接受新请求，已有 stream 排空。容量等待纳入请求超时，不计为节点健康失败。池空闲超时从最后一个活跃响应或隧道结束后起算；QUIC keepalive 不重置池空闲时间。`quic_connection_max_idle_timeout` 是独立的传输层空闲超时，仍可能终止活跃 stream。
 
 TLS 信任和客户端证书使用连接池级统一配置；连接参数仅在新建时生效，复用沿用原连接参数。进程停止新请求并排空业务后关闭共享池，再退出 H3 runtime 和 worker runtime。日志 writer 的活动文件和轮转归档必须拥有互不重叠的路径命名空间。
 
@@ -533,7 +533,9 @@ TLS 信任和客户端证书使用连接池级统一配置；连接参数仅在�
 |------|------|------|------|
 | `upstream` | `String` | 是 | 上游名称，引用 `plugins.upstream.upstreams[].name` |
 
-直连模式的超时和连接池配置在 upstream 定义中设置：`tcp_connect_timeout` 用于 TCP 建连；`tls_handshake_timeout` 用于 TCP 上的 TLS 握手；`upstream_request_timeout` 限制响应头或隧道建立的等待时间。普通转发的连接池按 scheme、目标主机和端口区分，配置项为 `pool`；隧道使用 `tunnel_idle_timeout`。HTTPS 目标使用系统信任库，并可通过 `plugins.upstream.certificates.server_ca_path` 添加 CA，客户端证书沿用该配置中的 `client_cert_path` 和 `client_key_path`。
+直连与链式转发的 `upstream_send_timeout`、`upstream_read_timeout` 均默认 10s，按插件、upstream、address 三级继承，分别限制请求写入和响应读取的无进展时间，不限制上传或下载的总耗时。等待客户端提供请求 body 不计上游发送超时，上传发送完成后才开始等待响应的读取超时；提前响应仍可正常处理。HTTP/HTTPS 按实际连接读写进展计时，H3 按单个请求 stream 的字节进展计时。CONNECT 成功后由 `tunnel_idle_timeout` 控制隧道，不再使用请求读写超时。
+
+通过 `use_connection_pool` 选择连接池；`tcp_connect_timeout`、`tls_handshake_timeout` 等连接参数在 `plugins.upstream.connection_pools[]` 配置。HTTPS 目标使用系统信任库，可通过该连接池的 `certificates.server_ca_path` 添加 CA；客户端证书使用同级 `client_cert_path` 和 `client_key_path`。
 
 显式 CA 文件必须包含有效证书；空文件、只有私钥或无证书内容会导致配置失败，系统信任库不会掩盖该错误。
 

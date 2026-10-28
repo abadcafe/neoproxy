@@ -79,8 +79,7 @@ async fn test_serve_translates_targets_and_metadata_then_maps_denied_response()
       session::serve(
         connection,
         service,
-        Duration::from_secs(1),
-        Duration::from_secs(3),
+        tokio::time::Instant::now() + Duration::from_secs(1),
         "session-test".into()
       ),
       async {
@@ -106,8 +105,7 @@ async fn test_serve_invalid_handshake_closes_without_connect_reply() {
     session::serve(
       connection,
       crate::server::placeholder_service(),
-      Duration::from_secs(1),
-      Duration::from_secs(3),
+      tokio::time::Instant::now() + Duration::from_secs(1),
       "session-test".into()
     ),
     async {
@@ -130,8 +128,7 @@ async fn test_serve_handshake_timeout_closes_idle_client() {
     session::serve(
       connection,
       crate::server::placeholder_service(),
-      Duration::from_secs(1),
-      Duration::from_secs(3),
+      tokio::time::Instant::now() + Duration::from_secs(1),
       "session-test".into()
     ),
     async {
@@ -139,4 +136,91 @@ async fn test_serve_handshake_timeout_closes_idle_client() {
     },
   );
   assert_eq!(start.elapsed(), Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn test_serve_injects_basic_header_for_connect_authentication() {
+  let (username, password) = ("user", "pass:word");
+  let (connection, mut client) = connection_pair().await;
+  let service =
+    Service::new(tower::service_fn(move |request: Request| {
+      Box::pin(async move {
+        assert_eq!(request.method(), http::Method::CONNECT);
+        let header =
+          request.headers().get(http::header::PROXY_AUTHORIZATION);
+        let header = header.unwrap();
+        assert_eq!(header, "Basic dXNlcjpwYXNzOndvcmQ=");
+        assert!(header.is_sensitive());
+        assert_eq!(
+          crate::auth::UserPasswordAuth::parse_basic_auth(header)
+            .unwrap(),
+          (username.into(), password.into())
+        );
+        Ok(build_error_response(
+          http::StatusCode::PROXY_AUTHENTICATION_REQUIRED,
+          "denied",
+        ))
+      }) as Pin<Box<dyn Future<Output = Result<Response>>>>
+    }));
+  tokio::join!(
+    session::serve(
+      connection,
+      service,
+      tokio::time::Instant::now() + Duration::from_secs(1),
+      "session-test".into()
+    ),
+    async {
+      client.write_all(&[5, 1, 2]).await.unwrap();
+      let mut reply = [0; 2];
+      client.read_exact(&mut reply).await.unwrap();
+      assert_eq!(reply, [5, 2]);
+      let mut credentials =
+        vec![1, u8::try_from(username.len()).unwrap()];
+      credentials.extend_from_slice(username.as_bytes());
+      credentials.push(u8::try_from(password.len()).unwrap());
+      credentials.extend_from_slice(password.as_bytes());
+      client.write_all(&credentials).await.unwrap();
+      client.read_exact(&mut reply).await.unwrap();
+      assert_eq!(reply, [1, 0]);
+      client
+        .write_all(&[5, 1, 0, 1, 127, 0, 0, 1, 1, 187])
+        .await
+        .unwrap();
+      let mut command_reply = [0; 10];
+      client.read_exact(&mut command_reply).await.unwrap();
+      assert_eq!(command_reply[1], 2);
+    }
+  );
+}
+
+#[tokio::test]
+async fn test_serve_header_deadline_excludes_service_execution() {
+  let (connection, mut client) = connection_pair().await;
+  let service = Service::new(tower::service_fn(|_: Request| {
+    Box::pin(async {
+      tokio::time::sleep(Duration::from_millis(1100)).await;
+      Ok(build_error_response(http::StatusCode::FORBIDDEN, "denied"))
+    }) as Pin<Box<dyn Future<Output = Result<Response>>>>
+  }));
+  tokio::join!(
+    session::serve(
+      connection,
+      service,
+      tokio::time::Instant::now() + Duration::from_secs(1),
+      "session-test".into()
+    ),
+    async {
+      client.write_all(&[5, 1, 0]).await.unwrap();
+      let mut method = [0; 2];
+      client.read_exact(&mut method).await.unwrap();
+      assert_eq!(method, [5, 0]);
+      client
+        .write_all(&[5, 1, 0, 1, 127, 0, 0, 1, 0, 80])
+        .await
+        .unwrap();
+      let mut reply = [0; 10];
+      client.read_exact(&mut reply).await.unwrap();
+      assert_eq!(reply[1], 2);
+    }
+  );
 }

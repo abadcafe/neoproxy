@@ -6,10 +6,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use h3::client as h3_cli;
 
 use super::super::observation::ConnectionObservation;
+use super::io_progress::SendBuffer;
 use super::quic_connect;
 use crate::plugins::upstream::client::protocol::QuicConfig;
 use crate::plugins::upstream::error::UpstreamError;
@@ -24,24 +24,28 @@ pub(super) async fn establish(
   pool: &Settings,
   tls_config: &rustls::ClientConfig,
   observation: &ConnectionObservation,
+  registry: super::read_progress::Registry,
 ) -> Result<
   (
     quinn::Connection,
-    h3_cli::SendRequest<h3_quinn::OpenStreams, Bytes>,
+    h3_cli::SendRequest<super::read_progress::Opener, SendBuffer>,
   ),
   UpstreamError,
 > {
   let address = &pool.address;
   let quinn_conn =
     create_quic_connection(pool, tls_config, observation).await?;
-  let (mut h3_conn, send_request) =
-    h3::client::new(h3_quinn::Connection::new(quinn_conn.clone()))
-      .await
-      .map_err(|e| {
-        UpstreamError::ConnectionTerminated(format!(
-          "H3 connection setup to {address} failed: {e}"
-        ))
-      })?;
+  let (mut h3_conn, send_request) = h3::client::builder()
+    .build(super::read_progress::Connection::new(
+      quinn_conn.clone(),
+      registry,
+    ))
+    .await
+    .map_err(|e| {
+      UpstreamError::ConnectionTerminated(format!(
+        "H3 connection setup to {address} failed: {e}"
+      ))
+    })?;
 
   tokio::spawn(async move {
     let _ = std::future::poll_fn(|cx| h3_conn.poll_close(cx)).await;

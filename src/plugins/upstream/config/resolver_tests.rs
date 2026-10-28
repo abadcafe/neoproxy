@@ -91,12 +91,12 @@ connection_pools:
 #[test]
 fn test_merge_chain_config_inherits_request_deadline() {
   let config: UpstreamPluginConfig = serde_yaml::from_str(
-    "upstream_request_timeout: 2s\nupstreams:\n- name: direct",
+    "upstream_read_timeout: 2s\nupstreams:\n- name: direct",
   )
   .unwrap();
   assert_eq!(
     merge_chain_config(&config).unwrap()["direct"]
-      .upstream_request_timeout,
+      .upstream_read_timeout,
     Duration::from_secs(2)
   );
 }
@@ -131,17 +131,20 @@ fn test_merge_chain_config_resolves_direct_https_policy() {
 }
 
 #[test]
-fn test_merge_chain_config_inherits_address_request_deadlines() {
+fn test_merge_chain_config_inherits_address_io_timeouts() {
   let config: UpstreamPluginConfig = serde_yaml::from_str(
     r#"
-upstream_request_timeout: 9s
+upstream_read_timeout: 9s
+upstream_send_timeout: 8s
 upstreams:
 - name: overridden
-  upstream_request_timeout: 4s
+  upstream_read_timeout: 4s
+  upstream_send_timeout: 3s
   addresses:
   - address: "127.0.0.1:80"
     address_protocol: http
-    upstream_request_timeout: 1s
+    upstream_read_timeout: 1s
+    upstream_send_timeout: 2s
   - address: "127.0.0.1:81"
     address_protocol: http
 - name: inherited
@@ -157,21 +160,33 @@ upstreams:
   .unwrap();
   let upstreams = merge_chain_config(&config).unwrap();
   assert_eq!(
-    upstreams["overridden"].addresses[0].upstream_request_timeout,
+    upstreams["overridden"].addresses[0].upstream_send_timeout,
+    Duration::from_secs(2)
+  );
+  assert_eq!(
+    upstreams["overridden"].addresses[1].upstream_send_timeout,
+    Duration::from_secs(3)
+  );
+  assert_eq!(
+    upstreams["inherited"].addresses[0].upstream_send_timeout,
+    Duration::from_secs(8)
+  );
+  assert_eq!(
+    upstreams["overridden"].addresses[0].upstream_read_timeout,
     Duration::from_secs(1)
   );
   assert_eq!(
-    upstreams["overridden"].addresses[1].upstream_request_timeout,
+    upstreams["overridden"].addresses[1].upstream_read_timeout,
     Duration::from_secs(4)
   );
   assert_eq!(
-    upstreams["inherited"].addresses[0].upstream_request_timeout,
+    upstreams["inherited"].addresses[0].upstream_read_timeout,
     Duration::from_secs(9)
   );
 }
 
 #[test]
-fn test_merge_chain_config_defaults_address_request_deadline() {
+fn test_merge_chain_config_defaults_address_io_timeouts() {
   let config: UpstreamPluginConfig = serde_yaml::from_str(
     "upstreams: [{name: chain, addresses: [{address: '127.0.0.1:80', \
      address_protocol: http}]}]",
@@ -179,8 +194,12 @@ fn test_merge_chain_config_defaults_address_request_deadline() {
   .unwrap();
   let upstreams = merge_chain_config(&config).unwrap();
   assert_eq!(
-    upstreams["chain"].addresses[0].upstream_request_timeout,
-    Duration::from_secs(30)
+    upstreams["chain"].addresses[0].upstream_send_timeout,
+    Duration::from_secs(10)
+  );
+  assert_eq!(
+    upstreams["chain"].addresses[0].upstream_read_timeout,
+    Duration::from_secs(10)
   );
 }
 

@@ -1,8 +1,7 @@
 //! module: listeners::http3::quic_config
 //! responsibility: validate listener QUIC transport parameters
 //! public operations: DEFAULT_MAX_CONCURRENT_BIDI_STREAMS,
-//! DEFAULT_MAX_IDLE_TIMEOUT, DEFAULT_INITIAL_MTU,
-//! DEFAULT_SEND_WINDOW, DEFAULT_RECEIVE_WINDOW, H3_NO_ERROR_CODE,
+//! DEFAULT_INITIAL_MTU, H3_NO_ERROR_CODE,
 //! Http3ListenerArgs, validate_and_apply_defaults,
 //! QuicConfig
 //! data entities: Http3ListenerArgs, QuicConfig
@@ -17,19 +16,8 @@ use serde::Deserialize;
 /// Default maximum concurrent bidirectional streams
 pub(super) const DEFAULT_MAX_CONCURRENT_BIDI_STREAMS: u64 = 100;
 
-/// Default maximum idle timeout
-pub(super) const DEFAULT_MAX_IDLE_TIMEOUT: Duration =
-  Duration::from_secs(5);
-
 /// Default initial MTU
 pub(super) const DEFAULT_INITIAL_MTU: u16 = 1200;
-
-/// Default send window size (10MiB)
-pub(super) const DEFAULT_SEND_WINDOW: Byte = Byte::from_u64(10485760);
-
-/// Default receive window size (10MiB)
-pub(super) const DEFAULT_RECEIVE_WINDOW: Byte =
-  Byte::from_u64(10485760);
 
 /// H3_NO_ERROR error code for CONNECTION_CLOSE frame
 /// See: https://www.rfc-editor.org/rfc/rfc9114.html#errors
@@ -60,21 +48,17 @@ pub(super) struct Http3ListenerArgs {
   /// 1..=2^60)
   #[serde(default = "default_max_concurrent_bidi_streams")]
   quic_connection_max_concurrent_bidi_streams: u64,
-  /// Maximum idle timeout (default: 5s)
-  #[serde(
-    with = "humantime_serde",
-    default = "default_max_idle_timeout"
-  )]
-  quic_connection_idle_timeout: Duration,
+  /// Omission preserves Quinn's default transport idle timeout.
+  #[serde(with = "humantime_serde", default)]
+  quic_connection_max_idle_timeout: Option<Duration>,
   /// Initial MTU (default: 1200, range: 1200-9000)
   #[serde(default = "default_initial_mtu")]
   quic_connection_initial_mtu: u16,
-  /// Send window size (default: 10MiB)
-  #[serde(default = "default_send_window")]
-  quic_connection_send_window: Byte,
-  /// Receive window size (default: 10MiB)
-  #[serde(default = "default_receive_window")]
-  quic_connection_receive_window: Byte,
+  /// Omission preserves Quinn's default connection windows.
+  #[serde(default)]
+  quic_connection_send_window: Option<Byte>,
+  #[serde(default)]
+  quic_connection_receive_window: Option<Byte>,
 }
 
 fn default_handshake_timeout() -> Duration {
@@ -85,20 +69,8 @@ fn default_max_concurrent_bidi_streams() -> u64 {
   DEFAULT_MAX_CONCURRENT_BIDI_STREAMS
 }
 
-fn default_max_idle_timeout() -> Duration {
-  DEFAULT_MAX_IDLE_TIMEOUT
-}
-
 fn default_initial_mtu() -> u16 {
   DEFAULT_INITIAL_MTU
-}
-
-fn default_send_window() -> Byte {
-  DEFAULT_SEND_WINDOW
-}
-
-fn default_receive_window() -> Byte {
-  DEFAULT_RECEIVE_WINDOW
 }
 
 impl Http3ListenerArgs {
@@ -137,11 +109,14 @@ impl Http3ListenerArgs {
         );
       }
     }
-    if let Some(value) = self.quic_connection_keep_alive_interval {
+    if let (Some(value), Some(idle)) = (
+      self.quic_connection_keep_alive_interval,
+      self.quic_connection_max_idle_timeout,
+    ) {
       anyhow::ensure!(
-        value < self.quic_connection_idle_timeout,
+        value < idle,
         "quic_connection_keep_alive_interval must be less than \
-         quic_connection_idle_timeout"
+         quic_connection_max_idle_timeout"
       );
     }
     let stream_receive_window =
@@ -153,17 +128,24 @@ impl Http3ListenerArgs {
          integer"
       );
     }
-    let max_idle_timeout_ms =
-      u64::try_from(self.quic_connection_idle_timeout.as_millis())
-        .context(
-          "Invalid quic_connection_idle_timeout: milliseconds overflow",
+    let max_idle_timeout_ms = self
+      .quic_connection_max_idle_timeout
+      .map(|value| -> Result<u64> {
+        let milliseconds = u64::try_from(value.as_millis()).context(
+          "Invalid quic_connection_max_idle_timeout: milliseconds \
+           overflow",
         )?;
-    quinn::VarInt::try_from(max_idle_timeout_ms).context(
-      "Invalid quic_connection_idle_timeout: exceeds QUIC range",
-    )?;
-    if max_idle_timeout_ms == 0 {
-      bail!("Invalid quic_connection_idle_timeout: must be > 0ms");
-    }
+        quinn::VarInt::try_from(milliseconds).context(
+          "Invalid quic_connection_max_idle_timeout: exceeds QUIC \
+           range",
+        )?;
+        anyhow::ensure!(
+          milliseconds > 0,
+          "Invalid quic_connection_max_idle_timeout: must be > 0ms"
+        );
+        Ok(milliseconds)
+      })
+      .transpose()?;
 
     if !(1200..=9000).contains(&self.quic_connection_initial_mtu) {
       bail!(
@@ -173,19 +155,22 @@ impl Http3ListenerArgs {
       );
     }
 
-    let send_window = self.quic_connection_send_window.as_u64();
-    if send_window == 0 {
+    let send_window =
+      self.quic_connection_send_window.map(|v| v.as_u64());
+    let receive_window =
+      self.quic_connection_receive_window.map(|v| v.as_u64());
+    if send_window == Some(0) {
       bail!("Invalid quic_connection_send_window: must be > 0");
     }
-
-    let receive_window = self.quic_connection_receive_window.as_u64();
-    if receive_window == 0 {
-      bail!("Invalid quic_connection_receive_window: must be > 0");
+    if let Some(value) = receive_window {
+      anyhow::ensure!(
+        value > 0,
+        "Invalid quic_connection_receive_window: must be > 0"
+      );
+      quinn::VarInt::try_from(value).context(
+        "Invalid quic_connection_receive_window: exceeds QUIC range",
+      )?;
     }
-
-    quinn::VarInt::try_from(receive_window).context(
-      "Invalid quic_connection_receive_window: exceeds QUIC range",
-    )?;
 
     Ok(QuicConfig {
       handshake_timeout: self.quic_connection_handshake_timeout,
@@ -208,10 +193,10 @@ pub(super) struct QuicConfig {
   pub(super) keep_alive_interval: Option<Duration>,
   pub(super) stream_receive_window: Option<u64>,
   pub(super) max_concurrent_bidi_streams: u64,
-  pub(super) max_idle_timeout_ms: u64,
+  pub(super) max_idle_timeout_ms: Option<u64>,
   pub(super) initial_mtu: u16,
-  pub(super) send_window: u64,
-  pub(super) receive_window: u64,
+  pub(super) send_window: Option<u64>,
+  pub(super) receive_window: Option<u64>,
 }
 
 impl Default for QuicConfig {
@@ -221,10 +206,10 @@ impl Default for QuicConfig {
       keep_alive_interval: None,
       stream_receive_window: None,
       max_concurrent_bidi_streams: DEFAULT_MAX_CONCURRENT_BIDI_STREAMS,
-      max_idle_timeout_ms: DEFAULT_MAX_IDLE_TIMEOUT.as_millis() as u64,
+      max_idle_timeout_ms: None,
       initial_mtu: DEFAULT_INITIAL_MTU,
-      send_window: DEFAULT_SEND_WINDOW.as_u64(),
-      receive_window: DEFAULT_RECEIVE_WINDOW.as_u64(),
+      send_window: None,
+      receive_window: None,
     }
   }
 }

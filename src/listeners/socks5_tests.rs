@@ -91,22 +91,21 @@ fn test_socks5_builder_default_args_succeeds() {
 }
 
 #[test]
-fn test_socks5_builder_custom_handshake_timeout_succeeds() {
+fn test_socks5_builder_custom_header_read_timeout_succeeds() {
   let builder = socks5::create_listener_builder();
   let args: crate::config::SerializedArgs =
-    serde_yaml::from_str(r#"socks5_handshake_timeout: "5s""#).unwrap();
+    serde_yaml::from_str(r#"header_read_timeout: "5s""#).unwrap();
   let result =
     builder(vec!["127.0.0.1:0".to_string()], args, plain_servers());
   assert!(result.is_ok());
 }
 
 #[test]
-fn test_socks5_builder_invalid_handshake_timeout_returns_error() {
+fn test_socks5_builder_invalid_header_read_timeout_returns_error() {
   let builder = socks5::create_listener_builder();
-  let args: crate::config::SerializedArgs = serde_yaml::from_str(
-    r#"socks5_handshake_timeout: "not_a_duration""#,
-  )
-  .unwrap();
+  let args: crate::config::SerializedArgs =
+    serde_yaml::from_str(r#"header_read_timeout: "not_a_duration""#)
+      .unwrap();
   let result =
     builder(vec!["127.0.0.1:0".to_string()], args, plain_servers());
   assert!(result.is_err());
@@ -153,47 +152,11 @@ fn test_socks5_builder_ipv6_address_succeeds() {
 fn test_socks5_builder_rejects_unrepresentable_deadlines() {
   let builder = socks5::create_listener_builder();
   for value in ["0s", "18446744073709551615s"] {
-    let args = serde_yaml::from_str(&format!(
-      "socks5_handshake_timeout: {value:?}"
-    ))
-    .unwrap();
+    let args =
+      serde_yaml::from_str(&format!("header_read_timeout: {value:?}"))
+        .unwrap();
     let result =
       builder(vec!["127.0.0.1:0".into()], args, plain_servers());
     assert!(result.is_err(), "accepted invalid deadline {value}");
-  }
-}
-
-#[test]
-fn test_socks5_builder_independent_connect_timeout_succeeds() {
-  let args = serde_yaml::from_str(
-    "socks5_handshake_timeout: 1s\nsocks5_connect_timeout: 5s",
-  )
-  .unwrap();
-  assert!(
-    socks5::create_listener_builder()(
-      vec!["127.0.0.1:0".into()],
-      args,
-      plain_servers(),
-    )
-    .is_ok()
-  );
-}
-
-#[test]
-fn test_socks5_builder_invalid_connect_timeout_returns_error() {
-  for value in ["0s", "invalid", "18446744073709551615s"] {
-    let args = serde_yaml::from_str(&format!(
-      "socks5_connect_timeout: {value:?}"
-    ))
-    .unwrap();
-    assert!(
-      socks5::create_listener_builder()(
-        vec!["127.0.0.1:0".into()],
-        args,
-        plain_servers(),
-      )
-      .is_err(),
-      "{value}"
-    );
   }
 }

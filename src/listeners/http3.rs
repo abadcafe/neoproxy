@@ -146,17 +146,18 @@ impl Listening for Http3Listener {
           anyhow!("Invalid max_concurrent_bidi_streams: {}", e)
         })?,
       )
-      .max_idle_timeout(Some(
-        quinn::VarInt::try_from(quic_config.max_idle_timeout_ms)
-          .map_err(|e| anyhow!("Invalid max_idle_timeout_ms: {}", e))?
-          .into(),
-      ))
-      .initial_mtu(quic_config.initial_mtu)
-      .send_window(quic_config.send_window)
-      .receive_window(
-        quinn::VarInt::try_from(quic_config.receive_window)
-          .map_err(|e| anyhow!("Invalid receive_window: {}", e))?,
-      );
+      .initial_mtu(quic_config.initial_mtu);
+    if let Some(milliseconds) = quic_config.max_idle_timeout_ms {
+      transport_config.max_idle_timeout(Some(
+        quinn::VarInt::try_from(milliseconds)?.into(),
+      ));
+    }
+    if let Some(window) = quic_config.send_window {
+      transport_config.send_window(window);
+    }
+    if let Some(window) = quic_config.receive_window {
+      transport_config.receive_window(quinn::VarInt::try_from(window)?);
+    }
 
     transport_config
       .keep_alive_interval(quic_config.keep_alive_interval);

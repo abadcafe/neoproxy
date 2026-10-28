@@ -54,17 +54,17 @@ plugins:
   # Business policy and use_connection_pool inherit plugin/upstream/address.
   # DNS, TLS and transport settings belong only to named connection pools.
   upstream:
+    upstream_send_timeout: 10s  # Pending upstream writes without progress
+    upstream_read_timeout: 10s  # Upstream response reads without progress
     use_connection_pool: default
     connection_pools:
       - name: default
         tcp_connect_timeout: 10s
-        http_pool_max_idle_connections: 32
-        http_pool_idle_timeout: 60m
-        https_pool_max_idle_connections: 32
-        https_pool_idle_timeout: 60m
+        http_max_idle_connections: 100
+        http_connection_idle_timeout: 60s
         http3_pool_io_threads: 1
-        http3_pool_max_connections_per_host: 2
-        http3_pool_idle_timeout: 60m
+        http3_pool_max_connections_per_host: 1
+        http3_connection_idle_timeout: 60s
         # tcp_keep_alive_time: 60s
         # tcp_keep_alive_interval: 10s
         # tcp_keep_alive_retries: 3
@@ -154,6 +154,8 @@ listeners:
   # HTTP listener - configurable accept retry delay
   - name: http_chain
     kind: http
+    keep_alive: true
+    header_read_timeout: 75s
     addresses: ["127.0.0.1:8080"]
     # Resource/unknown accept error retry delay (default: 1s)
     tcp_accept_retry_delay: "1s"
@@ -163,6 +165,8 @@ listeners:
 # HTTPS listener - supports TLS handshake timeout
   - name: https_chain
     kind: https
+    keep_alive: true
+    header_read_timeout: 75s
     addresses: ["127.0.0.1:8443"]
     # TLS handshake timeout (default: 5s)
     tls_handshake_timeout: "5s"
@@ -180,23 +184,21 @@ listeners:
     quic_connection_keep_alive_interval: "3s"
     quic_stream_receive_window: "1MiB"
     quic_connection_max_concurrent_bidi_streams: 100
-    # Max idle timeout (default: 5s)
-    quic_connection_idle_timeout: "5s"
+    # Omitted/null: inherit Quinn max_idle_timeout (currently 30s)
+    quic_connection_max_idle_timeout: null
     # Initial MTU (default: 1200, range: 1200-9000)
     quic_connection_initial_mtu: 1200
-    # QUIC send window (default: 10MiB)
-    quic_connection_send_window: "10MiB"
-    # QUIC receive window (default: 10MiB)
-    quic_connection_receive_window: "10MiB"
-# SOCKS5 listener - supports handshake timeout
+    # Omitted/null: inherit Quinn send_window (currently 10000000 bytes)
+    quic_connection_send_window: null
+    # Omitted/null: inherit Quinn receive_window (currently 2^62 - 1 bytes)
+    quic_connection_receive_window: null
+# SOCKS5 listener - one deadline for the complete proxy request
 # Auth is configured in the service pipeline (auth.basic_auth layer)
   - name: socks5_chain
     kind: socks5
     addresses: ["127.0.0.1:9080"]
-    # Handshake timeout (default: 3s)
-    socks5_handshake_timeout: "3s"
-    # Client CONNECT command read deadline; excludes upstream dialing
-    socks5_connect_timeout: "3s"
+    # Total from accept through negotiation/auth/CONNECT; excludes upstream dialing
+    header_read_timeout: "75s"
     # Resource/unknown accept error retry delay (default: 1s)
     tcp_accept_retry_delay: "1s"
     tcp_keep_alive_time: "60s"

@@ -5,6 +5,8 @@ import socket
 import tempfile
 import time
 
+import pytest
+
 from tests.fixtures.ports import get_unique_port
 from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
 from tests.fixtures.socks5_client import socks5_handshake_password
@@ -17,7 +19,7 @@ from tests.fixtures.tcp_peer import create_target_server, send_ok_and_close
 class TestSocks5HandshakeTimeout:
     """Tests for SOCKS5 handshake timeout behavior"""
 
-    def test_handshake_timeout_partial_data(self) -> None:
+    def test_header_read_timeout_partial_data(self) -> None:
         """
         TC-S5-008: Handshake timeout - partial data sent
 
@@ -30,7 +32,7 @@ class TestSocks5HandshakeTimeout:
 
         try:
             config_path = create_socks5_config(
-                proxy_port, temp_dir, handshake_timeout="0.5s"
+                proxy_port, temp_dir, header_read_timeout="0.5s"
             )
 
             proxy_proc = start_proxy(config_path)
@@ -64,7 +66,7 @@ class TestSocks5HandshakeTimeout:
                 terminate_process(proxy_proc, timeout=0.5, force=True)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_custom_handshake_timeout(self) -> None:
+    def test_custom_header_read_timeout(self) -> None:
         """
         TC-S5-009: Custom handshake timeout configuration
 
@@ -77,7 +79,7 @@ class TestSocks5HandshakeTimeout:
         try:
             # Use 0.5 second timeout
             config_path = create_socks5_config(
-                proxy_port, temp_dir, handshake_timeout="0.5s"
+                proxy_port, temp_dir, header_read_timeout="0.5s"
             )
 
             proxy_proc = start_proxy(config_path)
@@ -109,25 +111,26 @@ class TestSocks5HandshakeTimeout:
                 terminate_process(proxy_proc, timeout=0.5, force=True)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_handshake_timeout_default(self) -> None:
+    @pytest.mark.timeout(100)
+    def test_header_read_timeout_default(self) -> None:
         """
         TC-S5-039: Handshake timeout default value
 
-        Test that default handshake timeout is 3 seconds.
+        Test that default header read timeout is 75 seconds.
         """
         temp_dir = tempfile.mkdtemp()
         proxy_port = get_unique_port()
         proxy_proc: BytesProcess | None = None
 
         try:
-            # No handshake_timeout specified, should use default 3s
+            # No header_read_timeout specified, should use default 75s
             config_path = create_socks5_config(proxy_port, temp_dir)
 
             proxy_proc = start_proxy(config_path)
             assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
+            sock.settimeout(85.0)
             try:
                 sock.connect(("127.0.0.1", proxy_port))
 
@@ -137,12 +140,12 @@ class TestSocks5HandshakeTimeout:
                     data = sock.recv(1024)
                     assert len(data) == 0, "Expected connection close"
                 except socket.timeout:
-                    pass
+                    pytest.fail("SOCKS5 default header deadline did not expire")
 
                 elapsed = time.monotonic() - start_time
-                # Default should be around 3 seconds
-                assert 2.0 <= elapsed <= 6.0, (
-                    f"Timeout not matching default: {elapsed}s (expected ~3s)"
+                # Default should be around 75 seconds
+                assert 74.0 <= elapsed <= 85.0, (
+                    f"Timeout not matching default: {elapsed}s (expected ~75s)"
                 )
 
             finally:

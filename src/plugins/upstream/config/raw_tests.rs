@@ -46,8 +46,8 @@ fn test_upstream_address_config_protocol_defaults_to_https() {
 fn test_pool_config_default_uses_pool_defaults() {
   let pool = PoolConfig::default();
 
-  assert_eq!(pool.max_idle_per_host, 32);
-  assert_eq!(pool.idle_timeout, std::time::Duration::from_secs(3600));
+  assert_eq!(pool.max_idle_per_host, 100);
+  assert_eq!(pool.idle_timeout, std::time::Duration::from_secs(60));
 }
 
 #[test]
@@ -64,17 +64,17 @@ fn test_plugin_pool_configuration_defaults_and_overrides() {
   let config: super::raw::UpstreamPluginConfig =
     serde_yaml::from_str("{}").unwrap();
   let pools = crate::plugins::upstream::config::connection_pool::resolve_connection_pools(&config).unwrap()["default"].limits();
-  assert_eq!(pools.http.max_idle_per_host, 32);
+  assert_eq!(pools.http.max_idle_per_host, 100);
   assert_eq!(
     pools.https.idle_timeout,
-    std::time::Duration::from_secs(3600)
+    std::time::Duration::from_secs(60)
   );
-  assert_eq!(pools.h3_connections, 2);
+  assert_eq!(pools.h3_connections, 1);
   assert_eq!(pools.h3_threads, 1);
   let config: super::raw::UpstreamPluginConfig = serde_yaml::from_str(
-    "connection_pools:\n- name: default\n  \
-     http_pool_max_idle_connections: 0\n  http3_pool_io_threads: 3\n  \
-     http3_pool_idle_timeout: 60m\n",
+    "connection_pools:\n- name: default\n  http_max_idle_connections: \
+     0\n  http3_pool_io_threads: 3\n  http3_connection_idle_timeout: \
+     60m\n",
   )
   .unwrap();
   assert_eq!(crate::plugins::upstream::config::connection_pool::resolve_connection_pools(&config).unwrap()["default"].limits().http.max_idle_per_host, 0);
@@ -92,4 +92,31 @@ fn test_plugin_pool_rejects_zero_h3_capacity_and_threads() {
     .unwrap();
     assert!(super::merge_chain_config(&config).is_err());
   }
+}
+
+#[test]
+fn test_connection_pool_shared_http_policy_and_h3_defaults() {
+  let config = serde_yaml::from_str(
+    "connection_pools: [{name: default, http_max_idle_connections: 7, \
+     http_connection_idle_timeout: 9s}]",
+  )
+  .unwrap();
+  let pools =
+    super::connection_pool::resolve_connection_pools(&config).unwrap();
+  let limits = pools["default"].limits();
+  assert_eq!(limits.http.max_idle_per_host, 7);
+  assert_eq!(limits.https.max_idle_per_host, 7);
+  assert_eq!(
+    limits.http.idle_timeout,
+    std::time::Duration::from_secs(9)
+  );
+  assert_eq!(
+    limits.https.idle_timeout,
+    std::time::Duration::from_secs(9)
+  );
+  assert_eq!(limits.h3_connections, 1);
+  assert_eq!(
+    limits.h3_idle_timeout,
+    std::time::Duration::from_secs(60)
+  );
 }

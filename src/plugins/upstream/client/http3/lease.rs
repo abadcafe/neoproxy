@@ -9,15 +9,16 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::super::observation::ConnectionObservation;
+use super::io_progress::SendBuffer;
 pub(super) struct Session {
   pub(super) connection: quinn::Connection,
   pub(super) sender:
-    h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
+    h3::client::SendRequest<super::read_progress::Opener, SendBuffer>,
   pub(super) observation: ConnectionObservation,
+  pub(super) reads: super::read_progress::Registry,
   pub(super) hostname: Option<String>,
   pub(super) draining: AtomicBool,
   active: AtomicUsize,
@@ -27,8 +28,12 @@ pub(super) struct Session {
 impl Session {
   pub(super) fn new(
     connection: quinn::Connection,
-    sender: h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
+    sender: h3::client::SendRequest<
+      super::read_progress::Opener,
+      SendBuffer,
+    >,
     observation: ConnectionObservation,
+    reads: super::read_progress::Registry,
     hostname: Option<String>,
     permit: tokio::sync::OwnedSemaphorePermit,
   ) -> Arc<Self> {
@@ -36,6 +41,7 @@ impl Session {
       connection,
       sender,
       observation,
+      reads,
       hostname,
       draining: AtomicBool::new(false),
       active: AtomicUsize::new(0),

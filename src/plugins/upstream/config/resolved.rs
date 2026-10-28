@@ -66,7 +66,8 @@ pub(crate) struct Address {
   pub(crate) weight: usize,
   pub(crate) address_protocol: Protocol,
   pub(crate) tunnel_idle_timeout: Duration,
-  pub(crate) upstream_request_timeout: Duration,
+  pub(crate) upstream_read_timeout: Duration,
+  pub(crate) upstream_send_timeout: Duration,
   pub(crate) user: Option<UserCredential>,
 }
 
@@ -84,5 +85,6 @@ pub(crate) struct Upstream {
   pub(crate) connect_timeout: Duration,
   pub(crate) tls_handshake_timeout: Duration,
   pub(crate) tunnel_idle_timeout: Duration,
-  pub(crate) upstream_request_timeout: Duration,
+  pub(crate) upstream_read_timeout: Duration,
+  pub(crate) upstream_send_timeout: Duration,
 }

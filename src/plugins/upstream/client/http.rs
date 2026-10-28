@@ -123,6 +123,16 @@ async fn negotiate_tunnel<I>(
 where
   I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
+  let timeout = super::exchange_timeout::Control::default();
+  timeout.start(
+    request
+      .extensions
+      .get::<super::exchange_timeout::Timeouts>()
+      .copied()
+      .unwrap_or_default(),
+  );
+  timeout.upload_complete();
+  let io = super::exchange_timeout::TimedIo::new(io, timeout.clone());
   let (mut sr, conn) = http1::handshake(io).await.map_err(|e| {
     UpstreamError::ProxyInternalError(format!(
       "HTTP/1.1 handshake failed: {e}"
@@ -177,6 +187,7 @@ where
     }
   })?;
 
+  timeout.disable();
   Ok(ConnectResult {
     transport: Box::new(TokioIo::new(upgraded)),
     upstream_addr,

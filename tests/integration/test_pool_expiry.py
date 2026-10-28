@@ -50,7 +50,7 @@ def test_pool_idle_timeout_closes_unused_connection(
             "upstream": {
                 "upstreams": [relay],
                 "connection_pools": [
-                    {"name": "default", "http_pool_idle_timeout": "100ms"}
+                    {"name": "default", "http_connection_idle_timeout": "100ms"}
                 ],
             }
         },
@@ -127,8 +127,7 @@ def test_proxy_pool_reuses_one_connection_across_origin_authorities(
                     {
                         "name": "default",
                         "certificates": {"server_ca_path": ca},
-                        "http_pool_max_idle_connections": max_idle,
-                        "https_pool_max_idle_connections": max_idle,
+                        "http_max_idle_connections": max_idle,
                     }
                 ],
             }

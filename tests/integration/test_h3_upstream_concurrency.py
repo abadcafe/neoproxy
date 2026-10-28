@@ -131,7 +131,7 @@ plugins:
         http3_pool_max_connections_per_host: {maximum}
         certificates:
           server_ca_path: {ca}
-    upstream_request_timeout: 10s
+    upstream_read_timeout: 10s
     upstreams:
     - name: relay
       addresses:

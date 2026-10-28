@@ -195,19 +195,3 @@ fn test_debug_redacts_credentials() {
   assert!(output.contains("\"*\""));
   assert!(output.contains("UserPasswordAuth"));
 }
-
-#[test]
-fn test_debug_proxy_credentials_only_masks_password() {
-  let credentials = crate::auth::ProxyCredentials::new(
-    "visible-user".into(),
-    "hidden-password".into(),
-  );
-  for output in
-    [format!("{credentials:?}"), format!("{credentials:#?}")]
-  {
-    assert!(output.contains("username: \"visible-user\""));
-    assert!(output.contains("password: \"*\""));
-    assert!(!output.contains("hidden-password"));
-  }
-  assert_eq!(credentials.parts(), ("visible-user", "hidden-password"));
-}

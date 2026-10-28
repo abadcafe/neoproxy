@@ -13,9 +13,8 @@ def create_socks5_config(
     auth_type: str | None = None,
     users: list[UserConfig] | None = None,
     addresses: list[str] | None = None,
-    handshake_timeout: str | None = None,
+    header_read_timeout: str | None = None,
     server_threads: int = 1,
-    connect_timeout: str | None = None,
 ) -> str:
     """
     Create SOCKS5 listener configuration file.
@@ -26,8 +25,7 @@ def create_socks5_config(
         auth_type: Authentication type ("password" or None for no auth)
         users: List of user dicts with "username" and "password" keys
         addresses: List of addresses to listen on (default: ["0.0.0.0:port"])
-        handshake_timeout: Handshake timeout string (e.g., "3s")
-        connect_timeout: CONNECT command read timeout string (e.g., "3s")
+        header_read_timeout: Total request header timeout (default: "75s")
         server_threads: Number of worker threads
 
     Returns:
@@ -38,11 +36,8 @@ def create_socks5_config(
 
     # Build flat protocol fields for the listener
     args_entries: list[str] = []
-    if handshake_timeout:
-        args_entries.append(f'  socks5_handshake_timeout: "{handshake_timeout}"')
-
-    if connect_timeout:
-        args_entries.append(f'  socks5_connect_timeout: "{connect_timeout}"')
+    if header_read_timeout:
+        args_entries.append(f'  header_read_timeout: "{header_read_timeout}"')
 
     addresses_yaml = "\n".join([f'  - "{a}"' for a in addresses])
 

@@ -64,7 +64,7 @@ def _configuration(
         {"quic_connection_keep_alive_interval": "0s"},
         {
             "quic_connection_keep_alive_interval": "6s",
-            "quic_connection_idle_timeout": "5s",
+            "quic_connection_max_idle_timeout": "5s",
         },
         {"quic_stream_receive_window": "0B"},
         {"quic_stream_receive_window": "4611686018427387904B"},
@@ -114,7 +114,7 @@ async def test_quic_connection_handshake_timeout_bounds_incomplete_handshake(
                 matrix_certificates,
                 {
                     "quic_connection_handshake_timeout": "100ms",
-                    "quic_connection_idle_timeout": "10s",
+                    "quic_connection_max_idle_timeout": "10s",
                     "quic_connection_max_concurrent_bidi_streams": 10001,
                     "quic_stream_receive_window": "4KiB",
                 },
@@ -166,7 +166,7 @@ async def test_quic_keepalive_preserves_idle_connection_and_small_stream_window(
                 matrix_certificates,
                 {
                     "quic_connection_keep_alive_interval": "100ms",
-                    "quic_connection_idle_timeout": "500ms",
+                    "quic_connection_max_idle_timeout": "500ms",
                     "quic_stream_receive_window": "4KiB",
                 },
             )

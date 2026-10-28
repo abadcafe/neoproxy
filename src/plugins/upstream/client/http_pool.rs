@@ -15,6 +15,7 @@ use http_body::{Body, Frame, SizeHint};
 use hyper::client::conn::http1::{self, SendRequest};
 use tower::{Service, ServiceExt};
 
+use super::exchange_timeout::{Control, TimedIo, Timeouts, UploadBody};
 use super::forward::ForwardClient;
 use super::http_cache::{Cache, Connection, Key};
 use super::observation::ConnectionObservation;
@@ -87,10 +88,17 @@ where
   ) -> Result<Connection, UpstreamError> {
     let io = self.connect(uri, ctx).await?;
     let observation = io.observation();
-    let (sender, connection) = http1::handshake(io)
-      .await
-      .map_err(|error| classify_http_client_error(error.into()))?;
-    Ok(Connection { sender, driver: Box::pin(connection), observation })
+    let timeout = Control::default();
+    let (sender, connection) =
+      http1::handshake(TimedIo::new(io, timeout.clone()))
+        .await
+        .map_err(|error| classify_http_client_error(error.into()))?;
+    Ok(Connection {
+      sender,
+      driver: Box::pin(connection),
+      observation,
+      timeout,
+    })
   }
 }
 impl<C> ForwardClient for ProxyPool<C>
@@ -103,6 +111,11 @@ where
     mut request: Request,
   ) -> Result<Response, UpstreamError> {
     super::http1_framing::prepare_request(&mut request);
+    let settings = request
+      .extensions()
+      .get::<Timeouts>()
+      .copied()
+      .unwrap_or_default();
     let ctx = request.extensions().get::<RequestContext>().cloned();
     let uri = request.uri().clone();
     let key = self.key.clone().unwrap_or(Key {
@@ -150,6 +163,9 @@ where
         }
         continue;
       }
+      connection.timeout.start(settings);
+      request = request
+        .map(|body| UploadBody::wrap(body, connection.timeout.clone()));
       super::retry_request::Progress::mark_request(&request);
       let result = {
         let pending = connection.sender.try_send_request(request);
@@ -181,6 +197,7 @@ where
         }
       }
     };
+    connection.timeout.response_started();
     let (mut parts, inner) = response.into_parts();
     parts.extensions.insert(connection.observation.clone());
     if driver_done {
@@ -191,7 +208,9 @@ where
     }
     let (recycle, completed) =
       tokio::sync::oneshot::channel::<SendRequest<RequestBody>>();
-    let Connection { sender, mut driver, observation } = connection;
+    let Connection { sender, mut driver, observation, timeout } =
+      connection;
+    let response_timeout = timeout.clone();
     let cache = self.cache.clone();
     // The driver belongs to this lease. Cancellation drops it instead
     // of returning a partially exchanged connection to the global pool.
@@ -204,9 +223,11 @@ where
         _ = &mut driver => return,
         result = sender.ready() => { if result.is_err() { return; } }
       }
-      cache.put(key, Connection { sender, driver, observation });
+      timeout.disable();
+      cache.put(key, Connection { sender, driver, observation, timeout });
     });
     let mut body = PooledBody {
+      timeout: response_timeout,
       inner,
       sender: Some(sender),
       recycle: Some(recycle),
@@ -221,6 +242,7 @@ where
   }
 }
 struct PooledBody {
+  timeout: Control,
   inner: hyper::body::Incoming,
   sender: Option<SendRequest<RequestBody>>,
   recycle:
@@ -229,6 +251,7 @@ struct PooledBody {
 
 impl PooledBody {
   fn recycle(&mut self) {
+    self.timeout.response_complete();
     if let Some(sender) = self.sender.take() {
       let _ = self
         .recycle

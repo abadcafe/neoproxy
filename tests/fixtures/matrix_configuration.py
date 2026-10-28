@@ -76,7 +76,7 @@ def write_node(
     ]
     plugins: ConfigDict = {
         "upstream": {
-            "upstream_request_timeout": "10s",
+            "upstream_read_timeout": "10s",
             "tunnel_idle_timeout": "10s"
             if next_peer is not None
             else tunnel_idle_timeout,
@@ -128,7 +128,7 @@ def write_node(
         "addresses": [f"127.0.0.1:{port}"],
     }
     if protocol == "http3":
-        listener["quic_connection_idle_timeout"] = quic_idle_timeout
+        listener["quic_connection_max_idle_timeout"] = quic_idle_timeout
         listener["quic_stream_receive_window"] = "4KiB"
     else:
         listener.update(

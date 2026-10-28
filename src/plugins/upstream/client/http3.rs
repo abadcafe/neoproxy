@@ -14,6 +14,10 @@ mod quic_connect_tests;
 mod session;
 mod sessions;
 pub(super) use sessions::Store;
+mod io_progress;
+#[cfg(test)]
+mod io_progress_tests;
+mod read_progress;
 #[cfg(test)]
 mod session_tests;
 mod upload;
@@ -26,6 +30,7 @@ use std::time::Duration;
 
 use bytes::{Buf, Bytes};
 use http_body::{Body, Frame, SizeHint};
+use io_progress::SendBuffer;
 use session::SessionLease;
 pub(super) use session::SessionPool;
 use upload::Upload;
@@ -81,12 +86,18 @@ pub(super) async fn exchange(
   req_body: RequestBody,
   tracker: &Rc<StreamTracker>,
 ) -> Result<Response, UpstreamError> {
+  let settings = request
+    .extensions()
+    .get::<super::exchange_timeout::Timeouts>()
+    .copied()
+    .unwrap_or_default();
   let request_id = request
     .extensions()
     .get::<RequestContext>()
     .and_then(RequestContext::request_id)
     .cloned();
-  let (stream, lease) = session.open(request, tls, tracker).await?;
+  let (stream, lease, reads) =
+    session.open(request, tls, tracker).await?;
   // Snapshot immutable metadata before receiving. h3-quinn 0.0.10
   // temporarily moves its RecvStream into a pending read future;
   // asking recv_id() during that read panics in the dependency.
@@ -98,32 +109,32 @@ pub(super) async fn exchange(
     req_body,
     tracker,
     request_id.clone(),
+    settings.send,
   ));
-  let response = {
-    let response = receive_final_response(&mut stream);
-    tokio::pin!(response);
-    tokio::select! {
-      biased;
-      response = &mut response => response,
-      result = upload.as_mut().expect("upload started") => {
-        result?;
-        upload = None;
-        response.await
-      }
-    }
-  };
-  let proxy_resp = response?;
+  let proxy_resp = receive_final_response(
+    &mut stream,
+    settings.read,
+    &mut upload,
+    &reads,
+  )
+  .await?;
   let (parts, ()) = proxy_resp.into_parts();
   Ok(Response::from_parts(
     parts,
     ResponseBody::new(H3ResponseBody::new(
-      stream, stream_id, request_id, upload, lease,
+      stream,
+      stream_id,
+      request_id,
+      upload,
+      lease,
+      settings.read,
+      reads,
     )),
   ))
 }
 
 type H3ClientRequestStream =
-  h3::client::RequestStream<h3_quinn::RecvStream, Bytes>;
+  h3::client::RequestStream<read_progress::Recv, SendBuffer>;
 
 enum H3ResponseBodyState {
   Data,
@@ -138,6 +149,9 @@ struct H3ResponseBody {
   state: H3ResponseBodyState,
   upload: Option<Upload>,
   _lease: SessionLease,
+  read_timeout: Duration,
+  reads: io_progress::Progress,
+  read_timer: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl H3ResponseBody {
@@ -147,6 +161,8 @@ impl H3ResponseBody {
     request_id: Option<crate::request_id::RequestId>,
     upload: Option<Upload>,
     lease: SessionLease,
+    read_timeout: Duration,
+    reads: io_progress::Progress,
   ) -> Self {
     Self {
       stream,
@@ -155,6 +171,9 @@ impl H3ResponseBody {
       state: H3ResponseBodyState::Data,
       upload,
       _lease: lease,
+      read_timeout,
+      reads,
+      read_timer: None,
     }
   }
 }
@@ -183,8 +202,29 @@ impl Body for H3ResponseBody {
       match this.state {
         H3ResponseBodyState::Data => {
           match this.stream.poll_recv_data(cx) {
-            Poll::Pending => return Poll::Pending,
+            Poll::Pending => {
+              if this.reads.poll_stalled(
+                &mut this.read_timer,
+                this.read_timeout,
+                cx,
+              ) {
+                this
+                  .stream
+                  .stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
+                this.upload = None;
+                this.state = H3ResponseBodyState::Done;
+                return Poll::Ready(Some(Err(
+                  std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "upstream read inactivity timeout",
+                  )
+                  .into(),
+                )));
+              }
+              return Poll::Pending;
+            }
             Poll::Ready(Ok(Some(mut chunk))) => {
+              this.read_timer = None;
               let bytes = chunk.copy_to_bytes(chunk.remaining());
               tracing::trace!(request_id = this.request_id.as_ref().map(tracing::field::display), stream_id = %this.stream_id, bytes = bytes.len(), "H3 response content received");
               return Poll::Ready(Some(Ok(Frame::data(bytes))));
@@ -203,7 +243,27 @@ impl Body for H3ResponseBody {
         }
         H3ResponseBodyState::Trailers => {
           match this.stream.poll_recv_trailers(cx) {
-            Poll::Pending => return Poll::Pending,
+            Poll::Pending => {
+              if this.reads.poll_stalled(
+                &mut this.read_timer,
+                this.read_timeout,
+                cx,
+              ) {
+                this
+                  .stream
+                  .stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
+                this.upload = None;
+                this.state = H3ResponseBodyState::Done;
+                return Poll::Ready(Some(Err(
+                  std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "upstream read inactivity timeout",
+                  )
+                  .into(),
+                )));
+              }
+              return Poll::Pending;
+            }
             Poll::Ready(Ok(Some(mut trailers))) => {
               crate::hop_headers::strip_trailer_headers(&mut trailers);
               this.state = H3ResponseBodyState::Done;
@@ -303,10 +363,21 @@ impl ClientProtocol for Http3Client {
       let mut req = build_connect_request(target, &self.user, request);
       *req.version_mut() = http::Version::HTTP_3;
 
-      let (mut stream, lease) =
+      let settings = req
+        .extensions()
+        .get::<super::exchange_timeout::Timeouts>()
+        .copied()
+        .unwrap_or_default();
+      let (mut stream, lease, reads) =
         self.session.open(req, &tls, &tracker).await?;
 
-      let mut resp = receive_final_response(&mut stream).await?;
+      let mut resp = receive_final_response(
+        &mut stream,
+        settings.read,
+        &mut None,
+        &reads,
+      )
+      .await?;
 
       // RFC 9110 §9.3.6: every 2xx establishes a CONNECT tunnel.
       if !resp.status().is_success() {
@@ -340,12 +411,36 @@ impl ClientProtocol for Http3Client {
 
 /// h3 returns one header section per call, including informational
 /// responses. Only a final section determines forwarding or CONNECT
-/// success. The outer request deadline also bounds endless 1xx input.
+/// success. Read inactivity starts after upload, and each header
+/// section is progress. An early response is accepted while upload
+/// continues.
 async fn receive_final_response<S: h3::quic::RecvStream>(
-  stream: &mut h3::client::RequestStream<S, Bytes>,
+  stream: &mut h3::client::RequestStream<S, SendBuffer>,
+  read_timeout: Duration,
+  upload: &mut Option<Upload>,
+  reads: &io_progress::Progress,
 ) -> Result<http::Response<()>, UpstreamError> {
   loop {
-    let response = stream.recv_response().await.map_err(|error| {
+    let pending = stream.recv_response();
+    tokio::pin!(pending);
+    let response = if let Some(sending) = upload {
+      tokio::select! {
+        biased;
+        result = &mut pending => result,
+        result = sending => {
+          result?;
+          *upload = None;
+          reads.wait(&mut pending, read_timeout).await.map_err(|_| UpstreamError::ConnectionTimeout("upstream read inactivity timeout".into()))?
+        }
+      }
+    } else {
+      reads.wait(&mut pending, read_timeout).await.map_err(|_| {
+        UpstreamError::ConnectionTimeout(
+          "upstream read inactivity timeout".into(),
+        )
+      })?
+    };
+    let response = response.map_err(|error| {
       UpstreamError::ConnectionTerminated(error.to_string())
     })?;
     if response.status() == http::StatusCode::SWITCHING_PROTOCOLS {

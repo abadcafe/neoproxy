@@ -1,4 +1,4 @@
-"""CONNECT status handling, including a recorded Hyper 1.6.0 limitation.
+"""CONNECT status handling, including a recorded Hyper 1.12.0 limitation.
 
 Only wire interfaces are used. HTTP(S) peers and an H3 peer return selected
 statuses, send data with the successful response, and echo tunnel bytes.
@@ -79,7 +79,7 @@ servers:
                 actual = int(headers.split(b"\r\n", 1)[0].split()[1])
                 if kind in ("http", "https") and status == 204:
                     # Third-party defect, not an accepted protocol behavior:
-                    # Hyper 1.6.0 proto/h1/role.rs Client::decoder returns
+                    # Hyper 1.12.0 proto/h1/role.rs Client::decoder returns
                     # (ZERO, false) for 204 before checking CONNECT + 2xx.
                     # Consequently OnUpgrade fails and this proxy reports 502.
                     # Record the actual failed tunnel, without modifying Hyper,
@@ -184,7 +184,7 @@ def test_connect_upstream_status(
 def test_hyper_dependency_connect_204_fails_to_upgrade(
     tmp_path: Path, kind: Literal["http", "https"]
 ) -> None:
-    """RFC 9110 §9.3.6 requires success; Hyper 1.6.0 does not expose the I/O."""
+    """RFC 9110 §9.3.6 requires success; Hyper 1.12.0 does not expose the I/O."""
     asyncio.run(_check_upstream(tmp_path, kind, 204))
 
 

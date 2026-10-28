@@ -48,14 +48,12 @@ def direct_proxy(
                 }
             plugin: ConfigDict = {
                 "upstreams": [upstream],
-                "upstream_request_timeout": "4s",
+                "upstream_read_timeout": "4s",
                 "connection_pools": [
                     {
                         "name": "default",
-                        "http_pool_idle_timeout": idle_timeout,
-                        "https_pool_idle_timeout": idle_timeout,
-                        "http_pool_max_idle_connections": max_idle_per_host,
-                        "https_pool_max_idle_connections": max_idle_per_host,
+                        "http_connection_idle_timeout": idle_timeout,
+                        "http_max_idle_connections": max_idle_per_host,
                         "certificates": {"server_ca_path": ca},
                         "dns_resolve_timeout": "1s",
                         "tls_handshake_timeout": tls_handshake_timeout,

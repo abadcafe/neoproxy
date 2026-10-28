@@ -90,9 +90,21 @@ impl ClientProtocol for Socks5Client {
         io.observation().record(ctx);
       }
       let peer = io.peer_addr().ok();
-      let mut transport = TokioIo::new(io);
+      let timeout = super::exchange_timeout::Control::default();
+      timeout.start(
+        request
+          .extensions
+          .get::<super::exchange_timeout::Timeouts>()
+          .copied()
+          .unwrap_or_default(),
+      );
+      timeout.response_started();
+      let mut transport = TokioIo::new(
+        super::exchange_timeout::TimedIo::new(io, timeout.clone()),
+      );
       handshake::negotiate(&mut transport, target, self.user.as_ref())
         .await?;
+      timeout.disable();
       Ok(ConnectResult {
         transport: Box::new(transport),
         upstream_addr: peer,

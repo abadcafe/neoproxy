@@ -597,7 +597,7 @@ listeners:
   kind: socks5
   addresses:
     - "0.0.0.0:{proxy_port}"
-  socks5_handshake_timeout: "invalid"
+  header_read_timeout: "invalid"
 servers:
 - name: socks5_server
   listeners: ["socks5_main"]

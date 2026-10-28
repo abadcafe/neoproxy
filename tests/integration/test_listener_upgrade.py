@@ -15,10 +15,12 @@ from tests.fixtures.tcp_peer import TargetServerFactory
 
 
 @pytest.mark.parametrize("protocol", ["http", "https"])
+@pytest.mark.parametrize("keep_alive", [True, False])
 def test_connect_upgrade_preserves_preread_and_subsequent_bytes(
     tmp_path: Path,
     target_server: TargetServerFactory,
     protocol: Literal["http", "https"],
+    keep_alive: bool,
 ) -> None:
     payload = b"early-tunnel-data\x00\xff\r\n\r\n"
     followup = b"later-tunnel-data"
@@ -45,7 +47,7 @@ def test_connect_upgrade_preserves_preread_and_subsequent_bytes(
         server["certificates"] = [{"cert_path": cert, "key_path": key}]
     config: ConfigDict = {
         "plugins": {"upstream": {"upstreams": [{"name": "direct"}]}},
-        "listeners": [{"name": "entry", "kind": protocol}],
+        "listeners": [{"name": "entry", "kind": protocol, "keep_alive": keep_alive}],
         "services": [
             {"name": "direct", "kind": "upstream.upstream", "upstream": "direct"}
         ],

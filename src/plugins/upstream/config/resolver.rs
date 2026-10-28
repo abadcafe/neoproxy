@@ -25,7 +25,7 @@ fn resolve_quic(
   pool: &super::connection_pool::ConnectionPoolConfig,
 ) -> QuicResolved {
   QuicResolved {
-    max_idle_timeout: pool.quic_connection_idle_timeout,
+    max_idle_timeout: pool.quic_connection_max_idle_timeout,
     keep_alive_interval: pool
       .quic_connection_keep_alive_interval
       .unwrap_or_else(default_keep_alive_interval),
@@ -150,11 +150,17 @@ pub(crate) fn merge_chain_config(
         weight: addr.weight,
         address_protocol: resolved_protocol,
         tunnel_idle_timeout,
-        upstream_request_timeout: resolve_field_with_default(
-          addr.upstream_request_timeout.as_ref(),
-          upstream.upstream_request_timeout.as_ref(),
-          plugin.upstream_request_timeout.as_ref(),
-          std::time::Duration::from_secs(30),
+        upstream_read_timeout: resolve_field_with_default(
+          addr.upstream_read_timeout.as_ref(),
+          upstream.upstream_read_timeout.as_ref(),
+          plugin.upstream_read_timeout.as_ref(),
+          std::time::Duration::from_secs(10),
+        ),
+        upstream_send_timeout: resolve_field_with_default(
+          addr.upstream_send_timeout.as_ref(),
+          upstream.upstream_send_timeout.as_ref(),
+          plugin.upstream_send_timeout.as_ref(),
+          std::time::Duration::from_secs(10),
         ),
         user,
       });
@@ -194,11 +200,17 @@ pub(crate) fn merge_chain_config(
           .tls_handshake_timeout
           .unwrap_or_else(default_tls_handshake_timeout),
         tunnel_idle_timeout,
-        upstream_request_timeout: resolve_field_with_default(
-          upstream.upstream_request_timeout.as_ref(),
-          plugin.upstream_request_timeout.as_ref(),
+        upstream_read_timeout: resolve_field_with_default(
+          upstream.upstream_read_timeout.as_ref(),
+          plugin.upstream_read_timeout.as_ref(),
           None,
-          std::time::Duration::from_secs(30),
+          std::time::Duration::from_secs(10),
+        ),
+        upstream_send_timeout: resolve_field_with_default(
+          upstream.upstream_send_timeout.as_ref(),
+          plugin.upstream_send_timeout.as_ref(),
+          None,
+          std::time::Duration::from_secs(10),
         ),
       },
     );

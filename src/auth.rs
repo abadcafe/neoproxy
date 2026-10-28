@@ -1,9 +1,8 @@
 //! module: auth
 //! responsibility: parse and verify proxy credentials
 //! public operations: AuthError, UserPasswordAuth, none, from_users,
-//! verify_credentials, parse_basic_auth, ProxyCredentials, new,
-//! parts
-//! data entities: AuthError, UserPasswordAuth, ProxyCredentials
+//! verify_credentials, parse_basic_auth
+//! data entities: AuthError, UserPasswordAuth
 //! tests: auth_tests.rs
 
 //! Shared authentication types.
@@ -182,33 +181,5 @@ impl UserPasswordAuth {
     }
 
     Ok((username, password))
-  }
-}
-
-#[derive(Clone)]
-pub(crate) struct ProxyCredentials {
-  username: String,
-  password: String,
-}
-
-impl std::fmt::Debug for ProxyCredentials {
-  fn fmt(
-    &self,
-    formatter: &mut std::fmt::Formatter<'_>,
-  ) -> std::fmt::Result {
-    formatter
-      .debug_struct("ProxyCredentials")
-      .field("username", &self.username)
-      .field("password", &"*")
-      .finish()
-  }
-}
-impl ProxyCredentials {
-  pub(crate) fn new(username: String, password: String) -> Self {
-    Self { username, password }
-  }
-
-  pub(crate) fn parts(&self) -> (&str, &str) {
-    (&self.username, &self.password)
   }
 }

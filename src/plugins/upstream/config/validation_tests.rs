@@ -129,9 +129,9 @@ connection_pools:
 fn test_validate_plugin_config_rejects_unrepresentable_quic_values() {
   for field in [
     "connection_pools:\n- name: default\n  \
-     quic_connection_idle_timeout: 100us\n",
+     quic_connection_max_idle_timeout: 100us\n",
     "connection_pools:\n- name: default\n  \
-     quic_connection_idle_timeout: 18446744073709552s\n",
+     quic_connection_max_idle_timeout: 18446744073709552s\n",
     "connection_pools:\n- name: default\n  \
      quic_connection_receive_window: 4611686018427387904\n",
   ] {
@@ -159,8 +159,9 @@ fn test_validate_plugin_config_bounds_every_idle_deadline() {
          {duration}}}]}}]"
       ),
       format!(
-        "connection_pools: [{{name: default, http_pool_idle_timeout: \
-         {duration}}}]\nupstreams: [{{name: direct}}]"
+        "connection_pools: [{{name: default, \
+         http_connection_idle_timeout: {duration}}}]\nupstreams: \
+         [{{name: direct}}]"
       ),
     ] {
       let config: UpstreamPluginConfig =
@@ -178,7 +179,7 @@ fn test_validate_plugin_config_accepts_finite_idle_deadlines() {
   let config: UpstreamPluginConfig = serde_yaml::from_str(
     "tunnel_idle_timeout: 1ms\nupstreams:\n- name: \
      direct\nconnection_pools:\n- name: default\n  \
-     http_pool_idle_timeout: 1ms\n  http_pool_max_idle_connections: \
+     http_connection_idle_timeout: 1ms\n  http_max_idle_connections: \
      0\n",
   )
   .unwrap();
@@ -204,7 +205,7 @@ fn test_validate_plugin_config_rejects_invalid_address_request_timeout()
 {
   let config: UpstreamPluginConfig = serde_yaml::from_str(
     "upstreams: [{name: chain, addresses: [{address: '127.0.0.1:80', \
-     address_protocol: http, upstream_request_timeout: 0s}]}]",
+     address_protocol: http, upstream_read_timeout: 0s}]}]",
   )
   .unwrap();
   assert!(validate_plugin_config(&config).is_err());

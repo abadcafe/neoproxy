@@ -20,6 +20,7 @@ pub(super) struct Key {
   pub(super) origin: Option<String>,
 }
 pub(super) struct Connection {
+  pub(super) timeout: super::exchange_timeout::Control,
   pub(super) sender: SendRequest<RequestBody>,
   pub(super) driver:
     Pin<Box<dyn Future<Output = Result<(), hyper::Error>> + Send>>,

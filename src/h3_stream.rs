@@ -208,18 +208,51 @@ macro_rules! impl_recv {
     }
   };
 }
-impl_send!(
-  h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>
-);
+impl<B: Buf + From<Bytes> + Send + Sync + Unpin + 'static> H3Send
+  for h3::client::RequestStream<h3_quinn::SendStream<B>, B>
+{
+  async fn send_data(&mut self, data: Bytes) -> std::io::Result<()> {
+    self.send_data(B::from(data)).await.map_err(std::io::Error::other)
+  }
+
+  async fn finish(&mut self) -> std::io::Result<()> {
+    self.finish().await.map_err(std::io::Error::other)
+  }
+}
 impl_send!(
   h3::server::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>
 );
-impl_recv!(h3::client::RequestStream<h3_quinn::RecvStream, Bytes>);
+impl<
+  B: Buf + Send + Unpin + 'static,
+  R: h3::quic::RecvStream + Unpin + Send + Sync + 'static,
+> H3Recv for h3::client::RequestStream<R, B>
+{
+  fn poll_recv_data(
+    &mut self,
+    cx: &mut Context<'_>,
+  ) -> Poll<std::io::Result<Option<Bytes>>> {
+    match self.poll_recv_data(cx) {
+      Poll::Ready(Ok(data)) => Poll::Ready(Ok(
+        data.map(|mut bytes| bytes.copy_to_bytes(bytes.remaining())),
+      )),
+      Poll::Ready(Err(error)) if error.is_h3_no_error() => {
+        Poll::Ready(Ok(None))
+      }
+      Poll::Ready(Err(error)) => {
+        Poll::Ready(Err(std::io::Error::other(error)))
+      }
+      Poll::Pending => Poll::Pending,
+    }
+  }
+}
 impl_recv!(h3::server::RequestStream<h3_quinn::RecvStream, Bytes>);
 
-pub(crate) type H3ClientBidiStream = H3BidirectionalStream<
-  h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
-  h3::client::RequestStream<h3_quinn::RecvStream, Bytes>,
+pub(crate) type H3ClientBidiStream<
+  B = Bytes,
+  R = h3_quinn::RecvStream,
+> = H3BidirectionalStream<
+  h3::client::RequestStream<h3_quinn::SendStream<B>, B>,
+  h3::client::RequestStream<R, B>,
 >;
 pub(crate) type H3ServerBidiStream = H3BidirectionalStream<
   h3::server::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,

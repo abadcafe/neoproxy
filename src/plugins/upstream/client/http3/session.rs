@@ -8,9 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use bytes::Bytes;
-
 use super::establish::{self, Settings};
+use super::io_progress::SendBuffer;
 use super::lease::Session;
 pub(in crate::plugins::upstream::client) use super::lease::SessionLease;
 use super::sessions::{Bucket, Store};
@@ -64,7 +63,6 @@ impl SessionPool {
   async fn checkout(
     &self,
     tls: &rustls::ClientConfig,
-    progress: Option<&super::super::retry_request::Progress>,
     ctx: Option<&RequestContext>,
   ) -> Result<SessionLease, UpstreamError> {
     self.bucket.retire();
@@ -84,13 +82,7 @@ impl SessionPool {
       {
         return Ok(session);
       }
-      if let Some(progress) = progress {
-        progress.waiting(true);
-      }
       notified.await;
-      if let Some(progress) = progress {
-        progress.waiting(false);
-      }
     };
     let settings = self.settings.clone();
     let tls = tls.clone();
@@ -101,11 +93,12 @@ impl SessionPool {
     self.runtime.spawn(async move {
       let observation =
         super::super::observation::ConnectionObservation::new();
+      let reads = super::read_progress::Registry::default();
       let result = tokio::select! {
         _ = tx.closed() => { drop(permit); bucket.changed.notify_waiters(); return; }
-        result = establish::establish(&settings, &tls, &observation) => result,
+        result = establish::establish(&settings, &tls, &observation, reads.clone()) => result,
       }.map(|(connection, sender)| {
-        let session = Session::new(connection, sender, observation.clone(), settings.hostname, permit);
+        let session = Session::new(connection, sender, observation.clone(), reads, settings.hostname, permit);
         let lease = SessionLease::new(session.clone());
         bucket.insert(session);
         lease
@@ -133,20 +126,15 @@ impl SessionPool {
     _tracker: &Rc<StreamTracker>,
   ) -> Result<
     (
-      h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+      h3::client::RequestStream<super::read_progress::Bidi, SendBuffer>,
       SessionLease,
+      super::io_progress::Progress,
     ),
     UpstreamError,
   > {
     for attempt in 0..2 {
       let lease = self
-        .checkout(
-          tls,
-          request
-            .extensions()
-            .get::<super::super::retry_request::Progress>(),
-          request.extensions().get::<RequestContext>(),
-        )
+        .checkout(tls, request.extensions().get::<RequestContext>())
         .await?;
       let session = lease.session();
       if let Some(ctx) = request.extensions().get::<RequestContext>() {
@@ -154,8 +142,25 @@ impl SessionPool {
       }
       let mut sender = session.sender.clone();
       super::super::retry_request::Progress::mark_request(&request);
-      match sender.send_request(request.clone()).await {
-        Ok(stream) => return Ok((stream, lease)),
+      let settings = request
+        .extensions()
+        .get::<super::super::exchange_timeout::Timeouts>()
+        .copied()
+        .unwrap_or_default();
+      match tokio::time::timeout(
+        settings.send,
+        sender.send_request(request.clone()),
+      )
+      .await
+      .map_err(|_| {
+        UpstreamError::ConnectionTimeout(
+          "upstream send inactivity timeout".into(),
+        )
+      })? {
+        Ok(stream) => {
+          let progress = session.reads.get(stream.id());
+          return Ok((stream, lease, progress));
+        }
         Err(h3::error::StreamError::RemoteClosing) if attempt == 0 => {
           session.draining.store(true, Ordering::Release);
           drop(lease);

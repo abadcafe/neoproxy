@@ -21,10 +21,13 @@ from tests.fixtures.proxy_process import managed_processes
 from tests.fixtures.stream_cleanup import close_writer
 
 
-async def final_response(directory: Path, method: Literal["GET", "CONNECT"]) -> None:
+async def final_response(
+    directory: Path, method: Literal["GET", "CONNECT"], fragmented: bool
+) -> None:
     certificate, key, ca, _ = generate_test_certificates(str(directory))
     upstream = get_unique_port()
     entry = get_unique_port()
+    pending: list[asyncio.Task[None]] = []
 
     class InformationalPeer(H3ProtocolBase):
         def __init__(
@@ -44,15 +47,38 @@ async def final_response(directory: Path, method: Literal["GET", "CONNECT"]) -> 
                     _, informational = encoder.encode(
                         message.stream_id, [(b":status", b"103")]
                     )
-                    _, final = encoder.encode(message.stream_id, [(b":status", b"200")])
-                    self.quic_connection.send_stream_data(
-                        message.stream_id,
+                    final_headers = [(b":status", b"200")]
+                    if method == "GET":
+                        final_headers.append((b"content-length", b"2"))
+                    _, final = encoder.encode(message.stream_id, final_headers)
+                    wire = (
                         encode_frame(FrameType.HEADERS, informational)
                         + encode_frame(FrameType.HEADERS, final)
-                        + encode_frame(FrameType.DATA, b"OK"),
-                        end_stream=True,
+                        + encode_frame(FrameType.DATA, b"OK")
                     )
-                    self.transmit()
+                    if fragmented:
+                        pending.append(
+                            asyncio.create_task(
+                                self.send_fragmented(message.stream_id, wire)
+                            )
+                        )
+                    else:
+                        self.quic_connection.send_stream_data(
+                            message.stream_id, wire, end_stream=True
+                        )
+                        self.transmit()
+
+        async def send_fragmented(self, stream: int, wire: bytes) -> None:
+            # Each header section takes longer than the configured 300ms,
+            # but individual QUIC reads continue to make progress.
+            for offset in range(len(wire)):
+                self.quic_connection.send_stream_data(
+                    stream,
+                    wire[offset : offset + 1],
+                    end_stream=offset == len(wire) - 1,
+                )
+                self.transmit()
+                await asyncio.sleep(0.1)
 
     configuration = QuicConfiguration(is_client=False, alpn_protocols=["h3"])
     configuration.load_cert_chain(certificate, key)
@@ -66,6 +92,7 @@ async def final_response(directory: Path, method: Literal["GET", "CONNECT"]) -> 
     _ = config.write_text(f"""server_threads: 1
 plugins:
   upstream:
+    upstream_read_timeout: 300ms
     connection_pools:
       - name: default
         certificates: {{server_ca_path: {ca}}}
@@ -114,11 +141,14 @@ servers:
             finally:
                 await close_writer(writer)
     finally:
+        if pending:
+            _ = await asyncio.gather(*pending)
         server.close()
 
 
 @pytest.mark.parametrize("method", ["GET", "CONNECT"])
+@pytest.mark.parametrize("fragmented", [False, True])
 def test_h3_upstream_waits_for_final_response(
-    tmp_path: Path, method: Literal["GET", "CONNECT"]
+    tmp_path: Path, method: Literal["GET", "CONNECT"], fragmented: bool
 ) -> None:
-    asyncio.run(final_response(tmp_path, method))
+    asyncio.run(final_response(tmp_path, method, fragmented))

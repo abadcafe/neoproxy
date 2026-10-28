@@ -24,7 +24,8 @@ class ForwardNode(BaseModel):
     username: str | None = None
     upstream_username: str | None = None
     handshake_timeout: str = "1s"
-    request_timeout: str = "3s"
+    read_timeout: str = "3s"
+    send_timeout: str = "10s"
     h3_max_connections: int = 2
 
 
@@ -42,7 +43,8 @@ def write_forward_node(directory: Path, node: ForwardNode) -> str:
         upstream["addresses"] = [address]
     plugin: ConfigDict = {
         "upstreams": [upstream],
-        "upstream_request_timeout": node.request_timeout,
+        "upstream_read_timeout": node.read_timeout,
+        "upstream_send_timeout": node.send_timeout,
         "connection_pools": [
             {
                 "name": "default",

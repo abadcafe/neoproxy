@@ -106,7 +106,7 @@ def configuration(
     plugin: ConfigDict = {
         "address_protocol": "socks5",
         "address_fail_timeout": "30s",
-        "upstream_request_timeout": "200ms",
+        "upstream_read_timeout": "200ms",
         "upstreams": [{"name": "main", "addresses": list(addresses)}],
         "connection_pools": [
             {

@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Result, ensure};
 use serde::Deserialize;
 
-const DEFAULT_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(75);
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(try_from = "DurationValue")]

@@ -1,19 +1,14 @@
 //! module: listeners::socks5::handshake
 //! responsibility: negotiate SOCKS5 methods and collect unverified
-//! credentials public operations: DEFAULT_HANDSHAKE_TIMEOUT,
+//! credentials public operations:
 //! HandshakeResult, HandshakeError, perform_handshake
 //! data entities: HandshakeResult, HandshakeError
 //! tests: handshake_tests.rs
 
 //! SOCKS5 handshake protocol handling.
 
-use std::time::Duration;
-
 use fast_socks5::server::StandardAuthentication;
-
-/// Default handshake timeout.
-pub(super) const DEFAULT_HANDSHAKE_TIMEOUT: Duration =
-  Duration::from_secs(3);
+use tokio::time::Instant;
 
 /// Result of a successful SOCKS5 handshake.
 ///
@@ -57,6 +52,9 @@ pub(crate) enum HandshakeError {
   /// Authentication method not acceptable.
   MethodNotAcceptable(Vec<u8>),
 
+  /// Credentials cannot be represented by HTTP Basic.
+  InvalidCredentialFormat(&'static str),
+
   /// Client disconnected during handshake.
   ClientDisconnected,
 
@@ -73,6 +71,9 @@ impl std::fmt::Display for HandshakeError {
       }
       Self::MethodNotAcceptable(methods) => {
         write!(f, "authentication method not acceptable: {:?}", methods)
+      }
+      Self::InvalidCredentialFormat(reason) => {
+        write!(f, "invalid Basic credential format: {reason}")
       }
       Self::ClientDisconnected => {
         write!(f, "client disconnected during handshake")
@@ -120,17 +121,18 @@ impl From<fast_socks5::server::SocksServerError> for HandshakeError {
 /// 3. Credential collection and subnegotiation acknowledgement
 pub(super) async fn perform_handshake(
   stream: tokio::net::TcpStream,
-  timeout_duration: Duration,
+  deadline: Instant,
 ) -> Result<HandshakeResult, HandshakeError> {
   let handshake_fut = async {
     let proto =
       fast_socks5::server::Socks5ServerProtocol::start(stream);
 
     // PRODUCT CONTRACT: SOCKS5 and HTTP share one request middleware
-    // pipeline. This listener MUST NOT validate credentials or inspect
-    // auth policy. Prefer password when offered to carry credentials
-    // into CONNECT; otherwise accept no-auth. auth.basic_auth alone
-    // decides admission.
+    // pipeline. This listener MUST NOT verify account/password
+    // correctness or inspect auth policy. Basic syntax checks are
+    // protocol adaptation. Prefer password when offered to carry
+    // credentials into CONNECT; otherwise accept no-auth.
+    // auth.basic_auth alone decides admission.
     let methods = StandardAuthentication::allow_no_auth(true);
     let auth_state = proto.negotiate_auth(methods).await?;
 
@@ -154,10 +156,30 @@ pub(super) async fn perform_handshake(
         let (username, password, auth_impl) =
           auth_state.read_username_password().await?;
 
+        // Syntax validation is independent of service authentication:
+        // these fields must be representable by HTTP Basic (RFC 7617).
+        // Do not compare credentials with users or consult auth policy here.
+        let invalid = if username.contains(':') {
+          Some("username contains ':'")
+        } else if username.bytes().any(|byte| byte.is_ascii_control()) {
+          Some("username contains an ASCII control character")
+        } else if password.bytes().any(|byte| byte.is_ascii_control()) {
+          Some("password contains an ASCII control character")
+        } else {
+          None
+        };
+        if let Some(reason) = invalid {
+          // RFC 1929 defines only success/nonzero failure, not an
+          // invalid-character code. fast-socks5 sends STATUS=0xff and
+          // drops the socket. The reason is logged locally, never the password.
+          auth_impl.reject().await?;
+          return Err(HandshakeError::InvalidCredentialFormat(reason));
+        }
+
         // PRODUCT CONTRACT — intentional and mandatory, not a defect/TODO:
         // acknowledge credential receipt BEFORE reading CONNECT, without
-        // checking username/password. The client waits for this reply before
-        // sending its target. The converted CONNECT then follows exactly the
+        // verifying the identity/password against configured users. The client
+        // waits for this reply before sending its target. The converted CONNECT then follows exactly the
         // HTTP auth.basic_auth middleware pipeline. Invalid/missing credentials
         // produce HTTP 407, mapped to SOCKS5 CONNECT REP=0x02; no tunnel opens.
         // This deliberately differs from RFC 1929's authentication-success
@@ -183,13 +205,10 @@ pub(super) async fn perform_handshake(
     }
   };
 
-  match tokio::time::timeout(timeout_duration, handshake_fut).await {
+  match tokio::time::timeout_at(deadline, handshake_fut).await {
     Ok(result) => result,
     Err(_) => {
-      tracing::warn!(
-        "SOCKS5 handshake timed out after {:?}",
-        timeout_duration
-      );
+      tracing::warn!("SOCKS5 header deadline expired during handshake");
       Err(HandshakeError::Timeout)
     }
   }

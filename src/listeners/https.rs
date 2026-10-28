@@ -48,6 +48,8 @@ struct HttpsListenerArgs {
     default = "default_tls_handshake_timeout"
   )]
   tls_handshake_timeout: Duration,
+  #[serde(default = "super::http_connection::default_keep_alive")]
+  keep_alive: bool,
   #[serde(default)]
   header_read_timeout: super::header_deadline::HeaderDeadline,
   #[serde(default)]
@@ -60,6 +62,7 @@ impl Default for HttpsListenerArgs {
       tcp_options: Default::default(),
       tls_handshake_timeout: DEFAULT_TLS_HANDSHAKE_TIMEOUT,
       header_read_timeout: Default::default(),
+      keep_alive: true,
       tcp_accept_retry_delay: Default::default(),
     }
   }
@@ -92,6 +95,7 @@ struct HttpsListener {
   /// TLS handshake timeout
   tls_handshake_timeout: Duration,
   header_deadline: super::header_deadline::HeaderDeadline,
+  keep_alive: bool,
   tcp_accept_retry_delay: AcceptRetryDelay,
   /// Shared TCP listener base for lifecycle management
   base: TcpListenerBase,
@@ -135,6 +139,7 @@ impl HttpsListener {
       server_router: ServerRouter::build(server_routing_table),
       tls_handshake_timeout,
       header_deadline: _args.header_read_timeout,
+      keep_alive: _args.keep_alive,
       tcp_accept_retry_delay: _args.tcp_accept_retry_delay,
       base: TcpListenerBase::new().with_tcp_options(_args.tcp_options),
     }))
@@ -148,6 +153,7 @@ impl Listening for HttpsListener {
     let router = self.server_router.clone();
     let handshake_timeout = self.tls_handshake_timeout;
     let header_deadline = self.header_deadline;
+    let keep_alive = self.keep_alive;
     self.base.start(
       &self.addresses,
       "HTTPS",
@@ -182,6 +188,7 @@ impl Listening for HttpsListener {
                 stream,
                 service,
                 header_deadline,
+                keep_alive,
                 connection.shutdown,
               )
               .await

@@ -179,7 +179,7 @@ def test_http_chain_connect_response_has_a_deadline(
     config = f"""server_threads: 1
 plugins:
   upstream:
-    upstream_request_timeout: 100ms
+    upstream_read_timeout: 100ms
     upstreams:
     - name: relay
       addresses:
@@ -212,7 +212,8 @@ servers:
 
 @pytest.mark.parametrize("listener_kind", ["http", "https"])
 @pytest.mark.parametrize(
-    "header_timeout", [pytest.param(None, marks=pytest.mark.slow), "100ms"]
+    "header_timeout",
+    [pytest.param(None, marks=[pytest.mark.slow, pytest.mark.timeout(100)]), "100ms"],
 )
 def test_http_incomplete_headers_expire(
     tmp_path: Path,
@@ -243,9 +244,9 @@ def test_http_incomplete_headers_expire(
                 conn = connections.enter_context(
                     context.wrap_socket(conn, server_hostname="localhost")
                 )
-            # The default follows Hyper's 30s; explicit configuration can
+            # The listener default is 75s; explicit configuration can
             # override it. Leave scheduling margin for the server deadline.
-            conn.settimeout(35 if header_timeout is None else 2)
+            conn.settimeout(80 if header_timeout is None else 2)
             conn.sendall(b"GET / HTTP/1.1\r\nHost:")
             response = conn.recv(4096)
             assert not response or b"408" in response.split(b"\r\n", 1)[0]
@@ -276,14 +277,14 @@ def test_chain_uses_selected_address_request_timeout(
     config = f"""server_threads: 1
 plugins:
   upstream:
-    upstream_request_timeout: 2s
+    upstream_read_timeout: 2s
     upstreams:
     - name: relay
-      upstream_request_timeout: 1s
+      upstream_read_timeout: 1s
       addresses:
       - address: 127.0.0.1:{ports[0]}
         address_protocol: http
-        upstream_request_timeout: 100ms
+        upstream_read_timeout: 100ms
       - address: 127.0.0.1:{ports[1]}
         address_protocol: http
 listeners:

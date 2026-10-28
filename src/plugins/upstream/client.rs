@@ -155,3 +155,6 @@ impl UpstreamRegistry {
     }
   }
 }
+
+#[cfg(test)]
+mod retry_request_tests;

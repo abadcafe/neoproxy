@@ -248,7 +248,13 @@ impl Upstream {
         group,
         excluded,
         Some(ctx),
-        |progress| request.can_retry(progress),
+        |progress| {
+          request.can_retry(
+            progress,
+            &req_headers.method,
+            self.config.upstream_non_idempotent_retry,
+          )
+        },
         async |selected, progress| {
           let mut parts = req_headers.clone();
           parts.extensions.insert(progress);

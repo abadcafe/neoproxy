@@ -17,19 +17,28 @@ use h3::quic::{
 use super::request_stream::CancellableStream;
 use crate::shutdown::ShutdownHandle;
 
-pub(super) struct StreamOpener(h3_quinn::OpenStreams);
+pub(super) struct StreamOpener(
+  h3_quinn::OpenStreams,
+  crate::h3_io_deadline::Controls,
+);
 
 pub(super) struct AcceptingConnection {
   inner: h3_quinn::Connection,
   shutdown: ShutdownHandle,
+  controls: crate::h3_io_deadline::Controls,
 }
 
 impl AcceptingConnection {
   pub(super) fn new(
     connection: quinn::Connection,
     shutdown: ShutdownHandle,
+    controls: crate::h3_io_deadline::Controls,
   ) -> Self {
-    Self { inner: h3_quinn::Connection::new(connection), shutdown }
+    Self {
+      inner: h3_quinn::Connection::new(connection),
+      shutdown,
+      controls,
+    }
   }
 }
 
@@ -58,7 +67,10 @@ impl Connection<Bytes> for AcceptingConnection {
     for _ in 0..REJECTION_BATCH {
       let mut stream = ready!(self.inner.poll_accept_bidi(cx))?;
       if !self.shutdown.is_shutdown() {
-        return Poll::Ready(Ok(CancellableStream::new(stream)));
+        return Poll::Ready(Ok(CancellableStream::new(
+          stream,
+          &self.controls,
+        )));
       }
       stream.stop_sending(Code::H3_REQUEST_REJECTED.value());
       stream.reset(Code::H3_REQUEST_REJECTED.value());
@@ -68,9 +80,10 @@ impl Connection<Bytes> for AcceptingConnection {
   }
 
   fn opener(&self) -> Self::OpenStreams {
-    StreamOpener(<h3_quinn::Connection as Connection<Bytes>>::opener(
-      &self.inner,
-    ))
+    StreamOpener(
+      <h3_quinn::Connection as Connection<Bytes>>::opener(&self.inner),
+      self.controls.clone(),
+    )
   }
 }
 
@@ -82,10 +95,10 @@ impl OpenStreams<Bytes> for AcceptingConnection {
     &mut self,
     cx: &mut Context<'_>,
   ) -> Poll<Result<Self::BidiStream, StreamErrorIncoming>> {
-    self
-      .inner
-      .poll_open_bidi(cx)
-      .map(|result| result.map(CancellableStream::new))
+    self.inner.poll_open_bidi(cx).map(|result| {
+      result
+        .map(|stream| CancellableStream::new(stream, &self.controls))
+    })
   }
 
   fn poll_open_send(
@@ -112,10 +125,9 @@ impl OpenStreams<Bytes> for StreamOpener {
     &mut self,
     cx: &mut Context<'_>,
   ) -> Poll<Result<Self::BidiStream, StreamErrorIncoming>> {
-    self
-      .0
-      .poll_open_bidi(cx)
-      .map(|result| result.map(CancellableStream::new))
+    self.0.poll_open_bidi(cx).map(|result| {
+      result.map(|stream| CancellableStream::new(stream, &self.1))
+    })
   }
 
   fn poll_open_send(

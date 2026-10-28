@@ -16,20 +16,20 @@ enum ReceiveState {
   Done,
 }
 
-pub(super) struct H3RecvBody {
-  stream: h3::server::RequestStream<h3_quinn::RecvStream, Bytes>,
+pub(super) struct H3RecvBody<S = h3_quinn::RecvStream> {
+  stream: h3::server::RequestStream<S, Bytes>,
   state: ReceiveState,
 }
 
-impl H3RecvBody {
+impl<S: h3::quic::RecvStream> H3RecvBody<S> {
   pub(super) fn new(
-    stream: h3::server::RequestStream<h3_quinn::RecvStream, Bytes>,
+    stream: h3::server::RequestStream<S, Bytes>,
   ) -> Self {
     Self { stream, state: ReceiveState::Data }
   }
 }
 
-impl Body for H3RecvBody {
+impl<S: h3::quic::RecvStream + Unpin> Body for H3RecvBody<S> {
   type Data = Bytes;
   type Error = h3::error::StreamError;
 

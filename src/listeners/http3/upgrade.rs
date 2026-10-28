@@ -16,6 +16,7 @@ use crate::stream::{OnUpgrade, UpgradeTrigger};
 /// 1. Send the H3 protocol response on the stream
 /// 2. Transfer stream ownership to the Service via the upgrade channel
 pub(crate) struct H3UpgradeTrigger<S: h3::quic::BidiStream<Bytes>> {
+  control: crate::h3_io_deadline::Control,
   trigger: Option<UpgradeTrigger>,
   stream: Option<h3::server::RequestStream<S, Bytes>>,
 }
@@ -32,16 +33,24 @@ impl<S> H3UpgradeTrigger<S>
 where
   S: h3::quic::BidiStream<
       Bytes,
-      SendStream = h3_quinn::SendStream<Bytes>,
-      RecvStream = h3_quinn::RecvStream,
+      SendStream = crate::h3_io_deadline::TimedSend<
+        h3_quinn::SendStream<Bytes>,
+      >,
+      RecvStream = crate::h3_io_deadline::TrackedRecv<
+        h3_quinn::RecvStream,
+      >,
     >,
 {
   /// Create a linked (trigger, on_upgrade) pair.
   pub(crate) fn pair(
     stream: h3::server::RequestStream<S, Bytes>,
+    control: crate::h3_io_deadline::Control,
   ) -> (Self, OnUpgrade) {
     let (trigger, on_upgrade) = OnUpgrade::pair();
-    (Self { trigger: Some(trigger), stream: Some(stream) }, on_upgrade)
+    (
+      Self { control, trigger: Some(trigger), stream: Some(stream) },
+      on_upgrade,
+    )
   }
 
   /// Complete CONNECT using its actual status and a streamed failure
@@ -67,6 +76,7 @@ where
         .unwrap()
         .send_response(http::Response::from_parts(parts, ()))
         .await?;
+      self.control.disable();
       let (send, recv) = self.stream.take().unwrap().split();
       self
         .trigger

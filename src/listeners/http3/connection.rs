@@ -21,6 +21,7 @@ pub(super) async fn handle_h3_connection(
   shutdown: ShutdownHandle,
   local_addr: SocketAddr,
   header_deadline: crate::listeners::header_deadline::HeaderDeadline,
+  policy: crate::listeners::http_policy::HttpPolicy,
 ) {
   let client_addr = connection.remote_address();
   // TLS has already checked any presented certificate against this
@@ -33,9 +34,18 @@ pub(super) async fn handle_h3_connection(
         .ok()
     })
     .is_some_and(|certificates| !certificates.is_empty());
-  let backend =
-    AcceptingConnection::new(connection.clone(), shutdown.clone());
-  let builder = h3::server::builder();
+  let controls = crate::h3_io_deadline::Controls::new(
+    policy.write_timeout.duration(),
+  );
+  let backend = AcceptingConnection::new(
+    connection.clone(),
+    shutdown.clone(),
+    controls.clone(),
+  );
+  let mut builder = h3::server::builder();
+  builder.max_field_section_size(u64::from(
+    policy.request_limits.limits().bytes(),
+  ));
   let mut h3 = tokio::select! {
     biased;
     _ = shutdown.notified() => return,
@@ -73,6 +83,7 @@ pub(super) async fn handle_h3_connection(
     match result {
       Ok(Some(resolver)) => {
         let router = router.clone();
+        let controls = controls.clone();
         requests.register(async move {
           match tokio::time::timeout(
             header_deadline.duration(),
@@ -81,6 +92,7 @@ pub(super) async fn handle_h3_connection(
           .await
           {
             Ok(Ok((request, stream))) => {
+              let write_control = controls.take(stream.id());
               handle_h3_stream(
                 request,
                 stream,
@@ -88,6 +100,7 @@ pub(super) async fn handle_h3_connection(
                 client_addr,
                 local_addr,
                 client_cert_presented,
+                (policy, write_control),
               )
               .await
             }

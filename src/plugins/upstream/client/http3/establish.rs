@@ -15,6 +15,7 @@ use crate::plugins::upstream::client::protocol::QuicConfig;
 use crate::plugins::upstream::error::UpstreamError;
 #[derive(Clone)]
 pub(super) struct Settings {
+  pub(super) limits: crate::header_limits::Limits,
   pub(super) address: std::net::SocketAddr,
   pub(super) hostname: Option<String>,
   pub(super) quic: QuicConfig,
@@ -36,6 +37,7 @@ pub(super) async fn establish(
   let quinn_conn =
     create_quic_connection(pool, tls_config, observation).await?;
   let (mut h3_conn, send_request) = h3::client::builder()
+    .max_field_section_size(u64::from(pool.limits.bytes()))
     .build(super::read_progress::Connection::new(
       quinn_conn.clone(),
       registry,

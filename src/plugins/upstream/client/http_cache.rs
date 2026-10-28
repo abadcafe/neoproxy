@@ -32,6 +32,7 @@ struct Entry {
   expires: tokio::time::Instant,
 }
 pub(super) struct Cache {
+  pub(super) limits: crate::header_limits::Limits,
   entries: Mutex<Vec<Entry>>,
   reaper: std::sync::atomic::AtomicBool,
   changed: Arc<tokio::sync::Notify>,
@@ -42,8 +43,10 @@ impl Cache {
   pub(super) fn new(
     max_idle: usize,
     idle_timeout: Duration,
+    limits: crate::header_limits::Limits,
   ) -> Arc<Self> {
     Arc::new(Self {
+      limits,
       entries: Mutex::new(Vec::new()),
       reaper: std::sync::atomic::AtomicBool::new(false),
       changed: Arc::new(tokio::sync::Notify::new()),

@@ -43,15 +43,18 @@ impl ConnectionPool {
       http: Cache::new(
         config.http.max_idle_per_host,
         config.http.idle_timeout,
+        settings.response_limits.limits(),
       ),
       https: Cache::new(
         config.https.max_idle_per_host,
         config.https.idle_timeout,
+        settings.response_limits.limits(),
       ),
       h3_runtime: runtime.handle().clone(),
       h3: super::http3::Store::new(
         config.h3_connections,
         config.h3_idle_timeout,
+        settings.response_limits.limits(),
       ),
       runtime: Mutex::new(Some(runtime)),
       dns,

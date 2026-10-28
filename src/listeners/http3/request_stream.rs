@@ -15,13 +15,25 @@ use h3::quic::{
 };
 
 pub(super) struct CancellableStream {
-  inner: Option<h3_quinn::BidiStream<Bytes>>,
+  send: Option<
+    crate::h3_io_deadline::TimedSend<h3_quinn::SendStream<Bytes>>,
+  >,
+  recv:
+    Option<crate::h3_io_deadline::TrackedRecv<h3_quinn::RecvStream>>,
   finished: bool,
 }
 
 impl CancellableStream {
-  pub(super) fn new(inner: h3_quinn::BidiStream<Bytes>) -> Self {
-    Self { inner: Some(inner), finished: false }
+  pub(super) fn new(
+    inner: h3_quinn::BidiStream<Bytes>,
+    controls: &crate::h3_io_deadline::Controls,
+  ) -> Self {
+    let (send, recv) = inner.split();
+    Self {
+      send: Some(controls.register(send)),
+      recv: Some(controls.track_recv(recv)),
+      finished: false,
+    }
   }
 }
 
@@ -30,21 +42,21 @@ impl SendStream<Bytes> for CancellableStream {
     &mut self,
     cx: &mut Context<'_>,
   ) -> Poll<Result<(), StreamErrorIncoming>> {
-    self.inner.as_mut().unwrap().poll_ready(cx)
+    self.send.as_mut().unwrap().poll_ready(cx)
   }
 
   fn send_data<D: Into<WriteBuf<Bytes>>>(
     &mut self,
     data: D,
   ) -> Result<(), StreamErrorIncoming> {
-    self.inner.as_mut().unwrap().send_data(data)
+    self.send.as_mut().unwrap().send_data(data)
   }
 
   fn poll_finish(
     &mut self,
     cx: &mut Context<'_>,
   ) -> Poll<Result<(), StreamErrorIncoming>> {
-    let result = self.inner.as_mut().unwrap().poll_finish(cx);
+    let result = self.send.as_mut().unwrap().poll_finish(cx);
     if matches!(result, Poll::Ready(Ok(()))) {
       self.finished = true;
     }
@@ -52,12 +64,12 @@ impl SendStream<Bytes> for CancellableStream {
   }
 
   fn reset(&mut self, code: u64) {
-    self.inner.as_mut().unwrap().reset(code);
+    self.send.as_mut().unwrap().reset(code);
     self.finished = true;
   }
 
   fn send_id(&self) -> StreamId {
-    self.inner.as_ref().unwrap().send_id()
+    self.send.as_ref().unwrap().send_id()
   }
 }
 
@@ -68,26 +80,28 @@ impl RecvStream for CancellableStream {
     &mut self,
     cx: &mut Context<'_>,
   ) -> Poll<Result<Option<Bytes>, StreamErrorIncoming>> {
-    self.inner.as_mut().unwrap().poll_data(cx)
+    self.recv.as_mut().unwrap().poll_data(cx)
   }
 
   fn stop_sending(&mut self, code: u64) {
-    self.inner.as_mut().unwrap().stop_sending(code);
+    self.recv.as_mut().unwrap().stop_sending(code);
   }
 
   fn recv_id(&self) -> StreamId {
-    self.inner.as_ref().unwrap().recv_id()
+    self.recv.as_ref().unwrap().recv_id()
   }
 }
 
 impl BidiStream<Bytes> for CancellableStream {
-  type RecvStream = h3_quinn::RecvStream;
-  type SendStream = h3_quinn::SendStream<Bytes>;
+  type RecvStream =
+    crate::h3_io_deadline::TrackedRecv<h3_quinn::RecvStream>;
+  type SendStream =
+    crate::h3_io_deadline::TimedSend<h3_quinn::SendStream<Bytes>>;
 
   fn split(mut self) -> (Self::SendStream, Self::RecvStream) {
     // Consuming split transfers cancellation responsibility to the
     // ordinary response writer or the upgraded tunnel's I/O owner.
-    self.inner.take().unwrap().split()
+    (self.send.take().unwrap(), self.recv.take().unwrap())
   }
 }
 
@@ -99,7 +113,7 @@ impl Drop for CancellableStream {
     // The Option permits a consuming split; every other method requires
     // an unsplit stream, so unwrap deliberately exposes invariant bugs.
     if !self.finished
-      && let Some(stream) = &mut self.inner
+      && let Some(stream) = &mut self.send
     {
       stream.reset(Code::H3_REQUEST_CANCELLED.value());
     }

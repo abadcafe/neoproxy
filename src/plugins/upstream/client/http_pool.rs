@@ -3,6 +3,7 @@
 //! worker public operations: ProxyPool::{new,shared,connect,close},
 //! ForwardClient data entities: ProxyPool, PooledBody
 //! tests: HTTP pool process contracts
+use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -46,7 +47,11 @@ impl<C> ProxyPool<C> {
   ) -> Self {
     Self {
       connector,
-      cache: Cache::new(max_idle, idle_timeout),
+      cache: Cache::new(
+        max_idle,
+        idle_timeout,
+        crate::header_limits::ResponseLimits::default().limits(),
+      ),
       key: None,
       tracker,
     }
@@ -59,6 +64,19 @@ impl<C> ProxyPool<C> {
     tracker: Rc<StreamTracker>,
   ) -> Self {
     Self { connector, cache, key: Some(key), tracker }
+  }
+
+  pub(super) fn builder(&self) -> http1::Builder {
+    let mut builder = http1::Builder::new();
+    if self.cache.limits.count() != 100 {
+      builder.max_headers(self.cache.limits.count());
+    }
+    builder
+      .max_header_size(self.cache.limits.bytes() as usize)
+      .max_buf_size(
+        (self.cache.limits.bytes() as usize).max(8192 + 4096 * 100),
+      );
+    builder
   }
 
   pub(super) fn close(&self) { /* Shared pools outlive individual upstreams. */
@@ -89,10 +107,11 @@ where
     let io = self.connect(uri, ctx).await?;
     let observation = io.observation();
     let timeout = Control::default();
-    let (sender, connection) =
-      http1::handshake(TimedIo::new(io, timeout.clone()))
-        .await
-        .map_err(|error| classify_http_client_error(error.into()))?;
+    let (sender, connection) = self
+      .builder()
+      .handshake(TimedIo::new(io, timeout.clone()))
+      .await
+      .map_err(|error| classify_http_client_error(error.into()))?;
     Ok(Connection {
       sender,
       driver: Box::pin(connection),
@@ -181,7 +200,13 @@ where
           // Hyper returns the request only when it has not been sent.
           // Never retry an exchange whose bytes may have reached the
           // peer.
-          if reused && let Some(unsent) = error.take_message() {
+          if let Some(unsent) = error.take_message() {
+            super::retry_request::Progress::unsent(&unsent);
+            if !reused {
+              return Err(classify_http_client_error(
+                error.into_error().into(),
+              ));
+            }
             request = unsent;
             reused = false;
             driver_done = false;
@@ -208,6 +233,7 @@ where
     }
     let (recycle, completed) =
       tokio::sync::oneshot::channel::<SendRequest<RequestBody>>();
+    let (released, release) = tokio::sync::oneshot::channel();
     let Connection { sender, mut driver, observation, timeout } =
       connection;
     let response_timeout = timeout.clone();
@@ -225,15 +251,21 @@ where
       }
       timeout.disable();
       cache.put(key, Connection { sender, driver, observation, timeout });
+      let _ = released.send(());
     });
     let mut body = PooledBody {
       timeout: response_timeout,
       inner,
       sender: Some(sender),
       recycle: Some(recycle),
+      release: Some(release),
+      final_frame: None,
     };
     if body.inner.is_end_stream() {
       body.recycle();
+      if let Some(release) = body.release.take() {
+        let _ = release.await;
+      }
     }
     Ok(Response::from_parts(
       parts,
@@ -242,6 +274,8 @@ where
   }
 }
 struct PooledBody {
+  release: Option<tokio::sync::oneshot::Receiver<()>>,
+  final_frame: Option<Frame<Bytes>>,
   timeout: Control,
   inner: hyper::body::Incoming,
   sender: Option<SendRequest<RequestBody>>,
@@ -250,7 +284,30 @@ struct PooledBody {
 }
 
 impl PooledBody {
+  // Publish the lease before exposing its final bytes. Otherwise
+  // another worker can open a redundant connection after the client
+  // consumes EOF but before the recycling task runs. A closed driver
+  // simply drops ACK.
+  fn poll_released(
+    &mut self,
+    cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Bytes>, hyper::Error>>> {
+    if let Some(release) = &mut self.release {
+      std::task::ready!(Pin::new(release).poll(cx)).ok();
+      self.release = None;
+    }
+    Poll::Ready(self.final_frame.take().map(Ok))
+  }
+
   fn recycle(&mut self) {
+    if self.sender.is_none() {
+      return;
+    }
+    // An early response must not wait for an unfinished upload. Such a
+    // connection cannot become reusable until that upload is resolved.
+    if !self.timeout.upload_flushed() {
+      self.release = None;
+    }
     self.timeout.response_complete();
     if let Some(sender) = self.sender.take() {
       let _ = self
@@ -270,20 +327,36 @@ impl Body for PooledBody {
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+    if self.sender.is_none() && self.recycle.is_none() {
+      return self.poll_released(cx);
+    }
     let result = Pin::new(&mut self.inner).poll_frame(cx);
     if matches!(result, Poll::Ready(Some(Err(_)))) {
       self.sender = None;
+      self.recycle = None;
+      self.release = None;
     } else if result.is_ready() && self.inner.is_end_stream() {
       self.recycle();
+      if let Poll::Ready(Some(Ok(frame))) = result {
+        self.final_frame = Some(frame);
+      }
+      return self.poll_released(cx);
     }
     result
   }
 
   fn is_end_stream(&self) -> bool {
     self.inner.is_end_stream()
+      && self.release.is_none()
+      && self.final_frame.is_none()
   }
 
   fn size_hint(&self) -> SizeHint {
+    if let Some(data) =
+      self.final_frame.as_ref().and_then(Frame::data_ref)
+    {
+      return SizeHint::with_exact(data.len() as u64);
+    }
     self.inner.size_hint()
   }
 }

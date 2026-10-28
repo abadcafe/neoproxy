@@ -160,3 +160,23 @@ fn test_socks5_builder_rejects_unrepresentable_deadlines() {
     assert!(result.is_err(), "accepted invalid deadline {value}");
   }
 }
+
+#[test]
+fn test_socks5_builder_rejects_http_only_policy() {
+  for yaml in [
+    "body_read_timeout: 60s",
+    "write_timeout: 60s",
+    "max_request_headers: 100",
+    "max_request_header_size: 32KiB",
+  ] {
+    assert!(
+      socks5::create_listener_builder()(
+        vec!["127.0.0.1:0".into()],
+        serde_yaml::from_str(yaml).unwrap(),
+        plain_servers()
+      )
+      .is_err(),
+      "{yaml}"
+    );
+  }
+}

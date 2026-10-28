@@ -252,7 +252,7 @@ def test_http_incomplete_headers_expire(
             assert not response or b"408" in response.split(b"\r\n", 1)[0]
 
 
-@pytest.mark.parametrize("method", ["GET", "CONNECT"])
+@pytest.mark.parametrize("method", ["POST", "CONNECT"])
 def test_chain_uses_selected_address_request_timeout(
     tmp_path: Path, target_server: TargetServerFactory, method: str
 ) -> None:
@@ -307,7 +307,8 @@ servers:
     try:
         with running_proxy(tmp_path, config) as process:
             assert process.wait_ready()
-            # CONNECT may fail over before exposing a tunnel to the client.
+            # CONNECT may fail over before exposing a tunnel. POST keeps the
+            # first timeout observable with non-idempotent retries disabled.
             statuses = (b"200", b"200") if method == "CONNECT" else (b"504", b"200")
             for status in statuses:
                 with socket.create_connection(("127.0.0.1", entry), timeout=2) as conn:

@@ -81,6 +81,8 @@ impl UpstreamAddressConfig {
 #[serde(deny_unknown_fields)]
 pub(super) struct UpstreamConfig {
   #[serde(default)]
+  pub(super) upstream_non_idempotent_retry: Option<bool>,
+  #[serde(default)]
   pub(super) use_connection_pool: Option<String>,
   #[serde(default)]
   pub(super) address_protocol: Option<ProtocolKind>,
@@ -105,6 +107,8 @@ pub(super) struct UpstreamConfig {
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpstreamPluginConfig {
+  #[serde(default)]
+  pub(super) upstream_non_idempotent_retry: Option<bool>,
   #[serde(default)]
   pub(super) connection_pools:
     Vec<super::connection_pool::ConnectionPoolConfig>,

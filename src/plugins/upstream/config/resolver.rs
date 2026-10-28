@@ -178,6 +178,10 @@ pub(crate) fn merge_chain_config(
     upstreams.insert(
       upstream.name.clone(),
       Upstream {
+        upstream_non_idempotent_retry: upstream
+          .upstream_non_idempotent_retry
+          .or(plugin.upstream_non_idempotent_retry)
+          .unwrap_or(false),
         use_connection_pool: pool_name.to_owned(),
         address_max_fails: resolve_field_with_default(
           upstream.address_max_fails.as_ref(),

@@ -109,7 +109,7 @@ plugins:
 
 插件配置使用 `plugins.upstream`，服务类型使用 `upstream.upstream`。
 
-统一代理插件，通过 `connection_pools` 定义命名连接资源，通过 `upstreams` 定义路由节点。业务参数及 `use_connection_pool` 支持三级继承：**Plugin → Upstream → Address**。
+统一代理插件，通过 `connection_pools` 定义命名连接资源，通过 `upstreams` 定义路由节点。除另行注明外，业务参数及 `use_connection_pool` 支持三级继承：**Plugin → Upstream → Address**。
 低层级覆盖高层级同名参数。`upstream_send_timeout` 和 `upstream_read_timeout` 均默认 10s，按插件、upstream、address 三级继承；链式请求使用调度选中地址的超时。链式地址通过 `address_protocol: http`、`address_protocol: https` 、`address_protocol: http3` 或 `address_protocol: socks5` 选择单一协议；`address_protocol` 支持三级继承，默认 `https`。TCP keepalive 的三个字段均已生效，省略时保持系统默认；配置任一项即启用 TCP keepalive。
 
 SOCKS5 上游仅承接 CONNECT，目标解析复用 HTTP CONNECT：域名交给上游解析，IPv4/IPv6 按对应类型发送。普通 GET/POST 等请求只选择 HTTP/HTTPS/HTTP3 节点；没有可用节点时返回与节点全部不可用相同的 502，协议不适用不计健康检查失败。SOCKS5 握手、认证和 CONNECT 协商的读写分别使用 `upstream_read_timeout` 与 `upstream_send_timeout`，成功后的隧道复用 `tunnel_idle_timeout`，每条隧道独立使用 TCP 连接。
@@ -133,6 +133,8 @@ plugins:
         dns_servers: null                 # 仅连接池级；未配置时读取系统 DNS 服务器
         dns_resolve_timeout: 5s            # 仅连接池级
         dns_refresh_retry_interval: 30s    # 仅连接池级；刷新失败后重试间隔
+        max_response_headers: 100          # 接收上游响应头的字段数量上限
+        max_response_header_size: 32KiB     # 接收上游响应头的大小上限
         http_max_idle_connections: 100 # HTTP/HTTPS 各自的空闲缓存上限；0 禁用缓存
         http_connection_idle_timeout: 60s
         http3_pool_io_threads: 1            # H3 池独立 I/O runtime 的线程数，至少 1
@@ -148,6 +150,7 @@ plugins:
     address_protocol: https           # 三级继承；direct 普通请求由 URL scheme 决定
     address_max_fails: 1               # 三级继承；0 禁用被动失败摘除
     address_fail_timeout: 10s          # 三级继承；失败统计及摘除时长
+    upstream_non_idempotent_retry: false # 仅 plugin → upstream 继承
     upstream_send_timeout: 10s         # 有数据待发送时，向上游写入无进展的时限
     upstream_read_timeout: 10s         # 等待上游响应头及 body 时，读取无进展的时限
     tunnel_idle_timeout: 60s           # 插件级默认配置
@@ -236,6 +239,21 @@ upstream 的 `quic_connection_send_window`、`quic_connection_receive_window` �
 ## Listener 详解
 
 HTTP、HTTPS、HTTP/3 使用 `header_read_timeout` 限制请求头读取时间（默认 `75s`，必须为正且可表示的时长）。HTTP/3 超时只取消对应请求流，其他流继续处理。
+
+HTTP、HTTPS、HTTP/3 listener 还支持以下平铺参数；SOCKS5 不接受这些 HTTP 参数：
+
+| 参数 | 默认值 | 含义 |
+|---|---|---|
+| `body_read_timeout` | `60s` | 等待请求 body/trailer 时，读取没有字节进展的时限 |
+| `write_timeout` | `60s` | 有响应头、body 或 trailer 待发时，写入没有进展的时限 |
+| `max_request_headers` | `100` | 接收请求头的字段数量上限，重复字段分别计数 |
+| `max_request_header_size` | `32KiB` | 接收请求头的大小上限 |
+
+时长必须为正且能安全计时。超时衡量 I/O 空闲时间，不限制整个上传/下载的总时长；等待上游响应 body 不计客户端写超时，未消费请求 body 的背压等待不计读取超时。请求 body 超时且还没返回响应时返回 408，响应已开始则终止交换。HTTP/1 写超时关闭该连接，HTTP/3 写超时取消对应 stream。HTTP/2 保留 Hyper 的流控机制，这个写超时作用于底层连接的写阻塞，不单独计量某一流等待流控窗口的时间。成功 CONNECT 的后续数据仅使用 `tunnel_idle_timeout`。
+
+上游响应方向在 `plugins.upstream.connection_pools[]` 配置 `max_response_headers`（默认 `100`）和 `max_response_header_size`（默认 `32KiB`），同一个池的解析策略一致，direct 与链式 HTTP/HTTPS/H3 都适用。它们不限制向上游发送的请求头；listener 请求限制也不限制向客户端发送的响应头。
+
+头大小必须在 `1..=4294967295` 字节范围内，数量必须是正整数。HTTP/1 按原始头部字节数检查，包含请求行/状态行；HTTP/2 和 HTTP/3 按协议定义的解压后字段列表大小检查，包含伪头和每字段开销。H2/H3 的字段数量检查针对普通头字段。初始头、informational response 及 trailers 都受对应方向的限制，每个头区段分别计算；这些参数不限制 body 总大小，也不要求攒满缓冲再发送。HTTP/1 请求初始头超限返回 431，上游初始响应头超限返回 502；已经开始的消息遇到非法 trailers 时终止流。
 
 HTTP/HTTPS listener 的 `keep_alive` 默认为 `true`，控制 HTTP/1 连接是否可处理后续请求；设置 `false` 时普通响应完成后关闭连接，成功的 CONNECT 仍按隧道生命周期处理。它不控制 TCP 保活探测，也不作用于 H3。HTTP/1 的 `header_read_timeout` 同时覆盖 keep-alive 等待下一份请求头的时间。
 
@@ -513,7 +531,7 @@ Service 按方法处理请求：`CONNECT host:port` 建立透明隧道；其他�
 
 direct 从请求目标构造一个权重为 1 的 address，链式模式使用配置的全部 addresses；各域名先解析为所有 A/AAAA 地址，再对全部 IP 节点做平滑加权轮询。每个 IP 继承所属 address 的完整权重、协议、认证及超时配置。同一 IP 属于不同 address 时保持不同身份。连接池按选中节点及目标身份隔离，复用连接也先经过节点调度，不再做 IP 并发竞速。所有 TCP 监听和上游连接均启用 `TCP_NODELAY`；`quic_connection_*` 只作用于 HTTP/3 链式上游。
 
-节点健康和权重状态跨 worker 共享，按 upstream 和目标隔离。`address_max_fails` 默认 1，`address_fail_timeout` 默认 10s，采用 Nginx 风格的被动失败计数、有效权重恢复和到期重试；只有一个 IP 节点时不因失败摘除，`address_max_fails: 0` 禁用摘除。失败只统计建连（含 TLS/QUIC 握手）、发送请求、等待响应头阶段的传输错误或超时，不按 HTTP 4xx/5xx 状态摘除，不统计非法响应头、客户端请求体错误、响应 body 或已建立隧道的后续错误。未提交请求的建连失败可尝试同组其他节点；已经提交的普通请求不自动重放。主动健康探测不启用。
+节点健康和权重状态跨 worker 共享，按 upstream 和目标隔离。`address_max_fails` 默认 1，`address_fail_timeout` 默认 10s，采用 Nginx 风格的被动失败计数、有效权重恢复和到期重试；只有一个 IP 节点时不因失败摘除，`address_max_fails: 0` 禁用摘除。失败只统计建连（含 TLS/QUIC 握手）、发送请求、等待响应头阶段的传输错误或超时，不按 HTTP 4xx/5xx 状态摘除，不统计非法响应头、客户端请求体错误、响应 body 或已建立隧道的后续错误。发送前的建连失败可尝试同组其他节点，不受方法幂等性限制。发送后，GET、HEAD、PUT、DELETE、OPTIONS、TRACE 允许重试；其他方法仅在 `upstream_non_idempotent_retry: true` 时允许。该配置默认为 `false`，仅按 plugin → upstream 继承，不支持 address 级。任何重试都要求尚未消费请求 body、尚未返回下游响应、属于可重试的传输故障且存在未尝试节点；不缓存或落盘 body，也不因 HTTP 错误状态重试。已经消费 body 的 PUT 即使幂等也不能重放。已建立的 CONNECT/SOCKS5 隧道不重放。主动健康探测不启用。
 
 HTTP/HTTPS 普通转发独占借出完整连接，由当前 worker 驱动。请求和响应完整结束且协议状态允许复用时才归还；异常、取消、状态不确定则关闭。空闲超时从归还时起算，池上限只限制空闲缓存。HTTP/HTTPS CONNECT、SOCKS5 和 direct CONNECT 使用专用连接，不进入缓存池。
 

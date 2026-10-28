@@ -14,9 +14,8 @@ mod quic_connect_tests;
 mod session;
 mod sessions;
 pub(super) use sessions::Store;
-mod io_progress;
-#[cfg(test)]
-mod io_progress_tests;
+
+use crate::io_progress;
 mod read_progress;
 #[cfg(test)]
 mod session_tests;
@@ -116,6 +115,7 @@ pub(super) async fn exchange(
     settings.read,
     &mut upload,
     &reads,
+    session.limits(),
   )
   .await?;
   let (parts, ()) = proxy_resp.into_parts();
@@ -127,7 +127,7 @@ pub(super) async fn exchange(
       request_id,
       upload,
       lease,
-      settings.read,
+      (settings.read, session.limits()),
       reads,
     )),
   ))
@@ -150,6 +150,7 @@ struct H3ResponseBody {
   upload: Option<Upload>,
   _lease: SessionLease,
   read_timeout: Duration,
+  limits: crate::header_limits::Limits,
   reads: io_progress::Progress,
   read_timer: Option<Pin<Box<tokio::time::Sleep>>>,
 }
@@ -161,7 +162,7 @@ impl H3ResponseBody {
     request_id: Option<crate::request_id::RequestId>,
     upload: Option<Upload>,
     lease: SessionLease,
-    read_timeout: Duration,
+    (read_timeout, limits): (Duration, crate::header_limits::Limits),
     reads: io_progress::Progress,
   ) -> Self {
     Self {
@@ -172,6 +173,7 @@ impl H3ResponseBody {
       upload,
       _lease: lease,
       read_timeout,
+      limits,
       reads,
       read_timer: None,
     }
@@ -265,6 +267,15 @@ impl Body for H3ResponseBody {
               return Poll::Pending;
             }
             Poll::Ready(Ok(Some(mut trailers))) => {
+              if !this.limits.accepts(&trailers) {
+                this.state = H3ResponseBodyState::Done;
+                this
+                  .stream
+                  .stop_sending(h3::error::Code::H3_EXCESSIVE_LOAD);
+                return Poll::Ready(Some(Err(anyhow::anyhow!(
+                  "too many upstream response trailers"
+                ))));
+              }
               crate::hop_headers::strip_trailer_headers(&mut trailers);
               this.state = H3ResponseBodyState::Done;
               return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
@@ -376,6 +387,7 @@ impl ClientProtocol for Http3Client {
         settings.read,
         &mut None,
         &reads,
+        self.session.limits(),
       )
       .await?;
 
@@ -419,6 +431,7 @@ async fn receive_final_response<S: h3::quic::RecvStream>(
   read_timeout: Duration,
   upload: &mut Option<Upload>,
   reads: &io_progress::Progress,
+  limits: crate::header_limits::Limits,
 ) -> Result<http::Response<()>, UpstreamError> {
   loop {
     let pending = stream.recv_response();
@@ -440,9 +453,17 @@ async fn receive_final_response<S: h3::quic::RecvStream>(
         )
       })?
     };
-    let response = response.map_err(|error| {
-      UpstreamError::ConnectionTerminated(error.to_string())
+    let response = response.map_err(|error| match error {
+      h3::error::StreamError::HeaderTooBig { .. } => {
+        UpstreamError::InvalidResponse(error.to_string())
+      }
+      _ => UpstreamError::ConnectionTerminated(error.to_string()),
     })?;
+    if !limits.accepts(response.headers()) {
+      return Err(UpstreamError::InvalidResponse(
+        "too many upstream response headers".into(),
+      ));
+    }
     if response.status() == http::StatusCode::SWITCHING_PROTOCOLS {
       return Err(UpstreamError::TlsProtocolError(
         "HTTP/3 forbids status 101".into(),

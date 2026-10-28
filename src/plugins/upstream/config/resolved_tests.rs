@@ -57,6 +57,7 @@ fn test_quic_resolved_preserves_optional_transport_fields() {
 #[test]
 fn test_upstream_preserves_direct_mode_defaults() {
   let upstream = Upstream {
+    upstream_non_idempotent_retry: false,
     use_connection_pool: "default".into(),
     address_max_fails: 1,
     address_fail_timeout: Duration::from_secs(10),

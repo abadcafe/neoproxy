@@ -14,6 +14,8 @@ use super::raw::{CertificateConfig, UpstreamPluginConfig};
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ConnectionPoolConfig {
+  #[serde(flatten)]
+  pub(crate) response_limits: crate::header_limits::ResponseLimits,
   pub(crate) name: String,
   #[serde(default)]
   pub(crate) http_max_idle_connections: Option<usize>,

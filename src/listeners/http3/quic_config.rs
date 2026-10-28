@@ -32,6 +32,13 @@ pub(super) const H3_NO_ERROR_CODE: u32 = 0x100;
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Http3ListenerArgs {
+  #[serde(flatten)]
+  pub(super) request_limits: crate::header_limits::RequestLimits,
+  #[serde(default)]
+  pub(super) body_read_timeout:
+    crate::listeners::http_policy::IdleTimeout,
+  #[serde(default)]
+  pub(super) write_timeout: crate::listeners::http_policy::IdleTimeout,
   #[serde(default)]
   pub(super) header_read_timeout:
     crate::listeners::header_deadline::HeaderDeadline,

@@ -296,3 +296,22 @@ fn test_merge_chain_config_socks5_inherits_and_validates_credentials() {
     }
   }
 }
+
+#[test]
+fn test_non_idempotent_retry_defaults_and_upstream_override() {
+  let config: UpstreamPluginConfig =
+    serde_yaml::from_str("upstreams: [{name: main}]").unwrap();
+  assert!(
+    !merge_chain_config(&config).unwrap()["main"]
+      .upstream_non_idempotent_retry
+  );
+  let config: UpstreamPluginConfig = serde_yaml::from_str(
+    "upstream_non_idempotent_retry: true\nupstreams:\n- name: \
+     inherited\n- name: overridden\n  upstream_non_idempotent_retry: \
+     false",
+  )
+  .unwrap();
+  let resolved = merge_chain_config(&config).unwrap();
+  assert!(resolved["inherited"].upstream_non_idempotent_retry);
+  assert!(!resolved["overridden"].upstream_non_idempotent_retry);
+}

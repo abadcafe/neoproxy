@@ -237,3 +237,15 @@ fn main() -> Result<std::process::ExitCode> {
 mod tcp_options;
 #[cfg(test)]
 mod tcp_options_tests;
+
+mod header_limits;
+#[cfg(test)]
+mod header_limits_tests;
+
+mod h3_io_deadline;
+#[cfg(test)]
+mod h3_io_deadline_tests;
+
+mod io_progress;
+#[cfg(test)]
+mod io_progress_tests;

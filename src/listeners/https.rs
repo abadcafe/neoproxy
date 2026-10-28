@@ -39,6 +39,12 @@ const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 #[serde(deny_unknown_fields)]
 struct HttpsListenerArgs {
   #[serde(flatten)]
+  request_limits: crate::header_limits::RequestLimits,
+  #[serde(default)]
+  body_read_timeout: super::http_policy::IdleTimeout,
+  #[serde(default)]
+  write_timeout: super::http_policy::IdleTimeout,
+  #[serde(flatten)]
   tcp_options: crate::tcp_options::TcpOptions,
   /// TLS handshake timeout (default: 5s).
   /// Protects against slow clients holding connections during TLS
@@ -59,6 +65,9 @@ struct HttpsListenerArgs {
 impl Default for HttpsListenerArgs {
   fn default() -> Self {
     Self {
+      request_limits: Default::default(),
+      body_read_timeout: Default::default(),
+      write_timeout: Default::default(),
       tcp_options: Default::default(),
       tls_handshake_timeout: DEFAULT_TLS_HANDSHAKE_TIMEOUT,
       header_read_timeout: Default::default(),
@@ -94,6 +103,7 @@ struct HttpsListener {
   server_router: ServerRouter,
   /// TLS handshake timeout
   tls_handshake_timeout: Duration,
+  policy: super::http_policy::HttpPolicy,
   header_deadline: super::header_deadline::HeaderDeadline,
   keep_alive: bool,
   tcp_accept_retry_delay: AcceptRetryDelay,
@@ -138,6 +148,11 @@ impl HttpsListener {
       tls_config,
       server_router: ServerRouter::build(server_routing_table),
       tls_handshake_timeout,
+      policy: super::http_policy::HttpPolicy {
+        request_limits: _args.request_limits,
+        body_read_timeout: _args.body_read_timeout,
+        write_timeout: _args.write_timeout,
+      },
       header_deadline: _args.header_read_timeout,
       keep_alive: _args.keep_alive,
       tcp_accept_retry_delay: _args.tcp_accept_retry_delay,
@@ -152,6 +167,7 @@ impl Listening for HttpsListener {
       tokio_rustls::TlsAcceptor::from(self.tls_config.clone());
     let router = self.server_router.clone();
     let handshake_timeout = self.tls_handshake_timeout;
+    let policy = self.policy;
     let header_deadline = self.header_deadline;
     let keep_alive = self.keep_alive;
     self.base.start(
@@ -188,6 +204,7 @@ impl Listening for HttpsListener {
                 stream,
                 service,
                 header_deadline,
+                policy,
                 keep_alive,
                 connection.shutdown,
               )

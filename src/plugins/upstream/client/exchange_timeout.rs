@@ -28,6 +28,7 @@ impl Default for Timeouts {
 struct State {
   settings: Option<Timeouts>,
   upload_done: bool,
+  upload_flushed: bool,
   reading: bool,
   response_done: bool,
   read_timer: Option<Pin<Box<tokio::time::Sleep>>>,
@@ -40,6 +41,10 @@ impl Control {
   pub(super) fn start(&self, settings: Timeouts) {
     *self.0.lock().expect("exchange timer poisoned") =
       State { settings: Some(settings), ..State::default() };
+  }
+
+  pub(super) fn upload_flushed(&self) -> bool {
+    self.0.lock().expect("exchange timer poisoned").upload_flushed
   }
 
   pub(super) fn upload_complete(&self) {
@@ -157,6 +162,9 @@ impl<I: hyper::rt::Write + Unpin> hyper::rt::Write for TimedIo<I> {
       state.write_timer = None;
       // Body EOF alone is insufficient: Hyper may still have buffered
       // request bytes. Start response waiting only after they flush.
+      if state.upload_done {
+        state.upload_flushed = true;
+      }
       if state.upload_done && !state.response_done {
         state.reading = true;
         if let Some(waker) = state.reader.take() {

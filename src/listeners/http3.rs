@@ -63,6 +63,7 @@ struct Http3Listener {
   tls_config: Arc<rustls::ServerConfig>,
   /// QUIC configuration
   quic_config: QuicConfig,
+  policy: super::http_policy::HttpPolicy,
   header_deadline: super::header_deadline::HeaderDeadline,
   /// Routing table for hostname-based routing
   server_router: crate::server::ServerRouter,
@@ -107,6 +108,11 @@ impl Http3Listener {
       addresses,
       tls_config,
       quic_config,
+      policy: super::http_policy::HttpPolicy {
+        request_limits: args.request_limits,
+        body_read_timeout: args.body_read_timeout,
+        write_timeout: args.write_timeout,
+      },
       header_deadline: args.header_read_timeout,
       server_router: crate::server::ServerRouter::build(
         server_routing_table,
@@ -123,6 +129,7 @@ impl Listening for Http3Listener {
     let addresses = self.addresses.clone();
     let tls_config = self.tls_config.clone();
     let quic_config = self.quic_config.clone();
+    let policy = self.policy;
     let header_deadline = self.header_deadline;
     let stream_tracker = self.stream_tracker.clone();
     let transport = self.transport.clone();
@@ -258,6 +265,7 @@ impl Listening for Http3Listener {
                     stream_shutdown,
                     local_addr,
                     header_deadline,
+                    policy,
                   )
                   .await;
                 }

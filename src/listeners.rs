@@ -138,3 +138,18 @@ mod socks5_tests;
 mod tcp_bind_tests;
 #[cfg(test)]
 mod tcp_listener_base_tests;
+
+mod http_policy;
+#[cfg(test)]
+mod http_policy_tests;
+
+mod incoming_body;
+#[cfg(test)]
+mod incoming_body_tests;
+
+mod http_protocol;
+#[cfg(test)]
+mod http_protocol_tests;
+mod write_deadline;
+#[cfg(test)]
+mod write_deadline_tests;

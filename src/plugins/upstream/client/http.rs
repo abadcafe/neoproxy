@@ -99,8 +99,8 @@ where
         request,
         &self.user,
         tracker,
-        peer,
-        self.tunnel_idle_timeout,
+        (peer, self.tunnel_idle_timeout),
+        self.client.builder(),
       )
       .await
     })
@@ -117,8 +117,11 @@ async fn negotiate_tunnel<I>(
   request: &::http::request::Parts,
   user: &Option<crate::config::UserCredential>,
   tracker: &StreamTracker,
-  upstream_addr: Option<std::net::SocketAddr>,
-  tunnel_idle_timeout: Duration,
+  (upstream_addr, tunnel_idle_timeout): (
+    Option<std::net::SocketAddr>,
+    Duration,
+  ),
+  builder: http1::Builder,
 ) -> Result<ConnectResult, UpstreamError>
 where
   I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
@@ -133,7 +136,7 @@ where
   );
   timeout.upload_complete();
   let io = super::exchange_timeout::TimedIo::new(io, timeout.clone());
-  let (mut sr, conn) = http1::handshake(io).await.map_err(|e| {
+  let (mut sr, conn) = builder.handshake(io).await.map_err(|e| {
     UpstreamError::ProxyInternalError(format!(
       "HTTP/1.1 handshake failed: {e}"
     ))

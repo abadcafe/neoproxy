@@ -26,6 +26,12 @@ use crate::server::{Server, ServerRouter};
 #[serde(default, deny_unknown_fields)]
 struct HttpListenerArgs {
   #[serde(flatten)]
+  request_limits: crate::header_limits::RequestLimits,
+  #[serde(default)]
+  body_read_timeout: super::http_policy::IdleTimeout,
+  #[serde(default)]
+  write_timeout: super::http_policy::IdleTimeout,
+  #[serde(flatten)]
   tcp_options: crate::tcp_options::TcpOptions,
   #[serde(default = "super::http_connection::default_keep_alive")]
   keep_alive: bool,
@@ -36,6 +42,9 @@ struct HttpListenerArgs {
 impl Default for HttpListenerArgs {
   fn default() -> Self {
     Self {
+      request_limits: Default::default(),
+      body_read_timeout: Default::default(),
+      write_timeout: Default::default(),
       tcp_options: Default::default(),
       header_read_timeout: Default::default(),
       tcp_accept_retry_delay: Default::default(),
@@ -52,6 +61,7 @@ struct HttpListener {
   server_router: ServerRouter,
   /// Shared TCP listener base for lifecycle management
   base: TcpListenerBase,
+  policy: super::http_policy::HttpPolicy,
   header_deadline: super::header_deadline::HeaderDeadline,
   keep_alive: bool,
   tcp_accept_retry_delay: AcceptRetryDelay,
@@ -78,6 +88,11 @@ impl HttpListener {
       addresses,
       server_router: ServerRouter::build(server_routing_table),
       base: TcpListenerBase::new().with_tcp_options(args.tcp_options),
+      policy: super::http_policy::HttpPolicy {
+        request_limits: args.request_limits,
+        body_read_timeout: args.body_read_timeout,
+        write_timeout: args.write_timeout,
+      },
       header_deadline: args.header_read_timeout,
       keep_alive: args.keep_alive,
       tcp_accept_retry_delay: args.tcp_accept_retry_delay,
@@ -101,6 +116,7 @@ impl HttpListener {
 impl Listening for HttpListener {
   fn start(&self) -> Result<Pin<Box<dyn Future<Output = Result<()>>>>> {
     let server_router = self.server_router.clone();
+    let policy = self.policy;
     let header_deadline = self.header_deadline;
     let keep_alive = self.keep_alive;
     self.base.start(
@@ -118,6 +134,7 @@ impl Listening for HttpListener {
             connection.stream,
             service,
             header_deadline,
+            policy,
             keep_alive,
             connection.shutdown,
           )

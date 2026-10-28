@@ -108,3 +108,41 @@ fn test_http_builder_multiple_servers_with_hostnames_succeeds() {
     builder(vec!["127.0.0.1:0".to_string()], empty_args(), servers);
   assert!(result.is_ok());
 }
+
+#[test]
+fn test_http_builder_accepts_http_exchange_policy() {
+  let args = serde_yaml::from_str(
+    "body_read_timeout: 5s\nwrite_timeout: 10s\nmax_request_headers: \
+     20\nmax_request_header_size: 32KiB",
+  )
+  .unwrap();
+  assert!(
+    http::create_listener_builder()(
+      vec!["127.0.0.1:0".into()],
+      args,
+      plain_servers()
+    )
+    .is_ok()
+  );
+}
+
+#[test]
+fn test_http_builder_rejects_invalid_http_exchange_policy() {
+  for yaml in [
+    "body_read_timeout: 0s",
+    "write_timeout: 0s",
+    "max_request_headers: 0",
+    "max_request_header_size: 0",
+    "max_request_header_size: 4GiB",
+  ] {
+    assert!(
+      http::create_listener_builder()(
+        vec!["127.0.0.1:0".into()],
+        serde_yaml::from_str(yaml).unwrap(),
+        plain_servers()
+      )
+      .is_err(),
+      "{yaml}"
+    );
+  }
+}

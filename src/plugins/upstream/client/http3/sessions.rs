@@ -85,6 +85,8 @@ impl Bucket {
   }
 }
 pub(in crate::plugins::upstream::client) struct Store {
+  pub(in crate::plugins::upstream::client) limits:
+    crate::header_limits::Limits,
   buckets: Mutex<HashMap<std::net::SocketAddr, Arc<Bucket>>>,
   maximum: usize,
   timeout: Duration,
@@ -93,8 +95,10 @@ impl Store {
   pub(in crate::plugins::upstream::client) fn new(
     maximum: usize,
     timeout: Duration,
+    limits: crate::header_limits::Limits,
   ) -> Arc<Self> {
     Arc::new(Self {
+      limits,
       buckets: Mutex::new(HashMap::new()),
       maximum,
       timeout,

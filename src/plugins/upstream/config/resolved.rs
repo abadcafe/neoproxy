@@ -74,6 +74,7 @@ pub(crate) struct Address {
 /// Resolved upstream after three-level inheritance.
 #[derive(Clone, Debug)]
 pub(crate) struct Upstream {
+  pub(crate) upstream_non_idempotent_retry: bool,
   pub(crate) use_connection_pool: String,
   pub(crate) address_max_fails: usize,
   pub(crate) address_fail_timeout: Duration,

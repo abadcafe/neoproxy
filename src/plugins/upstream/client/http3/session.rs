@@ -39,7 +39,11 @@ impl SessionPool {
       hostname,
       quic,
       handshake_timeout,
-      Store::new(1, pool.idle_timeout),
+      Store::new(
+        1,
+        pool.idle_timeout,
+        crate::header_limits::ResponseLimits::default().limits(),
+      ),
       runtime,
     )
   }
@@ -53,11 +57,21 @@ impl SessionPool {
     runtime: tokio::runtime::Handle,
   ) -> Self {
     Self {
-      settings: Settings { address, hostname, quic, handshake_timeout },
+      settings: Settings {
+        address,
+        hostname,
+        quic,
+        handshake_timeout,
+        limits: store.limits,
+      },
       bucket: store.bucket(address, &runtime),
       runtime,
       _store: store,
     }
+  }
+
+  pub(super) fn limits(&self) -> crate::header_limits::Limits {
+    self.settings.limits
   }
 
   async fn checkout(
@@ -161,10 +175,16 @@ impl SessionPool {
           let progress = session.reads.get(stream.id());
           return Ok((stream, lease, progress));
         }
-        Err(h3::error::StreamError::RemoteClosing) if attempt == 0 => {
+        Err(h3::error::StreamError::RemoteClosing) => {
+          super::super::retry_request::Progress::unsent(&request);
           session.draining.store(true, Ordering::Release);
           drop(lease);
           self.bucket.retire();
+          if attempt != 0 {
+            return Err(UpstreamError::ConnectionTerminated(
+              "H3 peer closed before sending request".into(),
+            ));
+          }
         }
         Err(error) => {
           return Err(UpstreamError::ConnectionTerminated(

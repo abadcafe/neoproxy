@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use bytes::{Buf, Bytes};
 
-use super::io_progress::{Progress, SendBuffer};
+use crate::io_progress::{Progress, SendBuffer};
 
 #[tokio::test(start_paused = true)]
 async fn test_partial_writes_reset_timeout_without_finishing_frame() {

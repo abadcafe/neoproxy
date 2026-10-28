@@ -32,6 +32,10 @@ pub(super) async fn handle_h3_stream(
   client_addr: SocketAddr,
   local_addr: SocketAddr,
   client_cert_presented: bool,
+  (policy, write_control): (
+    crate::listeners::http_policy::HttpPolicy,
+    crate::h3_io_deadline::Control,
+  ),
 ) -> () {
   let method = req.method().clone();
   let content_length = req
@@ -45,7 +49,9 @@ pub(super) async fn handle_h3_stream(
     client_addr,
     local_addr,
     client_cert_presented,
-  );
+  )
+  .with_policy(policy)
+  .with_reads(write_control.reads());
 
   // CONNECT transfers the whole stream after a successful response.
   let is_connect = method == http::Method::CONNECT;
@@ -56,7 +62,8 @@ pub(super) async fn handle_h3_stream(
   // mutually exclusive.
   let (request_body, mut stream_holder, trigger_and_upgrade) =
     if is_connect {
-      let (trigger, on_upgrade) = H3UpgradeTrigger::pair(stream);
+      let (trigger, on_upgrade) =
+        H3UpgradeTrigger::pair(stream, write_control);
       let body = RequestBody::new(BytesBufBodyWrapper::new(
         http_body_util::Empty::<Bytes>::new(),
       ));
@@ -65,8 +72,9 @@ pub(super) async fn handle_h3_stream(
       // Non-CONNECT: split stream, use recv half for body, keep send
       // half for response
       let (send_stream, recv_stream) = stream.split();
-      let body = RequestBody::new(BytesBufBodyWrapper::new(
-        BodyBoundary::new(H3RecvBody::new(recv_stream), content_length),
+      let body = RequestBody::new(BodyBoundary::new(
+        H3RecvBody::new(recv_stream),
+        content_length,
       ));
       (body, Some(ResponseWriter::new(send_stream)), None)
     };

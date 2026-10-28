@@ -19,19 +19,16 @@ listeners:
 - name: np-private-listener-name
   kind: http
   addresses: ["127.0.0.1:8080"]
-  args:
-    token: np-private-listener-token
+  token: np-private-listener-token
 services:
 - name: np-private-service-name
   kind: echo.echo
-  args:
-    arbitrary_key: np-private-service-value
+  arbitrary_key: np-private-service-value
   layers:
   - kind: auth.basic_auth
-    args:
-      users:
-      - username: np-private-user
-        password: np-private-layer-password
+    users:
+    - username: np-private-user
+      password: np-private-layer-password
 servers:
 - name: np-private-server-name
   listeners: [np-private-listener-name]
@@ -317,7 +314,6 @@ listeners:
 services:
   - name: "echo_svc"
     kind: "echo.echo"
-    args: null
     layers: []
 servers:
   - name: "server1"
@@ -342,7 +338,6 @@ fn test_parse_str_service_kind_split_into_parts() {
 services:
   - name: echo_svc
     kind: "echo.echo"
-    args: null
     layers: []
 servers: []
 "#;
@@ -359,10 +354,8 @@ fn test_parse_str_layer_kind_split_into_parts() {
 services:
   - name: echo_svc
     kind: "echo.echo"
-    args: null
     layers:
       - kind: "echo.echo"
-        args: null
 servers: []
 "#;
 
@@ -378,7 +371,6 @@ fn test_parse_str_service_kind_missing_dot() {
 services:
   - name: test
     kind: "invalidkind"
-    args: null
     layers: []
 servers: []
 "#;
@@ -400,7 +392,6 @@ fn test_parse_str_service_kind_empty_service_name() {
 services:
   - name: test
     kind: "echo."
-    args: null
     layers: []
 servers: []
 "#;
@@ -419,7 +410,6 @@ fn test_parse_str_service_kind_empty_plugin_name() {
 services:
   - name: test
     kind: ".echo"
-    args: null
     layers: []
 servers: []
 "#;
@@ -438,7 +428,6 @@ fn test_parse_str_service_kind_empty_string() {
 services:
   - name: test
     kind: ""
-    args: null
     layers: []
 servers: []
 "#;
@@ -454,7 +443,6 @@ fn test_parse_str_service_kind_multiple_dots() {
 services:
   - name: test
     kind: "echo.echo.echo"
-    args: null
     layers: []
 servers: []
 "#;
@@ -470,10 +458,8 @@ fn test_parse_str_layer_kind_missing_dot() {
 services:
   - name: echo_svc
     kind: "echo.echo"
-    args: null
     layers:
       - kind: "invalidkind"
-        args: null
 servers: []
 "#;
 
@@ -488,10 +474,8 @@ fn test_parse_str_layer_kind_empty_parts() {
 services:
   - name: echo_svc
     kind: "echo.echo"
-    args: null
     layers:
       - kind: "echo."
-        args: null
 servers: []
 "#;
 

@@ -91,7 +91,7 @@ fn test_validate_server_tls_empty_certificates() {
   let tls: ServerTlsConfig =
     serde_yaml::from_str("certificates: []").unwrap();
   let mut collector = ConfigErrorCollector::new();
-  validate_server_tls(&tls, "servers[0].tls", &mut collector);
+  validate_server_tls(&tls, "servers[0]", &mut collector);
   assert!(collector.has_errors());
   let found = collector
     .errors()
@@ -111,7 +111,7 @@ certificates:
   )
   .unwrap();
   let mut collector = ConfigErrorCollector::new();
-  validate_server_tls(&tls, "servers[0].tls", &mut collector);
+  validate_server_tls(&tls, "servers[0]", &mut collector);
   assert!(collector.has_errors());
   assert_eq!(collector.errors().len(), 2);
 }

@@ -31,10 +31,7 @@ def authenticated_proxy(
     cert, key, ca, _ = generate_test_certificates(str(directory))
     tls = ""
     if listener_kind != "http":
-        tls = (
-            f"  tls:\n    certificates:\n    - cert_path: {cert}\n"
-            + f"      key_path: {key}\n"
-        )
+        tls = f"  certificates:\n  - cert_path: {cert}\n" + f"    key_path: {key}\n"
     content = f"""server_threads: 1
 plugins:
   echo: {{}}
@@ -48,12 +45,11 @@ services:
   kind: echo.echo
   layers:
   - kind: auth.basic_auth
-    args:
-      users:
-      - username: user
-        password: password
-      - username: second
-        password: different
+    users:
+    - username: user
+      password: password
+    - username: second
+      password: different
 servers:
 - name: echo
   listeners: [main]
@@ -64,7 +60,7 @@ servers:
     _ = config.write_text(content)
     process = start_proxy(str(config))
     try:
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         yield port, ca
     finally:
         terminate_process(process, timeout=2, force=True)

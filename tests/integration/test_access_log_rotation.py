@@ -24,7 +24,7 @@ def _run_requests(config: Path, port: int, timezone: str, indices: range) -> Non
         stderr=subprocess.PIPE,
     )
     try:
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         for index in indices:
             with socket.create_connection(("127.0.0.1", port), timeout=3) as client:
                 client.sendall(
@@ -59,8 +59,7 @@ services:
   kind: echo.echo
   layers:
   - kind: access_log.file
-    args:
-      writer: logs/access
+    writer: logs/access
 servers:
 - name: main
   service: echo

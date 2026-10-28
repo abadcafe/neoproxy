@@ -426,6 +426,15 @@ async fn create_quic_connection(
   if let Some(v) = quic.send_window {
     transport.send_window(v);
   }
+  if let Some(v) = quic.stream_receive_window {
+    transport.stream_receive_window(
+      quinn::VarInt::from_u64(v).map_err(|_| {
+        UpstreamError::ProxyInternalError(
+          "stream_receive_window overflow".into(),
+        )
+      })?,
+    );
+  }
   if let Some(v) = quic.receive_window {
     transport.receive_window(quinn::VarInt::from_u64(v).map_err(
       |_| {

@@ -23,10 +23,11 @@ use crate::redaction::Redacted;
 
 /// Service configuration (raw, before kind parsing).
 #[derive(Deserialize, Default, Clone)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub(super) struct ServiceRaw {
   name: String,
   kind: String,
+  #[serde(flatten)]
   args: SerializedArgs,
   layers: Vec<LayerRaw>,
 }

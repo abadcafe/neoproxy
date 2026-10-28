@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use tokio::time::timeout;
 use tracing::warn;
@@ -38,6 +38,8 @@ const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 struct HttpsListenerArgs {
+  #[serde(flatten)]
+  tcp_options: crate::tcp_options::TcpOptions,
   /// TLS handshake timeout (default: 5s).
   /// Protects against slow clients holding connections during TLS
   /// negotiation.
@@ -49,15 +51,16 @@ struct HttpsListenerArgs {
   #[serde(default)]
   header_read_timeout: super::header_deadline::HeaderDeadline,
   #[serde(default)]
-  accept_retry_delay: AcceptRetryDelay,
+  tcp_accept_retry_delay: AcceptRetryDelay,
 }
 
 impl Default for HttpsListenerArgs {
   fn default() -> Self {
     Self {
+      tcp_options: Default::default(),
       tls_handshake_timeout: DEFAULT_TLS_HANDSHAKE_TIMEOUT,
       header_read_timeout: Default::default(),
-      accept_retry_delay: Default::default(),
+      tcp_accept_retry_delay: Default::default(),
     }
   }
 }
@@ -89,7 +92,7 @@ struct HttpsListener {
   /// TLS handshake timeout
   tls_handshake_timeout: Duration,
   header_deadline: super::header_deadline::HeaderDeadline,
-  accept_retry_delay: AcceptRetryDelay,
+  tcp_accept_retry_delay: AcceptRetryDelay,
   /// Shared TCP listener base for lifecycle management
   base: TcpListenerBase,
 }
@@ -110,13 +113,6 @@ impl HttpsListener {
           .is_some(),
       "tls_handshake_timeout must be positive and representable"
     );
-
-    // TLS config is required for https listener
-    // Check that at least one server has TLS configured
-    let has_tls = server_routing_table.iter().any(|e| e.tls.is_some());
-    if !has_tls {
-      bail!("https listener requires server-level tls configuration");
-    }
 
     // Build TLS config from all servers' certificates (SNI-based
     // selection)
@@ -139,8 +135,8 @@ impl HttpsListener {
       server_router: ServerRouter::build(server_routing_table),
       tls_handshake_timeout,
       header_deadline: _args.header_read_timeout,
-      accept_retry_delay: _args.accept_retry_delay,
-      base: TcpListenerBase::new(),
+      tcp_accept_retry_delay: _args.tcp_accept_retry_delay,
+      base: TcpListenerBase::new().with_tcp_options(_args.tcp_options),
     }))
   }
 }
@@ -155,7 +151,7 @@ impl Listening for HttpsListener {
     self.base.start(
       &self.addresses,
       "HTTPS",
-      self.accept_retry_delay,
+      self.tcp_accept_retry_delay,
       move |connection| {
         let tls_acceptor = tls_acceptor.clone();
         let router = router.clone();
@@ -218,7 +214,7 @@ pub(crate) fn listener_name() -> &'static str {
 
 /// Get listener properties for conflict detection.
 pub(crate) fn props() -> ListenerPropertyValues {
-  ListenerPropertyValues::new(TransportLayer::Tcp, true)
+  ListenerPropertyValues::new(TransportLayer::Tcp, true, true)
 }
 
 /// Create a listener builder

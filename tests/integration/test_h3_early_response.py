@@ -71,7 +71,7 @@ async def test_final_response_survives_peer_stopping_upload(tmp_path: Path) -> N
     try:
         with managed_processes() as start:
             process = start(config)
-            assert process.wait_ready(timeout=3)
+            assert process.wait_ready()
             reader, writer = await asyncio.open_connection("127.0.0.1", entry)
             try:
                 writer.write(

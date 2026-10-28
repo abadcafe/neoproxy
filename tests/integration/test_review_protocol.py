@@ -54,9 +54,9 @@ servers:
 def test_https_accepts_clients_while_another_handshake_stalls(tmp_path: Path) -> None:
     cert, key, _, _ = generate_test_certificates(str(tmp_path))
     port = get_unique_port()
-    tls = f"  tls:\n    certificates:\n    - cert_path: {cert}\n      key_path: {key}"
+    tls = f"  certificates:\n  - cert_path: {cert}\n    key_path: {key}"
     with running_proxy(tmp_path, echo_config(port, "https", tls)) as process:
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         with socket.create_connection(("127.0.0.1", port), timeout=2):
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             context.check_hostname = False
@@ -96,14 +96,14 @@ def test_http3_streams_echo_before_upload_eof_and_preserves_trailers(
 ) -> None:
     cert, key, _, _ = generate_test_certificates(str(tmp_path))
     port = get_unique_port()
-    tls = f"  tls:\n    certificates:\n    - cert_path: {cert}\n      key_path: {key}"
+    tls = f"  certificates:\n  - cert_path: {cert}\n    key_path: {key}"
     with running_proxy(
         tmp_path,
         echo_config(port, "http3", tls).replace(
             "server_threads: 1", "server_threads: 2"
         ),
     ) as process:
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         asyncio.run(stream_echo(port))
 
 
@@ -111,7 +111,7 @@ def test_http3_chain_streams_response_before_upload_eof(tmp_path: Path) -> None:
     cert, key, ca, _ = generate_test_certificates(str(tmp_path))
     upstream = get_unique_port()
     entry = get_unique_port()
-    tls = f"  tls:\n    certificates:\n    - cert_path: {cert}\n      key_path: {key}"
+    tls = f"  certificates:\n  - cert_path: {cert}\n    key_path: {key}"
     chain = f"""server_threads: 1
 plugins:
   upstream:
@@ -130,8 +130,7 @@ listeners:
 services:
 - name: relay
   kind: upstream.upstream
-  args:
-    upstream: relay
+  upstream: relay
 servers:
 - name: relay
   service: relay
@@ -140,9 +139,9 @@ servers:
     with running_proxy(
         tmp_path / "upstream", echo_config(upstream, "http3", tls)
     ) as remote:
-        assert remote.wait_ready(timeout=3)
+        assert remote.wait_ready()
         with running_proxy(tmp_path / "entry", chain) as local:
-            assert local.wait_ready(timeout=3)
+            assert local.wait_ready()
             with socket.create_connection(("127.0.0.1", entry), timeout=3) as conn:
                 conn.sendall(
                     (
@@ -191,8 +190,7 @@ listeners:
 services:
 - name: relay
   kind: upstream.upstream
-  args:
-    upstream: relay
+  upstream: relay
 servers:
 - name: relay
   service: relay
@@ -200,7 +198,7 @@ servers:
 """
     try:
         with running_proxy(tmp_path, config) as process:
-            assert process.wait_ready(timeout=3)
+            assert process.wait_ready()
             with socket.create_connection(("127.0.0.1", entry), timeout=2) as conn:
                 conn.sendall(
                     b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
@@ -223,18 +221,15 @@ def test_http_incomplete_headers_expire(
     tls = ""
     if listener_kind == "https":
         cert, key, _, _ = generate_test_certificates(str(tmp_path))
-        tls = (
-            f"  tls:\n    certificates:\n    - cert_path: {cert}\n      key_path: {key}"
-        )
+        tls = f"  certificates:\n  - cert_path: {cert}\n    key_path: {key}"
     config = echo_config(port, listener_kind, tls)
     if header_timeout is not None:
         config = config.replace(
             f"  kind: {listener_kind}\n",
-            f"  kind: {listener_kind}\n  args:\n"
-            + f"    header_read_timeout: {header_timeout}\n",
+            f"  kind: {listener_kind}\n" + f"  header_read_timeout: {header_timeout}\n",
         )
     with running_proxy(tmp_path, config) as process:
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         with ExitStack() as connections:
             conn: socket.socket = connections.enter_context(
                 socket.create_connection(("127.0.0.1", port), timeout=2)
@@ -296,8 +291,7 @@ listeners:
 services:
 - name: relay
   kind: upstream.upstream
-  args:
-    upstream: relay
+  upstream: relay
 servers:
 - name: relay
   service: relay
@@ -309,7 +303,7 @@ servers:
     ).encode()
     try:
         with running_proxy(tmp_path, config) as process:
-            assert process.wait_ready(timeout=3)
+            assert process.wait_ready()
             # CONNECT may fail over before exposing a tunnel to the client.
             statuses = (b"200", b"200") if method == "CONNECT" else (b"504", b"200")
             for status in statuses:

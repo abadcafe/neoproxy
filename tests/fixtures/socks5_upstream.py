@@ -118,9 +118,7 @@ def configuration(
         "server_threads": 1,
         "plugins": {"upstream": plugin},
         "listeners": [{"name": "main", "kind": "http"}],
-        "services": [
-            {"name": "main", "kind": "upstream.upstream", "args": {"upstream": "main"}}
-        ],
+        "services": [{"name": "main", "kind": "upstream.upstream", "upstream": "main"}],
         "servers": [{"name": "main", "listeners": ["main"], "service": "main"}],
     }
 

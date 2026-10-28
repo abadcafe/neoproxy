@@ -69,7 +69,7 @@ def direct_proxy(
                     {
                         "name": "forward",
                         "kind": "upstream.upstream",
-                        "args": {"upstream": upstream["name"]},
+                        "upstream": upstream["name"],
                     }
                 ],
                 "servers": [
@@ -80,7 +80,7 @@ def direct_proxy(
             _ = path.write_text(dict_to_yaml(config))
             process = start(str(path))
             processes.append(process)
-            assert process.wait_ready(timeout=3)
+            assert process.wait_ready()
             upstream_port = port
         assert upstream_port is not None
         try:

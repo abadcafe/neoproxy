@@ -52,7 +52,7 @@ def test_pool_idle_timeout_closes_unused_connection(
             {
                 "name": "relay",
                 "kind": "upstream.upstream",
-                "args": {"upstream": "relay"},
+                "upstream": "relay",
             }
         ],
         "servers": [{"name": "relay", "service": "relay", "listeners": ["main"]}],
@@ -127,7 +127,7 @@ def test_proxy_pool_reuses_one_connection_across_origin_authorities(
             {
                 "name": "relay",
                 "kind": "upstream.upstream",
-                "args": {"upstream": "relay"},
+                "upstream": "relay",
             }
         ],
         "servers": [{"name": "relay", "service": "relay", "listeners": ["main"]}],

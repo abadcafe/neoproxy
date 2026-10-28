@@ -75,8 +75,7 @@ listeners:
 services:
 - name: relay
   kind: upstream.upstream
-  args:
-    upstream: relay
+  upstream: relay
 servers:
 - name: relay
   service: relay
@@ -84,7 +83,7 @@ servers:
 """)
     process = start_proxy(str(config))
     try:
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         reader, writer = await asyncio.open_connection("127.0.0.1", entry)
         try:
             writer.write(

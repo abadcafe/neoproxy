@@ -140,8 +140,7 @@ listeners:
 services:
 - name: relay
   kind: upstream.upstream
-  args:
-    upstream: relay
+  upstream: relay
 servers:
 - name: relay
   service: relay
@@ -149,7 +148,7 @@ servers:
 """)
     process = start_proxy(str(config))
     try:
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         connected = asyncio.Event()
         start = asyncio.Event()
         connected_count = 0

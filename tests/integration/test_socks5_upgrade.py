@@ -41,9 +41,7 @@ plugins:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
-
+  upstream: direct
 listeners:
 - name: socks5_main
   kind: socks5
@@ -93,7 +91,7 @@ class TestSocks5UpgradeConnectTcp:
         config = create_socks5_connect_tcp_config(port, self.temp_dir)
         proc = start_proxy(config)
         self.processes.append(proc)
-        assert proc.wait_ready(timeout=10.0), "Proxy did not start in time"
+        assert proc.wait_ready(), "Proxy did not start in time"
 
     def _create_echo_target(self, port: int) -> None:
         """Create a TCP echo server on the given port."""

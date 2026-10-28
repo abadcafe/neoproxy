@@ -43,7 +43,7 @@ class TestHTTPConnect:
             proxy_proc = start_proxy(config_path)
 
             # 3. 等待代理服务器就绪
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # 4. 发送 origin-form GET 请求（非代理请求格式）
             request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
@@ -80,7 +80,7 @@ class TestHTTPConnect:
             proxy_proc = start_proxy(config_path)
 
             # 3. 等待代理服务器就绪
-            assert proxy_proc.wait_ready(timeout=2.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # 4. 发送 CONNECT 请求到不可达地址
             # 使用本地不存在的端口，会立即收到 connection refused
@@ -176,7 +176,7 @@ class TestHTTPConnect:
             proxy_proc = start_proxy(config_path)
 
             # 4. 等待代理服务器就绪
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # 5. 建立 CONNECT 隧道
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

@@ -34,16 +34,14 @@ def create_http3_listener_config(
     Returns:
         str: Path to the configuration file
     """
-    # QUIC config goes in listener args
+    # QUIC fields live directly on the listener
     quic_section = ""
     if quic_config:
-        # Indent each line of quic_config so it nests under 'quic:'
+        # Align each protocol field with kind and addresses
         indented = "\n".join(
-            "      " + line.strip() for line in quic_config.strip().splitlines()
+            "  " + line.strip() for line in quic_config.strip().splitlines()
         )
         quic_section = f"""
-  args:
-    quic:
 {indented}"""
 
     config_content = f"""server_threads: {server_threads}
@@ -61,15 +59,12 @@ listeners:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
-
+  upstream: direct
 servers:
 - name: http3_server
-  tls:
-    certificates:
-    - cert_path: "{cert_path}"
-      key_path: "{key_path}"
+  certificates:
+  - cert_path: "{cert_path}"
+    key_path: "{key_path}"
   listeners: ["h3_main"]
   service: direct
 """
@@ -133,9 +128,7 @@ listeners:
 services:
 - name: upstream
   kind: upstream.upstream
-  args:
-    upstream: {upstream_name}
-
+  upstream: {upstream_name}
 servers:
 - name: http_proxy
   listeners: ["http_main"]
@@ -182,10 +175,9 @@ def create_http3_listener_config_with_password_auth(
 
     listener_args_section = ""
     if quic_config:
-        listener_args_section = f"""
-  args:
-    quic:
-{quic_config}"""
+        listener_args_section = "\n" + "\n".join(
+            "  " + line.strip() for line in quic_config.strip().splitlines()
+        )
 
     config_content = f"""server_threads: {server_threads}
 
@@ -198,12 +190,10 @@ plugins:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
+  upstream: direct
   layers:
     - kind: auth.basic_auth
-      args:
-        users:
+      users:
 {users_section}
 
 listeners:
@@ -213,10 +203,9 @@ listeners:
 
 servers:
 - name: http3_server
-  tls:
-    certificates:
-    - cert_path: "{cert_path}"
-      key_path: "{key_path}"
+  certificates:
+  - cert_path: "{cert_path}"
+    key_path: "{key_path}"
   listeners: ["h3_main"]
   service: direct
 """
@@ -322,9 +311,7 @@ listeners:
 services:
 - name: upstream
   kind: upstream.upstream
-  args:
-    upstream: {upstream_name}
-
+  upstream: {upstream_name}
 servers:
 - name: http_proxy
   listeners: ["http_main"]

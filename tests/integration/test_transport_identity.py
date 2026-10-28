@@ -42,7 +42,6 @@ class TestHostHeaderRequired:
                     {
                         "name": "echo",
                         "kind": "echo.echo",
-                        "args": {},
                     }
                 ],
                 "listeners": [
@@ -71,7 +70,7 @@ class TestHostHeaderRequired:
                 stderr=subprocess.PIPE,
             )
 
-            if not proc.wait_ready(timeout=5.0):
+            if not proc.wait_ready():
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -129,7 +128,6 @@ class TestHostHeaderRequired:
                     {
                         "name": "echo",
                         "kind": "echo.echo",
-                        "args": {},
                     }
                 ],
                 "listeners": [
@@ -142,14 +140,12 @@ class TestHostHeaderRequired:
                 "servers": [
                     {
                         "name": "default_server",
-                        "tls": {
-                            "certificates": [
-                                {
-                                    "cert_path": cert_path,
-                                    "key_path": key_path,
-                                }
-                            ]
-                        },
+                        "certificates": [
+                            {
+                                "cert_path": cert_path,
+                                "key_path": key_path,
+                            }
+                        ],
                         "listeners": ["https_main"],
                         "service": "echo",
                     }
@@ -166,7 +162,7 @@ class TestHostHeaderRequired:
                 stderr=subprocess.PIPE,
             )
 
-            if not proc.wait_ready(timeout=5.0):
+            if not proc.wait_ready():
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")

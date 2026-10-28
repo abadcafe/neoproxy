@@ -59,7 +59,7 @@ class TestHTTP3ChainAuthInheritance:
                 users=[("inherited_user", "inherited_pass")],
             )
             h3_proc = start_proxy(h3_config)
-            assert h3_proc.wait_ready(timeout=5.0)
+            assert h3_proc.wait_ready()
 
             # Proxy has NO user field - should inherit from default_user
             chain_config = create_http3_chain_config_with_per_proxy_auth(
@@ -75,7 +75,7 @@ class TestHTTP3ChainAuthInheritance:
                 ),  # Will be inherited
             )
             chain_proc = start_proxy(chain_config)
-            assert chain_proc.wait_ready(timeout=5.0)
+            assert chain_proc.wait_ready()
 
             # Clear no_proxy to force proxy usage for localhost
             env = get_curl_env_without_no_proxy()

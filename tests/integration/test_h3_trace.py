@@ -85,7 +85,7 @@ async def test_trace_preserves_response_with_buffered_data_and_pending_read(
         ) as capture:
             directory = capture.directory
             process = capture.start_proxy("entry", config)
-            assert process.wait_ready(timeout=3)
+            assert process.wait_ready()
             reader, writer = await asyncio.open_connection("127.0.0.1", entry)
             try:
                 writer.write(

@@ -51,8 +51,7 @@ listeners:
 services:
 - name: relay
   kind: upstream.upstream
-  args:
-    upstream: relay
+  upstream: relay
 servers:
 - name: relay
   service: relay
@@ -60,7 +59,7 @@ servers:
 """)
     process = start_proxy(str(config))
     try:
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         reader, writer = await asyncio.open_connection("127.0.0.1", entry)
         try:
             async with asyncio.timeout(3):
@@ -199,10 +198,9 @@ servers:
 - name: echo
   service: echo
   listeners: [main]
-  tls:
-    certificates:
-    - cert_path: {cert}
-      key_path: {key}
+  certificates:
+  - cert_path: {cert}
+    key_path: {key}
 """)
     return config
 
@@ -213,7 +211,7 @@ def test_listener_http_accepts_empty_port_and_rejects_invalid_authority(
 ) -> None:
     port = get_unique_port()
     process = proxy_process(str(_echo_config(tmp_path, port, kind)))
-    assert process.wait_ready(timeout=3)
+    assert process.wait_ready()
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
@@ -249,7 +247,7 @@ def test_listener_h3_accepts_empty_port_and_rejects_invalid_authority(
 ) -> None:
     port = get_unique_port()
     process = proxy_process(str(_echo_config(tmp_path, port, "http3")))
-    assert process.wait_ready(timeout=3)
+    assert process.wait_ready()
     for authority, expected in [
         ("example.test:", 200),
         ("[::1]:", 200),
@@ -275,7 +273,7 @@ def test_connect_rejects_missing_empty_and_invalid_ports(
 ) -> None:
     port = get_unique_port()
     process = proxy_process(create_test_config(port, str(tmp_path)))
-    assert process.wait_ready(timeout=3)
+    assert process.wait_ready()
     for target in [
         "example.test",
         "example.test:",

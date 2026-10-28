@@ -30,6 +30,7 @@ async fn test_session_pool_drop_cancels_maintenance_after_failed_handshake()
           max_concurrent_bidi_streams: None,
           initial_mtu: None,
           send_window: None,
+          stream_receive_window: None,
           receive_window: None,
         },
         Duration::from_millis(100),
@@ -116,7 +117,7 @@ async fn test_session_pool_peer_closure_during_h3_setup_is_bad_gateway()
       QuicConfig {
         max_idle_timeout: None, keep_alive_interval: Duration::from_secs(3),
         max_concurrent_bidi_streams: None, initial_mtu: None,
-        send_window: None, receive_window: None,
+        send_window: None, receive_window: None, stream_receive_window: None,
       },
       Duration::from_secs(2), Default::default(),
     );

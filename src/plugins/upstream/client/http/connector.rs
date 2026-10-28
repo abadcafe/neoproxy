@@ -24,7 +24,7 @@ use super::transport::ProxyTransport;
 pub(crate) struct ProxyConnector {
   proxy_addr: std::net::SocketAddr,
   connect_timeout: Duration,
-  tcp_options: super::super::tcp_options::TcpOptions,
+  tcp_options: crate::tcp_options::TcpOptions,
 }
 
 impl ProxyConnector {
@@ -43,7 +43,7 @@ impl ProxyConnector {
 impl ProxyConnector {
   pub(in crate::plugins::upstream::client) fn with_tcp_options(
     mut self,
-    options: super::super::tcp_options::TcpOptions,
+    options: crate::tcp_options::TcpOptions,
   ) -> Self {
     self.tcp_options = options;
     self

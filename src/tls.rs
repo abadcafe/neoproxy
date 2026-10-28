@@ -23,12 +23,13 @@ use rustls::sign::CertifiedKey;
 
 use crate::server::Server;
 
-/// Per-listener virtual servers. A matched server without TLS remains
-/// a match: it cannot silently fall back to another server's
-/// certificate.
+/// A compiled virtual server always owns a nonempty certificate list.
+/// Missing identities are configuration errors, never implicit
+/// handshake rejection rules or requests to borrow another server's
+/// identity.
 #[derive(Debug)]
 struct TlsServer {
-  certificates: Option<Arc<crate::certificate::Candidates>>,
+  certificates: Arc<crate::certificate::Candidates>,
 }
 
 #[derive(Debug, Default)]
@@ -40,13 +41,23 @@ struct SniResolver {
 
 impl SniResolver {
   fn compile(servers: &[Server]) -> Result<Self> {
+    ensure!(
+      !servers.is_empty(),
+      "TLS listener requires servers with certificates"
+    );
     let mut resolver = Self::default();
     for (index, server) in servers.iter().enumerate() {
       let certificates = server
         .tls
         .as_ref()
-        .map(|tls| tls.compile(&server.hostnames))
-        .transpose()
+        .with_context(|| {
+          format!(
+            "TLS server[{index}] (service '{}') must configure \
+             certificates",
+            server.service_name
+          )
+        })?
+        .compile(&server.hostnames)
         .with_context(|| {
           format!(
             "TLS server[{index}] (service '{}')",
@@ -101,7 +112,7 @@ impl ResolvesServerCert for SniResolver {
         })
       })
       .or(self.default.as_ref())?;
-    selected.certificates.as_ref()?.choose(hello.signature_schemes())
+    selected.certificates.choose(hello.signature_schemes())
   }
 }
 

@@ -98,7 +98,7 @@ class TestHTTPErrorResponse:
             config_path = create_echo_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # Send a normal POST request to echo service
             # Echo service should return the body as-is (200 OK)
@@ -146,7 +146,7 @@ class TestHTTPErrorResponse:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # Send an origin-form GET request (should return 400)
             request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
@@ -192,7 +192,7 @@ class TestHTTPErrorResponse:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # Send CONNECT with invalid target (missing port)
             request = b"CONNECT example.com HTTP/1.1\r\nHost: example.com\r\n\r\n"
@@ -240,7 +240,7 @@ class TestHTTPErrorResponse:
             config_path = create_echo_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # Test 1: POST with body
             test_body = b"Hello, Echo Service!"

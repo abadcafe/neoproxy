@@ -60,9 +60,7 @@ listeners:
 services:
   - name: chain
     kind: upstream.upstream
-    args:
-      upstream: http_chain
-
+    upstream: http_chain
 servers:
   - name: http_proxy
     listeners: ["http_main"]
@@ -98,9 +96,7 @@ listeners:
 services:
   - name: chain
     kind: upstream.upstream
-    args:
-      upstream: https_chain
-
+    upstream: https_chain
 servers:
   - name: http_proxy
     listeners: ["http_main"]
@@ -154,7 +150,7 @@ def test_upstream_http_proxy_forward_request() -> None:
         )
         config_path = _write_upstream_config(entry_port, upstream_port, temp_dir)
         proxy_proc = start_proxy(config_path)
-        assert proxy_proc.wait_ready(timeout=5.0)
+        assert proxy_proc.wait_ready()
 
         result: subprocess.CompletedProcess[str] = subprocess.run(
             [
@@ -217,7 +213,7 @@ def test_upstream_https_proxy_forward_request() -> None:
             entry_port, upstream_port, ca_path, temp_dir
         )
         proxy_proc = start_proxy(config_path)
-        assert proxy_proc.wait_ready(timeout=5.0)
+        assert proxy_proc.wait_ready()
 
         result: subprocess.CompletedProcess[str] = subprocess.run(
             [
@@ -281,7 +277,7 @@ def test_upstream_http_proxy_connect_tunnel() -> None:
         )
         config_path = _write_upstream_config(entry_port, upstream_port, temp_dir)
         proxy_proc = start_proxy(config_path)
-        assert proxy_proc.wait_ready(timeout=5.0)
+        assert proxy_proc.wait_ready()
 
         with socket.create_connection(("127.0.0.1", entry_port), timeout=5.0) as sock:
             sock.sendall(
@@ -347,7 +343,7 @@ def test_upstream_https_proxy_connect_tunnel() -> None:
             entry_port, upstream_port, ca_path, temp_dir
         )
         proxy_proc = start_proxy(config_path)
-        assert proxy_proc.wait_ready(timeout=5.0)
+        assert proxy_proc.wait_ready()
 
         with socket.create_connection(("127.0.0.1", entry_port), timeout=5.0) as sock:
             sock.sendall(

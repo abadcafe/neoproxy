@@ -47,12 +47,11 @@ def test_socks5_defers_credential_verification_to_connect(
     config = tmp_path / "proxy.yaml"
     auth_layer = (
         """  - kind: auth.basic_auth
-    args:
-      users:
-      - username: user
-        password: correct
-      - username: "user:with:colon"
-        password: "pass:word"
+    users:
+    - username: user
+      password: correct
+    - username: "user:with:colon"
+      password: "pass:word"
 """
         if auth_enabled
         else ""
@@ -75,12 +74,10 @@ listeners:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
+  upstream: direct
   layers:
   - kind: access_log.file
-    args:
-      writer: logs/access
+    writer: logs/access
 {auth_layer}servers:
 - name: main
   service: direct
@@ -93,7 +90,7 @@ services:
         target.settimeout(2)
         process = start_proxy(str(config))
         try:
-            assert process.wait_ready(timeout=3)
+            assert process.wait_ready()
             with socket.create_connection(
                 ("127.0.0.1", proxy_port), timeout=2
             ) as client:

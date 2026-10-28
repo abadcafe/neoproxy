@@ -49,10 +49,9 @@ servers:
 - name: echo
   service: echo
   listeners: [main]
-  tls:
-    certificates:
-    - cert_path: {shared_test_certs["cert_path"]}
-      key_path: {shared_test_certs["key_path"]}
+  certificates:
+  - cert_path: {shared_test_certs["cert_path"]}
+    key_path: {shared_test_certs["key_path"]}
 """)
     process = start_proxy(str(config))
     try:

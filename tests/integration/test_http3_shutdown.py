@@ -52,28 +52,26 @@ services:
   kind: echo.echo
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
+  upstream: direct
 servers:
 - name: echo
   hostnames: [localhost, echo.test]
   service: echo
   listeners: [main]
-  tls:
-    certificates:
-    - cert_path: {cert_path}
-      key_path: {key_path}
+  certificates:
+  - cert_path: {cert_path}
+    key_path: {key_path}
 - name: proxy
   service: direct
   listeners: [main]
+  certificates:
+  - cert_path: {cert_path}
+    key_path: {key_path}
 """)
     process = start_proxy(str(config))
     try:
-        deadline = time.monotonic() + 3
-        while bound_socket_count(process, port) != workers:
-            assert process.poll() is None
-            assert time.monotonic() < deadline
-            time.sleep(0.02)
+        assert process.wait_ready()
+        assert bound_socket_count(process, port) == workers
         yield process, port
     finally:
         terminate_process(process, force=True)

@@ -30,19 +30,17 @@ def running_proxy(
     if retry_delay is not None:
         content = content.replace(
             f"  kind: {listener_kind}\n",
-            f"  kind: {listener_kind}\n  args:\n"
-            + f"    accept_retry_delay: {retry_delay}\n",
+            f"  kind: {listener_kind}\n" + f"  tcp_accept_retry_delay: {retry_delay}\n",
         )
     if listener_kind == "https":
         cert, key, _, _ = generate_test_certificates(str(directory))
         content += (
-            f"  tls:\n    certificates:\n    - cert_path: {cert}\n"
-            + f"      key_path: {key}\n"
+            f"  certificates:\n  - cert_path: {cert}\n" + f"    key_path: {key}\n"
         )
     _ = config.write_text(content)
     process = start_proxy(str(config), nofile_limit=64)
     try:
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         yield process, port
     finally:
         # The descriptor limit is restricted to this disposable child.

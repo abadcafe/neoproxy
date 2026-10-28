@@ -30,7 +30,7 @@ def test_dns_failure_returns_bad_gateway_with_dns_diagnostic(
             {
                 "name": "relay",
                 "kind": "upstream.upstream",
-                "args": {"upstream": "relay"},
+                "upstream": "relay",
             }
         ],
         "servers": [{"name": "relay", "service": "relay", "listeners": ["main"]}],

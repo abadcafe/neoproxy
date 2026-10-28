@@ -233,3 +233,142 @@ fn test_pool_config_defaults() {
     Duration::from_secs(90)
   );
 }
+
+#[test]
+fn test_merge_chain_config_stream_window_inherits_three_levels() {
+  let config: UpstreamPluginConfig = serde_yaml::from_str(
+    "quic_stream_receive_window: 1024\nupstreams:\n- name: \
+     inherited\n  addresses:\n  - address: '127.0.0.1:443'\n    \
+     address_protocol: http3\n- name: overridden\n  \
+     quic_stream_receive_window: 2048\n  addresses:\n  - address: \
+     '127.0.0.1:443'\n    address_protocol: http3\n  - address: \
+     '127.0.0.1:444'\n    address_protocol: http3\n    \
+     quic_stream_receive_window: 4096",
+  )
+  .unwrap();
+  let resolved = merge_chain_config(&config).unwrap();
+  for (name, index, expected) in [
+    ("inherited", 0, 1024),
+    ("overridden", 0, 2048),
+    ("overridden", 1, 4096),
+  ] {
+    let Protocol::Http3 { quic, .. } =
+      &resolved[name].addresses[index].address_protocol
+    else {
+      panic!("expected HTTP3");
+    };
+    assert_eq!(quic.stream_receive_window, Some(expected));
+  }
+}
+
+#[test]
+fn test_merge_chain_config_validates_quic_stream_and_count_bounds() {
+  for (fields, valid) in [
+    ("quic_connection_max_concurrent_bidi_streams: 10001", true),
+    (
+      "quic_connection_max_concurrent_bidi_streams: \
+       1152921504606846976",
+      true,
+    ),
+    (
+      "quic_connection_max_concurrent_bidi_streams: \
+       1152921504606846977",
+      false,
+    ),
+    ("quic_stream_receive_window: 0", false),
+    ("quic_stream_receive_window: 4611686018427387904", false),
+    ("quic_stream_receive_window: 4096", true),
+  ] {
+    for yaml in [
+      format!("{fields}\nupstreams: [{{name: direct}}]"),
+      format!("upstreams:\n- name: direct\n  {fields}"),
+      format!(
+        "upstreams:\n- name: chain\n  addresses:\n  - address: \
+         '127.0.0.1:443'\n    address_protocol: http3\n    {fields}"
+      ),
+    ] {
+      let config: UpstreamPluginConfig =
+        serde_yaml::from_str(&yaml).unwrap();
+      assert_eq!(merge_chain_config(&config).is_ok(), valid, "{yaml}");
+    }
+  }
+}
+
+#[test]
+fn test_merge_chain_config_window_units_and_integer_bytes() {
+  for field in [
+    "quic_connection_send_window",
+    "quic_connection_receive_window",
+    "quic_stream_receive_window",
+  ] {
+    for (value, expected) in [
+      ("10MiB", 10 * 1024 * 1024),
+      ("10MB", 10_000_000),
+      ("4096", 4096),
+    ] {
+      let config: UpstreamPluginConfig =
+        serde_yaml::from_str(&format!(
+          "{field}: {value}\nupstreams:\n- name: inherited\n  \
+           addresses:\n  - address: '127.0.0.1:443'\n    \
+           address_protocol: http3\n- name: override\n  {field}: \
+           2MiB\n  addresses:\n  - address: '127.0.0.1:443'\n    \
+           address_protocol: http3\n  - address: '127.0.0.1:444'\n    \
+           address_protocol: http3\n    {field}: 4KiB"
+        ))
+        .unwrap();
+      let resolved = merge_chain_config(&config).unwrap();
+      for (name, index, expected) in [
+        ("inherited", 0, expected),
+        ("override", 0, 2 * 1024 * 1024),
+        ("override", 1, 4096),
+      ] {
+        let Protocol::Http3 { quic, .. } =
+          &resolved[name].addresses[index].address_protocol
+        else {
+          panic!("expected HTTP3");
+        };
+        let actual = match field {
+          "quic_connection_send_window" => quic.send_window,
+          "quic_connection_receive_window" => quic.receive_window,
+          _ => quic.stream_receive_window,
+        };
+        assert_eq!(
+          actual,
+          Some(expected),
+          "{field}: {value}, {name}/{index}"
+        );
+      }
+    }
+  }
+}
+
+#[test]
+fn test_merge_chain_config_window_units_reject_invalid_sizes() {
+  for field in [
+    "quic_connection_send_window",
+    "quic_connection_receive_window",
+    "quic_stream_receive_window",
+  ] {
+    for value in ["0MiB", "-1MiB", "garbage", "18446744073709551616B"] {
+      let parsed = serde_yaml::from_str::<UpstreamPluginConfig>(
+        &format!("{field}: {value}\nupstreams: [{{name: direct}}]"),
+      );
+      assert!(
+        parsed
+          .and_then(|config| merge_chain_config(&config)
+            .map_err(serde::de::Error::custom))
+          .is_err(),
+        "{field}: {value}"
+      );
+    }
+  }
+  for field in
+    ["quic_connection_receive_window", "quic_stream_receive_window"]
+  {
+    let parsed: UpstreamPluginConfig = serde_yaml::from_str(&format!(
+      "{field}: 4EiB\nupstreams: [{{name: direct}}]"
+    ))
+    .unwrap();
+    assert!(merge_chain_config(&parsed).is_err());
+  }
+}

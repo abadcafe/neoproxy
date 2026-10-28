@@ -30,7 +30,7 @@ pub(super) struct DirectClient {
   connect_timeout: Duration,
   tunnel_idle_timeout: Duration,
   endpoint: std::net::SocketAddr,
-  tcp_options: super::tcp_options::TcpOptions,
+  tcp_options: crate::tcp_options::TcpOptions,
 }
 impl DirectClient {
   pub(super) fn new(
@@ -51,7 +51,7 @@ impl DirectClient {
       connect_timeout: config.connect_timeout,
       tunnel_idle_timeout: config.tunnel_idle_timeout,
       endpoint,
-      tcp_options: super::tcp_options::TcpOptions {
+      tcp_options: crate::tcp_options::TcpOptions {
         time: config.tcp_keep_alive_time,
         interval: config.tcp_keep_alive_interval,
         retries: config.tcp_keep_alive_retries,

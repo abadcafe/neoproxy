@@ -24,14 +24,11 @@ listeners:
   - name: http3_main
     kind: http3
     addresses: ["127.0.0.1:18444"]
-    args:
-      quic:
-        max_concurrent_bidi_streams: 100
+    quic_connection_max_concurrent_bidi_streams: 100
 
 services:
   - name: echo
     kind: echo.echo
-    args: {}
 
 servers:
   # Server with http listener
@@ -44,10 +41,9 @@ servers:
   # Server with https listener
   - name: https_server
     hostnames: ["https.example.com"]
-    tls:
-      certificates:
-        - cert_path: conf/certs/server.crt
-          key_path: conf/certs/server.key
+    certificates:
+      - cert_path: conf/certs/server.crt
+        key_path: conf/certs/server.key
     listeners:
       - https_main
     service: echo
@@ -55,10 +51,9 @@ servers:
   # Server with http3 listener
   - name: http3_server
     hostnames: ["h3.example.com"]
-    tls:
-      certificates:
-        - cert_path: conf/certs/server.crt
-          key_path: conf/certs/server.key
+    certificates:
+      - cert_path: conf/certs/server.crt
+        key_path: conf/certs/server.key
     listeners:
       - http3_main
     service: echo

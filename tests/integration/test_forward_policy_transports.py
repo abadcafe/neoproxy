@@ -46,7 +46,7 @@ async def test_forwarding_policy_is_consistent_across_proxy_transports(
                 {
                     "name": "relay",
                     "kind": "upstream.upstream",
-                    "args": {"upstream": "relay"},
+                    "upstream": "relay",
                 }
             ],
             "servers": [{"name": "relay", "service": "relay", "listeners": ["main"]}],

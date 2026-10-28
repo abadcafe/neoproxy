@@ -6,7 +6,6 @@ Data entities: Readiness. Tests: notified_process_tests.py through process API.
 import selectors
 import socket
 import tempfile
-import time
 from contextlib import ExitStack
 
 from .process_exit import ExitNotification
@@ -27,7 +26,7 @@ class Readiness:
     def address(self) -> str:
         return self._address
 
-    def wait_for(self, pid: int, timeout: float) -> bool:
+    def wait_for(self, pid: int) -> bool:
         if self._received:
             return True
         if self._closed:
@@ -41,18 +40,20 @@ class Readiness:
             selector = resources.enter_context(selectors.DefaultSelector())
             _ = selector.register(self._socket, selectors.EVENT_READ)
             _ = selector.register(exited, selectors.EVENT_READ)
-            deadline = time.monotonic() + timeout
             while True:
-                events = selector.select(max(0, deadline - time.monotonic()))
-                if not events or any(key.fd == exited.fileno() for key, _ in events):
+                # Startup completion is an explicit child notification.
+                # Keep waiting through unrelated signals/status updates; an
+                # exit event ends the wait even if READY was never emitted.
+                events = selector.select()
+                if any(key.fd == exited.fileno() for key, _ in events):
                     return False
+                if not any(key.fd == self._socket.fileno() for key, _ in events):
+                    continue
                 message = self._socket.recv(4096)
                 if b"READY=1" in message.splitlines():
                     self._received = True
                     self.close()
                     return True
-                if time.monotonic() >= deadline:
-                    return False
 
     def close(self) -> None:
         if not self._closed:

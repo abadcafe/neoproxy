@@ -6,7 +6,8 @@ use crate::listeners::https;
 
 #[test]
 fn test_https_builder_accept_retry_delay_can_be_configured() {
-  let args = serde_yaml::from_str("accept_retry_delay: 250ms").unwrap();
+  let args =
+    serde_yaml::from_str("tcp_accept_retry_delay: 250ms").unwrap();
   let result = https::create_listener_builder()(
     vec!["127.0.0.1:0".into()],
     args,
@@ -18,9 +19,10 @@ fn test_https_builder_accept_retry_delay_can_be_configured() {
 #[test]
 fn test_https_builder_rejects_invalid_accept_retry_delay() {
   for value in ["0s", "invalid", "18446744073709551615s"] {
-    let args =
-      serde_yaml::from_str(&format!("accept_retry_delay: {value:?}"))
-        .unwrap();
+    let args = serde_yaml::from_str(&format!(
+      "tcp_accept_retry_delay: {value:?}"
+    ))
+    .unwrap();
     let result = https::create_listener_builder()(
       vec!["127.0.0.1:0".into()],
       args,
@@ -60,9 +62,12 @@ fn test_https_builder_no_tls_returns_error() {
     no_tls_servers(),
   );
   assert!(result.is_err());
-  assert!(result.unwrap_err().to_string().contains(
-    "https listener requires server-level tls configuration"
-  ));
+  assert!(
+    result
+      .unwrap_err()
+      .to_string()
+      .contains("must configure certificates")
+  );
 }
 
 #[test]

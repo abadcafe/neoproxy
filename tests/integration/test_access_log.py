@@ -60,7 +60,7 @@ class TestAccessLogTextFormat:
         )
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert proc.wait_ready(timeout=5.0)
+            assert proc.wait_ready()
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -84,7 +84,7 @@ class TestAccessLogTextFormat:
         )
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert proc.wait_ready(timeout=5.0)
+            assert proc.wait_ready()
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -117,7 +117,7 @@ class TestAccessLogTextFormat:
         )
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert proc.wait_ready(timeout=5.0)
+            assert proc.wait_ready()
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -148,7 +148,7 @@ class TestAccessLogGracefulShutdown:
         )
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert proc.wait_ready(timeout=5.0)
+            assert proc.wait_ready()
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -180,7 +180,7 @@ class TestAccessLogContextFields:
         )
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert proc.wait_ready(timeout=5.0)
+            assert proc.wait_ready()
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -213,7 +213,7 @@ class TestAccessLogContent:
         )
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert proc.wait_ready(timeout=5.0)
+            assert proc.wait_ready()
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -248,7 +248,7 @@ class TestAccessLogDisabled:
         )
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert proc.wait_ready(timeout=5.0)
+            assert proc.wait_ready()
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -282,7 +282,7 @@ class TestAccessLogNamedWriters:
 
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert proc.wait_ready(timeout=5.0)
+            assert proc.wait_ready()
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -345,7 +345,7 @@ class TestAccessLogNamedWriters:
                     "layers": [
                         {
                             "kind": "access_log.file",
-                            "args": {"writer": "logs/default_access"},
+                            "writer": "logs/default_access",
                         }
                     ],
                 },
@@ -355,7 +355,7 @@ class TestAccessLogNamedWriters:
                     "layers": [
                         {
                             "kind": "access_log.file",
-                            "args": {"writer": "logs/audit"},
+                            "writer": "logs/audit",
                         }
                     ],
                 },
@@ -368,8 +368,8 @@ class TestAccessLogNamedWriters:
 
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert proc.wait_ready(timeout=5.0)
-            assert proc.wait_ready(timeout=5.0)
+            assert proc.wait_ready()
+            assert proc.wait_ready()
 
             status1 = curl_request("http://example.com/", test_env.proxy_port)
             assert status1 == 200
@@ -430,7 +430,7 @@ class TestAccessLogNamedWriters:
                     "layers": [
                         {
                             "kind": "access_log.file",
-                            "args": {"writer": "logs/nonexistent"},
+                            "writer": "logs/nonexistent",
                         }
                     ],
                 }
@@ -464,7 +464,7 @@ class TestAccessLogNamedWriters:
 
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert proc.wait_ready(timeout=5.0)
+            assert proc.wait_ready()
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -488,14 +488,8 @@ class TestAccessLogNamedWriters:
     ) -> None:
         """Layer with missing writer field should fail to start.
 
-        Per spec: 'Missing writer field in layer args -> build error'.
-        The writer field is required with no default, so the proxy
-        should exit when it is absent.
-
-        We pass args as a valid mapping (with context_fields but no
-        writer) rather than an empty dict, because dict_to_yaml
-        renders {} as a bare "args:" key (null in YAML), which
-        causes a different deserialization error than missing writer.
+        The flat layer configuration contains context_fields but omits its
+        required writer. Startup must report the missing plugin parameter.
         """
 
         empty_context_fields: list[JsonValue] = []
@@ -533,7 +527,7 @@ class TestAccessLogNamedWriters:
                         # (not rendered as null by dict_to_yaml).
                         {
                             "kind": "access_log.file",
-                            "args": {"context_fields": empty_context_fields},
+                            "context_fields": empty_context_fields,
                         }
                     ],
                 }
@@ -572,7 +566,7 @@ class TestAccessLogNamedWriters:
 
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert proc.wait_ready(timeout=5.0)
+            assert proc.wait_ready()
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -620,7 +614,7 @@ class TestAccessLogNamedWriters:
 
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert proc.wait_ready(timeout=5.0)
+            assert proc.wait_ready()
 
             status = curl_request("http://example.com/", test_env.proxy_port)
             assert status == 200
@@ -709,21 +703,17 @@ class TestAccessLogContextFieldValues:
                     "layers": [
                         {
                             "kind": "access_log.file",
-                            "args": {
-                                "writer": "logs/access",
-                                "context_fields": ["basic_auth.user"],
-                            },
+                            "writer": "logs/access",
+                            "context_fields": ["basic_auth.user"],
                         },
                         {
                             "kind": "auth.basic_auth",
-                            "args": {
-                                "users": [
-                                    {
-                                        "username": "admin",
-                                        "password": "secret",
-                                    },
-                                ],
-                            },
+                            "users": [
+                                {
+                                    "username": "admin",
+                                    "password": "secret",
+                                },
+                            ],
                         },
                     ],
                 }
@@ -736,7 +726,7 @@ class TestAccessLogContextFieldValues:
 
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert proc.wait_ready(timeout=5.0)
+            assert proc.wait_ready()
 
             # Send request WITHOUT auth - should get 407
             status = curl_request("http://example.com/", port)
@@ -812,24 +802,20 @@ class TestAccessLogContextFieldValues:
                     "layers": [
                         {
                             "kind": "access_log.file",
-                            "args": {
-                                "writer": "logs/json_access",
-                                "context_fields": [
-                                    "basic_auth.user",
-                                    "basic_auth.auth_type",
-                                ],
-                            },
+                            "writer": "logs/json_access",
+                            "context_fields": [
+                                "basic_auth.user",
+                                "basic_auth.auth_type",
+                            ],
                         },
                         {
                             "kind": "auth.basic_auth",
-                            "args": {
-                                "users": [
-                                    {
-                                        "username": "admin",
-                                        "password": "secret",
-                                    },
-                                ],
-                            },
+                            "users": [
+                                {
+                                    "username": "admin",
+                                    "password": "secret",
+                                },
+                            ],
                         },
                     ],
                 }
@@ -842,7 +828,7 @@ class TestAccessLogContextFieldValues:
 
         proc = start_proxy_with_cwd(config_path, test_env.temp_dir)
         try:
-            assert proc.wait_ready(timeout=5.0)
+            assert proc.wait_ready()
 
             # Authenticate with valid credentials
             creds = base64.b64encode(b"admin:secret").decode()

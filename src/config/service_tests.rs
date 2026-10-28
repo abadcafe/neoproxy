@@ -19,7 +19,6 @@ fn test_parse_str_service_kind_split_into_parts() {
 services:
 - name: my_svc
   kind: connect_tcp.connect_tcp
-  args: null
   layers: []
 servers: []
 "#,
@@ -40,7 +39,6 @@ fn test_parse_str_service_kind_invalid() {
 services:
 - name: my_svc
   kind: nodot
-  args: null
   layers: []
 servers: []
 "#,
@@ -56,12 +54,9 @@ fn test_parse_str_service_layers_split_into_parts() {
 services:
 - name: my_svc
   kind: echo.echo
-  args: null
   layers:
   - kind: auth.basic_auth
-    args: null
   - kind: access_log.file
-    args: null
 servers: []
 "#,
   )
@@ -101,7 +96,6 @@ fn test_validate_existing_service_reference_allowed() {
 services:
 - name: echo
   kind: echo.echo
-  args: null
   layers: []
 servers:
 - name: server1
@@ -141,5 +135,22 @@ servers:
     !collector.has_errors(),
     "empty service name should be allowed: {:?}",
     collector.errors()
+  );
+}
+
+#[test]
+fn test_parse_str_preserves_flat_service_and_layer_parameters() {
+  let config = Config::parse_str(
+    "services:\n- name: proxy\n  kind: upstream.upstream\n  upstream: \
+     direct\n  layers:\n  - kind: auth.basic_auth\n    users:\n    - \
+     username: alice\n      password: secret",
+  )
+  .unwrap();
+  let service = &config.services()[0];
+  assert_eq!(service.args()["upstream"].as_str(), Some("direct"));
+  assert!(service.args().get("layers").is_none());
+  assert_eq!(
+    service.layers()[0].args()["users"][0]["username"].as_str(),
+    Some("alice")
   );
 }

@@ -62,6 +62,9 @@ plugins:
     # tcp_keep_alive_time: 60s
     # tcp_keep_alive_interval: 10s
     # tcp_keep_alive_retries: 3
+    # quic_connection_send_window: 10MiB
+    # quic_connection_receive_window: 10MiB
+    # quic_stream_receive_window: 1MiB  # inherited by upstream/address
     certificates:
       client_cert_path: conf/certs/client.crt
       client_key_path: conf/certs/client.key
@@ -89,52 +92,44 @@ plugins:
 # Services define request handlers. Each service has:
 #   - name: Service name (referenced by servers)
 #   - kind: Service type in "plugin.service" format
-#   - args: Service-specific parameters
+#   - Service-specific parameters live beside kind (no args wrapper)
 #   - layers: Middleware layers applied to this service (optional)
 
 services:
   # Echo service - simplest test service, echoes requests back
   - name: echo
     kind: echo.echo
-    args: {}
+
 
   # Chain proxy service (through upstream H3 proxy)
   - name: chain
     kind: upstream.upstream
-    args:
-      upstream: local_relay
+    upstream: local_relay
     layers:
       # Basic proxy authentication (used by SOCKS5 listener)
       - kind: auth.basic_auth
-        args:
-          users:
-            - username: "admin"
-              password: "secret"
+        users:
+          - username: "admin"
+            password: "secret"
       - kind: access_log.file
-        args:
-          writer: "logs/access.log"
-
-  # Direct proxy service with basic auth layer
+        writer: "logs/access.log"
+# Direct proxy service with basic auth layer
   - name: direct_proxy
     kind: upstream.upstream
-    args:
-      upstream: direct
+    upstream: direct
     layers:
       # Basic proxy authentication layer
       - kind: auth.basic_auth
-        args:
-          users:
-            - username: "admin"
-              password: "secret"
-      # Access log layer (uses the configured writer format)
+        users:
+          - username: "admin"
+            password: "secret"
+    # Access log layer (uses the configured writer format)
       - kind: access_log.file
-        args:
-          writer: "logs/access.log"
-          # Request context fields to include in log entries
-          context_fields:
-            - "basic_auth.user"
-            - "upstream.connect_ms"
-
+        writer: "logs/access.log"
+        # Request context fields to include in log entries
+        context_fields:
+          - "basic_auth.user"
+          - "upstream.connect_ms"
 # -----------------------------------------------------------------------------
 # Listeners
 # -----------------------------------------------------------------------------
@@ -143,56 +138,60 @@ services:
 #   - name: Unique listener name (referenced by servers)
 #   - kind: Listener type ("http", "https", "http3", "socks5")
 #   - addresses: List of "host:port" addresses to bind
-#   - args: Listener-type-specific parameters (optional)
-
+#   - Protocol-specific parameters live beside kind (no args wrapper)
 listeners:
   # HTTP listener - configurable accept retry delay
   - name: http_chain
     kind: http
     addresses: ["127.0.0.1:8080"]
-    args:
-      # Resource/unknown accept error retry delay (default: 1s)
-      accept_retry_delay: "1s"
-
-  # HTTPS listener - supports TLS handshake timeout
+    # Resource/unknown accept error retry delay (default: 1s)
+    tcp_accept_retry_delay: "1s"
+    tcp_keep_alive_time: "60s"
+    tcp_keep_alive_interval: "10s"
+    tcp_keep_alive_retries: 3
+# HTTPS listener - supports TLS handshake timeout
   - name: https_chain
     kind: https
     addresses: ["127.0.0.1:8443"]
-    args:
-      # TLS handshake timeout (default: 5s)
-      tls_handshake_timeout: "5s"
-      # Resource/unknown accept error retry delay (default: 1s)
-      accept_retry_delay: "1s"
-
-  # HTTP/3 listener - supports QUIC protocol tuning
+    # TLS handshake timeout (default: 5s)
+    tls_handshake_timeout: "5s"
+    # Resource/unknown accept error retry delay (default: 1s)
+    tcp_accept_retry_delay: "1s"
+    tcp_keep_alive_time: "60s"
+    tcp_keep_alive_interval: "10s"
+    tcp_keep_alive_retries: 3
+# HTTP/3 listener - supports QUIC protocol tuning
   - name: http3_chain
     kind: http3
     addresses: ["127.0.0.1:8443"]
-    args:
-      quic:
-        # Max concurrent bidirectional QUIC streams (default: 100, range: 1-10000)
-        max_concurrent_bidi_streams: 100
-        # Max idle timeout (default: 5s)
-        max_idle_timeout: "5s"
-        # Initial MTU (default: 1200, range: 1200-9000)
-        initial_mtu: 1200
-        # QUIC send window (default: 10MiB)
-        send_window: "10MiB"
-        # QUIC receive window (default: 10MiB)
-        receive_window: "10MiB"
-
-  # SOCKS5 listener - supports handshake timeout
-  # Auth is configured in the service pipeline (auth.basic_auth layer)
+    # Max concurrent bidirectional QUIC streams (default: 100, range: 1..=2^60)
+    quic_connection_handshake_timeout: "5s"
+    quic_connection_keep_alive_interval: "3s"
+    quic_stream_receive_window: "1MiB"
+    quic_connection_max_concurrent_bidi_streams: 100
+    # Max idle timeout (default: 5s)
+    quic_connection_idle_timeout: "5s"
+    # Initial MTU (default: 1200, range: 1200-9000)
+    quic_connection_initial_mtu: 1200
+    # QUIC send window (default: 10MiB)
+    quic_connection_send_window: "10MiB"
+    # QUIC receive window (default: 10MiB)
+    quic_connection_receive_window: "10MiB"
+# SOCKS5 listener - supports handshake timeout
+# Auth is configured in the service pipeline (auth.basic_auth layer)
   - name: socks5_chain
     kind: socks5
     addresses: ["127.0.0.1:9080"]
-    args:
-      # Handshake timeout (default: 3s)
-      handshake_timeout: "3s"
-      # Resource/unknown accept error retry delay (default: 1s)
-      accept_retry_delay: "1s"
-
-  # HTTP listener on alternate port (for connect_proxy)
+    # Handshake timeout (default: 3s)
+    socks5_handshake_timeout: "3s"
+    # Client CONNECT command read deadline; excludes upstream dialing
+    socks5_connect_timeout: "3s"
+    # Resource/unknown accept error retry delay (default: 1s)
+    tcp_accept_retry_delay: "1s"
+    tcp_keep_alive_time: "60s"
+    tcp_keep_alive_interval: "10s"
+    tcp_keep_alive_retries: 3
+# HTTP listener on alternate port (for connect_proxy)
   - name: http_connect
     kind: http
     addresses: ["127.0.0.1:10080"]
@@ -223,7 +222,8 @@ listeners:
 #     the server first, then its first client-compatible certificate.
 #     Supports exact ("api.example.com") and wildcard ("*.example.com") patterns.
 #     Empty = default/catch-all server.
-#   - tls: Server-level TLS configuration (required for https/http3)
+#   - certificates: Server certificate/key pairs (required for https/http3)
+#   - client_ca_certs: Optional client certificate trust roots
 #   - listeners: List of listener names (references to top-level listeners)
 #   - service: Service to route requests to
 
@@ -256,12 +256,11 @@ servers:
   #   # SOCKS5 proxy (with auth)
   #   curl --socks5 127.0.0.1:11080 --proxy-user admin:secret https://httpbin.org/ip
   - name: connect_proxy
-    tls:
-      certificates:
-        - cert_path: conf/certs/server.crt
-          key_path: conf/certs/server.key
-      client_ca_certs:
-        - conf/certs/client-ca.crt
+    certificates:
+      - cert_path: conf/certs/server.crt
+        key_path: conf/certs/server.key
+    client_ca_certs:
+      - conf/certs/client-ca.crt
     listeners:
       - http_connect
       - https_connect
@@ -293,10 +292,9 @@ servers:
   #   # SOCKS5 proxy (with auth)
   #   curl --socks5 127.0.0.1:9080 --proxy-user admin:secret https://httpbin.org/ip
   - name: chain_proxy
-    tls:
-      certificates:
-        - cert_path: conf/certs/server.crt
-          key_path: conf/certs/server.key
+    certificates:
+      - cert_path: conf/certs/server.crt
+        key_path: conf/certs/server.key
     listeners:
       - http_chain
       - https_chain

@@ -43,7 +43,7 @@ def _configuration(ca: str, relay_port: int) -> ConfigDict:
             {
                 "name": "relay",
                 "kind": "upstream.upstream",
-                "args": {"upstream": "relay"},
+                "upstream": "relay",
             }
         ],
         "servers": [{"name": "main", "listeners": ["main"], "service": "relay"}],

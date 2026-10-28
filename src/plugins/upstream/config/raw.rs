@@ -10,6 +10,7 @@
 use std::time::Duration;
 
 use anyhow::{Result, bail};
+use byte_unit::Byte;
 use serde::Deserialize;
 
 use super::defaults::default_weight;
@@ -86,9 +87,11 @@ pub(crate) struct UpstreamAddressConfig {
   #[serde(default)]
   pub(super) quic_connection_initial_mtu: Option<u16>,
   #[serde(default)]
-  pub(super) quic_connection_send_window: Option<u64>,
+  pub(super) quic_connection_send_window: Option<Byte>,
   #[serde(default)]
-  pub(super) quic_connection_receive_window: Option<u64>,
+  pub(super) quic_connection_receive_window: Option<Byte>,
+  #[serde(default)]
+  pub(super) quic_stream_receive_window: Option<Byte>,
 }
 
 impl UpstreamAddressConfig {
@@ -140,9 +143,11 @@ pub(super) struct UpstreamConfig {
   #[serde(default)]
   pub(super) quic_connection_initial_mtu: Option<u16>,
   #[serde(default)]
-  pub(super) quic_connection_send_window: Option<u64>,
+  pub(super) quic_connection_send_window: Option<Byte>,
   #[serde(default)]
-  pub(super) quic_connection_receive_window: Option<u64>,
+  pub(super) quic_connection_receive_window: Option<Byte>,
+  #[serde(default)]
+  pub(super) quic_stream_receive_window: Option<Byte>,
 }
 
 /// Top-level plugin configuration.
@@ -191,9 +196,11 @@ pub(crate) struct UpstreamPluginConfig {
   #[serde(default)]
   pub(super) quic_connection_initial_mtu: Option<u16>,
   #[serde(default)]
-  pub(super) quic_connection_send_window: Option<u64>,
+  pub(super) quic_connection_send_window: Option<Byte>,
   #[serde(default)]
-  pub(super) quic_connection_receive_window: Option<u64>,
+  pub(super) quic_connection_receive_window: Option<Byte>,
+  #[serde(default)]
+  pub(super) quic_stream_receive_window: Option<Byte>,
   #[serde(default)]
   pub(super) upstreams: Vec<UpstreamConfig>,
 }

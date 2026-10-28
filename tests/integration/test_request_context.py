@@ -96,9 +96,9 @@ def test_request_id_propagates_and_tunnel_logs_only_after_transfer(
     enable_access_log(entry_config, fields)
     with managed_processes() as start:
         upstream = start(upstream_config)
-        assert upstream.wait_ready(timeout=3)
+        assert upstream.wait_ready()
         entry = start(entry_config)
-        assert entry.wait_ready(timeout=3)
+        assert entry.wait_ready()
         with socket.create_connection(("127.0.0.1", entry_port), timeout=5) as client:
             target = f"127.0.0.1:{origin_port}"
             line = f"CONNECT {target}" if mode == "tunnel" else f"POST http://{target}/"
@@ -227,7 +227,7 @@ def test_dns_failure_records_native_access_fields_and_response_id(
     )
     with managed_processes() as start:
         process = start(config)
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         client = HTTPConnection("127.0.0.1", port, timeout=5)
         try:
             client.request(

@@ -34,7 +34,8 @@ def enable_access_log(config_path: str, fields: Sequence[str]) -> None:
         )
         layer: ConfigDict = {
             "kind": "access_log.file",
-            "args": {"writer": "logs/access", "context_fields": list(fields)},
+            "writer": "logs/access",
+            "context_fields": list(fields),
         }
         combined: list[JsonValue] = [layer, *layers]
         service["layers"] = combined

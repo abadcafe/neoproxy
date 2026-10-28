@@ -44,8 +44,7 @@ listeners:
 - name: main
   kind: http3
   addresses: ["127.0.0.1:{port}"]
-  args:
-    header_read_timeout: 100ms
+  header_read_timeout: 100ms
 services:
 - name: echo
   kind: echo.echo
@@ -53,12 +52,11 @@ servers:
 - name: main
   service: echo
   listeners: [main]
-  tls:
-    certificates:
-    - cert_path: {cert}
-      key_path: {key}
+  certificates:
+  - cert_path: {cert}
+    key_path: {key}
 """)
     with managed_processes() as start:
         process = start(str(config))
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         asyncio.run(verify_header_deadline(port))

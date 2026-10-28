@@ -126,7 +126,7 @@ def test_forward_preserves_target_and_message_across_proxy_routes(
                         else None,
                     )
                     process = start(write_forward_node(tmp_path / f"node{index}", node))
-                    assert process.wait_ready(timeout=3)
+                    assert process.wait_ready()
                     upstream_port, upstream_kind = port, listener
                 assert upstream_port is not None
                 status, _, body = await _exchange(
@@ -184,7 +184,7 @@ def test_direct_https_pool_reuses_origin_and_isolates_scheme(tmp_path: Path) -> 
             with managed_processes() as start:
                 node = ForwardNode(port=entry, ca=ca, certificate=certificate, key=key)
                 process = start(write_forward_node(tmp_path / "entry", node))
-                assert process.wait_ready(timeout=3)
+                assert process.wait_ready()
                 target = f"127.0.0.1:{origin_port}/"
                 assert (await _exchange(entry, f"https://{target}", "GET", b""))[
                     0
@@ -287,7 +287,7 @@ def test_https_forward_streams_before_upload_eof_across_h3_proxy(
                         ),
                     ]:
                         process = start(write_forward_node(tmp_path / name, node))
-                        assert process.wait_ready(timeout=3)
+                        assert process.wait_ready()
                     authority = f"127.0.0.1:{origin_port}"
                     if listener == "http3":
                         configuration = QuicConfiguration(
@@ -387,7 +387,7 @@ def test_direct_https_forward_reports_tls_failures(
             )
             with managed_processes() as start:
                 process = start(write_forward_node(tmp_path / "entry", node))
-                assert process.wait_ready(timeout=3)
+                assert process.wait_ready()
                 status, headers, _ = await _exchange(
                     entry, f"https://127.0.0.1:{origin_port}/", "GET", b""
                 )

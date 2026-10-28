@@ -38,7 +38,7 @@ def test_record_chain_keeps_logs_and_exact_curl_status(tmp_path: Path) -> None:
     ) as capture:
         directory = capture.directory
         process = capture.start_proxy("entry", create_echo_config(port, str(working)))
-        assert process.wait_ready(timeout=2)
+        assert process.wait_ready()
         result = capture.run_curl(
             [
                 "curl",

@@ -33,8 +33,7 @@ def running_proxy(
         cert, key, _, _ = generate_test_certificates(str(directory))
         content = config.read_text().replace("  kind: http\n", "  kind: https\n")
         content += (
-            f"  tls:\n    certificates:\n    - cert_path: {cert}\n"
-            + f"      key_path: {key}\n"
+            f"  certificates:\n  - cert_path: {cert}\n" + f"    key_path: {key}\n"
         )
         _ = config.write_text(content)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -43,7 +42,7 @@ def running_proxy(
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
     process = start_proxy(str(config))
     try:
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         connection.connect()
         if context is not None:
             stream = connection.sock

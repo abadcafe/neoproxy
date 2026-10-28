@@ -55,7 +55,7 @@ class TestHTTP3ErrorHandling:
 
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(), "HTTP/3 listener failed to start"
 
             # Send a GET request (non-CONNECT) using HTTP/3 client
             async def do_get_request() -> tuple[bool, int, bytes | str]:
@@ -112,7 +112,7 @@ class TestHTTP3ErrorHandling:
 
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(), "HTTP/3 listener failed to start"
 
             # CONNECT to an invalid target (port 0 is invalid)
             async def do_connect() -> tuple[bool, int, bytes | str]:
@@ -182,15 +182,12 @@ listeners:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
-
+  upstream: direct
 servers:
 - name: http3_server
-  tls:
-    certificates:
-    - cert_path: "{cert_path}"
-      key_path: "{key_path}"
+  certificates:
+  - cert_path: "{cert_path}"
+    key_path: "{key_path}"
   listeners: ["h3_main"]
   service: direct
 """
@@ -200,7 +197,7 @@ servers:
 
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(), "HTTP/3 listener failed to start"
 
             # CONNECT to an unreachable target
             # Use TEST-NET-2 (198.51.100.0/24) which is non-routable
@@ -260,8 +257,8 @@ class TestHTTP3ConfigValidationFull:
             key_path = shared_test_certs["key_path"]
 
             # Test with zero timeout (invalid, rejected at startup)
-            quic_config = """      max_concurrent_bidi_streams: 100
-      max_idle_timeout: '0s'"""
+            quic_config = """      quic_connection_max_concurrent_bidi_streams: 100
+      quic_connection_idle_timeout: '0s'"""
 
             config_path = create_http3_listener_config(
                 proxy_port,
@@ -302,11 +299,11 @@ class TestHTTP3ConfigValidationFull:
             key_path = shared_test_certs["key_path"]
 
             # Test minimum valid values
-            quic_config = """      max_concurrent_bidi_streams: 1
-      max_idle_timeout: '1ms'
-      initial_mtu: 1200
-      send_window: '1B'
-      receive_window: '1B'"""
+            quic_config = """      quic_connection_max_concurrent_bidi_streams: 1
+      quic_connection_idle_timeout: '1ms'
+      quic_connection_initial_mtu: 1200
+      quic_connection_send_window: '1B'
+      quic_connection_receive_window: '1B'"""
 
             config_path = create_http3_listener_config(
                 proxy_port,
@@ -319,7 +316,7 @@ class TestHTTP3ConfigValidationFull:
             proxy_proc = start_proxy(config_path)
 
             # Should start with minimum valid values
-            if not proxy_proc.wait_ready(timeout=5.0):
+            if not proxy_proc.wait_ready():
                 if proxy_proc.poll() is not None:
                     _, stderr_data = proxy_proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -351,11 +348,11 @@ class TestHTTP3ConfigValidationFull:
             key_path = shared_test_certs["key_path"]
 
             # Test maximum valid values per design doc
-            quic_config = """      max_concurrent_bidi_streams: 10000
-      max_idle_timeout: '300s'
-      initial_mtu: 9000
-      send_window: '100MiB'
-      receive_window: '100MiB'"""
+            quic_config = """      quic_connection_max_concurrent_bidi_streams: 10000
+      quic_connection_idle_timeout: '300s'
+      quic_connection_initial_mtu: 9000
+      quic_connection_send_window: '100MiB'
+      quic_connection_receive_window: '100MiB'"""
 
             config_path = create_http3_listener_config(
                 proxy_port,
@@ -368,7 +365,7 @@ class TestHTTP3ConfigValidationFull:
             proxy_proc = start_proxy(config_path)
 
             # Should start with maximum valid values
-            if not proxy_proc.wait_ready(timeout=5.0):
+            if not proxy_proc.wait_ready():
                 if proxy_proc.poll() is not None:
                     _, stderr_data = proxy_proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -383,7 +380,10 @@ class TestHTTP3ConfigValidationFull:
                 _ = proxy_proc.wait(timeout=5)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    @pytest.mark.parametrize("field", ["max_concurrent_bidi_streams", "initial_mtu"])
+    @pytest.mark.parametrize(
+        "field",
+        ["quic_connection_max_concurrent_bidi_streams", "quic_connection_initial_mtu"],
+    )
     def test_quic_params_negative_values_rejected(
         self, shared_test_certs: StringMap, field: str
     ) -> None:

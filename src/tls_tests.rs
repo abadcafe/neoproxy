@@ -232,7 +232,7 @@ fn test_build_tls_server_config_no_certificates() {
 
   let result =
     build_tls_server_config(&servers, vec![b"http/1.1".to_vec()]);
-  assert!(result.is_ok());
+  assert!(result.is_err());
 }
 
 fn accepts_client_hello(

@@ -71,11 +71,11 @@ macro_rules! validate_transport_fields {
     }
     if let Some(value) =
       $config.quic_connection_max_concurrent_bidi_streams
-      && !(1..=10_000).contains(&value)
+      && !(1..=1u64 << 60).contains(&value)
     {
       bail!(
         "{} quic_connection_max_concurrent_bidi_streams must be in \
-         1..=10000",
+         1..=2^60",
         $location
       );
     }
@@ -88,18 +88,32 @@ macro_rules! validate_transport_fields {
       );
     }
     if let Some(value) = $config.quic_connection_send_window
-      && value == 0
+      && value.as_u64_checked().is_none_or(|bytes| bytes == 0)
     {
       bail!(
-        "{} quic_connection_send_window must be greater than 0",
+        "{} quic_connection_send_window must fit a positive u64 byte \
+         count",
         $location
       );
     }
     if let Some(value) = $config.quic_connection_receive_window
-      && (value == 0 || quinn::VarInt::from_u64(value).is_err())
+      && value.as_u64_checked().is_none_or(|bytes| {
+        bytes == 0 || quinn::VarInt::from_u64(bytes).is_err()
+      })
     {
       bail!(
         "{} quic_connection_receive_window must fit a positive QUIC \
+         variable integer",
+        $location
+      );
+    }
+    if let Some(value) = $config.quic_stream_receive_window
+      && value.as_u64_checked().is_none_or(|bytes| {
+        bytes == 0 || quinn::VarInt::from_u64(bytes).is_err()
+      })
+    {
+      bail!(
+        "{} quic_stream_receive_window must fit a positive QUIC \
          variable integer",
         $location
       );

@@ -64,7 +64,7 @@ class TestPerformance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # Establish tunnel
             client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -142,7 +142,7 @@ class TestPerformance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # Establish tunnel
             client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -229,7 +229,7 @@ class TestPerformance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # Rapid connection cycle
             num_cycles = 50
@@ -314,7 +314,7 @@ class TestPerformance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # Create 1000 concurrent connections via asyncio
             num_connections = 1000

@@ -104,10 +104,10 @@ def test_h3_chain_preserves_bulk_data_and_independent_half_closes(
     )
     relay = start_proxy(relay_config)
     try:
-        assert relay.wait_ready(timeout=3)
+        assert relay.wait_ready()
         entry = start_proxy(entry_config)
         try:
-            assert entry.wait_ready(timeout=3)
+            assert entry.wait_ready()
             # Both client/server H3 adapters run in real proxy processes.
             # The dependency's classic CONNECT pseudo-header defect has
             # its own strict-peer failure case in test_dependency_h3.py.

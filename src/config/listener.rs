@@ -3,8 +3,8 @@
 //! owned property contract
 //! public operations: TransportLayer, ListenerPropertyValues, new,
 //! transport_layer, supports_hostname_routing,
-//! ListenerPropertiesProvider, ListenerConfig, name, kind,
-//! addresses, args
+//! requires_server_certificate, ListenerPropertiesProvider,
+//! ListenerConfig, name, kind, addresses, args
 //! data entities: TransportLayer, ListenerPropertyValues,
 //! ListenerConfig
 //! tests: listener_tests.rs, listener_validation_conflict_tests.rs,
@@ -46,14 +46,25 @@ pub(crate) struct ListenerPropertyValues {
   pub(in crate::config) transport_layer: TransportLayer,
   /// Whether the listener supports hostname-based routing
   pub(in crate::config) supports_hostname_routing: bool,
+  /// Each associated virtual server must own a TLS identity.
+  requires_server_certificate: bool,
 }
 
 impl ListenerPropertyValues {
   pub(crate) fn new(
     transport_layer: TransportLayer,
     supports_hostname_routing: bool,
+    requires_server_certificate: bool,
   ) -> Self {
-    Self { transport_layer, supports_hostname_routing }
+    Self {
+      transport_layer,
+      supports_hostname_routing,
+      requires_server_certificate,
+    }
+  }
+
+  pub(crate) fn requires_server_certificate(&self) -> bool {
+    self.requires_server_certificate
   }
 
   pub(crate) fn transport_layer(&self) -> TransportLayer {
@@ -81,11 +92,12 @@ pub(crate) trait ListenerPropertiesProvider {
 
 /// Top-level listener configuration.
 #[derive(Deserialize, Default, Clone)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub(crate) struct ListenerConfig {
   pub(in crate::config) name: String,
   pub(in crate::config) kind: String,
   pub(in crate::config) addresses: Vec<String>,
+  #[serde(flatten)]
   pub(in crate::config) args: SerializedArgs,
 }
 

@@ -31,7 +31,7 @@ class TestMultipleWorkerThreads:
             config_path = create_test_config(proxy_port, temp_dir, server_threads=4)
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -90,7 +90,7 @@ class TestMultipleWorkerThreads:
 
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # Establish multiple tunnels
             for _ in range(5):

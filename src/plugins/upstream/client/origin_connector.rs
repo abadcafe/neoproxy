@@ -20,9 +20,9 @@ use tokio_rustls::client::TlsStream;
 use tower::Service;
 
 use super::observation::ConnectionObservation;
-use super::tcp_options::TcpOptions;
 use crate::io_stream::Io;
 use crate::plugins::upstream::config::Upstream;
+use crate::tcp_options::TcpOptions;
 
 #[derive(Clone)]
 pub(super) struct OriginConnector {

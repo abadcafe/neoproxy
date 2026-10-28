@@ -283,12 +283,9 @@ fn test_build_service_with_layers_reverse_order() {
 services:
 - name: test_svc
   kind: test.echo
-  args: null
   layers:
   - kind: test.layer_a
-    args: null
   - kind: test.layer_b
-    args: null
 servers: []
 "#,
   );
@@ -315,12 +312,9 @@ fn test_build_service_with_layers_markers_in_reverse_order() {
 services:
 - name: test_svc
   kind: test.echo
-  args: null
   layers:
   - kind: test.layer_a
-    args: null
   - kind: test.layer_b
-    args: null
 servers: []
 "#,
   );
@@ -367,10 +361,8 @@ fn test_build_listeners_caches_service_across_servers() {
 services:
 - name: shared_svc
   kind: test.echo
-  args: null
   layers:
   - kind: test.marker
-    args: null
 listeners:
 - name: main_listener
   kind: http
@@ -412,7 +404,6 @@ fn test_build_service_with_layers_success() {
 services:
 - name: my_echo
   kind: echo.echo
-  args: null
   layers: []
 servers: []
 "#,
@@ -430,7 +421,6 @@ fn test_build_service_with_layers_not_found_in_plugin() {
 services:
 - name: bad_svc
   kind: echo.nonexistent_service
-  args: null
   layers: []
 servers: []
 "#,
@@ -451,7 +441,6 @@ fn test_build_service_with_layers_plugin_not_found() {
 services:
 - name: svc
   kind: nonexistent_plugin.echo
-  args: null
   layers: []
 servers: []
 "#,
@@ -479,7 +468,6 @@ fn test_build_listeners_with_servers() {
 services:
 - name: my_echo
   kind: echo.echo
-  args: null
   layers: []
 listeners:
 - name: main

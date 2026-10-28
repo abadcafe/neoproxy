@@ -58,5 +58,5 @@ def running_proxy(
     _ = path.write_text(dict_to_yaml(_with_port(config, port)))
     with managed_processes() as start:
         process = start(str(path))
-        assert process.wait_ready(timeout=2), f"Proxy did not start on port {port}"
+        assert process.wait_ready(), f"Proxy did not start on port {port}"
         yield ProxyContext(process, port, str(directory))

@@ -214,3 +214,7 @@ fn main() -> Result<std::process::ExitCode> {
 
   Ok(std::process::ExitCode::from(exit_code as u8))
 }
+
+mod tcp_options;
+#[cfg(test)]
+mod tcp_options_tests;

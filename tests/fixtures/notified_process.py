@@ -44,11 +44,11 @@ class ProxyProcess(subprocess.Popen[bytes]):
             )
             _ = setup.pop_all()
 
-    def wait_ready(self, timeout: float = 5.0) -> bool:
-        """Wait for startup completion or process exit through kernel events."""
+    def wait_ready(self) -> bool:
+        """Wait for READY=1 or process exit, without a startup deadline."""
         if self.poll() is not None:
             return False
-        notified = self._readiness.wait_for(self.pid, timeout)
+        notified = self._readiness.wait_for(self.pid)
         running = self.poll() is None
         return notified and running
 

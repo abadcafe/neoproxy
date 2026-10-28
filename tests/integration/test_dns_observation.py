@@ -50,7 +50,7 @@ async def test_origin_records_successful_dns_metadata(
                     {
                         "name": "forward",
                         "kind": "upstream.upstream",
-                        "args": {"upstream": "direct"},
+                        "upstream": "direct",
                     }
                 ],
                 "servers": [
@@ -70,7 +70,7 @@ async def test_origin_records_successful_dns_metadata(
             )
             with managed_processes() as start:
                 proxy = start(str(path))
-                assert proxy.wait_ready(timeout=3)
+                assert proxy.wait_ready()
                 status, _, body = await curl_forward(
                     entry, f"https://origin.test:{peer.port}/"
                 )

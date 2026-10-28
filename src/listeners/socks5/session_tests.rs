@@ -80,6 +80,7 @@ async fn test_serve_translates_targets_and_metadata_then_maps_denied_response()
         connection,
         service,
         Duration::from_secs(1),
+        Duration::from_secs(3),
         "session-test".into()
       ),
       async {
@@ -106,6 +107,7 @@ async fn test_serve_invalid_handshake_closes_without_connect_reply() {
       connection,
       crate::server::placeholder_service(),
       Duration::from_secs(1),
+      Duration::from_secs(3),
       "session-test".into()
     ),
     async {
@@ -129,6 +131,7 @@ async fn test_serve_handshake_timeout_closes_idle_client() {
       connection,
       crate::server::placeholder_service(),
       Duration::from_secs(1),
+      Duration::from_secs(3),
       "session-test".into()
     ),
     async {

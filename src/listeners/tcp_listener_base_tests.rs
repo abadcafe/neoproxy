@@ -176,3 +176,52 @@ async fn test_stop_aborts_unresponsive_connection_after_grace_period() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn test_start_applies_keepalive_to_accepted_socket() {
+  tokio::task::LocalSet::new()
+    .run_until(async {
+      let address = available_address();
+      let base = TcpListenerBase::new().with_tcp_options(
+        crate::tcp_options::TcpOptions {
+          time: Some(std::time::Duration::from_secs(31)),
+          interval: Some(std::time::Duration::from_secs(7)),
+          retries: Some(4),
+        },
+      );
+      let (tx, rx) = tokio::sync::oneshot::channel();
+      let tx = Rc::new(std::cell::RefCell::new(Some(tx)));
+      let running = tokio::task::spawn_local(
+        base
+          .start(
+            &[address],
+            "keepalive",
+            Default::default(),
+            move |connection| {
+              let tx = tx.clone();
+              async move {
+                let socket = socket2::SockRef::from(&connection.stream);
+                assert!(socket.keepalive().unwrap());
+                assert_eq!(
+                  socket.tcp_keepalive_time().unwrap(),
+                  std::time::Duration::from_secs(31)
+                );
+                assert_eq!(
+                  socket.tcp_keepalive_interval().unwrap(),
+                  std::time::Duration::from_secs(7)
+                );
+                assert_eq!(socket.tcp_keepalive_retries().unwrap(), 4);
+                tx.borrow_mut().take().unwrap().send(()).unwrap();
+              }
+            },
+          )
+          .unwrap(),
+      );
+      let _client =
+        tokio::net::TcpStream::connect(address).await.unwrap();
+      rx.await.unwrap();
+      base.stop();
+      running.await.unwrap().unwrap();
+    })
+    .await;
+}

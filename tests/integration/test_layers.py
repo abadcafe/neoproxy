@@ -127,14 +127,12 @@ class TestAuthLayer:
                     "layers": [
                         {
                             "kind": "auth.basic_auth",
-                            "args": {
-                                "users": [
-                                    {
-                                        "username": "admin",
-                                        "password": "secret",
-                                    }
-                                ]
-                            },
+                            "users": [
+                                {
+                                    "username": "admin",
+                                    "password": "secret",
+                                }
+                            ],
                         }
                     ],
                 }
@@ -177,14 +175,12 @@ class TestAuthLayer:
                     "layers": [
                         {
                             "kind": "auth.basic_auth",
-                            "args": {
-                                "users": [
-                                    {
-                                        "username": "admin",
-                                        "password": "secret",
-                                    }
-                                ]
-                            },
+                            "users": [
+                                {
+                                    "username": "admin",
+                                    "password": "secret",
+                                }
+                            ],
                         }
                     ],
                 }
@@ -228,14 +224,12 @@ class TestAuthLayer:
                     "layers": [
                         {
                             "kind": "auth.basic_auth",
-                            "args": {
-                                "users": [
-                                    {
-                                        "username": "admin",
-                                        "password": "secret",
-                                    }
-                                ]
-                            },
+                            "users": [
+                                {
+                                    "username": "admin",
+                                    "password": "secret",
+                                }
+                            ],
                         }
                     ],
                 }
@@ -279,14 +273,12 @@ class TestAuthLayer:
                     "layers": [
                         {
                             "kind": "auth.basic_auth",
-                            "args": {
-                                "users": [
-                                    {
-                                        "username": "admin",
-                                        "password": "secret",
-                                    }
-                                ]
-                            },
+                            "users": [
+                                {
+                                    "username": "admin",
+                                    "password": "secret",
+                                }
+                            ],
                         }
                     ],
                 }
@@ -329,14 +321,12 @@ class TestAuthLayer:
                     "layers": [
                         {
                             "kind": "auth.basic_auth",
-                            "args": {
-                                "users": [
-                                    {
-                                        "username": "admin",
-                                        "password": "secret",
-                                    }
-                                ]
-                            },
+                            "users": [
+                                {
+                                    "username": "admin",
+                                    "password": "secret",
+                                }
+                            ],
                         }
                     ],
                 }
@@ -380,7 +370,7 @@ class TestAccessLogLayer:
                     "layers": [
                         {
                             "kind": "access_log.file",
-                            "args": _access_log_layer_args(
+                            **_access_log_layer_args(
                                 context_fields=["basic_auth.user"],
                             ),
                         }
@@ -425,7 +415,7 @@ class TestAccessLogLayer:
                     "layers": [
                         {
                             "kind": "access_log.file",
-                            "args": _access_log_layer_args(),
+                            **_access_log_layer_args(),
                         },
                     ],
                 }
@@ -469,7 +459,7 @@ class TestCombinedLayers:
                     "layers": [
                         {
                             "kind": "access_log.file",
-                            "args": _access_log_layer_args(
+                            **_access_log_layer_args(
                                 context_fields=[
                                     "basic_auth.user",
                                     "basic_auth.auth_type",
@@ -478,14 +468,12 @@ class TestCombinedLayers:
                         },
                         {
                             "kind": "auth.basic_auth",
-                            "args": {
-                                "users": [
-                                    {
-                                        "username": "admin",
-                                        "password": "secret",
-                                    }
-                                ]
-                            },
+                            "users": [
+                                {
+                                    "username": "admin",
+                                    "password": "secret",
+                                }
+                            ],
                         },
                     ],
                 }
@@ -547,11 +535,11 @@ class TestAccessLogErrorHandling:
                 {
                     "name": "tcp_svc",
                     "kind": "upstream.upstream",
-                    "args": {"upstream": "direct"},
+                    "upstream": "direct",
                     "layers": [
                         {
                             "kind": "access_log.file",
-                            "args": _access_log_layer_args(),
+                            **_access_log_layer_args(),
                         },
                     ],
                 }
@@ -632,18 +620,16 @@ class TestLayerOrdering:
                     "layers": [
                         {
                             "kind": "access_log.file",
-                            "args": _access_log_layer_args(),
+                            **_access_log_layer_args(),
                         },
                         {
                             "kind": "auth.basic_auth",
-                            "args": {
-                                "users": [
-                                    {
-                                        "username": "admin",
-                                        "password": "secret",
-                                    }
-                                ]
-                            },
+                            "users": [
+                                {
+                                    "username": "admin",
+                                    "password": "secret",
+                                }
+                            ],
                         },
                     ],
                 }
@@ -697,7 +683,7 @@ class TestMultiThreadedAccessLog:
                     "layers": [
                         {
                             "kind": "access_log.file",
-                            "args": _access_log_layer_args(),
+                            **_access_log_layer_args(),
                         },
                     ],
                 }

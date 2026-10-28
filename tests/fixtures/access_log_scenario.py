@@ -58,7 +58,7 @@ def write_config(
         layer_args: ConfigDict = {"writer": path_prefix}
         if context_fields:
             layer_args["context_fields"] = [field for field in context_fields]
-        layers.append({"kind": "access_log.file", "args": layer_args})
+        layers.append({"kind": "access_log.file", **layer_args})
 
     config: ConfigDict = {
         "listeners": [

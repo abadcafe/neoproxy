@@ -73,25 +73,23 @@ servers:
   hostnames: [localhost, a.test]
   listeners: [shared]
   service: echo
-  tls:
-    certificates:
-    - cert_path: {certificate}
-      key_path: {key}
-    client_ca_certs: [{authorities[0][0]}]
+  certificates:
+  - cert_path: {certificate}
+    key_path: {key}
+  client_ca_certs: [{authorities[0][0]}]
 - name: b
   hostnames: [b.test]
   listeners: [shared]
   service: echo
-  tls:
-    certificates:
-    - cert_path: {certificate}
-      key_path: {key}
-    client_ca_certs: [{authorities[1][0]}]
+  certificates:
+  - cert_path: {certificate}
+    key_path: {key}
+  client_ca_certs: [{authorities[1][0]}]
 """)
     process = start_proxy(str(config))
     try:
         if kind == "http3":
-            assert process.wait_ready(timeout=5.0)
+            assert process.wait_ready()
             for hostname in ("a.test", "b.test"):
                 asyncio.run(
                     _request_h3(
@@ -99,7 +97,7 @@ servers:
                     )
                 )
         else:
-            assert process.wait_ready(timeout=5.0)
+            assert process.wait_ready()
             context = ssl.create_default_context(cafile=server_ca)
             context.load_cert_chain(client_certificate, client_key)
             for hostname in ("a.test", "b.test"):

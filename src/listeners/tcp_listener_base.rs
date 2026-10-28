@@ -1,8 +1,8 @@
 //! module: tcp_listener_base
 //! responsibility: own TCP listener acceptance through connection
-//! shutdown public operations: TcpListenerBase::{new, start, stop},
-//! TcpConnection data entities: TcpListenerBase, TcpConnection
-//! tests: tcp_listener_base_tests.rs
+//! shutdown public operations: TcpListenerBase::{new, with_tcp_options,
+//! start, stop}, TcpConnection data entities: TcpListenerBase,
+//! TcpConnection tests: tcp_listener_base_tests.rs
 
 use std::cell::RefCell;
 use std::future::{Future, poll_fn};
@@ -34,6 +34,7 @@ pub(crate) struct TcpListenerBase {
   listening_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
   stream_tracker: Rc<StreamTracker>,
   graceful_shutdown_timeout: Duration,
+  tcp_options: crate::tcp_options::TcpOptions,
 }
 
 impl TcpListenerBase {
@@ -43,7 +44,16 @@ impl TcpListenerBase {
       listening_set: Rc::new(RefCell::new(task::JoinSet::new())),
       stream_tracker: Rc::new(StreamTracker::new()),
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
+      tcp_options: Default::default(),
     }
+  }
+
+  pub(crate) fn with_tcp_options(
+    mut self,
+    options: crate::tcp_options::TcpOptions,
+  ) -> Self {
+    self.tcp_options = options;
+    self
   }
 
   /// Bind every address before accepting any connections. A startup
@@ -75,6 +85,7 @@ impl TcpListenerBase {
         })
         .collect::<Result<Vec<_>>>()?
     };
+    let tcp_options = self.tcp_options;
     let tasks = listeners.into_iter().map(|listener| {
       let tracker = self.stream_tracker.clone();
       let shutdown = tracker.shutdown_handle();
@@ -90,6 +101,10 @@ impl TcpListenerBase {
           };
           let (stream, peer_addr) = accepted
             .with_context(|| format!("{name} accept failed on {address}"))?;
+          if let Err(error) = tcp_options.apply(&stream) {
+            warn!("{name} failed to configure TCP connection from {peer_addr}: {error}");
+            continue;
+          }
           let local_addr = match stream.local_addr() {
             Ok(address) => address,
             Err(error) => {

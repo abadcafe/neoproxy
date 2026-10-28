@@ -56,29 +56,23 @@ listeners:
   - name: <监听器名称>
     kind: <监听器类型>     # http / https / http3 / socks5
     addresses: ["host:port"]
-    args:
-      # 监听器特定参数
-
+    # 监听器特定参数
 # 服务定义
 services:
   - name: <服务名称>
     kind: <插件名>.<服务名>
-    args:
-      # 服务特定参数
+    # 服务特定参数
     layers:                  # 可选中间件层
       - kind: <插件名>.<层名>
-        args:
-          # 层特定参数
-
+        # 层特定参数
 # 服务器定义（关联服务和监听器）
 servers:
   - name: <服务器名称>
     hostnames: []            # 可选虚拟主机名
-    tls:                     # 可选 TLS 配置
-      certificates:
-        - cert_path: <路径>
-          key_path: <路径>
-      client_ca_certs: []    # 默认空列表，不要求客户端证书；非空启用 mTLS
+    certificates:
+      - cert_path: <路径>
+        key_path: <路径>
+    client_ca_certs: []    # 默认空列表，不要求客户端证书；非空启用 mTLS
     listeners:
       - <引用监听器名称>
     service: <引用的服务名称>
@@ -179,11 +173,76 @@ plugins:
 
 ---
 
+## 配置结构
+
+`listeners[]`、`services[]` 和 `services[].layers[]` 均采用扁平配置，协议或插件参数直接
+与 `kind` 同级。`name`、`kind`、`addresses` / `layers` 是容器字段，其余字段交给对应
+类型严格校验；未知字段和不适用协议的字段会导致启动失败。TLS 证书仍属于
+`servers[].certificates` 和 `servers[].client_ca_certs`，认证仍属于 `auth.basic_auth`，不迁移到 listener。
+
+每个 server 只要关联任意 HTTPS 或 HTTP/3 listener，就必须配置非空的 certificates；
+默认 server（hostnames: []）以及同时关联 HTTP/SOCKS5 的 server 也遵守此规则。
+同一 listener 上其他 server 的证书不能替代本 server 的配置，但多个 server 可以引用相同证书文件。
+缺失证书在启动 worker、绑定监听地址之前报错，并指出 server、listener 和配置字段。
+仅关联 HTTP/SOCKS5 时可以省略证书；client_ca_certs 始终可选。
+
+
+```yaml
+plugins:
+  upstream:
+    upstreams:
+      - name: direct
+  auth: {}
+services:
+  - name: proxy
+    kind: upstream.upstream
+    upstream: direct
+    layers:
+      - kind: auth.basic_auth
+        users:
+          - username: alice
+            password: secret
+listeners:
+  - name: http
+    kind: http
+    addresses: ["127.0.0.1:8080"]
+    header_read_timeout: 30s
+    tcp_accept_retry_delay: 1s
+    tcp_keep_alive_time: 60s
+    tcp_keep_alive_interval: 10s
+    tcp_keep_alive_retries: 3
+servers:
+  - name: proxy
+    listeners: [http]
+    service: proxy
+```
+
+upstream 的 `quic_connection_send_window`、`quic_connection_receive_window` 和
+`quic_stream_receive_window` 统一支持 `10MiB`、`1MiB` 等尺寸字符串，也支持字节整数，
+与 listener 使用相同格式。这三个字段均按插件 → upstream → address 继承。
+其中 `quic_stream_receive_window`
+未配置时沿用 Quinn 默认值。它控制从上游接收的单条流，包括普通响应及 CONNECT 隧道。
+例如插件级 `quic_stream_receive_window: 1MiB`，可在 upstream 或 address 同名字段覆盖。
+`1MiB` 等于 1048576 字节；`1MB` 等于 1000000 字节。upstream 的
+`quic_connection_max_concurrent_bidi_streams` 同样取消 10000 上限，使用 `1..=2^60` 范围。
+
 ## Listener 详解
 
-HTTP、HTTPS、HTTP/3 使用 `args.header_read_timeout` 限制请求头读取时间（默认 `30s`，必须为正且可表示的时长）。HTTP/3 超时只取消对应请求流，其他流继续处理。
+HTTP、HTTPS、HTTP/3 使用 `header_read_timeout` 限制请求头读取时间（默认 `30s`，必须为正且可表示的时长）。HTTP/3 超时只取消对应请求流，其他流继续处理。
 
-HTTP、HTTPS、SOCKS5 共用 TCP accept 恢复策略：连接中止、信号中断及待接收连接的网络错误立即继续，不做定时退避；文件描述符或内存资源耗尽时记 ERROR 日志，并按 `args.accept_retry_delay` 退避后重试（默认 `1s`）。监听描述符无效、不是 socket 或已不处于监听状态时，返回原始错误，由监督层停止服务并以非零状态退出。其他未知 I/O 错误记 ERROR 并退避，避免忙循环；所有等待均可被 shutdown 打断。
+HTTP、HTTPS、SOCKS5 共用 TCP accept 恢复策略：连接中止、信号中断及待接收连接的网络错误立即继续，不做定时退避；文件描述符或内存资源耗尽时记 ERROR 日志，并按 `tcp_accept_retry_delay` 退避后重试（默认 `1s`）。监听描述符无效、不是 socket 或已不处于监听状态时，返回原始错误，由监督层停止服务并以非零状态退出。其他未知 I/O 错误记 ERROR 并退避，避免忙循环；所有等待均可被 shutdown 打断。
+
+HTTP、HTTPS、SOCKS5 还支持以下 TCP 参数，作用于 accept 得到的客户端 socket。
+任一项配置即启用 TCP keepalive；未配置的项沿用操作系统值，三项均未配置时不主动启用。
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `tcp_keep_alive_time` | `Duration?` | 系统值 | 开始保活探测前的空闲时间 |
+| `tcp_keep_alive_interval` | `Duration?` | 系统值 | 探测间隔 |
+| `tcp_keep_alive_retries` | `u32?` | 系统值 | 探测重试次数，必须大于零 |
+
+时间参数至少 1 秒，并须能表示为正 `u32` 秒数。TCP listener 与 upstream 共用 socket
+选项实现；全部 TCP 连接继续启用 `TCP_NODELAY`。
 
 ### 1. http (HTTP/1.1)
 
@@ -196,7 +255,7 @@ HTTP/1.1 监听器，支持 CONNECT 方法和基于 Host 头的虚拟主机路�
 1. 支持 HTTP/1.0 和 HTTP/1.1；HTTP/1.1 必须恰好有一个合法 Host 字段。
 2. 绝对 URI 和 CONNECT 使用目标 authority 路由；普通 origin-form 请求使用 Host。HTTP/1 绝对 URI 中的 authority 优先于 Host，转发时重新生成 Host。
 3. 重复 Host、非法 authority 返回 `400 Bad Request`；没有可确定 authority 的请求也返回 400。
-4. `args.header_read_timeout` 默认为 `30s`，限制请求头读取时间。
+4. `header_read_timeout` 默认为 `30s`，限制请求头读取时间。
 
 #### 配置参数
 
@@ -204,7 +263,7 @@ HTTP/1.1 监听器，支持 CONNECT 方法和基于 Host 头的虚拟主机路�
 |------|------|------|------|
 | `addresses` | `[String]` | 是 | 监听地址列表，格式 `host:port` |
 | `header_read_timeout` | `Duration` | 否 | HTTP/1 请求头读取超时，默认 `30s` |
-| `accept_retry_delay` | `Duration` | 否 | accept 资源耗尽或未知 I/O 错误后的重试退避，默认 `1s`；必须大于零且能安全计时 |
+| `tcp_accept_retry_delay` | `Duration` | 否 | accept 资源耗尽或未知 I/O 错误后的重试退避，默认 `1s`；必须大于零且能安全计时 |
 
 #### 配置示例
 
@@ -214,8 +273,7 @@ listeners:
     kind: http
     addresses:
       - "0.0.0.0:8080"
-    args:
-      accept_retry_delay: "1s"
+    tcp_accept_retry_delay: "1s"
 ```
 
 #### 使用方式
@@ -237,7 +295,7 @@ HTTPS (HTTP/1.1 over TLS) 监听器，支持 SNI 证书选择和客户端证书�
 1. HTTP 路由和 Host 校验遵循上述 HTTP 规则。
 2. TLS 握手并发进行，不阻塞其他客户端连接。
 3. SNI 在当前 listener 的关联 Server 中按 `hostnames` 选择 Server，再选择该 Server 的证书；无 SNI 或未匹配时使用唯一的 `hostnames: []` 默认 Server，没有默认 Server 或选中 Server 没有兼容证书则握手失败。客户端 CA 仍由关联 Server 向 listener 汇总：提交的客户端证书在 TLS 握手中使用 CA 并集验证，不可信则握手失败；允许匿名握手。请求阶段按目标 authority/Host 在同一 listener 内另行选择 Server；其 `client_ca_certs` 非空但连接未提供证书时，由 listener 直接返回 `403 Forbidden`。Service 不重验证书，不要求请求目标等于 SNI。
-4. `args.header_read_timeout` 默认为 `30s`，独立于 TLS 握手超时。
+4. `header_read_timeout` 默认为 `30s`，独立于 TLS 握手超时。
 
 #### 配置参数
 
@@ -246,7 +304,7 @@ HTTPS (HTTP/1.1 over TLS) 监听器，支持 SNI 证书选择和客户端证书�
 | `addresses` | `[String]` | 是 | - | 监听地址列表 |
 | `tls_handshake_timeout` | `Duration` | 否 | `5s` | TLS 握手超时，防止慢客户端占用连接 |
 | `header_read_timeout` | `Duration` | 否 | `30s` | HTTP/1 请求头读取超时 |
-| `accept_retry_delay` | `Duration` | 否 | `1s` | accept 资源耗尽或未知 I/O 错误后的重试退避，必须大于零且能安全计时 |
+| `tcp_accept_retry_delay` | `Duration` | 否 | `1s` | accept 资源耗尽或未知 I/O 错误后的重试退避，必须大于零且能安全计时 |
 
 TLS 证书在服务器（Server）级别配置，多个服务器可以共享同一监听器地址，通过 SNI 区分证书。
 
@@ -257,18 +315,15 @@ listeners:
   - name: https_main
     kind: https
     addresses: ["0.0.0.0:8443"]
-    args:
-      tls_handshake_timeout: "5s"
-      accept_retry_delay: "1s"
-
+    tls_handshake_timeout: "5s"
+    tcp_accept_retry_delay: "1s"
 servers:
   - name: my_server
-    tls:
-      certificates:
-        - cert_path: /path/to/cert.pem
-          key_path: /path/to/key.pem
-      client_ca_certs:         # 可选，用于 mTLS
-        - /path/to/client-ca.crt
+    certificates:
+      - cert_path: /path/to/cert.pem
+        key_path: /path/to/key.pem
+    client_ca_certs:         # 可选，用于 mTLS
+      - /path/to/client-ca.crt
     listeners:
       - https_main
     service: tunnel
@@ -303,20 +358,23 @@ HTTP/3 (QUIC) 监听器，提供更快的连接建立和更好的弱网表现。
 
 #### 配置参数
 
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `addresses` | `[String]` | 是 | 监听地址列表 |
-| `quic` | `Object` | 否 | QUIC 协议参数 |
-
-#### QUIC 参数
+所有参数直接与 `name`、`kind`、`addresses` 同级，不再设置 `args` 或 `quic` 配置块。
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `max_concurrent_bidi_streams` | `u64` | 100 | 最大并发双向流 (1-10000) |
-| `max_idle_timeout` | `Duration` | `5s` | 最大空闲超时 |
-| `initial_mtu` | `u16` | 1200 | 初始 MTU (1200-9000) |
-| `send_window` | `Byte` | `10MiB` | 发送窗口大小 |
-| `receive_window` | `Byte` | `10MiB` | 接收窗口大小 |
+| `addresses` | `[String]` | 必填 | UDP 监听地址 |
+| `header_read_timeout` | `Duration` | `30s` | 每条请求流读取请求头的期限 |
+| `quic_connection_handshake_timeout` | `Duration` | `5s` | 接受连接后等待 QUIC/TLS 握手的期限，超时释放握手连接 |
+| `quic_connection_keep_alive_interval` | `Duration?` | 关闭 | 主动保活间隔；配置时必须为正且小于连接空闲超时 |
+| `quic_connection_idle_timeout` | `Duration` | `5s` | 连接空闲超时，实际期限还受对端参数约束 |
+| `quic_connection_max_concurrent_bidi_streams` | `u64` | `100` | 允许对端打开的并发双向流，范围 `1..=2^60`；不再限制为 10000 |
+| `quic_connection_initial_mtu` | `u16` | `1200` | 初始 MTU，范围 1200–9000 字节 |
+| `quic_connection_send_window` | `Byte` | `10MiB` | 连接级发送窗口 |
+| `quic_connection_receive_window` | `Byte` | `10MiB` | 连接级接收窗口 |
+| `quic_stream_receive_window` | `Byte?` | Quinn 默认值 | 单条 stream 接收窗口，正值且可表示为 QUIC 可变整数 |
+
+连接级窗口在同一连接的请求及隧道之间共享，stream 接收窗口独立约束每条流。
+没有独立的 `quic_stream_send_window` 配置；每条流的发送额度由对端接收窗口约束。
 
 #### 配置示例
 
@@ -325,16 +383,18 @@ listeners:
   - name: http3_main
     kind: http3
     addresses: ["0.0.0.0:443"]
-    args:
-      quic:
-        max_concurrent_bidi_streams: 100
-        max_idle_timeout: "5s"
-        initial_mtu: 1200
-        send_window: "10MiB"
-        receive_window: "10MiB"
+    header_read_timeout: 30s
+    quic_connection_handshake_timeout: 5s
+    quic_connection_keep_alive_interval: 3s
+    quic_stream_receive_window: 1MiB
+    quic_connection_max_concurrent_bidi_streams: 100
+    quic_connection_idle_timeout: "5s"
+    quic_connection_initial_mtu: 1200
+    quic_connection_send_window: "10MiB"
+    quic_connection_receive_window: "10MiB"
 ```
 
-TLS 证书通过服务器级别的 `tls` 配置（同 https 监听器），http3 依赖相同机制。
+TLS 证书通过服务器级别的 `certificates`、`client_ca_certs` 配置（同 https 监听器），http3 依赖相同机制。
 
 ---
 
@@ -347,8 +407,12 @@ SOCKS5 监听器，使用 RFC 1928/1929 报文；认证执行时机遵循下述�
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | `addresses` | `[String]` | 是 | - | 监听地址列表 |
-| `handshake_timeout` | `Duration` | 否 | `3s` | 协议握手、后续命令读取各自的超时 |
-| `accept_retry_delay` | `Duration` | 否 | `1s` | accept 资源耗尽或未知 I/O 错误后的重试退避，必须大于零且能安全计时 |
+| `socks5_handshake_timeout` | `Duration` | 否 | `3s` | 方法协商、凭据接收及确认回复的整体超时 |
+| `socks5_connect_timeout` | `Duration` | 否 | `3s` | 握手完成后，等待并读完客户端 CONNECT 命令及目标地址的整体超时，不包含上游建联 |
+| `tcp_accept_retry_delay` | `Duration` | 否 | `1s` | accept 资源耗尽或未知 I/O 错误后的重试退避，必须大于零且能安全计时 |
+
+两个超时独立配置、分阶段计时，阶段内收到部分报文不会重置截止时间。
+未配置 `socks5_connect_timeout` 时始终使用 `3s`，不继承 `socks5_handshake_timeout`。
 
 **不可违背的产品约束：SOCKS5 与 HTTP 必须统一经过请求中间件认证。**
 这是一项有意的产品设计，不是缺陷、临时兼容或待修复项，不得改成握手阶段验证凭据，
@@ -364,7 +428,6 @@ SOCKS5 监听器，使用 RFC 1928/1929 报文；认证执行时机遵循下述�
 及其他中间件。配置认证时，缺失或错误凭据在此返回 HTTP 407，映射成 SOCKS5 CONNECT
 `REP=0x02` 并关闭连接，不建立上游隧道；未配置认证时无需验证凭据。
 凭据通过类型化扩展传递，保留用户名中的冒号；访问日志可记录被拒绝的 CONNECT。
-
 
 服务层 `users` 条目格式：
 
@@ -391,10 +454,9 @@ listeners:
   - name: socks5_main
     kind: socks5
     addresses: ["0.0.0.0:1080"]
-    args:
-      handshake_timeout: "15s"
-      accept_retry_delay: "1s"
-
+    socks5_handshake_timeout: "15s"
+    socks5_connect_timeout: "3s"
+    tcp_accept_retry_delay: "1s"
 plugins:
   auth: {}
   upstream:
@@ -403,14 +465,12 @@ plugins:
 services:
   - name: proxy
     kind: upstream.upstream
-    args:
-      upstream: direct
+    upstream: direct
     layers:
       - kind: auth.basic_auth
-        args:
-          users:
-            - username: admin
-              password: secret123
+        users:
+          - username: admin
+            password: secret123
 servers:
   - name: socks_proxy
     listeners: [socks5_main]
@@ -483,9 +543,7 @@ plugins:
 services:
   - name: tunnel
     kind: upstream.upstream
-    args:
-      upstream: direct
-
+    upstream: direct
 servers:
   - name: proxy
     listeners:
@@ -524,9 +582,7 @@ listeners:
 services:
   - name: chain
     kind: upstream.upstream
-    args:
-      upstream: remote_relay
-
+    upstream: remote_relay
 servers:
   - name: local_proxy
     listeners:
@@ -550,15 +606,12 @@ listeners:
 services:
   - name: tunnel
     kind: upstream.upstream
-    args:
-      upstream: direct
-
+    upstream: direct
 servers:
   - name: remote_proxy
-    tls:
-      certificates:
-        - cert_path: /etc/neoproxy/cert.pem
-          key_path: /etc/neoproxy/key.pem
+    certificates:
+      - cert_path: /etc/neoproxy/cert.pem
+        key_path: /etc/neoproxy/key.pem
     listeners:
       - http3_main
     service: tunnel
@@ -616,14 +669,12 @@ HTTP Basic 代理认证层，验证 `Proxy-Authorization` 请求头。
 services:
   - name: tunnel
     kind: upstream.upstream
-    args:
-      upstream: direct
+    upstream: direct
     layers:
       - kind: auth.basic_auth
-        args:
-          users:
-            - username: "admin"
-              password: "secret"
+        users:
+          - username: "admin"
+            password: "secret"
 ```
 
 ### 2. access_log.file
@@ -639,16 +690,14 @@ services:
 services:
   - name: tunnel
     kind: upstream.upstream
-    args:
-      upstream: direct
+    upstream: direct
     layers:
       - kind: access_log.file
-        args:
-          writer: "logs/access.log"
-          context_fields:
-            - "request.id"
-            - "basic_auth.user"
-            - "upstream.connect_ms"
+        writer: "logs/access.log"
+        context_fields:
+          - "request.id"
+          - "basic_auth.user"
+          - "upstream.connect_ms"
 ```
 
 请求入口从 `X-Request-ID` 读取已有值；缺失时使用 worker 本地随机密钥和递增计数器，
@@ -693,20 +742,18 @@ access log 继续在 service 返回响应头时生成；完整正文或 tunnel �
 servers:
   - name: api
     hostnames: ["api.example.com"]
-    tls:
-      certificates:
-        - cert_path: conf/certs/api.crt
-          key_path: conf/certs/api.key
+    certificates:
+      - cert_path: conf/certs/api.crt
+        key_path: conf/certs/api.key
     listeners:
       - https_main
     service: api_service
 
   - name: app
     hostnames: ["*.app.example.com"]
-    tls:
-      certificates:
-        - cert_path: conf/certs/app.crt
-          key_path: conf/certs/app.key
+    certificates:
+      - cert_path: conf/certs/app.crt
+        key_path: conf/certs/app.key
     listeners:
       - https_main
     service: app_service
@@ -754,20 +801,16 @@ listeners:
 services:
   - name: tunnel
     kind: upstream.upstream
-    args:
-      upstream: direct
+    upstream: direct
     layers:
       - kind: auth.basic_auth
-        args:
-          users:
-            - username: admin
-              password: secret123
+        users:
+          - username: admin
+            password: secret123
       - kind: access_log.file
-        args:
-          writer: "logs/access.log"
-          context_fields:
-            - "basic_auth.user"
-
+        writer: "logs/access.log"
+        context_fields:
+          - "basic_auth.user"
 servers:
   - name: http_proxy
     listeners:
@@ -793,9 +836,7 @@ listeners:
 services:
   - name: tunnel
     kind: upstream.upstream
-    args:
-      upstream: direct
-
+    upstream: direct
 servers:
   - name: socks5_proxy
     listeners:
@@ -817,8 +858,7 @@ listeners:
   - name: https_main
     kind: https
     addresses: ["0.0.0.0:443"]
-    args:
-      tls_handshake_timeout: "5s"
+    tls_handshake_timeout: "5s"
   - name: http3_main
     kind: http3
     addresses: ["0.0.0.0:443"]
@@ -826,23 +866,19 @@ listeners:
 services:
   - name: tunnel
     kind: upstream.upstream
-    args:
-      upstream: direct
+    upstream: direct
     layers:
       - kind: auth.basic_auth
-        args:
-          users:
-            - username: admin
-              password: secret123
-
+        users:
+          - username: admin
+            password: secret123
 servers:
   - name: secure_proxy
-    tls:
-      certificates:
-        - cert_path: /etc/neoproxy/cert.pem
-          key_path: /etc/neoproxy/key.pem
-      client_ca_certs:
-        - /etc/neoproxy/client-ca.crt
+    certificates:
+      - cert_path: /etc/neoproxy/cert.pem
+        key_path: /etc/neoproxy/key.pem
+    client_ca_certs:
+      - /etc/neoproxy/client-ca.crt
     listeners:
       - https_main
       - http3_main
@@ -876,9 +912,7 @@ listeners:
 services:
   - name: chain
     kind: upstream.upstream
-    args:
-      upstream: remote
-
+    upstream: remote
 servers:
   - name: local_proxy
     listeners:
@@ -904,15 +938,12 @@ listeners:
 services:
   - name: tunnel
     kind: upstream.upstream
-    args:
-      upstream: direct
-
+    upstream: direct
 servers:
   - name: remote_proxy
-    tls:
-      certificates:
-        - cert_path: /etc/neoproxy/cert.pem
-          key_path: /etc/neoproxy/key.pem
+    certificates:
+      - cert_path: /etc/neoproxy/cert.pem
+        key_path: /etc/neoproxy/key.pem
     listeners:
       - http3_main
     service: tunnel
@@ -1027,9 +1058,11 @@ uv run pytest --durations=20 --junitxml=tmp/pytest-timings.xml
 
 测试进程通过 `tmp/test-port-counter` 的文件锁协调端口，端口仍需通过 IPv4/IPv6、
 TCP/UDP 可用性探测。启动就绪改为专用通知：`start_proxy()` 返回拥有通知通道的
-`ProxyProcess`，调用 `wait_ready(timeout=...)` 等待结果。全部 worker 的所有 listener
+`ProxyProcess`，调用 `wait_ready()` 等待结果。全部 worker 的所有 listener
 完成绑定后，NeoProxy 向 `NOTIFY_SOCKET` 指定的 Unix datagram socket 发送一次
 `READY=1`。任何 worker 初始化失败或启动期间退出，都不会发出成功通知。
+就绪等待不设启动时限，不使用 sleep 或端口轮询：收到 `READY=1` 才继续，
+收到进程退出事件则立即报告准备失败。链式测试在全部代理进程通知就绪后才发送请求并开始计时。
 
 父进程通过内核事件同时等待就绪消息和子进程退出：Linux 使用 pidfd，macOS 使用
 kqueue 的 `EVFILT_PROC/NOTE_EXIT`。两者共用通知协议和截止时间处理；超时可以再次

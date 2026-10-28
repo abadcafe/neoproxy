@@ -87,19 +87,18 @@ listeners:
 services:
 - name: direct
   kind: upstream.upstream
-  args: {{upstream: direct}}
+  upstream: direct
 servers:
 - name: main
   service: direct
   listeners: [main]
-  tls:
-    certificates:
-    - cert_path: {certificate}
-      key_path: {key}
+  certificates:
+  - cert_path: {certificate}
+    key_path: {key}
 """)
     with managed_processes() as start:
         process = start(str(path))
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         for limit, expected_status in [("0", 204), ("2", 200)]:
             if kind == "http":
                 response = send_raw_request(
@@ -139,6 +138,6 @@ def test_http_listener_routes_hostless_http10_to_default(tmp_path: Path) -> None
     port = get_unique_port()
     with managed_processes() as start:
         process = start(create_echo_config(port, str(tmp_path)))
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         response = send_raw_request("127.0.0.1", port, b"GET / HTTP/1.0\r\n\r\n")
         assert int(response.split()[1]) == 200

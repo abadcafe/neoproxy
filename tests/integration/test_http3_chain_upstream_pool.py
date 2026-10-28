@@ -97,9 +97,7 @@ class TestConnectionReuseWithinService:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert upstream_proc.wait_ready(timeout=5.0), (
-                "Upstream H3 listener did not start"
-            )
+            assert upstream_proc.wait_ready(), "Upstream H3 listener did not start"
 
             chain_config = create_http3_chain_config(
                 http_port=http_port,
@@ -119,7 +117,7 @@ class TestConnectionReuseWithinService:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            _ = entry_proc.wait_ready(timeout=10)
+            _ = entry_proc.wait_ready()
 
             # Use local echo target to avoid external network
             _, target_socket = create_target_server(
@@ -179,9 +177,7 @@ class TestMultipleServicesShareUpstream:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert upstream_proc.wait_ready(timeout=5.0), (
-                "Upstream H3 listener did not start"
-            )
+            assert upstream_proc.wait_ready(), "Upstream H3 listener did not start"
 
             # Build config with two services using the same upstream
             log_dir = os.path.join(temp_dir, "logs")
@@ -211,13 +207,10 @@ listeners:
 services:
   - name: chain_1
     kind: upstream.upstream
-    args:
-      upstream: shared_upstream
+    upstream: shared_upstream
   - name: chain_2
     kind: upstream.upstream
-    args:
-      upstream: shared_upstream
-
+    upstream: shared_upstream
 servers:
   - name: server_1
     listeners: ["http_1"]
@@ -236,8 +229,8 @@ servers:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            _ = entry_proc.wait_ready(timeout=10)
-            _ = entry_proc.wait_ready(timeout=5)
+            _ = entry_proc.wait_ready()
+            _ = entry_proc.wait_ready()
 
             # Both services should work
             _, target_socket = create_target_server(
@@ -303,9 +296,7 @@ class TestThreeLevelConfigInheritance:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert upstream_proc.wait_ready(timeout=5.0), (
-                "Upstream H3 listener did not start"
-            )
+            assert upstream_proc.wait_ready(), "Upstream H3 listener did not start"
 
             # Plugin-level has WRONG user, address-level has CORRECT user
             config_content = f"""server_threads: 1
@@ -336,9 +327,7 @@ listeners:
 services:
   - name: chain
     kind: upstream.upstream
-    args:
-      upstream: test_upstream
-
+    upstream: test_upstream
 servers:
   - name: http_proxy
     listeners: ["http_main"]
@@ -354,7 +343,7 @@ servers:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            _ = entry_proc.wait_ready(timeout=10)
+            _ = entry_proc.wait_ready()
 
             _, target_socket = create_target_server(
                 "127.0.0.1", target_port, http_echo_handler
@@ -407,9 +396,7 @@ servers:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert upstream_proc.wait_ready(timeout=5.0), (
-                "Upstream H3 listener did not start"
-            )
+            assert upstream_proc.wait_ready(), "Upstream H3 listener did not start"
 
             # Plugin-level user, address has NO user -> inherits from plugin
             config_content = f"""server_threads: 1
@@ -437,9 +424,7 @@ listeners:
 services:
   - name: chain
     kind: upstream.upstream
-    args:
-      upstream: test_upstream
-
+    upstream: test_upstream
 servers:
   - name: http_proxy
     listeners: ["http_main"]
@@ -455,7 +440,7 @@ servers:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            _ = entry_proc.wait_ready(timeout=10)
+            _ = entry_proc.wait_ready()
 
             _, target_socket = create_target_server(
                 "127.0.0.1", target_port, http_echo_handler
@@ -507,9 +492,7 @@ servers:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert upstream_proc.wait_ready(timeout=5.0), (
-                "Upstream H3 listener did not start"
-            )
+            assert upstream_proc.wait_ready(), "Upstream H3 listener did not start"
 
             # Plugin has WRONG user, upstream has CORRECT user,
             # address has NO user -> inherits from upstream
@@ -541,9 +524,7 @@ listeners:
 services:
   - name: chain
     kind: upstream.upstream
-    args:
-      upstream: test_upstream
-
+    upstream: test_upstream
 servers:
   - name: http_proxy
     listeners: ["http_main"]
@@ -559,7 +540,7 @@ servers:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            _ = entry_proc.wait_ready(timeout=10)
+            _ = entry_proc.wait_ready()
 
             _, target_socket = create_target_server(
                 "127.0.0.1", target_port, http_echo_handler
@@ -619,7 +600,7 @@ class TestWRRLoadBalancingWithPool:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert upstream_proc_1.wait_ready(timeout=5.0), "Upstream 1 did not start"
+            assert upstream_proc_1.wait_ready(), "Upstream 1 did not start"
 
             upstream_config_2 = create_http3_listener_config(
                 h3_port_2, cert_path, key_path, temp_dir
@@ -630,7 +611,7 @@ class TestWRRLoadBalancingWithPool:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert upstream_proc_2.wait_ready(timeout=5.0), "Upstream 2 did not start"
+            assert upstream_proc_2.wait_ready(), "Upstream 2 did not start"
 
             # Config with two addresses, weights 2:1
             config_content = f"""server_threads: 2
@@ -659,9 +640,7 @@ listeners:
 services:
   - name: chain
     kind: upstream.upstream
-    args:
-      upstream: wrr_upstream
-
+    upstream: wrr_upstream
 servers:
   - name: http_proxy
     listeners: ["http_main"]
@@ -677,7 +656,7 @@ servers:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            _ = entry_proc.wait_ready(timeout=10)
+            _ = entry_proc.wait_ready()
 
             # Send 6 requests to local echo target
             _, target_socket = create_target_server(
@@ -745,9 +724,7 @@ listeners:
 services:
   - name: chain
     kind: upstream.upstream
-    args:
-      upstream: nonexistent_upstream
-
+    upstream: nonexistent_upstream
 servers:
   - name: http_proxy
     listeners: ["http_main"]
@@ -765,9 +742,7 @@ servers:
         )
         try:
             # Proxy should NOT start — upstream validation fails at startup
-            assert not proc.wait_ready(timeout=5.0), (
-                "Proxy should NOT start with missing upstream"
-            )
+            assert not proc.wait_ready(), "Proxy should NOT start with missing upstream"
             stdout, stderr = proc.communicate(timeout=5)
             assert proc.returncode == 2, (stdout, stderr)
         finally:
@@ -796,9 +771,7 @@ listeners:
 services:
   - name: chain
     kind: upstream.upstream
-    args:
-      upstream: ""
-
+    upstream: ""
 servers:
   - name: http_proxy
     listeners: ["http_main"]
@@ -855,8 +828,7 @@ listeners:
 services:
   - name: c
     kind: upstream.upstream
-    args:
-      upstream: u
+    upstream: u
 servers:
   - name: s
     listeners: ["http"]
@@ -872,9 +844,7 @@ servers:
             text=False,
         )
         try:
-            assert proc.wait_ready(timeout=5.0), (
-                "Should start with QUIC connection fields"
-            )
+            assert proc.wait_ready(), "Should start with QUIC connection fields"
         finally:
             terminate_process(proc, timeout=5, force=True)
 
@@ -899,9 +869,8 @@ listeners:
 services:
   - name: c
     kind: upstream.upstream
-    args:
-      upstream: u
-      unknown_field: "x"
+    upstream: u
+    unknown_field: "x"
 servers:
   - name: s
     listeners: ["http"]
@@ -936,8 +905,7 @@ listeners:
 services:
   - name: tcp
     kind: upstream.upstream
-    args:
-      upstream: direct
+    upstream: direct
 servers:
   - name: s
     listeners: ["http"]
@@ -953,7 +921,7 @@ servers:
             text=False,
         )
         try:
-            assert proc.wait_ready(timeout=5.0), "Should start with tunnel_idle_timeout"
+            assert proc.wait_ready(), "Should start with tunnel_idle_timeout"
         finally:
             terminate_process(proc, timeout=5, force=True)
 
@@ -973,9 +941,8 @@ listeners:
 services:
   - name: tcp
     kind: upstream.upstream
-    args:
-      upstream: direct
-      unknown_field: "x"
+    upstream: direct
+    unknown_field: "x"
 servers:
   - name: s
     listeners: ["http"]
@@ -1015,8 +982,7 @@ listeners:
 services:
   - name: c
     kind: upstream.upstream
-    args:
-      upstream: u
+    upstream: u
 servers:
   - name: s
     listeners: ["http"]

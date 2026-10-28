@@ -47,7 +47,7 @@ def test_chain_missing_server_ca_prevents_readiness(tmp_path: Path) -> None:
     )
     with managed_processes() as start:
         process = start(config)
-        assert not process.wait_ready(timeout=3)
+        assert not process.wait_ready()
         assert process.wait(timeout=3) == 2
     logs = "".join(
         path.read_text() for path in (tmp_path / "logs").glob("neoproxy.log*")
@@ -93,7 +93,7 @@ def test_chain_shutdown_releases_connections(
                 str(relay_dir),
             )
         )
-        assert relay.wait_ready(timeout=3)
+        assert relay.wait_ready()
         entry = start(
             create_http3_chain_config(
                 entry_port,
@@ -102,7 +102,7 @@ def test_chain_shutdown_releases_connections(
                 str(entry_dir),
             )
         )
-        assert entry.wait_ready(timeout=3)
+        assert entry.wait_ready()
         if active:
             _, target = create_target_server("127.0.0.1", target_port, echo)
             _ = resources.enter_context(target)
@@ -159,7 +159,7 @@ class TestWRRLoadBalancing:
                 temp_dir=temp_dir1,
             )
             h3_proc1 = start_proxy(h3_config1)
-            assert h3_proc1.wait_ready(timeout=5.0), "HTTP/3 listener 1 failed to start"
+            assert h3_proc1.wait_ready(), "HTTP/3 listener 1 failed to start"
 
             # Start HTTP/3 listener 2 (weight 1)
             h3_config2 = create_http3_listener_config(
@@ -169,7 +169,7 @@ class TestWRRLoadBalancing:
                 temp_dir=temp_dir2,
             )
             h3_proc2 = start_proxy(h3_config2)
-            assert h3_proc2.wait_ready(timeout=5.0), "HTTP/3 listener 2 failed to start"
+            assert h3_proc2.wait_ready(), "HTTP/3 listener 2 failed to start"
 
             # Observe selected peers on completed CONNECT requests.
             # Startup alone cannot prove that both relays receive traffic.
@@ -185,7 +185,7 @@ class TestWRRLoadBalancing:
             )
             enable_access_log(chain_config, ["upstream.connection.peer"])
             chain_proc = start_proxy(chain_config)
-            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
+            assert chain_proc.wait_ready(), "HTTP listener failed to start"
 
             # Send multiple requests through the chain
             # WRR should distribute these across both upstreams
@@ -295,7 +295,7 @@ class TestConnectionReuse:
                 temp_dir=temp_dir1,
             )
             h3_proc = start_proxy(h3_config)
-            assert h3_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
+            assert h3_proc.wait_ready(), "HTTP/3 listener failed to start"
 
             # Start chain service
             chain_config = create_http3_chain_config(
@@ -314,7 +314,7 @@ class TestConnectionReuse:
                 ],
             )
             chain_proc = start_proxy(chain_config)
-            assert chain_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
+            assert chain_proc.wait_ready(), "HTTP listener failed to start"
 
             # Send 5 requests through the chain
             for i in range(5):

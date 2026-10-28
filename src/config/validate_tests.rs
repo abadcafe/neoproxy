@@ -93,19 +93,37 @@ servers:
 }
 
 #[test]
-fn test_validate_config_https_without_tls() {
-  let collector = validate_yaml(
-    r#"
-listeners:
-- name: https_main
-  kind: https
-  addresses: ["127.0.0.1:8443"]
-servers:
-- name: https_server
-  listeners: ["https_main"]
-  service: ""
-"#,
-  );
+fn test_validate_config_requires_each_tls_server_certificate() {
+  for kind in ["https", "http3"] {
+    for hostnames in ["[]", "[named.test]"] {
+      for fields in ["", "  certificates: []\n"] {
+        let collector = validate_yaml(&format!(
+          "listeners:\n- name: secure\n  kind: {kind}\n  addresses: \
+           ['127.0.0.1:0']\nservers:\n- name: missing_identity\n  \
+           hostnames: {hostnames}\n  listeners: [secure]\n{fields}"
+        ));
+        assert!(
+          collector.errors().iter().any(|error| error.location()
+            == "servers[0].certificates"
+            && error.message().contains("missing_identity")
+            && error.message().contains("secure")
+            && error.message().contains(kind)),
+          "{:?}",
+          collector.errors()
+        );
+      }
+    }
+  }
+}
 
-  assert!(!collector.has_errors(), "{:?}", collector.errors());
+#[test]
+fn test_validate_config_plain_listeners_do_not_require_certificates() {
+  for kind in ["http", "socks5"] {
+    let collector = validate_yaml(&format!(
+      "listeners:\n- name: plain\n  kind: {kind}\n  addresses: \
+       ['127.0.0.1:0']\nservers:\n- name: plain\n  listeners: \
+       [plain]\n"
+    ));
+    assert!(!collector.has_errors(), "{:?}", collector.errors());
+  }
 }

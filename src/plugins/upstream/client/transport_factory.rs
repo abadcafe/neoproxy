@@ -61,7 +61,7 @@ pub(super) fn build(
       .trim_end_matches(']')
       .to_owned()
   });
-  let options = super::tcp_options::TcpOptions {
+  let options = crate::tcp_options::TcpOptions {
     time: address.tcp_keep_alive_time,
     interval: address.tcp_keep_alive_interval,
     retries: address.tcp_keep_alive_retries,
@@ -124,6 +124,7 @@ pub(super) fn build(
           initial_mtu: quic.initial_mtu,
           send_window: quic.send_window,
           receive_window: quic.receive_window,
+          stream_receive_window: quic.stream_receive_window,
         },
         *tls_handshake_timeout,
         config.pool_config.clone(),

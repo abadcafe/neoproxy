@@ -51,7 +51,6 @@ def write_h1_h3_config(
             {
                 "name": "echo",
                 "kind": "echo.echo",
-                "args": {},
             }
         ],
         "listeners": [
@@ -69,11 +68,7 @@ def write_h1_h3_config(
                 "name": "h3_main",
                 "kind": "http3",
                 "addresses": [f"127.0.0.1:{http3_port}"],
-                "args": {
-                    "quic": {
-                        "max_concurrent_bidi_streams": 100,
-                    },
-                },
+                "quic_connection_max_concurrent_bidi_streams": 100,
             },
             {
                 "name": "default_main",
@@ -93,14 +88,12 @@ def write_h1_h3_config(
             {
                 "name": "https_server",
                 "hostnames": ["https.example.com"],
-                "tls": {
-                    "certificates": [
-                        {
-                            "cert_path": "conf/certs/server.crt",
-                            "key_path": "conf/certs/server.key",
-                        }
-                    ]
-                },
+                "certificates": [
+                    {
+                        "cert_path": "conf/certs/server.crt",
+                        "key_path": "conf/certs/server.key",
+                    }
+                ],
                 "listeners": ["https_main"],
                 "service": "echo",
             },
@@ -108,14 +101,12 @@ def write_h1_h3_config(
             {
                 "name": "http3_server",
                 "hostnames": ["h3.example.com"],
-                "tls": {
-                    "certificates": [
-                        {
-                            "cert_path": "conf/certs/server.crt",
-                            "key_path": "conf/certs/server.key",
-                        }
-                    ]
-                },
+                "certificates": [
+                    {
+                        "cert_path": "conf/certs/server.crt",
+                        "key_path": "conf/certs/server.key",
+                    }
+                ],
                 "listeners": ["h3_main"],
                 "service": "echo",
             },
@@ -159,7 +150,6 @@ def write_minimal_echo_config(
             {
                 "name": "echo",
                 "kind": "echo.echo",
-                "args": {},
             }
         ],
         "listeners": [
@@ -253,7 +243,7 @@ def proxy_with_capture(
         )
 
         # One notification covers every worker and every listener.
-        ready = proc.wait_ready(timeout=5.0)
+        ready = proc.wait_ready()
 
         # If process exited or listeners not ready, capture stderr
         if proc.poll() is not None or not ready:

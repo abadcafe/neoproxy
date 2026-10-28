@@ -46,7 +46,7 @@ async def test_chain_h3_pool_respects_reuse_policy(
                 {
                     "name": "relay",
                     "kind": "upstream.upstream",
-                    "args": {"upstream": "relay"},
+                    "upstream": "relay",
                 }
             ],
             "servers": [{"name": "relay", "service": "relay", "listeners": ["main"]}],
@@ -87,7 +87,7 @@ async def test_chain_h3_pool_expires_without_subsequent_request(tmp_path: Path) 
                 {
                     "name": "relay",
                     "kind": "upstream.upstream",
-                    "args": {"upstream": "relay"},
+                    "upstream": "relay",
                 }
             ],
             "servers": [{"name": "relay", "service": "relay", "listeners": ["main"]}],

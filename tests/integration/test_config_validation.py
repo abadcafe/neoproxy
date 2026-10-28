@@ -355,9 +355,7 @@ plugins:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
-
+  upstream: direct
 listeners:
 - name: socks5_main
   kind: socks5
@@ -405,9 +403,7 @@ plugins:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
-
+  upstream: direct
 listeners:
 - name: socks5_main
   kind: socks5
@@ -492,17 +488,13 @@ plugins:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
-
+  upstream: direct
 listeners:
 - name: socks5_main
   kind: socks5
   addresses:
     - "0.0.0.0:{proxy_port}"
-  args:
-    some_unknown_field: true
-
+  some_unknown_field: true
 servers:
 - name: socks5_server
   listeners: ["socks5_main"]
@@ -552,10 +544,8 @@ listeners:
 services:
 - name: upstream
   kind: upstream.upstream
-  args:
-    upstream: test
-    ca_path: "/tmp/ca.pem"
-
+  upstream: test
+  ca_path: "/tmp/ca.pem"
 servers:
 - name: http_proxy
   listeners: ["http_main"]
@@ -601,17 +591,13 @@ plugins:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
-
+  upstream: direct
 listeners:
 - name: socks5_main
   kind: socks5
   addresses:
     - "0.0.0.0:{proxy_port}"
-  args:
-    handshake_timeout: "invalid"
-
+  socks5_handshake_timeout: "invalid"
 servers:
 - name: socks5_server
   listeners: ["socks5_main"]
@@ -658,17 +644,13 @@ plugins:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
-
+  upstream: direct
 listeners:
 - name: socks5_main
   kind: socks5
   addresses:
     - "0.0.0.0:{proxy_port}"
-  args:
-    client_ca_path: "/path/to/ca.pem"
-
+  client_ca_path: "/path/to/ca.pem"
 servers:
 - name: socks5_server
   listeners: ["socks5_main"]
@@ -880,9 +862,7 @@ plugins:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
-
+  upstream: direct
 listeners:
 - name: socks_a_main
   kind: socks5
@@ -923,9 +903,7 @@ plugins:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
-
+  upstream: direct
 listeners:
 - name: socks_main
   kind: socks5

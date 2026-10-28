@@ -44,6 +44,7 @@ fn test_quic_resolved_preserves_optional_transport_fields() {
     max_concurrent_bidi_streams: Some(64),
     initial_mtu: Some(1200),
     send_window: Some(1024),
+    stream_receive_window: None,
     receive_window: Some(2048),
   };
 

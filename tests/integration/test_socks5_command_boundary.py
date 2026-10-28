@@ -18,10 +18,12 @@ def test_socks5_command_has_its_own_timeout_after_subnegotiation(
     tmp_path: Path,
 ) -> None:
     port = get_unique_port()
-    config = create_socks5_config(port, str(tmp_path), handshake_timeout="300ms")
+    config = create_socks5_config(
+        port, str(tmp_path), handshake_timeout="2s", connect_timeout="300ms"
+    )
     process = start_proxy(config)
     try:
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
             assert socks5_handshake_no_auth(client) == MethodReply(AuthMethod.NONE)
             started = time.monotonic()
@@ -41,7 +43,7 @@ def test_socks5_invalid_http_target_fails_connection_and_keeps_worker_alive(
     config = create_socks5_config(port, str(tmp_path))
     process = start_proxy(config)
     try:
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
             assert socks5_handshake_no_auth(client) == MethodReply(AuthMethod.NONE)
             reply = socks5_connect_domain(client, "invalid target", 80)

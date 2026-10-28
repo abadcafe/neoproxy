@@ -29,6 +29,8 @@ mod direct;
 #[cfg(test)]
 mod direct_tests;
 mod dns_cache;
+#[cfg(test)]
+mod dns_cache_tests;
 mod forward;
 #[cfg(test)]
 mod forward_tests;
@@ -66,9 +68,6 @@ mod socks5_tests;
 mod tcp_connect;
 #[cfg(test)]
 mod tcp_connect_tests;
-mod tcp_options;
-#[cfg(test)]
-mod tcp_options_tests;
 mod transport_factory;
 
 fn build_root_cert_store(

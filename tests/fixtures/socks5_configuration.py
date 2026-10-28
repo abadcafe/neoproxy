@@ -15,6 +15,7 @@ def create_socks5_config(
     addresses: list[str] | None = None,
     handshake_timeout: str | None = None,
     server_threads: int = 1,
+    connect_timeout: str | None = None,
 ) -> str:
     """
     Create SOCKS5 listener configuration file.
@@ -26,6 +27,7 @@ def create_socks5_config(
         users: List of user dicts with "username" and "password" keys
         addresses: List of addresses to listen on (default: ["0.0.0.0:port"])
         handshake_timeout: Handshake timeout string (e.g., "3s")
+        connect_timeout: CONNECT command read timeout string (e.g., "3s")
         server_threads: Number of worker threads
 
     Returns:
@@ -34,15 +36,18 @@ def create_socks5_config(
     if addresses is None:
         addresses = [f"0.0.0.0:{proxy_port}"]
 
-    # Build args section for the listener
+    # Build flat protocol fields for the listener
     args_entries: list[str] = []
     if handshake_timeout:
-        args_entries.append(f'    handshake_timeout: "{handshake_timeout}"')
+        args_entries.append(f'  socks5_handshake_timeout: "{handshake_timeout}"')
+
+    if connect_timeout:
+        args_entries.append(f'  socks5_connect_timeout: "{connect_timeout}"')
 
     addresses_yaml = "\n".join([f'  - "{a}"' for a in addresses])
 
     if args_entries:
-        args_yaml = "\n" + "  args:\n" + "\n".join(args_entries)
+        args_yaml = "\n" + "\n".join(args_entries)
     else:
         args_yaml = ""
 
@@ -53,7 +58,7 @@ def create_socks5_config(
             users_yaml_lines.append(f'        - username: "{u["username"]}"')
             users_yaml_lines.append(f'          password: "{u["password"]}"')
         layers_yaml = (
-            "\n  layers:\n    - kind: auth.basic_auth\n      args:\n        users:\n"
+            "\n  layers:\n    - kind: auth.basic_auth\n      users:\n"
             + "\n".join(users_yaml_lines)
         )
     else:
@@ -71,9 +76,7 @@ plugins:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct{layers_yaml}
-
+  upstream: direct{layers_yaml}
 listeners:
 - name: socks5_main
   kind: socks5

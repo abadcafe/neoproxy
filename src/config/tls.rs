@@ -1,7 +1,7 @@
 //! module: config::tls
 //! responsibility: compile immutable configured TLS identities
 //! public operations: CertificateConfig, cert_path, key_path,
-//! ServerTlsConfig, compile, client_roots, certificates,
+//! ServerTlsConfig, new, compile, client_roots, certificates,
 //! client_ca_certs, validate_server_tls
 //! data entities: CertificateConfig, ServerTlsConfig
 //! tests: tls_tests.rs
@@ -66,6 +66,18 @@ impl std::fmt::Debug for ServerTlsConfig {
 }
 
 impl ServerTlsConfig {
+  pub(super) fn new(
+    certificates: Vec<CertificateConfig>,
+    client_ca_certs: Vec<String>,
+  ) -> Self {
+    Self {
+      certificates,
+      client_ca_certs,
+      compiled: Arc::new(OnceLock::new()),
+      roots: Arc::new(OnceLock::new()),
+    }
+  }
+
   /// Compile a configuration snapshot explicitly. Clones share its
   /// certificate/CA caches; no worker or handshake reads the files
   /// again.

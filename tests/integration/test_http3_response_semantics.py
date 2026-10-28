@@ -63,12 +63,11 @@ servers:
 - name: main
   service: echo
   listeners: [main]
-  tls:
-    certificates:
-    - cert_path: {cert}
-      key_path: {key}
+  certificates:
+  - cert_path: {cert}
+    key_path: {key}
 """)
     with managed_processes() as start:
         process = start(str(path))
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         asyncio.run(head_response(port))

@@ -21,6 +21,7 @@ fn quic_config() -> QuicConfig {
     max_concurrent_bidi_streams: None,
     initial_mtu: None,
     send_window: None,
+    stream_receive_window: None,
     receive_window: None,
   }
 }

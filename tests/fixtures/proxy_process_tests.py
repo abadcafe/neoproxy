@@ -28,7 +28,7 @@ def test_managed_processes_reaps_all_children_and_closes_pipes(tmp_path: Path) -
             port = get_unique_port()
             process = start(create_echo_config(port, str(directory)))
             processes.append(process)
-            assert process.wait_ready(timeout=2)
+            assert process.wait_ready()
         assert all(process.poll() is None for process in processes)
     for process in processes:
         assert_reaped(process)
@@ -46,7 +46,7 @@ def test_start_proxy_limits_descriptors_without_changing_parent(tmp_path: Path) 
     port = get_unique_port()
     process = start_proxy(create_echo_config(port, str(tmp_path)), nofile_limit=64)
     try:
-        assert process.wait_ready(timeout=2)
+        assert process.wait_ready()
         assert resource.getrlimit(resource.RLIMIT_NOFILE) == original
     finally:
         terminate_process(process)

@@ -55,12 +55,20 @@ fn merge_quic_field_level(
       addr.and_then(|c| c.quic_connection_send_window).as_ref(),
       upstream.quic_connection_send_window.as_ref(),
       plugin.quic_connection_send_window.as_ref(),
-    ),
+    )
+    .map(|value| value.as_u64()),
+    stream_receive_window: resolve_field(
+      addr.and_then(|c| c.quic_stream_receive_window).as_ref(),
+      upstream.quic_stream_receive_window.as_ref(),
+      plugin.quic_stream_receive_window.as_ref(),
+    )
+    .map(|value| value.as_u64()),
     receive_window: resolve_field(
       addr.and_then(|c| c.quic_connection_receive_window).as_ref(),
       upstream.quic_connection_receive_window.as_ref(),
       plugin.quic_connection_receive_window.as_ref(),
-    ),
+    )
+    .map(|value| value.as_u64()),
   }
 }
 

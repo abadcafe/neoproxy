@@ -59,15 +59,12 @@ listeners:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
-
+  upstream: direct
 servers:
 - name: http3_server
-  tls:
-    certificates:
-    - cert_path: "/nonexistent/path/to/cert.pem"
-      key_path: "/nonexistent/path/to/key.pem"
+  certificates:
+  - cert_path: "/nonexistent/path/to/cert.pem"
+    key_path: "/nonexistent/path/to/key.pem"
   listeners: ["h3_main"]
   service: direct
 """
@@ -124,15 +121,12 @@ listeners:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
-
+  upstream: direct
 servers:
 - name: http3_server
-  tls:
-    certificates:
-    - cert_path: "{cert_path}"
-      key_path: "/nonexistent/path/to/key.pem"
+  certificates:
+  - cert_path: "{cert_path}"
+    key_path: "/nonexistent/path/to/key.pem"
   listeners: ["h3_main"]
   service: direct
 """
@@ -201,15 +195,12 @@ listeners:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
-
+  upstream: direct
 servers:
 - name: http3_server
-  tls:
-    certificates:
-    - cert_path: "{cert_path1}"
-      key_path: "{key_path2}"
+  certificates:
+  - cert_path: "{cert_path1}"
+    key_path: "{key_path2}"
   listeners: ["h3_main"]
   service: direct
 """
@@ -265,8 +256,8 @@ class TestHTTP3ConfigValidation:
             key_path = shared_test_certs["key_path"]
 
             # Invalid QUIC config: max_concurrent_bidi_streams = 0
-            quic_config = """      max_concurrent_bidi_streams: 0
-      max_idle_timeout: '30s'"""
+            quic_config = """      quic_connection_max_concurrent_bidi_streams: 0
+      quic_connection_idle_timeout: '30s'"""
 
             config_path = create_http3_listener_config(
                 proxy_port,
@@ -318,9 +309,7 @@ listeners:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
-
+  upstream: direct
 servers:
 - name: http3_server
   listeners: ["h3_main"]
@@ -378,15 +367,12 @@ listeners:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
-
+  upstream: direct
 servers:
 - name: http3_server
-  tls:
-    certificates:
-    - cert_path: "{cert_path}"
-      key_path: "{key_path}"
+  certificates:
+  - cert_path: "{cert_path}"
+    key_path: "{key_path}"
   listeners: ["h3_main"]
   service: direct
 """
@@ -436,7 +422,7 @@ class TestHTTP3GracefulShutdown:
 
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(), "HTTP/3 listener failed to start"
 
             start_time = time.monotonic()
             proxy_proc.send_signal(signal.SIGTERM)
@@ -509,10 +495,9 @@ services:
 
 servers:
 - name: http3_server
-  tls:
-    certificates:
-    - cert_path: "{cert_path}"
-      key_path: "{key_path}"
+  certificates:
+  - cert_path: "{cert_path}"
+    key_path: "{key_path}"
   listeners: ["h3_main"]
   service: echo
 """
@@ -526,7 +511,7 @@ servers:
                 stderr=subprocess.PIPE,
             )
 
-            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(), "HTTP/3 listener failed to start"
 
             # Send a GET request using HTTP/3 client
             async def do_get_request() -> tuple[bool, int, bytes]:

@@ -181,17 +181,17 @@ fn test_compile_checks_every_candidate_certificate() {
 }
 
 #[test]
-fn test_select_matching_server_without_tls_does_not_use_default_certificate()
+fn test_compile_rejects_server_without_certificates_even_with_valid_default()
  {
   let fallback = identity(&["default.test"]);
   let mut without_tls = server(&["named.test"], &[&fallback]);
   without_tls.tls = None;
-  let config = build_tls_server_config(
+  let error = build_tls_server_config(
     &[without_tls, server(&[], &[&fallback])],
     vec![],
   )
-  .unwrap();
-  assert_eq!(selected(&config, Some("named.test")), None);
+  .unwrap_err();
+  assert!(format!("{error:#}").contains("certificates"));
 }
 
 #[test]
@@ -201,8 +201,8 @@ fn test_compile_config_reuses_credentials_and_ca_snapshot_without_files()
   let ca = format!("{}-ca.pem", certificate.cert);
   std::fs::copy(&certificate.cert, &ca).unwrap();
   let config = crate::config::Config::parse_str(&format!(
-    "servers:\n- name: named\n  hostnames: [named.test]\n  tls:\n    \
-     certificates:\n    - cert_path: {:?}\n      key_path: {:?}\n    \
+    "servers:\n- name: named\n  hostnames: [named.test]\n  \
+     certificates:\n  - cert_path: {:?}\n    key_path: {:?}\n  \
      client_ca_certs: [{:?}]\n",
     certificate.cert, certificate.key, ca,
   ))

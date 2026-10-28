@@ -207,7 +207,7 @@ class TestServerLevelConfig:
                     {
                         "name": "direct",
                         "kind": "upstream.upstream",
-                        "args": {"upstream": "direct"},
+                        "upstream": "direct",
                     }
                 ],
                 "listeners": [
@@ -220,15 +220,13 @@ class TestServerLevelConfig:
                 "servers": [
                     {
                         "name": "test",
-                        "tls": {
-                            "certificates": [
-                                {
-                                    "cert_path": cert_path,
-                                    "key_path": key_path,
-                                }
-                            ],
-                            "client_ca_certs": [ca_path],
-                        },
+                        "certificates": [
+                            {
+                                "cert_path": cert_path,
+                                "key_path": key_path,
+                            }
+                        ],
+                        "client_ca_certs": [ca_path],
                         "listeners": ["http_main"],
                         "service": "direct",
                     }
@@ -240,7 +238,7 @@ class TestServerLevelConfig:
 
             proc = start_proxy(config_path)
             try:
-                assert proc.wait_ready(timeout=5.0), (
+                assert proc.wait_ready(), (
                     "HTTP listener should start and ignore server-level TLS config"
                 )
             finally:
@@ -310,7 +308,6 @@ class TestHTTP3MultiAddress:
                     {
                         "name": "echo",
                         "kind": "echo.echo",
-                        "args": {},
                     }
                 ],
                 "listeners": [
@@ -326,14 +323,12 @@ class TestHTTP3MultiAddress:
                 "servers": [
                     {
                         "name": "http3_server",
-                        "tls": {
-                            "certificates": [
-                                {
-                                    "cert_path": cert_path,
-                                    "key_path": key_path,
-                                }
-                            ]
-                        },
+                        "certificates": [
+                            {
+                                "cert_path": cert_path,
+                                "key_path": key_path,
+                            }
+                        ],
                         "listeners": ["h3_multi"],
                         "service": "echo",
                     }
@@ -347,10 +342,10 @@ class TestHTTP3MultiAddress:
             proxy_proc = start_proxy(config_path)
 
             # Wait for both UDP ports to be bound
-            assert proxy_proc.wait_ready(timeout=5.0), (
+            assert proxy_proc.wait_ready(), (
                 f"HTTP/3 listener failed to start on port {proxy_port1}"
             )
-            assert proxy_proc.wait_ready(timeout=5.0), (
+            assert proxy_proc.wait_ready(), (
                 f"HTTP/3 listener failed to start on port {proxy_port2}"
             )
 
@@ -390,7 +385,7 @@ class TestHTTP3ConnectOnlyUpgrade:
             )
 
             # Wait for every listener to report readiness.
-            if not proc.wait_ready(timeout=5.0):
+            if not proc.wait_ready():
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -475,7 +470,7 @@ class TestHTTP10Support:
             )
 
             proc = start_proxy(config_path)
-            assert proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proc.wait_ready(), "Proxy server failed to start"
 
             # Send CONNECT with HTTP/1.0 (as Python 3.8 does)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -541,7 +536,7 @@ class TestHTTP10Support:
                 stderr=subprocess.PIPE,
             )
 
-            if not proc.wait_ready(timeout=5.0):
+            if not proc.wait_ready():
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -592,7 +587,7 @@ class TestHTTP10Support:
                 stderr=subprocess.PIPE,
             )
 
-            if not proc.wait_ready(timeout=5.0):
+            if not proc.wait_ready():
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -653,7 +648,6 @@ class TestHTTP3AuthorityHostMismatch:
                     {
                         "name": "echo",
                         "kind": "echo.echo",
-                        "args": {},
                     }
                 ],
                 "listeners": [
@@ -666,14 +660,12 @@ class TestHTTP3AuthorityHostMismatch:
                 "servers": [
                     {
                         "name": "http3_server",
-                        "tls": {
-                            "certificates": [
-                                {
-                                    "cert_path": cert_path,
-                                    "key_path": key_path,
-                                }
-                            ]
-                        },
+                        "certificates": [
+                            {
+                                "cert_path": cert_path,
+                                "key_path": key_path,
+                            }
+                        ],
                         "listeners": ["h3_main"],
                         "service": "echo",
                     }
@@ -691,7 +683,7 @@ class TestHTTP3AuthorityHostMismatch:
             )
 
             # Wait for HTTP/3 listener
-            if not proc.wait_ready(timeout=5.0):
+            if not proc.wait_ready():
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")
@@ -759,7 +751,6 @@ class TestHTTP3AuthorityHostMismatch:
                     {
                         "name": "echo",
                         "kind": "echo.echo",
-                        "args": {},
                     }
                 ],
                 "listeners": [
@@ -772,14 +763,12 @@ class TestHTTP3AuthorityHostMismatch:
                 "servers": [
                     {
                         "name": "http3_server",
-                        "tls": {
-                            "certificates": [
-                                {
-                                    "cert_path": cert_path,
-                                    "key_path": key_path,
-                                }
-                            ]
-                        },
+                        "certificates": [
+                            {
+                                "cert_path": cert_path,
+                                "key_path": key_path,
+                            }
+                        ],
                         "listeners": ["h3_main"],
                         "service": "echo",
                     }
@@ -797,7 +786,7 @@ class TestHTTP3AuthorityHostMismatch:
             )
 
             # Wait for HTTP/3 listener
-            if not proc.wait_ready(timeout=5.0):
+            if not proc.wait_ready():
                 if proc.poll() is not None:
                     _, stderr_data = proc.communicate(timeout=5)
                     stderr_text = stderr_data.decode("utf-8", errors="replace")

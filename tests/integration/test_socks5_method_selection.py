@@ -63,7 +63,7 @@ def test_socks5_selects_offered_method_and_authenticates_only_connect(
         target.settimeout(2)
         process = start_proxy(config)
         try:
-            assert process.wait_ready(timeout=3)
+            assert process.wait_ready()
             with socket.create_connection(
                 ("127.0.0.1", proxy_port), timeout=2
             ) as client:

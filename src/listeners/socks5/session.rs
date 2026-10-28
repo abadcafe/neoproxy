@@ -19,6 +19,7 @@ pub(super) async fn serve(
   connection: TcpConnection,
   service: RuntimeService,
   handshake_timeout: Duration,
+  connect_timeout: Duration,
   service_name: String,
 ) {
   let TcpConnection { stream, peer_addr, local_addr, .. } = connection;
@@ -73,9 +74,12 @@ pub(super) async fn serve(
       }
     };
 
-  // Bound the command phase as well as authentication.
+  // Start an independent deadline after the handshake. This bounds the
+  // entire client CONNECT command read (including target address);
+  // partial reads do not reset it. Shared auth and upstream dialing run
+  // afterward and are deliberately outside socks5_connect_timeout.
   let command = match tokio::time::timeout(
-    handshake_timeout,
+    connect_timeout,
     read_command_and_target(handshake_result.proto),
   )
   .await

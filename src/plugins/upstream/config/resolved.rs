@@ -28,6 +28,7 @@ pub(crate) struct QuicResolved {
   pub(crate) initial_mtu: Option<u16>,
   pub(crate) send_window: Option<u64>,
   pub(crate) receive_window: Option<u64>,
+  pub(crate) stream_receive_window: Option<u64>,
 }
 
 /// Resolved protocol with all fields filled.

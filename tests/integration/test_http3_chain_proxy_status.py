@@ -91,9 +91,7 @@ class TestHttp3ChainProxyStatus:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert upstream_proc.wait_ready(timeout=10.0), (
-                "Upstream proxy (H3) failed to start"
-            )
+            assert upstream_proc.wait_ready(), "Upstream proxy (H3) failed to start"
 
             # Start entry proxy (http3_chain -> H3 upstream)
             entry_config_path = create_http3_chain_config(
@@ -108,9 +106,7 @@ class TestHttp3ChainProxyStatus:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert entry_proc.wait_ready(timeout=10.0), (
-                "Entry proxy (http3_chain) failed to start"
-            )
+            assert entry_proc.wait_ready(), "Entry proxy (http3_chain) failed to start"
 
             # Send CONNECT via entry proxy
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -213,9 +209,7 @@ listeners:
 services:
 - name: upstream
   kind: upstream.upstream
-  args:
-    upstream: test_upstream
-
+  upstream: test_upstream
 servers:
 - name: http_proxy
   listeners: ["http_main"]
@@ -231,9 +225,7 @@ servers:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert entry_proc.wait_ready(timeout=10.0), (
-                "Entry proxy (http3_chain) failed to start"
-            )
+            assert entry_proc.wait_ready(), "Entry proxy (http3_chain) failed to start"
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10)
@@ -312,9 +304,7 @@ servers:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert upstream_proc.wait_ready(timeout=10.0), (
-                "Upstream proxy (H3) failed to start"
-            )
+            assert upstream_proc.wait_ready(), "Upstream proxy (H3) failed to start"
 
             # Start entry proxy
             entry_config_path = create_http3_chain_config(
@@ -329,9 +319,7 @@ servers:
                 stderr=subprocess.PIPE,
                 text=False,
             )
-            assert entry_proc.wait_ready(timeout=10.0), (
-                "Entry proxy (http3_chain) failed to start"
-            )
+            assert entry_proc.wait_ready(), "Entry proxy (http3_chain) failed to start"
 
             # CONNECT to a port where nothing is listening
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

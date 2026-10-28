@@ -80,7 +80,7 @@ def test_failover_records_the_last_selected_protocol(
             {
                 "name": "forward",
                 "kind": "upstream.upstream",
-                "args": {"upstream": "route"},
+                "upstream": "route",
             }
         ],
         "servers": [{"name": "forward", "listeners": ["main"], "service": "forward"}],
@@ -90,9 +90,9 @@ def test_failover_records_the_last_selected_protocol(
     enable_access_log(str(path), ["upstream.protocol"])
     with managed_processes() as start:
         next_process = start(next_path)
-        assert next_process.wait_ready(timeout=3)
+        assert next_process.wait_ready()
         proxy = start(str(path))
-        assert proxy.wait_ready(timeout=3)
+        assert proxy.wait_ready()
         client = HTTPConnection("127.0.0.1", entry_port, timeout=5)
         try:
             client.request("GET", f"http://127.0.0.1:{origin_port}/")
@@ -129,7 +129,7 @@ def test_failed_connection_records_selected_protocol(tmp_path: Path) -> None:
     enable_access_log(config, ["upstream.protocol"])
     with managed_processes() as start:
         proxy = start(config)
-        assert proxy.wait_ready(timeout=3)
+        assert proxy.wait_ready()
         client = HTTPConnection("127.0.0.1", entry_port, timeout=5)
         try:
             client.request("GET", "http://127.0.0.1:8000/")

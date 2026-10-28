@@ -56,6 +56,8 @@ def write_node(
             "address_protocol": kind,
             "tunnel_idle_timeout": tunnel_idle_timeout,
         }
+        if kind == "http3":
+            address["quic_stream_receive_window"] = "4KiB"
         if (user := supplied_user(next_auth)) is not None:
             address["user"] = user
         upstream["addresses"] = [address]
@@ -64,16 +66,14 @@ def write_node(
     layers: list[JsonValue] = [
         {
             "kind": "access_log.file",
-            "args": {
-                "writer": "logs/access",
-                "context_fields": [
-                    "request.id",
-                    "upstream.tcp.connect_ms",
-                    "upstream.protocol",
-                    "upstream.connection.peer",
-                    "upstream.error.kind",
-                ],
-            },
+            "writer": "logs/access",
+            "context_fields": [
+                "request.id",
+                "upstream.tcp.connect_ms",
+                "upstream.protocol",
+                "upstream.connection.peer",
+                "upstream.error.kind",
+            ],
         }
     ]
     plugins: ConfigDict = {
@@ -100,33 +100,40 @@ def write_node(
         layers.append(
             {
                 "kind": "auth.basic_auth",
-                "args": {
-                    "users": [
-                        {
-                            "username": f"matrix-{listener_auth.hop}",
-                            "password": f"{listener_auth.hop}-password",
-                        }
-                    ],
-                },
+                "users": [
+                    {
+                        "username": f"matrix-{listener_auth.hop}",
+                        "password": f"{listener_auth.hop}-password",
+                    }
+                ],
             }
         )
     server: ConfigDict = {"name": "main", "listeners": ["main"], "service": "main"}
     if protocol in ("https", "http3"):
-        tls: ConfigDict = {
+        identity: ConfigDict = {
             "certificates": [
                 {"cert_path": certs.server_cert, "key_path": certs.server_key}
             ]
         }
         if listener_auth is not None and listener_auth.certificate_required:
-            tls["client_ca_certs"] = [certs.ca]
-        server["tls"] = tls
+            identity["client_ca_certs"] = [certs.ca]
+        server.update(identity)
     listener: ConfigDict = {
         "name": "main",
         "kind": protocol,
         "addresses": [f"127.0.0.1:{port}"],
     }
     if protocol == "http3":
-        listener["args"] = {"quic": {"max_idle_timeout": quic_idle_timeout}}
+        listener["quic_connection_idle_timeout"] = quic_idle_timeout
+        listener["quic_stream_receive_window"] = "4KiB"
+    else:
+        listener.update(
+            {
+                "tcp_keep_alive_time": "60s",
+                "tcp_keep_alive_interval": "10s",
+                "tcp_keep_alive_retries": 3,
+            }
+        )
     config: ConfigDict = {
         "server_threads": 1,
         "plugins": plugins,
@@ -135,7 +142,7 @@ def write_node(
             {
                 "name": "main",
                 "kind": "upstream.upstream",
-                "args": {"upstream": "route"},
+                "upstream": "route",
                 "layers": layers,
             }
         ],

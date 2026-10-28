@@ -34,9 +34,12 @@ fn test_http3_builder_no_tls_returns_error() {
     no_tls_servers(),
   );
   assert!(result.is_err());
-  assert!(result.unwrap_err().to_string().contains(
-    "http3 listener requires server-level tls configuration"
-  ));
+  assert!(
+    result
+      .unwrap_err()
+      .to_string()
+      .contains("must configure certificates")
+  );
 }
 
 #[test]

@@ -30,7 +30,7 @@ impl TryFrom<DurationValue> for AcceptRetryDelay {
     ensure!(
       !value.0.is_zero()
         && std::time::Instant::now().checked_add(value.0).is_some(),
-      "accept_retry_delay must be positive and representable"
+      "tcp_accept_retry_delay must be positive and representable"
     );
     Ok(Self(value.0))
   }

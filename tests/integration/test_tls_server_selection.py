@@ -80,12 +80,10 @@ def _server(
         "hostnames": [value for value in hostnames],
         "listeners": ["main"],
         "service": "direct",
-        "tls": {
-            "certificates": [
-                {"cert_path": str(value.cert), "key_path": str(value.key)}
-                for value in credentials
-            ]
-        },
+        "certificates": [
+            {"cert_path": str(value.cert), "key_path": str(value.key)}
+            for value in credentials
+        ],
     }
 
 
@@ -106,7 +104,7 @@ def _proxy(
             {
                 "name": "direct",
                 "kind": "upstream.upstream",
-                "args": {"upstream": "direct"},
+                "upstream": "direct",
             }
         ],
         "servers": [value for value in servers],
@@ -115,7 +113,7 @@ def _proxy(
     _ = path.write_text(dict_to_yaml(config))
     process = start_proxy(str(path))
     try:
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         yield port
     finally:
         terminate_process(process, timeout=7)
@@ -317,7 +315,7 @@ def test_tls_and_http_server_selection_stay_within_the_current_listener(
             (ports[0], "a.test", "b.test", first),
             (ports[1], "b.test", "a.test", second),
         ]:
-            assert process.wait_ready(timeout=3)
+            assert process.wait_ready()
             with socket.create_connection(("127.0.0.1", port), timeout=3) as tcp:
                 with _context().wrap_socket(tcp, server_hostname=name) as tls:
                     assert tls.getpeercert(binary_form=True) == credential.der

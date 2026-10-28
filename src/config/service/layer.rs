@@ -11,9 +11,10 @@ use crate::redaction::Redacted;
 
 /// Layer configuration (raw, before kind parsing).
 #[derive(Deserialize, Default, Clone)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub(super) struct LayerRaw {
   kind: String,
+  #[serde(flatten)]
   args: SerializedArgs,
 }
 

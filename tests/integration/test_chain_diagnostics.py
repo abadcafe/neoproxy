@@ -101,7 +101,7 @@ def test_chain_capture_records_loopback_tcp_stage_timings(tmp_path: Path) -> Non
         ) as capture:
             directory = capture.directory
             process = capture.start_proxy("entry", config)
-            assert process.wait_ready(timeout=2)
+            assert process.wait_ready()
             result = capture.run_curl(
                 [
                     "curl",

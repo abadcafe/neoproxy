@@ -44,10 +44,9 @@ services:
   kind: echo.echo
   layers:
   - kind: auth.basic_auth
-    args:
-      users:
-      - username: {CLIENT_USER}
-        password: {CLIENT_PASSWORD}
+    users:
+    - username: {CLIENT_USER}
+      password: {CLIENT_PASSWORD}
 servers:
 - name: main
   service: echo
@@ -102,7 +101,7 @@ def test_startup_logs_mask_passwords_preserve_fields_and_authentication_works(
         stderr=subprocess.PIPE,
     )
     try:
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         assert _request(port, None).startswith(b"HTTP/1.1 407 ")
         assert _request(port, _credentials()).startswith(b"HTTP/1.1 200 ")
     finally:

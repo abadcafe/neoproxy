@@ -94,19 +94,7 @@ impl Http3Listener {
       .collect::<Result<Vec<_>>>()?;
 
     // Validate and apply QUIC config defaults
-    let quic_config = match &args.quic {
-      Some(quic_args) => quic_args.validate_and_apply_defaults()?,
-      None => QuicConfig::default(),
-    };
-
-    // TLS config is required for HTTP/3 listener
-    // Check that at least one server has TLS configured
-    let has_tls = server_routing_table.iter().any(|e| e.tls.is_some());
-    if !has_tls {
-      anyhow::bail!(
-        "http3 listener requires server-level tls configuration"
-      );
-    }
+    let quic_config = args.validate_and_apply_defaults()?;
 
     // Build TLS config from all servers' certificates (SNI-based
     // selection)
@@ -170,7 +158,14 @@ impl Listening for Http3Listener {
           .map_err(|e| anyhow!("Invalid receive_window: {}", e))?,
       );
 
+    transport_config
+      .keep_alive_interval(quic_config.keep_alive_interval);
+    if let Some(window) = quic_config.stream_receive_window {
+      transport_config
+        .stream_receive_window(quinn::VarInt::try_from(window)?);
+    }
     server_config.transport_config(Arc::new(transport_config));
+    let handshake_timeout = quic_config.handshake_timeout;
 
     // Create endpoints for all addresses
     let mut endpoints: Vec<quinn::Endpoint> = Vec::new();
@@ -241,7 +236,13 @@ impl Listening for Http3Listener {
               let handshake = tokio::select! {
                 biased;
                 _ = stream_shutdown.notified() => return,
-                result = conn => result,
+                result = tokio::time::timeout(handshake_timeout, conn) => match result {
+                  Ok(result) => result,
+                  Err(_) => {
+                    warn!("QUIC connection handshake timed out");
+                    return;
+                  }
+                },
               };
               match handshake {
                 Ok(quinn_conn) => {
@@ -339,7 +340,7 @@ pub(crate) fn listener_name() -> &'static str {
 
 /// Get listener properties for conflict detection.
 pub(crate) fn props() -> ListenerPropertyValues {
-  ListenerPropertyValues::new(TransportLayer::Udp, true)
+  ListenerPropertyValues::new(TransportLayer::Udp, true, true)
 }
 
 /// Create a listener builder

@@ -2,7 +2,7 @@
 //! responsibility: cache TTL-bound DNS answers and retain stale answers
 //! on failure public operations: DnsCache::{new,resolve}
 //! data entities: DnsCache, Entry
-//! tests: test_upstream_nodes.py
+//! tests: dns_cache_tests.rs; test_upstream_nodes.py
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};

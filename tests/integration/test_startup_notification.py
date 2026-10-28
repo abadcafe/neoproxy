@@ -24,10 +24,9 @@ def test_later_listener_bind_failure_never_notifies_readiness(
     tls = (
         ""
         if transport == "tcp"
-        else f"""  tls:
-    certificates:
-    - cert_path: {shared_test_certs["cert_path"]}
-      key_path: {shared_test_certs["key_path"]}
+        else f"""  certificates:
+  - cert_path: {shared_test_certs["cert_path"]}
+    key_path: {shared_test_certs["key_path"]}
 """
     )
     config = tmp_path / "proxy.yaml"
@@ -60,7 +59,7 @@ servers:
             owner.listen()
         process = start_proxy(str(config))
         try:
-            assert not process.wait_ready(timeout=3)
+            assert not process.wait_ready()
             assert process.wait(timeout=3) == 2
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as released:
                 released.bind(("127.0.0.1", healthy))

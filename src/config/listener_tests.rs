@@ -54,8 +54,10 @@ addresses:
 
 #[test]
 fn test_listener_property_values_construction() {
-  let props = ListenerPropertyValues::new(TransportLayer::Tcp, true);
+  let props =
+    ListenerPropertyValues::new(TransportLayer::Tcp, true, false);
   assert_eq!(props.transport_layer(), TransportLayer::Tcp);
+  assert!(!props.requires_server_certificate());
   assert!(props.supports_hostname_routing());
 }
 
@@ -63,21 +65,46 @@ fn test_listener_property_values_construction() {
 
 #[test]
 fn test_listener_property_values_tcp_with_hostname_routing() {
-  let props = ListenerPropertyValues::new(TransportLayer::Tcp, true);
+  let props =
+    ListenerPropertyValues::new(TransportLayer::Tcp, true, false);
   assert_eq!(props.transport_layer(), TransportLayer::Tcp);
+  assert!(!props.requires_server_certificate());
   assert!(props.supports_hostname_routing());
 }
 
 #[test]
 fn test_listener_property_values_tcp_without_hostname_routing() {
-  let props = ListenerPropertyValues::new(TransportLayer::Tcp, false);
+  let props =
+    ListenerPropertyValues::new(TransportLayer::Tcp, false, false);
   assert_eq!(props.transport_layer(), TransportLayer::Tcp);
+  assert!(!props.requires_server_certificate());
   assert!(!props.supports_hostname_routing());
 }
 
 #[test]
 fn test_listener_property_values_udp_with_hostname_routing() {
-  let props = ListenerPropertyValues::new(TransportLayer::Udp, true);
+  let props =
+    ListenerPropertyValues::new(TransportLayer::Udp, true, true);
   assert_eq!(props.transport_layer(), TransportLayer::Udp);
+  assert!(props.requires_server_certificate());
   assert!(props.supports_hostname_routing());
+}
+
+#[test]
+fn test_listener_config_collects_flat_protocol_fields() {
+  let config: ListenerConfig = serde_yaml::from_str(
+    "name: main\nkind: https\naddresses: \
+     ['127.0.0.1:8443']\ntls_handshake_timeout: \
+     7s\ntcp_keep_alive_time: 60s",
+  )
+  .unwrap();
+  assert_eq!(
+    config.args()["tls_handshake_timeout"].as_str(),
+    Some("7s")
+  );
+  assert_eq!(
+    config.args()["tcp_keep_alive_time"].as_str(),
+    Some("60s")
+  );
+  assert!(config.args().get("name").is_none());
 }

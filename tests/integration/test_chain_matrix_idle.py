@@ -108,8 +108,8 @@ def test_tunnel_idle_deadline_starts_before_first_application_byte(
         with record_chain(
             {"entry": entry_dir, "relay": relay_dir}, {"case": "idle-before-data"}
         ) as capture:
-            assert capture.start_proxy("relay", relay_config).wait_ready(timeout=3)
-            assert capture.start_proxy("entry", entry_config).wait_ready(timeout=3)
+            assert capture.start_proxy("relay", relay_config).wait_ready()
+            assert capture.start_proxy("entry", entry_config).wait_ready()
             tunnel = establish_connect_tunnel(
                 "127.0.0.1", entry_port, "127.0.0.1", port
             )

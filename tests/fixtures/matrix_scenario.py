@@ -74,9 +74,11 @@ def run_exchange(
             },
         ) as diagnostics:
             relay = diagnostics.start_proxy("relay", relay_config)
-            assert relay.wait_ready(timeout=3)
             entry = diagnostics.start_proxy("entry", entry_config)
-            assert entry.wait_ready(timeout=3)
+            # Both nodes must report READY=1 before any curl request or
+            # exchange timing starts. Process exit is a setup failure.
+            assert relay.wait_ready(), "relay exited before READY=1"
+            assert entry.wait_ready(), "entry exited before READY=1"
             started = monotonic()
             result = diagnostics.run_curl(
                 curl_command(

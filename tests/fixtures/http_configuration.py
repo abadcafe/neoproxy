@@ -33,9 +33,7 @@ listeners:
 services:
 - name: direct
   kind: upstream.upstream
-  args:
-    upstream: direct
-
+  upstream: direct
 servers:
 - name: http_connect
   hostnames: []

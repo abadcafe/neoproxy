@@ -23,6 +23,8 @@ mod error;
 mod listener;
 mod listener_validation;
 mod server;
+#[cfg(test)]
+mod server_tests;
 mod service;
 mod tls;
 mod validate;

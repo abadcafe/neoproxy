@@ -53,7 +53,7 @@ class TestNormalShutdown:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # Send SIGINT
             proxy_proc.send_signal(signal.SIGINT)
@@ -89,7 +89,7 @@ class TestNormalShutdown:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -134,7 +134,7 @@ class TestRepeatedSignal:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # Send multiple SIGINT signals rapidly
             proxy_proc.send_signal(signal.SIGINT)
@@ -207,7 +207,7 @@ class TestShutdownTimeout:
 
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # Establish CONNECT tunnel
             client_sock = establish_connect_tunnel(
@@ -342,7 +342,7 @@ class TestConnectTunnel:
 
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # Establish CONNECT tunnel
             client_sock = establish_connect_tunnel(
@@ -404,7 +404,7 @@ class TestResourceCleanup:
             config_path = create_test_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # Send SIGTERM
             proxy_proc.send_signal(signal.SIGTERM)
@@ -446,7 +446,7 @@ class TestResourceCleanup:
             config_path = create_echo_config(proxy_port, temp_dir)
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=2.0), "Proxy server failed to start"
+            assert proxy_proc.wait_ready(), "Proxy server failed to start"
 
             # Create multiple idle connections
             num_connections = 5

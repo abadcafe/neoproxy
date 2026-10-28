@@ -57,20 +57,18 @@ servers:
   hostnames: [localhost, a.test]
   listeners: [main]
   service: echo
-  tls:
-    certificates:
-    - cert_path: {json.dumps(material.certificate)}
-      key_path: {json.dumps(material.key)}
-    client_ca_certs: {json.dumps(ca_paths)}
+  certificates:
+  - cert_path: {json.dumps(material.certificate)}
+    key_path: {json.dumps(material.key)}
+  client_ca_certs: {json.dumps(ca_paths)}
 - name: b
   hostnames: [b.test]
   listeners: [main]
   service: echo
-  tls:
-    certificates:
-    - cert_path: {json.dumps(material.certificate)}
-      key_path: {json.dumps(material.key)}
-    client_ca_certs: {json.dumps(other_ca_paths)}
+  certificates:
+  - cert_path: {json.dumps(material.certificate)}
+    key_path: {json.dumps(material.key)}
+  client_ca_certs: {json.dumps(other_ca_paths)}
 """)
     return config, port
 
@@ -99,7 +97,7 @@ def test_empty_ca_list_allows_anonymous_requests(
     process = start_proxy(str(config))
     try:
         if kind == "http3":
-            assert process.wait_ready(timeout=5.0)
+            assert process.wait_ready()
             assert (
                 asyncio.run(
                     _request_h3_without_client_certificate(port, tls_material.ca)
@@ -107,7 +105,7 @@ def test_empty_ca_list_allows_anonymous_requests(
                 == 200
             )
         else:
-            assert process.wait_ready(timeout=5.0)
+            assert process.wait_ready()
             context = ssl.create_default_context(cafile=tls_material.ca)
             with socket.create_connection(("127.0.0.1", port), timeout=5) as tcp:
                 with context.wrap_socket(tcp, server_hostname="localhost") as tls:

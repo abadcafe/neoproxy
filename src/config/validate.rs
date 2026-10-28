@@ -77,13 +77,39 @@ pub(super) fn validate_config(
       validate_hostname(hostname, &hostname_location, collector);
     }
 
-    // Validate TLS if present
-    if let Some(tls) = server.tls() {
-      validate_server_tls(
-        tls,
-        &format!("{}.tls", server_location),
-        collector,
-      );
+    // Certificate ownership is a per-server requirement, including
+    // default servers and servers also bound to plaintext listeners. A
+    // different server's identity on the same listener cannot satisfy
+    // this contract.
+    let required_by = config
+      .listeners()
+      .iter()
+      .filter(|listener| {
+        server.listeners().iter().any(|name| name == listener.name())
+      })
+      .filter(|listener| {
+        listener_manager
+          .listener_props(listener.kind())
+          .is_some_and(|props| props.requires_server_certificate())
+      })
+      .map(|listener| {
+        format!("'{}' ({})", listener.name(), listener.kind())
+      })
+      .collect::<Vec<_>>();
+    if !required_by.is_empty()
+      && server.tls().is_none_or(|tls| tls.certificates().is_empty())
+    {
+      collector.add(ConfigError::InvalidFormat {
+        location: format!("{server_location}.certificates"),
+        message: format!(
+          "server '{}' must configure at least one certificate \
+           because it uses listener(s): {}",
+          server.name(),
+          required_by.join(", ")
+        ),
+      });
+    } else if let Some(tls) = server.tls() {
+      validate_server_tls(tls, &server_location, collector);
     }
 
     // Validate service reference

@@ -102,7 +102,7 @@ def chain_service_context(
             temp_dir=temp_dir,
         )
         proxy_proc = start_proxy(config_path)
-        assert proxy_proc.wait_ready(timeout=5.0), "HTTP listener failed to start"
+        assert proxy_proc.wait_ready(), "HTTP listener failed to start"
 
         yield temp_dir, proxy_proc
 
@@ -272,7 +272,7 @@ class TestHTTP3ChainAddressResolution:
             proxy_proc = start_proxy(config_path)
 
             # Should start successfully with hostname address
-            assert proxy_proc.wait_ready(timeout=5.0), (
+            assert proxy_proc.wait_ready(), (
                 "HTTP listener should start with hostname address in proxy_group"
             )
 
@@ -321,9 +321,7 @@ listeners:
 services:
 - name: upstream
   kind: upstream.upstream
-  args:
-    upstream: test_upstream
-
+  upstream: test_upstream
 servers:
 - name: http_proxy
   listeners: ["http_main"]
@@ -336,7 +334,7 @@ servers:
             proxy_proc = start_proxy(config_path)
 
             # Should start successfully (DNS resolved at connect time)
-            assert proxy_proc.wait_ready(timeout=5.0), (
+            assert proxy_proc.wait_ready(), (
                 "Service should start even with unresolvable proxy address"
             )
 

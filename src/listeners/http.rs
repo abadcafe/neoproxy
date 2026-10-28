@@ -25,8 +25,10 @@ use crate::server::{Server, ServerRouter};
 #[derive(Deserialize, Default, Clone, Debug)]
 #[serde(default, deny_unknown_fields)]
 struct HttpListenerArgs {
+  #[serde(flatten)]
+  tcp_options: crate::tcp_options::TcpOptions,
   header_read_timeout: super::header_deadline::HeaderDeadline,
-  accept_retry_delay: AcceptRetryDelay,
+  tcp_accept_retry_delay: AcceptRetryDelay,
 }
 
 /// HTTP Listener implementation with shared-address routing support.
@@ -38,7 +40,7 @@ struct HttpListener {
   /// Shared TCP listener base for lifecycle management
   base: TcpListenerBase,
   header_deadline: super::header_deadline::HeaderDeadline,
-  accept_retry_delay: AcceptRetryDelay,
+  tcp_accept_retry_delay: AcceptRetryDelay,
 }
 
 impl HttpListener {
@@ -61,9 +63,9 @@ impl HttpListener {
     Ok(Self {
       addresses,
       server_router: ServerRouter::build(server_routing_table),
-      base: TcpListenerBase::new(),
+      base: TcpListenerBase::new().with_tcp_options(args.tcp_options),
       header_deadline: args.header_read_timeout,
-      accept_retry_delay: args.accept_retry_delay,
+      tcp_accept_retry_delay: args.tcp_accept_retry_delay,
     })
   }
 
@@ -88,7 +90,7 @@ impl Listening for HttpListener {
     self.base.start(
       &self.addresses,
       "HTTP",
-      self.accept_retry_delay,
+      self.tcp_accept_retry_delay,
       move |connection| {
         let service = HttpService::new_http(
           server_router.clone(),
@@ -125,7 +127,7 @@ pub(crate) fn listener_name() -> &'static str {
 
 /// Get listener properties for conflict detection.
 pub(crate) fn props() -> ListenerPropertyValues {
-  ListenerPropertyValues::new(TransportLayer::Tcp, true)
+  ListenerPropertyValues::new(TransportLayer::Tcp, true, false)
 }
 
 pub(crate) fn create_listener_builder() -> Box<dyn BuildListener> {

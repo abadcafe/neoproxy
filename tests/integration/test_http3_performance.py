@@ -65,7 +65,7 @@ class TestHTTP3Performance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(), "HTTP/3 listener failed to start"
 
             # Test concurrent connections
             num_connections = 10
@@ -137,7 +137,7 @@ class TestHTTP3Performance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(), "HTTP/3 listener failed to start"
 
             # Measure connection latency
             latencies: list[float] = []
@@ -219,7 +219,7 @@ class TestHTTP3Performance:
 
             proxy_proc = start_proxy(config_path)
 
-            assert proxy_proc.wait_ready(timeout=5.0), "HTTP/3 listener failed to start"
+            assert proxy_proc.wait_ready(), "HTTP/3 listener failed to start"
 
             # Test throughput with large data transfer
             large_data = b"X" * (100 * 1024)  # 100KB

@@ -50,7 +50,7 @@ def write_forward_node(directory: Path, node: ForwardNode) -> str:
     service: ConfigDict = {
         "name": "forward",
         "kind": "upstream.upstream",
-        "args": {"upstream": "route"},
+        "upstream": "route",
     }
     plugins: ConfigDict = {"upstream": plugin}
     if node.username is not None:
@@ -58,7 +58,7 @@ def write_forward_node(directory: Path, node: ForwardNode) -> str:
         service["layers"] = [
             {
                 "kind": "auth.basic_auth",
-                "args": {"users": [{"username": node.username, "password": "secret"}]},
+                "users": [{"username": node.username, "password": "secret"}],
             }
         ]
     server: ConfigDict = {
@@ -67,9 +67,7 @@ def write_forward_node(directory: Path, node: ForwardNode) -> str:
         "listeners": ["main"],
     }
     if node.listener != "http":
-        server["tls"] = {
-            "certificates": [{"cert_path": node.certificate, "key_path": node.key}]
-        }
+        server["certificates"] = [{"cert_path": node.certificate, "key_path": node.key}]
     config: ConfigDict = {
         "server_threads": 1,
         "plugins": plugins,

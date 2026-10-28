@@ -50,8 +50,7 @@ services:
   kind: echo.echo
   layers:
   - kind: access_log.file
-    args:
-      writer: logs/access
+    writer: logs/access
 servers:
 - name: main
   service: echo
@@ -60,7 +59,7 @@ servers:
     process = start_proxy(str(config))
     log = tmp_path / "logs" / "access"
     try:
-        assert process.wait_ready(timeout=3)
+        assert process.wait_ready()
         _request(port, "/timer-anchor")
         assert _wait_for_log(log, "/timer-anchor", timeout=3)
         anchor = time.monotonic()

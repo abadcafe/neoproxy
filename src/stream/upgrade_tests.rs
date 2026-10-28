@@ -1,50 +1,4 @@
-use bytes::Bytes;
-use http_body_util::Empty;
-
 use super::upgrade::OnUpgrade;
-use crate::http_message::{BytesBufBodyWrapper, RequestBody};
-
-#[tokio::test]
-async fn test_on_upgrade_extracts_from_extensions() {
-  let (_trigger, upgrade) = OnUpgrade::pair();
-
-  let mut req = http::Request::builder()
-    .method(http::Method::CONNECT)
-    .uri("example.com:443")
-    .body(RequestBody::new(BytesBufBodyWrapper::new(
-      Empty::<Bytes>::new(),
-    )))
-    .unwrap();
-
-  req.extensions_mut().insert(upgrade);
-
-  let extracted = OnUpgrade::on(&mut req);
-  assert!(
-    extracted.is_some(),
-    "Should extract OnUpgrade from extensions"
-  );
-
-  let second = OnUpgrade::on(&mut req);
-  assert!(second.is_none(), "Second extraction should return None");
-}
-
-#[tokio::test]
-async fn test_on_upgrade_on_absent_then_inserted() {
-  let (_trigger, upgrade) = OnUpgrade::pair();
-
-  let mut req = http::Request::builder()
-    .method(http::Method::CONNECT)
-    .uri("example.com:443")
-    .body(RequestBody::new(BytesBufBodyWrapper::new(
-      Empty::<Bytes>::new(),
-    )))
-    .unwrap();
-
-  assert!(OnUpgrade::on(&mut req).is_none());
-
-  req.extensions_mut().insert(upgrade);
-  assert!(OnUpgrade::on(&mut req).is_some());
-}
 
 #[tokio::test]
 async fn test_on_upgrade_resolves_with_error_on_cancel() {
@@ -111,3 +65,57 @@ async fn test_on_upgrade_duplicate_consumption_panics() {
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Waker};
+
+#[tokio::test]
+async fn test_on_upgrade_new_preserves_stream_and_extension_contract() {
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+  let (trigger, source) = OnUpgrade::pair();
+  let upgrade = OnUpgrade::new(source);
+  let mut extensions = http::Extensions::new();
+  extensions.insert(upgrade);
+  let (stream, mut peer) = tokio::io::duplex(64);
+  trigger.send(Ok(Box::new(stream))).unwrap();
+  let mut stream =
+    extensions.remove::<OnUpgrade>().unwrap().await.unwrap();
+  peer.write_all(b"payload").await.unwrap();
+  let mut bytes = [0; 7];
+  stream.read_exact(&mut bytes).await.unwrap();
+  assert_eq!(&bytes, b"payload");
+}
+
+struct CloneProbe(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl Clone for CloneProbe {
+  fn clone(&self) -> Self {
+    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Self(self.0.clone())
+  }
+}
+impl Future for CloneProbe {
+  type Output = anyhow::Result<Box<dyn crate::stream::Io>>;
+
+  fn poll(
+    self: Pin<&mut Self>,
+    _cx: &mut Context<'_>,
+  ) -> std::task::Poll<Self::Output> {
+    std::task::Poll::Ready(Err(anyhow::anyhow!("source error")))
+  }
+}
+
+#[tokio::test]
+async fn test_on_upgrade_clone_delegates_to_source_and_preserves_error()
+{
+  let clones =
+    std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+  let upgrade = OnUpgrade::new(CloneProbe(clones.clone()));
+  let clone = upgrade.clone();
+  assert_eq!(clones.load(std::sync::atomic::Ordering::SeqCst), 1);
+  drop(upgrade);
+  assert_eq!(clone.await.err().unwrap().to_string(), "source error");
+}
+
+#[tokio::test]
+async fn test_upgrade_trigger_reports_dropped_receiver() {
+  let (trigger, upgrade) = OnUpgrade::pair();
+  drop(upgrade);
+  assert!(trigger.send(Ok(Box::new(tokio::io::duplex(64).0))).is_err());
+}

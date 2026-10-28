@@ -109,7 +109,7 @@ impl tower::Service<Request> for UpstreamService {
       }
     };
 
-    let upgrade = stream::extract_upgrade(&mut req);
+    let upgrade = req.extensions_mut().remove::<stream::OnUpgrade>();
     let (req_headers, req_body) = req.into_parts();
 
     Box::pin(async move {
@@ -154,7 +154,7 @@ async fn chain_connect(
   registry: &Rc<UpstreamRegistry>,
   st: &Rc<StreamTracker>,
   req_headers: http::request::Parts,
-  upgrade: Option<stream::UpgradeFuture>,
+  upgrade: Option<stream::OnUpgrade>,
   ctx: &RequestContext,
 ) -> Result<Response> {
   let target = match target_parser::parse_connect_target(&req_headers) {
@@ -226,7 +226,7 @@ async fn chain_connect(
 async fn complete_tunnel(
   target: Box<dyn Io>,
   st: &Rc<StreamTracker>,
-  upgrade: Option<stream::UpgradeFuture>,
+  upgrade: Option<stream::OnUpgrade>,
   ctx: &RequestContext,
   upstream_response: Option<http::response::Parts>,
   tunnel_idle_timeout: Duration,

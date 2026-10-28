@@ -3,7 +3,7 @@
 //! contract
 //! public operations: HttpService, dispatch,
 //! new_http, new_tls
-//! data entities: ClientCertPolicy, HttpService
+//! data entities: ClientCertPolicy, HttpService, HttpUpgrade
 //! tests: http_service_tests.rs
 
 //! Shared HTTP service adaptor for HTTP-family listeners.
@@ -181,12 +181,40 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
 
   fn call(
     &self,
-    req: http::Request<hyper_body::Incoming>,
+    mut req: http::Request<hyper_body::Incoming>,
   ) -> Self::Future {
+    // Adapt only at the Hyper entry point, before shared dispatch.
+    if let Some(upgrade) =
+      req.extensions_mut().remove::<hyper::upgrade::OnUpgrade>()
+    {
+      req
+        .extensions_mut()
+        .insert(crate::stream::OnUpgrade::new(HttpUpgrade(upgrade)));
+    }
     let (parts, body) = req.into_parts();
     self.dispatch(Request::from_parts(
       parts,
       RequestBody::new(BytesBufBodyWrapper::new(body)),
     ))
+  }
+}
+
+/// Clone delegates directly to Hyper, which owns its shared receiver.
+/// No additional Arc/Mutex is needed for this adapter.
+#[derive(Clone)]
+struct HttpUpgrade(hyper::upgrade::OnUpgrade);
+
+impl Future for HttpUpgrade {
+  type Output = Result<Box<dyn crate::stream::Io>>;
+
+  fn poll(
+    self: Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+  ) -> std::task::Poll<Self::Output> {
+    Pin::new(&mut self.get_mut().0).poll(cx).map(|result| {
+      // Retain Upgraded, including bytes pre-read by the HTTP parser.
+      let stream = hyper_util::rt::TokioIo::new(result?);
+      Ok(Box::new(stream) as Box<dyn crate::stream::Io>)
+    })
   }
 }

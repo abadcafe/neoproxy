@@ -1,6 +1,6 @@
 //! module: stream
 //! responsibilities: expose protocol upgrade and tunnel transport
-//! operations public operations: Io, upgrade types, extract_upgrade,
+//! operations public operations: Io, upgrade types,
 //! run_tunnel data entities: none
 //! tests: stream_tests.rs
 
@@ -17,8 +17,6 @@ pub(crate) use transfer::{
   IoSide, TransferEnd, TransferProgress, TransferTotals,
 };
 pub(crate) use tunnel::run_tunnel;
-pub(crate) use upgrade::{
-  OnUpgrade, UpgradeFuture, UpgradeTrigger, extract_upgrade,
-};
+pub(crate) use upgrade::{OnUpgrade, UpgradeTrigger};
 
 pub(crate) use crate::io_stream::Io;

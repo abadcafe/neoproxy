@@ -7,7 +7,7 @@
 pub(super) mod connector;
 #[cfg(test)]
 mod connector_tests;
-mod transport;
+pub(super) mod transport;
 
 use std::future::Future;
 use std::pin::Pin;

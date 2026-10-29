@@ -25,6 +25,9 @@ use crate::tracker::StreamTracker;
 
 mod client;
 mod config;
+pub(crate) mod egress;
+#[cfg(test)]
+mod egress_tests;
 mod error;
 mod inherit;
 mod service;

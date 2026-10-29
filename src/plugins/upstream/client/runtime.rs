@@ -112,9 +112,10 @@ impl Upstream {
     &self,
     uri: &http::Uri,
     ctx: Option<&RequestContext>,
+    permitted: Option<&[std::net::SocketAddr]>,
   ) -> Result<Rc<RefCell<Group>>, UpstreamError> {
     let addresses = self.addresses(uri);
-    let key = if self.config.addresses.is_empty() {
+    let mut key = if self.config.addresses.is_empty() {
       format!(
         "{}://{}",
         uri.scheme_str().unwrap_or("connect"),
@@ -123,14 +124,23 @@ impl Upstream {
     } else {
       String::new()
     };
+    if let Some(permitted) = permitted {
+      key.push_str(&format!("|authorized={permitted:?}"));
+    }
     let results = futures_util::future::join_all(addresses.iter().map(
       |address| async move {
-        self
-          .connection_pools
-          .get(&address.use_connection_pool)
-          .dns
-          .resolve(&address.address, ctx)
-          .await
+        if self.config.addresses.is_empty()
+          && let Some(permitted) = permitted
+        {
+          Ok(permitted.to_vec())
+        } else {
+          self
+            .connection_pools
+            .get(&address.use_connection_pool)
+            .dns
+            .resolve(&address.address, ctx)
+            .await
+        }
       },
     ))
     .await;
@@ -203,6 +213,21 @@ impl Upstream {
     req_body: RequestBody,
     ctx: &RequestContext,
   ) -> Result<Response, UpstreamError> {
+    let route = req_headers
+      .extensions
+      .get::<crate::plugins::upstream::egress::Route>();
+    let permitted =
+      self.authorize(target.absolute_uri(), route, Some(ctx)).await?;
+    if let Some(route) = route.filter(|r| r.proxy().is_some()) {
+      return super::egress::Egress::new(
+        &self.config,
+        &self.connection_pools,
+        route,
+        permitted.expect("authorized proxy destination"),
+      )
+      .forward(target, req_headers, req_body, ctx, &self.tracker)
+      .await;
+    }
     if !self.config.addresses.is_empty()
       && self.config.addresses.iter().all(|address| {
         matches!(
@@ -226,7 +251,9 @@ impl Upstream {
         Arc::from(protocol.as_str()),
       );
     }
-    let group = self.group(target.absolute_uri(), Some(ctx)).await?;
+    let group = self
+      .group(target.absolute_uri(), Some(ctx), permitted.as_deref())
+      .await?;
     let request = RetryRequest::new(req_body);
     // Incompatible peers are excluded without changing health or
     // weights.
@@ -302,7 +329,22 @@ impl Upstream {
     } else {
       Vec::new()
     };
-    let group = self.group(&target.uri(), ctx).await?;
+    let route = request
+      .extensions
+      .get::<crate::plugins::upstream::egress::Route>();
+    let permitted = self.authorize(&target.uri(), route, ctx).await?;
+    if let Some(route) = route.filter(|r| r.proxy().is_some()) {
+      return super::egress::Egress::new(
+        &self.config,
+        &self.connection_pools,
+        route,
+        permitted.expect("authorized proxy destination"),
+      )
+      .connect(target, ctx)
+      .await;
+    }
+    let group =
+      self.group(&target.uri(), ctx, permitted.as_deref()).await?;
     self
       .dispatch(
         group,
@@ -325,6 +367,39 @@ impl Upstream {
         },
       )
       .await
+  }
+
+  async fn authorize(
+    &self,
+    uri: &http::Uri,
+    route: Option<&crate::plugins::upstream::egress::Route>,
+    ctx: Option<&RequestContext>,
+  ) -> Result<Option<Vec<std::net::SocketAddr>>, UpstreamError> {
+    let Some(route) = route else {
+      return Ok(None);
+    };
+    let authority = uri.authority().expect("validated target");
+    let host =
+      authority.host().trim_start_matches('[').trim_end_matches(']');
+    let port = authority.port_u16().unwrap_or(
+      if uri.scheme_str() == Some("https") { 443 } else { 80 },
+    );
+    let ips = self
+      .connection_pools
+      .get(&self.config.use_connection_pool)
+      .dns
+      .resolve(&format!("{}:{port}", authority.host()), ctx)
+      .await?;
+    let mut permitted: Vec<_> = ips
+      .into_iter()
+      .filter(|ip| route.allows(host, ip.ip()))
+      .collect();
+    permitted.sort();
+    permitted.dedup();
+    if permitted.is_empty() {
+      return Err(UpstreamError::PolicyDenied);
+    }
+    Ok(Some(permitted))
   }
 
   async fn dispatch<T, F, R>(

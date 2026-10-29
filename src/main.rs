@@ -177,6 +177,11 @@ fn main() -> Result<std::process::ExitCode> {
       )
     })
     .transpose()?;
+  let policies = config
+    .plugins()
+    .get("e2b")
+    .map(plugins::e2b::SharedPolicies::new)
+    .transpose()?;
   // Create shutdown signal
   let shutdown = ShutdownHandle::new();
 
@@ -204,6 +209,7 @@ fn main() -> Result<std::process::ExitCode> {
     while let Some((i, (worker, readiness))) = workers.next() {
       let log_registry = log_registry.clone();
       let connection_pools = connection_pools.clone();
+      let policies = policies.clone();
       if let Err(error) = supervisor.spawn(
         scope,
         &format!("neoproxy-server-{i}"),
@@ -212,6 +218,7 @@ fn main() -> Result<std::process::ExitCode> {
             config,
             log_registry,
             connection_pools,
+            policies,
             worker,
             readiness,
             i,

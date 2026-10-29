@@ -22,6 +22,9 @@ mod access_log_tests;
 pub(crate) mod auth;
 #[cfg(test)]
 mod auth_tests;
+pub(crate) mod e2b;
+#[cfg(test)]
+mod e2b_tests;
 pub(crate) mod echo;
 #[cfg(test)]
 mod echo_tests;
@@ -52,18 +55,20 @@ impl PluginManager {
       std::sync::Arc<access_log::registry::WriterRegistry>,
     >,
   ) -> (Self, Vec<PluginLoadError>) {
-    Self::with_upstream(plugins_config, log_registry, None)
+    Self::with_shared(plugins_config, log_registry, None, None)
   }
 
-  pub(crate) fn with_upstream(
+  pub(crate) fn with_shared(
     plugins_config: HashMap<String, SerializedArgs>,
     log_registry: Option<
       std::sync::Arc<access_log::registry::WriterRegistry>,
     >,
     connection_pools: Option<std::sync::Arc<upstream::ConnectionPools>>,
+    policies: Option<std::sync::Arc<e2b::SharedPolicies>>,
   ) -> (Self, Vec<PluginLoadError>) {
     let known_plugins: &[(&str, CreateFn)] = &[
       (echo::plugin_name(), echo::create_plugin),
+      (e2b::plugin_name(), e2b::create_plugin),
       (auth::plugin_name(), auth::create_plugin),
       (access_log::plugin_name(), access_log::create_plugin),
       (upstream::plugin_name(), upstream::create_plugin),
@@ -74,6 +79,17 @@ impl PluginManager {
     let mut errors = Vec::new();
 
     for (name, args) in plugins_config {
+      if name == e2b::plugin_name()
+        && let Some(shared) = &policies
+      {
+        match e2b::create_shared_plugin(shared.clone()) {
+          Ok(plugin) => {
+            plugins.insert(name, plugin);
+          }
+          Err(source) => errors.push(PluginLoadError { name, source }),
+        }
+        continue;
+      }
       if name == access_log::plugin_name()
         && let Some(registry) = &log_registry
       {

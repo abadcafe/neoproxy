@@ -210,3 +210,25 @@ fn test_classify_errors_preserve_diagnostic_source_chain() {
   assert!(message.contains("TLS connector failed"), "{message}");
   assert!(message.contains("UnknownIssuer"), "{message}");
 }
+
+#[test]
+fn test_classify_http_client_error_preserves_typed_connector_failures()
+{
+  for error in [
+    UpstreamError::TlsCertificateError("identity mismatch".into()),
+    UpstreamError::ConnectionTimeout(
+      "egress handshake timed out".into(),
+    ),
+    UpstreamError::UpstreamConnectError {
+      status: http::StatusCode::FORBIDDEN,
+      upstream_proxy_status: None,
+    },
+  ] {
+    let expected = error.http_status();
+    let error = std::io::Error::other(error);
+    assert_eq!(
+      classify_http_client_error(error.into()).http_status(),
+      expected
+    );
+  }
+}

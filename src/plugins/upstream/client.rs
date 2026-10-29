@@ -31,6 +31,7 @@ mod direct_tests;
 mod dns_cache;
 #[cfg(test)]
 mod dns_cache_tests;
+mod egress;
 mod exchange_timeout;
 #[cfg(test)]
 mod exchange_timeout_tests;

@@ -15,7 +15,9 @@ use crate::plugins::upstream::target_parser::ConnectTarget;
 /// Does not resolve addresses or own deadlines. Exact reads preserve
 /// tunnel bytes; write_all handles partial writes on every handshake
 /// packet.
-pub(super) async fn negotiate<S: AsyncRead + AsyncWrite + Unpin>(
+pub(in crate::plugins::upstream::client) async fn negotiate<
+  S: AsyncRead + AsyncWrite + Unpin,
+>(
   stream: &mut S,
   target: &ConnectTarget,
   user: Option<&UserCredential>,

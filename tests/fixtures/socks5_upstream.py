@@ -4,6 +4,7 @@ Data entities: SocksPeer. Tests: integration/test_socks5_upstream.py.
 """
 
 import asyncio
+import ssl
 import subprocess
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -27,10 +28,11 @@ class SocksPeer:
     methods: list[bytes] = field(default_factory=list)
     users: list[tuple[bytes, bytes]] = field(default_factory=list)
     targets: list[tuple[int, bytes, int]] = field(default_factory=list)
+    requests: list[bytes] = field(default_factory=list)
 
 
 @asynccontextmanager
-async def socks_peer() -> AsyncGenerator[SocksPeer]:
+async def socks_peer(tls: ssl.SSLContext | None = None) -> AsyncGenerator[SocksPeer]:
     peer = SocksPeer(get_unique_port())
     tasks: list[asyncio.Task[None]] = []
 
@@ -72,7 +74,7 @@ async def socks_peer() -> AsyncGenerator[SocksPeer]:
             await writer.drain()
             if peer.reply:
                 return
-            _ = await reader.readuntil(b"\r\n\r\n")
+            peer.requests.append(await reader.readuntil(b"\r\n\r\n"))
             writer.write(
                 b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n"
                 + b"Connection: close\r\n\r\nsocks"
@@ -86,7 +88,7 @@ async def socks_peer() -> AsyncGenerator[SocksPeer]:
     def accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         tasks.append(asyncio.create_task(exchange(reader, writer)))
 
-    server = await asyncio.start_server(accept, "127.0.0.1", peer.port)
+    server = await asyncio.start_server(accept, "127.0.0.1", peer.port, ssl=tls)
     try:
         yield peer
     finally:

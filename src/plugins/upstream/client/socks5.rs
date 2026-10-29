@@ -4,7 +4,7 @@
 //! data entities: Socks5Client
 //! tests: socks5_tests.rs, test_socks5_upstream.py
 
-mod handshake;
+pub(super) mod handshake;
 #[cfg(test)]
 mod handshake_tests;
 

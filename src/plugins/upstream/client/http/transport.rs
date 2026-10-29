@@ -16,11 +16,16 @@ pub(crate) struct ProxyTransport<T> {
   observation: ConnectionObservation,
 }
 impl<T> ProxyTransport<T> {
-  pub(super) fn new(io: T, observation: ConnectionObservation) -> Self {
+  pub(in crate::plugins::upstream::client) fn new(
+    io: T,
+    observation: ConnectionObservation,
+  ) -> Self {
     Self { io: TokioIo::new(io), observation }
   }
 
-  pub(super) fn into_parts(self) -> (T, ConnectionObservation) {
+  pub(in crate::plugins::upstream::client) fn into_parts(
+    self,
+  ) -> (T, ConnectionObservation) {
     (self.io.into_inner(), self.observation)
   }
 }

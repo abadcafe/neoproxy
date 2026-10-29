@@ -1202,3 +1202,58 @@ HTTP/3 listener 及 `plugins.upstream.connection_pools[]` 还支持以下连接�
 | `quic_connection_datagram_send_buffer_size` | `1MiB` | 每个 QUIC 连接的数据报发送缓冲区容量 |
 
 缓冲区支持 `MiB` 等大小格式，必须为正且可由平台表示。upstream 三项仅在 connection pool 配置，通过 `use_connection_pool` 选择。Extended CONNECT 两侧固定开启，不提供关闭配置。
+
+### E2B sandbox 出站策略
+
+中心代理通过 `e2b.sandbox_network_policy` layer 按请求执行策略。请求必须携带唯一、非空的
+`x-sandbox-id`，否则返回 403；该头在策略层处理后移除，不发送给目标站点。
+
+```yaml
+plugins:
+  upstream:
+    upstreams:
+      - name: direct
+  e2b:
+    policy_api_url: http://policy-service/sandbox-network-policy
+    policy_api_timeout: 5s
+services:
+  - name: sandbox-egress
+    kind: upstream.upstream
+    upstream: direct
+    layers:
+      - kind: e2b.sandbox_network_policy
+        policy_fallback_ttl: 60s
+        default_policy:
+          denyOut: [0.0.0.0/0, "::/0"]
+```
+
+策略请求为 `GET /sandbox-network-policy?sandbox_id=...`。已有远端版本时发送
+`If-None-Match: "43"`。200 和 304 响应都必须包含 `ETag: "43"` 与
+`X-Policy-TTL: 300`（正整数秒）；200 的 JSON body 为
+`{"sandbox_id":"...","policy":{...}}`，304 没有 body，版本必须与请求匹配。
+
+缓存在进程内跨 worker 共享，相同 layer 配置共享缓存，不同默认策略或回退 TTL 隔离。
+每个 sandbox 一把异步 Mutex：取得锁后检查缓存；缺失或过期则持锁等待拉取完成并更新缓存。
+不会提前使用过期策略。新版本替换策略；相同版本保留策略并续期；版本回退、身份不匹配、
+无效 JSON/策略/响应头、HTTP 错误或超时均按失败处理。失败保留原策略和版本；没有原策略时
+使用 `default_policy`；两者均续期 `policy_fallback_ttl`（默认 60s）。默认策略不带远端 ETag。
+没有后台轮询，只有请求到达时才检查过期；已有隧道使用建立时的策略，不强制中断。
+
+`policy` 支持以下出站字段：
+
+- `allowOut`：IP、IPv4/IPv6 CIDR、域名、`*.example.com` 或 `*`。显式允许优先于拒绝。
+- `denyOut`：IP 或 CIDR；没有匹配规则时默认允许。
+- `dnsServers`：仅在 `allowOut` 包含域名时，额外允许访问这些 IPv4 地址；省略为
+  `[8.8.8.8]`，空数组不额外放行。它不改变 DNS 解析器；解析器仍由 upstream connection pool 配置。
+- `egressProxy`：`address: host:port`，可选成对的 `username` / `password`；支持
+  `tls: {enabled: true, serverName: proxy.example.com, caCert: "PEM..."}`。省略 `caCert`
+  使用系统 CA，配置它则替换系统 CA。允许域名匹配的连接使用 SOCKS5 远端域名解析，其他连接发送
+  已授权的目标 IP。普通 HTTP/HTTPS 转发也在 SOCKS5 TCP 隧道内进行，SOCKS5 连接不复用。
+- `allowInternetAccess: false`（亦接受更新接口的 `allow_internet_access`）：追加 IPv4/IPv6 全拒绝，
+  显式允许仍优先。
+
+域名来自普通请求 URL 或 CONNECT authority；IP 目标只按 IP/CIDR 规则处理。
+域名允许规则会拒绝解析到私有/本地地址的结果，防止通过域名放行访问本地网络。
+目标解析使用 upstream pool 的 DNS TTL 缓存，过滤后的地址直接用于连接选择，复用连接之前也重新授权。
+HTTP、HTTPS 和 H3 listener 均可使用该 layer；本次仅支持 TCP 出站，不增加透明 listener 或 SOCKS5 UDP。
+E2B `rules` 当前只有 transform；空规则集合可解析，包含 transform 的策略明确拒绝，避免静默忽略转换。

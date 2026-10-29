@@ -20,8 +20,9 @@ use crate::proxy_status::{
 // Upstream Error Type (RFC 9209 Proxy-Status error types)
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum UpstreamError {
+  PolicyDenied,
   DnsError(String),
   ConnectionRefused(String),
   ConnectionTimeout(String),
@@ -43,6 +44,7 @@ pub(crate) enum UpstreamError {
 impl UpstreamError {
   pub(crate) fn http_status(&self) -> http::StatusCode {
     match self {
+      Self::PolicyDenied => http::StatusCode::FORBIDDEN,
       Self::DnsError(_)
       | Self::ConnectionRefused(_)
       | Self::ConnectionTerminated(_)
@@ -70,6 +72,7 @@ impl UpstreamError {
 
   pub(crate) fn proxy_status_error(&self) -> &'static str {
     match self {
+      Self::PolicyDenied => "destination_ip_prohibited",
       Self::DnsError(_) => "dns_error",
       Self::ConnectionRefused(_) => "connection_refused",
       Self::ConnectionTimeout(_) => "connection_timeout",
@@ -87,6 +90,7 @@ impl UpstreamError {
   pub(crate) fn to_response(&self, ctx: &RequestContext) -> Response {
     use crate::context::fields::upstream;
     let phase = match self {
+      Self::PolicyDenied => "policy",
       Self::DnsError(_) => "dns",
       Self::TlsCertificateError(_) | Self::TlsProtocolError(_) => "tls",
       Self::ConnectionRefused(_)
@@ -144,6 +148,9 @@ impl UpstreamError {
 impl fmt::Display for UpstreamError {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
+      Self::PolicyDenied => {
+        write!(f, "Destination denied by network policy")
+      }
       Self::DnsError(msg) => write!(f, "DNS resolution failed: {msg}"),
       Self::ConnectionRefused(msg) => {
         write!(f, "Connection refused: {msg}")
@@ -244,6 +251,9 @@ pub(crate) fn classify_connect_error(
 pub(crate) fn classify_http_client_error(
   e: anyhow::Error,
 ) -> UpstreamError {
+  if let Some(error) = find_error_in_chain::<UpstreamError>(&e) {
+    return error.clone();
+  }
   if let Some(error) = find_error_in_chain::<hyper::Error>(&e) {
     if error.is_parse() {
       return UpstreamError::InvalidResponse(format!("{e:#}"));

@@ -128,7 +128,9 @@ class ChainCapture:
             observed,
             capture_output=True,
             text=True,
-            timeout=25,
+            timeout=float(command[command.index("--max-time") + 1]) + 5
+            if "--max-time" in command
+            else 25,
             env=get_curl_env_without_no_proxy(),
         )
         status, separator, metrics = result.stdout.partition(_METRICS_MARKER)

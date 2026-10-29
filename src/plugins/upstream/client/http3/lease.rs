@@ -15,8 +15,10 @@ use super::super::observation::ConnectionObservation;
 use super::io_progress::SendBuffer;
 pub(super) struct Session {
   pub(super) connection: quinn::Connection,
+  pub(super) datagrams: crate::connect_udp::h3::Hub,
   pub(super) sender:
     h3::client::SendRequest<super::read_progress::Opener, SendBuffer>,
+  pub(super) peer_settings: tokio::sync::watch::Receiver<Option<bool>>,
   pub(super) observation: ConnectionObservation,
   pub(super) reads: super::read_progress::Registry,
   pub(super) hostname: Option<String>,
@@ -33,14 +35,17 @@ impl Session {
       SendBuffer,
     >,
     observation: ConnectionObservation,
+    peer_settings: tokio::sync::watch::Receiver<Option<bool>>,
     reads: super::read_progress::Registry,
     hostname: Option<String>,
     permit: tokio::sync::OwnedSemaphorePermit,
   ) -> Arc<Self> {
     Arc::new(Self {
+      datagrams: crate::connect_udp::h3::Hub::new(connection.clone()),
       connection,
       sender,
       observation,
+      peer_settings,
       reads,
       hostname,
       draining: AtomicBool::new(false),

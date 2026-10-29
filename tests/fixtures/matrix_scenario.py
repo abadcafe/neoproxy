@@ -1,6 +1,6 @@
 """module: matrix_scenario; responsibility: own a two-hop curl experiment.
 Public operations: run_exchange. Data entities: none.
-Tests: chain matrix local, Baidu and authentication process contracts.
+Tests: chain matrix local, Cloudflare and authentication process contracts.
 """
 
 from contextlib import ExitStack
@@ -20,7 +20,7 @@ from .ports import get_unique_port
 def run_exchange(
     directory: Path,
     case: ChainCase,
-    target: Literal["local", "baidu"],
+    target: Literal["local", "cloudflare"],
     certs: CertificateFiles,
     *,
     entry_auth: AuthCase | None = None,
@@ -28,6 +28,8 @@ def run_exchange(
     origin_timing: ResponseTiming | None = None,
     tunnel_idle_timeout: str = "10s",
 ) -> Exchange:
+    if target == "cloudflare":
+        tunnel_idle_timeout = "30s"
     directory.mkdir(parents=True, exist_ok=True)
     entry_dir, relay_dir = directory / "entry", directory / "relay"
     entry_port, relay_port = get_unique_port(), get_unique_port()
@@ -42,6 +44,7 @@ def run_exchange(
         certs,
         listener_auth=relay_auth,
         quic_idle_timeout=quic_idle_timeout,
+        upstream_io_timeout="30s" if target == "cloudflare" else "10s",
     )
     entry_config = write_node(
         entry_dir,
@@ -53,11 +56,12 @@ def run_exchange(
         next_auth=relay_auth,
         tunnel_idle_timeout=tunnel_idle_timeout,
         quic_idle_timeout=quic_idle_timeout,
+        upstream_io_timeout="30s" if target == "cloudflare" else "10s",
     )
     sent_body = b"matrix-upload\x00\xff\n" * 1024
     origin_requests: list[OriginRequest] = []
     with ExitStack() as resources:
-        url = f"{case.scheme}://www.baidu.com/"
+        url = f"{case.scheme}://cloudflare.com/"
         if target == "local":
             origin = resources.enter_context(
                 local_origin(case.scheme, certs, origin_timing)

@@ -22,6 +22,7 @@ pub(crate) struct ClientCertCredential {
 /// Resolved QUIC settings from the selected connection pool.
 #[derive(Clone, Debug)]
 pub(crate) struct QuicResolved {
+  pub(crate) datagram: crate::quic_datagram::Config,
   pub(crate) max_idle_timeout: Option<Duration>,
   pub(crate) keep_alive_interval: Duration,
   pub(crate) max_concurrent_bidi_streams: Option<u64>,

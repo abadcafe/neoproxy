@@ -373,6 +373,13 @@ impl ClientProtocol for Http3Client {
 
       let mut req = build_connect_request(target, &self.user, request);
       *req.version_mut() = http::Version::HTTP_3;
+      let udp =
+        request.extensions.get::<crate::connect_udp::request::Udp>();
+      if let Some(udp) = udp {
+        let mut udp = udp.clone();
+        udp.authority = self.session.proxy_authority();
+        crate::connect_udp::request::apply(&mut req, &udp, true);
+      }
 
       let settings = req
         .extensions()
@@ -401,14 +408,35 @@ impl ClientProtocol for Http3Client {
         });
       }
 
+      if udp.is_some()
+        && !resp
+          .headers()
+          .get("capsule-protocol")
+          .is_some_and(|v| v == "?1")
+      {
+        return Err(UpstreamError::InvalidResponse(
+          "missing Capsule-Protocol negotiation".into(),
+        ));
+      }
+      let id = stream.id().into_inner();
+      use h3::ConnectionState;
+      let enabled = self.session.datagram_enabled()
+        && lease.session().sender.settings().enable_datagram();
+      let hub = lease.session().datagrams.clone();
       let (sending_stream, receiving_stream) = stream.split();
-      Ok(ConnectResult {
-        transport: Box::new(lease.attach(
-          crate::h3_stream::H3ClientBidiStream::new(
-            sending_stream,
-            receiving_stream,
-          ),
+      let transport: Box<dyn crate::stream::Io> = Box::new(
+        lease.attach(crate::h3_stream::H3ClientBidiStream::new(
+          sending_stream,
+          receiving_stream,
         )),
+      );
+      let transport = if udp.is_some() {
+        hub.attach(transport, id, enabled)
+      } else {
+        transport
+      };
+      Ok(ConnectResult {
+        transport,
         upstream_addr: None,
         upstream_response: Some(resp.into_parts().0),
         tunnel_idle_timeout,

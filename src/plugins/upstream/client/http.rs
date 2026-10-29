@@ -93,10 +93,17 @@ where
         io.observation().record(ctx);
       }
       let peer = io.peer_addr().ok();
+      let mut request = request.clone();
+      if let Some(udp) =
+        request.extensions.get_mut::<crate::connect_udp::request::Udp>()
+        && let Some(authority) = self.client.proxy_authority()
+      {
+        udp.authority = authority;
+      }
       negotiate_tunnel(
         io,
         target,
-        request,
+        &request,
         &self.user,
         tracker,
         (peer, self.tunnel_idle_timeout),
@@ -144,6 +151,11 @@ where
 
   let mut req = build_connect_request(target, user, request);
   *req.version_mut() = http::Version::HTTP_11;
+  let udp =
+    request.extensions.get::<crate::connect_udp::request::Udp>();
+  if let Some(udp) = udp {
+    crate::connect_udp::request::apply(&mut req, udp, false);
+  }
   let req = req.map(|()| {
     RequestBody::new(BytesBufBodyWrapper::new(
       http_body_util::Empty::new(),
@@ -166,7 +178,18 @@ where
   })?;
 
   // RFC 9110 §9.3.6: every 2xx establishes a CONNECT tunnel.
-  if !resp.status().is_success() {
+  if if udp.is_some() {
+    resp.status() != http::StatusCode::SWITCHING_PROTOCOLS
+      || !resp.headers().get("upgrade").is_some_and(|v| {
+        v.as_bytes().eq_ignore_ascii_case(b"connect-udp")
+      })
+      || !resp
+        .headers()
+        .get("capsule-protocol")
+        .is_some_and(|v| v == "?1")
+  } else {
+    !resp.status().is_success()
+  } {
     return Err(UpstreamError::UpstreamConnectError {
       status: resp.status(),
       upstream_proxy_status: crate::proxy_status::take_proxy_status(

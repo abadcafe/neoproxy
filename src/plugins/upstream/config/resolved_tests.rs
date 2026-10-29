@@ -41,6 +41,7 @@ fn test_resolved_address_preserves_runtime_fields() {
 #[test]
 fn test_quic_resolved_preserves_optional_transport_fields() {
   let quic = QuicResolved {
+    datagram: Default::default(),
     max_idle_timeout: Some(Duration::from_secs(20)),
     keep_alive_interval: Duration::from_secs(3),
     max_concurrent_bidi_streams: Some(64),

@@ -127,6 +127,7 @@ pub(super) fn build(
         endpoint,
         Some(hostname),
         QuicConfig {
+          datagram: quic.datagram.clone(),
           max_idle_timeout: quic.max_idle_timeout,
           keep_alive_interval: quic.keep_alive_interval,
           max_concurrent_bidi_streams: quic.max_concurrent_bidi_streams,

@@ -21,7 +21,10 @@ pub(super) async fn handle_h3_connection(
   shutdown: ShutdownHandle,
   local_addr: SocketAddr,
   header_deadline: crate::listeners::header_deadline::HeaderDeadline,
-  policy: crate::listeners::http_policy::HttpPolicy,
+  (policy, datagram_enabled): (
+    crate::listeners::http_policy::HttpPolicy,
+    bool,
+  ),
 ) {
   let client_addr = connection.remote_address();
   // TLS has already checked any presented certificate against this
@@ -43,6 +46,9 @@ pub(super) async fn handle_h3_connection(
     controls.clone(),
   );
   let mut builder = h3::server::builder();
+  builder
+    .enable_extended_connect(true)
+    .enable_datagram(datagram_enabled);
   builder.max_field_section_size(u64::from(
     policy.request_limits.limits().bytes(),
   ));
@@ -54,6 +60,7 @@ pub(super) async fn handle_h3_connection(
       Err(error) => { warn!("Failed to create H3 connection: {error}"); return; }
     },
   };
+  let hub = crate::connect_udp::h3::Hub::new(connection.clone());
   let mut draining = false;
   // The worker's Transport owner retains this driver throughout plugin
   // shutdown, including CONNECT I/O which has left the request tracker.
@@ -82,6 +89,10 @@ pub(super) async fn handle_h3_connection(
     };
     match result {
       Ok(Some(resolver)) => {
+        use h3::ConnectionState;
+        let datagrams =
+          datagram_enabled && h3.settings().enable_datagram();
+        let hub = hub.clone();
         let router = router.clone();
         let controls = controls.clone();
         requests.register(async move {
@@ -91,7 +102,15 @@ pub(super) async fn handle_h3_connection(
           )
           .await
           {
-            Ok(Ok((request, stream))) => {
+            Ok(Ok((mut request, stream))) => {
+              let id = stream.id().into_inner();
+              request.extensions_mut().insert(
+                crate::connect_udp::h3::Ingress {
+                  hub,
+                  id,
+                  enabled: datagrams,
+                },
+              );
               let write_control = controls.take(stream.id());
               handle_h3_stream(
                 request,

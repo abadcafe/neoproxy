@@ -109,6 +109,26 @@ impl tower::Service<Request> for UpstreamService {
       }
     };
 
+    let (mut parts, body) = req.into_parts();
+    match crate::connect_udp::request::recognize(&parts) {
+      Ok(Some(udp)) => {
+        let target = crate::connect_udp::request::target(&udp.path)
+          .expect("validated UDP target");
+        parts.method = http::Method::CONNECT;
+        parts.uri = target.parse().expect("validated UDP authority");
+        parts.extensions.insert(udp);
+      }
+      Ok(None) => {}
+      Err(error) => {
+        return Box::pin(async move {
+          Ok(build_error_response(
+            http::StatusCode::BAD_REQUEST,
+            &error.to_string(),
+          ))
+        });
+      }
+    }
+    req = Request::from_parts(parts, body);
     let upgrade = req.extensions_mut().remove::<stream::OnUpgrade>();
     let (req_headers, req_body) = req.into_parts();
 
@@ -205,7 +225,21 @@ async fn chain_connect(
     upstream_addr,
   );
 
-  complete_tunnel(
+  let udp = req_headers
+    .extensions
+    .get::<crate::connect_udp::request::Udp>()
+    .cloned();
+  let ingress = req_headers
+    .extensions
+    .get::<crate::connect_udp::h3::Ingress>()
+    .cloned();
+  let upgrade = upgrade.map(|upgrade| match ingress {
+    Some(ingress) if udp.is_some() => {
+      stream::OnUpgrade::new(UdpUpgrade { upgrade, ingress })
+    }
+    _ => upgrade,
+  });
+  let mut response = complete_tunnel(
     target_io,
     st,
     upgrade,
@@ -214,7 +248,49 @@ async fn chain_connect(
     tunnel_idle_timeout,
     completion,
   )
-  .await
+  .await?;
+  if let Some(udp) = udp {
+    response
+      .headers_mut()
+      .insert("capsule-protocol", http::HeaderValue::from_static("?1"));
+    if udp.http1 {
+      *response.status_mut() = http::StatusCode::SWITCHING_PROTOCOLS;
+      response.headers_mut().insert(
+        "connection",
+        http::HeaderValue::from_static("Upgrade"),
+      );
+      response.headers_mut().insert(
+        "upgrade",
+        http::HeaderValue::from_static("connect-udp"),
+      );
+    }
+  }
+  Ok(response)
+}
+
+#[derive(Clone)]
+struct UdpUpgrade {
+  upgrade: stream::OnUpgrade,
+  ingress: crate::connect_udp::h3::Ingress,
+}
+impl std::future::Future for UdpUpgrade {
+  type Output = Result<Box<dyn Io>>;
+
+  fn poll(
+    self: Pin<&mut Self>,
+    cx: &mut TaskContext<'_>,
+  ) -> Poll<Self::Output> {
+    let this = self.get_mut();
+    Pin::new(&mut this.upgrade).poll(cx).map(|result| {
+      result.map(|io| {
+        this.ingress.hub.attach(
+          io,
+          this.ingress.id,
+          this.ingress.enabled,
+        )
+      })
+    })
+  }
 }
 
 /// Complete a CONNECT tunnel by building the 200 response and

@@ -1,7 +1,7 @@
 """Authentication isolation between two simultaneously protected hops.
 
 Transport/method/scheme coverage and single-hop rejection belong to
-chain_matrix_local, chain_matrix_baidu and chain_matrix_auth. These cases
+chain_matrix_local, chain_matrix_cloudflare and chain_matrix_auth. These cases
 retain the old proxy_chain contract that both hops authenticate independently,
 including forwarding POST bodies and rejecting either hop's credentials.
 """

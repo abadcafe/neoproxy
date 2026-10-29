@@ -20,7 +20,7 @@ def test_curl_command_preserves_public_ca_trust(tmp_path: Path) -> None:
         tmp_path,
         ChainCase(entry="http", relay="http"),
         8080,
-        "https://www.baidu.com/",
+        "https://cloudflare.com/",
         certs,
         None,
         b"",

@@ -70,6 +70,25 @@ impl SessionPool {
     }
   }
 
+  pub(super) fn datagram_enabled(&self) -> bool {
+    self.settings.quic.datagram.http3_enable_datagram
+  }
+
+  pub(super) fn proxy_authority(&self) -> String {
+    match &self.settings.hostname {
+      Some(host) => format!(
+        "{}:{}",
+        if host.contains(':') {
+          format!("[{host}]")
+        } else {
+          host.clone()
+        },
+        self.settings.address.port()
+      ),
+      None => self.settings.address.to_string(),
+    }
+  }
+
   pub(super) fn limits(&self) -> crate::header_limits::Limits {
     self.settings.limits
   }
@@ -111,8 +130,8 @@ impl SessionPool {
       let result = tokio::select! {
         _ = tx.closed() => { drop(permit); bucket.changed.notify_waiters(); return; }
         result = establish::establish(&settings, &tls, &observation, reads.clone()) => result,
-      }.map(|(connection, sender)| {
-        let session = Session::new(connection, sender, observation.clone(), reads, settings.hostname, permit);
+      }.map(|(connection, sender, peer_settings)| {
+        let session = Session::new(connection, sender, observation.clone(), peer_settings, reads, settings.hostname, permit);
         let lease = SessionLease::new(session.clone());
         bucket.insert(session);
         lease
@@ -153,6 +172,43 @@ impl SessionPool {
       let session = lease.session();
       if let Some(ctx) = request.extensions().get::<RequestContext>() {
         session.observation.record(ctx);
+      }
+      if request
+        .extensions()
+        .get::<crate::connect_udp::request::Udp>()
+        .is_some()
+      {
+        let mut settings = session.peer_settings.clone();
+        let wait = async {
+          loop {
+            if let Some(enabled) = *settings.borrow_and_update() {
+              return Ok(enabled);
+            }
+            settings.changed().await.map_err(|_| {
+              UpstreamError::ConnectionTerminated(
+                "H3 closed before SETTINGS".into(),
+              )
+            })?;
+          }
+        };
+        let timeout = request
+          .extensions()
+          .get::<super::super::exchange_timeout::Timeouts>()
+          .copied()
+          .unwrap_or_default()
+          .read;
+        let enabled = tokio::time::timeout(timeout, wait)
+          .await
+          .map_err(|_| {
+            UpstreamError::ConnectionTimeout(
+              "H3 SETTINGS timeout".into(),
+            )
+          })??;
+        if !enabled {
+          return Err(UpstreamError::InvalidResponse(
+            "H3 peer does not support Extended CONNECT".into(),
+          ));
+        }
       }
       let mut sender = session.sender.clone();
       super::super::retry_request::Progress::mark_request(&request);

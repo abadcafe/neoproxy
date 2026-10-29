@@ -15,6 +15,8 @@ use super::raw::{CertificateConfig, UpstreamPluginConfig};
 #[serde(deny_unknown_fields)]
 pub(crate) struct ConnectionPoolConfig {
   #[serde(flatten)]
+  pub(crate) datagram: crate::quic_datagram::Config,
+  #[serde(flatten)]
   pub(crate) response_limits: crate::header_limits::ResponseLimits,
   pub(crate) name: String,
   #[serde(default)]
@@ -103,6 +105,7 @@ pub(crate) fn resolve_connection_pools(
 ) -> anyhow::Result<HashMap<String, ConnectionPoolConfig>> {
   let mut pools = HashMap::new();
   for pool in &plugin.connection_pools {
+    pool.datagram.validate()?;
     if pool.name.is_empty() {
       anyhow::bail!("connection pool name must not be empty");
     }

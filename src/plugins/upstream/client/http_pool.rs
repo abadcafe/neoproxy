@@ -66,6 +66,21 @@ impl<C> ProxyPool<C> {
     Self { connector, cache, key: Some(key), tracker }
   }
 
+  pub(super) fn proxy_authority(&self) -> Option<String> {
+    self.key.as_ref().map(|key| match &key.server_name {
+      Some(host) => format!(
+        "{}:{}",
+        if host.contains(':') {
+          format!("[{host}]")
+        } else {
+          host.clone()
+        },
+        key.endpoint.port()
+      ),
+      None => key.endpoint.to_string(),
+    })
+  }
+
   pub(super) fn builder(&self) -> http1::Builder {
     let mut builder = http1::Builder::new();
     if self.cache.limits.count() != 100 {

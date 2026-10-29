@@ -16,6 +16,7 @@ use crate::tracker::StreamTracker;
 
 fn quic_config() -> QuicConfig {
   QuicConfig {
+    datagram: Default::default(),
     max_idle_timeout: None,
     keep_alive_interval: Duration::from_secs(3),
     max_concurrent_bidi_streams: None,

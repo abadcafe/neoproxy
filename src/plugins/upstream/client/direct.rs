@@ -120,6 +120,22 @@ impl ClientProtocol for DirectClient {
     let connect_timeout = self.connect_timeout;
     let tunnel_idle_timeout = self.tunnel_idle_timeout;
     Box::pin(async move {
+      if request
+        .extensions
+        .get::<crate::connect_udp::request::Udp>()
+        .is_some()
+      {
+        let transport =
+          crate::connect_udp::direct::connect(self.endpoint)
+            .await
+            .map_err(|e| classify_connect_error(e.into()))?;
+        return Ok(ConnectResult {
+          transport,
+          upstream_addr: Some(self.endpoint),
+          upstream_response: None,
+          tunnel_idle_timeout,
+        });
+      }
       let observation =
         super::observation::ConnectionObservation::new();
       let started = std::time::Instant::now();

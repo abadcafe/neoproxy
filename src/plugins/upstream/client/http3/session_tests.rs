@@ -25,6 +25,7 @@ async fn test_session_pool_drop_cancels_maintenance_after_failed_handshake()
         peer.local_addr().unwrap(),
         Some("localhost".into()),
         QuicConfig {
+          datagram: Default::default(),
           max_idle_timeout: None,
           keep_alive_interval: Duration::from_secs(3),
           max_concurrent_bidi_streams: None,
@@ -115,6 +116,7 @@ async fn test_session_pool_peer_closure_during_h3_setup_is_bad_gateway()
     let pool = SessionPool::new(
       endpoint.local_addr().unwrap(), Some("localhost".into()),
       QuicConfig {
+    datagram:Default::default(),
         max_idle_timeout: None, keep_alive_interval: Duration::from_secs(3),
         max_concurrent_bidi_streams: None, initial_mtu: None,
         send_window: None, receive_window: None, stream_receive_window: None,
@@ -149,6 +151,7 @@ async fn test_session_pool_cancelled_handshake_releases_capacity() {
     peer.local_addr().unwrap(),
     Some("localhost".into()),
     QuicConfig {
+      datagram: Default::default(),
       max_idle_timeout: None,
       keep_alive_interval: Duration::from_secs(3),
       max_concurrent_bidi_streams: None,

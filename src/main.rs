@@ -23,6 +23,9 @@ mod certificate;
 mod certificate_tests;
 mod cli;
 mod config;
+mod connect_udp;
+#[cfg(test)]
+mod connect_udp_tests;
 mod context;
 mod h3_response;
 #[cfg(test)]
@@ -55,6 +58,9 @@ mod process;
 mod proxy_status;
 #[cfg(test)]
 mod proxy_status_tests;
+mod quic_datagram;
+#[cfg(test)]
+mod quic_datagram_tests;
 mod redaction;
 #[cfg(test)]
 mod redaction_tests;

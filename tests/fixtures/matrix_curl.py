@@ -25,14 +25,14 @@ def curl_command(
         "--silent",
         "--show-error",
         "--http3-only"
-        if case.entry == "http3" and case.mode == "forward"
+        if case.mode == "udp" or (case.entry == "http3" and case.mode == "forward")
         else "--http1.1",
         "--noproxy",
         "",
         "--connect-timeout",
-        "5",
+        "30" if urlsplit(url).hostname == "cloudflare.com" else "5",
         "--max-time",
-        "15",
+        "45" if urlsplit(url).hostname == "cloudflare.com" else "15",
         "--trace-ascii",
         str(directory / "curl.trace"),
         "--output",

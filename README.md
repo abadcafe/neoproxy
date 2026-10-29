@@ -1182,3 +1182,23 @@ SOCKS5 的 9 种组合（SOCKS5 仅支持隧道）。
 认证用例仅对 HTTPS/HTTP3 使用客户端证书。矩阵通过访问日志验证实际经过的两跳
 及所选中转协议；本地目标另验证接收的方法、路径和请求内容。
 
+
+
+### CONNECT-UDP
+
+HTTP、HTTPS 和 HTTP/3 listener/upstream 支持 RFC 9298 CONNECT-UDP，复用 `upstream.upstream` 服务、`auth.basic_auth`、节点调度和健康反馈。无需新增开关。默认 URI 模板为 `https://{proxy}/.well-known/masque/udp/{target_host}/{target_port}/`，IPv6 地址中的冒号使用 `%3A` 编码，端口为 1～65535。
+
+HTTP/HTTPS 使用 HTTP/1.1 `GET`、`Connection: Upgrade`、`Upgrade: connect-udp`，成功响应为 101。HTTP/3 使用 Extended CONNECT，`:protocol` 为 `connect-udp`，成功响应为 200。请求和成功响应携带 `Capsule-Protocol: ?1`。HTTP/1.1 通过 DATAGRAM Capsule 承载 UDP，HTTP/3 支持 QUIC DATAGRAM，并可通过 Capsule 承载；大于可用 QUIC DATAGRAM 大小的报文走 Capsule。只支持 Context ID 0，忽略未知 Context ID 和未知 Capsule 类型。
+
+末端 `addresses: []` 解析目标后创建连接到所选 IP 的 UDP socket；链式配置按每一跳的协议在 Capsule 与 HTTP/3 Datagram 间转换。一个请求对应一个固定 UDP 目标及独立 UDP socket，连接关闭、服务卸载或 `tunnel_idle_timeout` 到期后回收。SOCKS5 节点不参与 UDP 请求选择；没有可用的 HTTP/HTTPS/H3 节点时返回 502。UDP socket 建立成功不表示目标已经响应。
+
+
+HTTP/3 listener 及 `plugins.upstream.connection_pools[]` 还支持以下连接级参数：
+
+| 参数 | 默认值 | 含义 |
+|---|---|---|
+| `http3_enable_datagram` | `true` | 声明 HTTP/3 Datagram 能力；关闭后 CONNECT-UDP 使用 Capsule |
+| `quic_connection_datagram_receive_buffer_size` | `1MiB` | 每个 QUIC 连接的数据报接收缓冲区容量 |
+| `quic_connection_datagram_send_buffer_size` | `1MiB` | 每个 QUIC 连接的数据报发送缓冲区容量 |
+
+缓冲区支持 `MiB` 等大小格式，必须为正且可由平台表示。upstream 三项仅在 connection pool 配置，通过 `use_connection_pool` 选择。Extended CONNECT 两侧固定开启，不提供关闭配置。

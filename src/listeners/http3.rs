@@ -172,7 +172,9 @@ impl Listening for Http3Listener {
       transport_config
         .stream_receive_window(quinn::VarInt::try_from(window)?);
     }
+    quic_config.datagram.apply(&mut transport_config);
     server_config.transport_config(Arc::new(transport_config));
+    let datagram_enabled = quic_config.datagram.http3_enable_datagram;
     let handshake_timeout = quic_config.handshake_timeout;
 
     // Create endpoints for all addresses
@@ -265,7 +267,7 @@ impl Listening for Http3Listener {
                     stream_shutdown,
                     local_addr,
                     header_deadline,
-                    policy,
+                    (policy,datagram_enabled),
                   )
                   .await;
                 }

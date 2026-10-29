@@ -45,6 +45,7 @@ def write_node(
     next_auth: AuthCase | None = None,
     tunnel_idle_timeout: str = "10s",
     quic_idle_timeout: str = "5s",
+    upstream_io_timeout: str = "10s",
 ) -> str:
     directory.mkdir(parents=True, exist_ok=True)
     upstream: ConfigDict = {"name": "route"}
@@ -76,14 +77,14 @@ def write_node(
     ]
     plugins: ConfigDict = {
         "upstream": {
-            "upstream_read_timeout": "10s",
-            "tunnel_idle_timeout": "10s"
-            if next_peer is not None
-            else tunnel_idle_timeout,
+            "upstream_read_timeout": upstream_io_timeout,
+            "tunnel_idle_timeout": tunnel_idle_timeout,
             "upstreams": [upstream],
             "connection_pools": [
                 {
                     "name": "default",
+                    "tcp_connect_timeout": upstream_io_timeout,
+                    "tls_handshake_timeout": upstream_io_timeout,
                     "certificates": trust,
                     "quic_stream_receive_window": "4KiB",
                 }

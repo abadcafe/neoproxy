@@ -10,6 +10,7 @@ class QuicConfiguration:
         *,
         is_client: bool = False,
         alpn_protocols: list[str] | None = None,
+        max_datagram_frame_size: int | None = None,
     ) -> None: ...
     def load_verify_locations(self, cafile: str) -> None: ...
     def load_cert_chain(

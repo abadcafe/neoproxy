@@ -281,11 +281,32 @@ impl Upstream {
     request: &http::request::Parts,
   ) -> Result<ConnectResult, UpstreamError> {
     let ctx = request.extensions.get::<RequestContext>();
+    let udp = request
+      .extensions
+      .get::<crate::connect_udp::request::Udp>()
+      .is_some();
+    let excluded = if udp {
+      self
+        .config
+        .addresses
+        .iter()
+        .enumerate()
+        .filter_map(|(owner, address)| {
+          matches!(
+            address.address_protocol,
+            config::Protocol::Socks5 { .. }
+          )
+          .then_some(owner)
+        })
+        .collect()
+    } else {
+      Vec::new()
+    };
     let group = self.group(&target.uri(), ctx).await?;
     self
       .dispatch(
         group,
-        Vec::new(),
+        excluded,
         ctx,
         |_| true,
         async |selected, progress| {

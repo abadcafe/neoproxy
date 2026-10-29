@@ -1,23 +1,17 @@
-"""Public contracts for direct public-origin network preflight."""
+"""Public contracts for the three direct Cloudflare protocol probes."""
 
 import subprocess
 
 import pytest
 
-from tests.fixtures.network_preflight import check_baidu
+from tests.fixtures.network_preflight import check_cloudflare
 
 
-@pytest.mark.parametrize(
-    "status,code,failure_scheme",
-    [("200", 0, None), ("503", 0, "http"), ("000", 7, "http"), ("403", 0, "https")],
-)
-def test_check_baidu_checks_both_schemes_without_inherited_proxies(
-    monkeypatch: pytest.MonkeyPatch,
-    status: str,
-    code: int,
-    failure_scheme: str | None,
+@pytest.mark.parametrize("failure", [None, 0, 1, 2])
+def test_check_cloudflare_probes_http_https_and_h3(
+    monkeypatch: pytest.MonkeyPatch, failure: int | None
 ) -> None:
-    for name in (
+    for name in [
         "http_proxy",
         "HTTP_PROXY",
         "https_proxy",
@@ -26,9 +20,9 @@ def test_check_baidu_checks_both_schemes_without_inherited_proxies(
         "ALL_PROXY",
         "no_proxy",
         "NO_PROXY",
-    ):
+    ]:
         monkeypatch.setenv(name, "http://127.0.0.1:1")
-    calls: list[str] = []
+    calls: list[tuple[str, str]] = []
 
     def run(
         command: list[str],
@@ -41,23 +35,21 @@ def test_check_baidu_checks_both_schemes_without_inherited_proxies(
     ) -> subprocess.CompletedProcess[str]:
         assert not any(key.lower().endswith("_proxy") for key in env)
         assert command[:6] == ["curl", "--disable", "--proxy", "", "--noproxy", "*"]
-        assert capture_output and text and not check
-        assert timeout == 12
-        url = command[-1]
-        calls.append(url)
-        failed = failure_scheme is not None and url.startswith(failure_scheme + ":")
+        assert capture_output and text and not check and timeout == 12
+        failed = len(calls) == failure
+        calls.append((command[-1], command[-2]))
         return subprocess.CompletedProcess(
-            command, code if failed else 0, status if failed else "200", ""
+            command, 7 if failed else 0, "000" if failed else "301", ""
         )
 
     monkeypatch.setattr(subprocess, "run", run)
-    result = check_baidu()
-    assert (result is None) == (failure_scheme is None)
-    if failure_scheme is not None:
-        assert result is not None
-        assert f"{failure_scheme}://www.baidu.com/" in result
-    assert calls == (
-        ["http://www.baidu.com/"]
-        if failure_scheme == "http"
-        else ["http://www.baidu.com/", "https://www.baidu.com/"]
-    )
+    result = check_cloudflare()
+    assert (result is None) == (failure is None)
+    expected = [
+        ("http://cloudflare.com/", "--http1.1"),
+        ("https://cloudflare.com/", "--http1.1"),
+        ("https://cloudflare.com/", "--http3-only"),
+    ]
+    assert calls == (expected if failure is None else expected[: failure + 1])
+    if result is not None:
+        assert calls[-1][0] in result and calls[-1][1] in result

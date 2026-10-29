@@ -33,6 +33,8 @@ pub(super) const H3_NO_ERROR_CODE: u32 = 0x100;
 #[serde(deny_unknown_fields)]
 pub(super) struct Http3ListenerArgs {
   #[serde(flatten)]
+  datagram: crate::quic_datagram::Config,
+  #[serde(flatten)]
   pub(super) request_limits: crate::header_limits::RequestLimits,
   #[serde(default)]
   pub(super) body_read_timeout:
@@ -88,6 +90,7 @@ impl Http3ListenerArgs {
   pub(super) fn validate_and_apply_defaults(
     &self,
   ) -> Result<QuicConfig> {
+    self.datagram.validate()?;
     if !(1..=1u64 << 60)
       .contains(&self.quic_connection_max_concurrent_bidi_streams)
     {
@@ -180,6 +183,7 @@ impl Http3ListenerArgs {
     }
 
     Ok(QuicConfig {
+      datagram: self.datagram.clone(),
       handshake_timeout: self.quic_connection_handshake_timeout,
       keep_alive_interval: self.quic_connection_keep_alive_interval,
       stream_receive_window,
@@ -196,6 +200,7 @@ impl Http3ListenerArgs {
 /// Validated QUIC configuration with applied defaults
 #[derive(Clone, Debug)]
 pub(super) struct QuicConfig {
+  pub(super) datagram: crate::quic_datagram::Config,
   pub(super) handshake_timeout: Duration,
   pub(super) keep_alive_interval: Option<Duration>,
   pub(super) stream_receive_window: Option<u64>,
@@ -209,6 +214,7 @@ pub(super) struct QuicConfig {
 impl Default for QuicConfig {
   fn default() -> Self {
     Self {
+      datagram: Default::default(),
       handshake_timeout: default_handshake_timeout(),
       keep_alive_interval: None,
       stream_receive_window: None,

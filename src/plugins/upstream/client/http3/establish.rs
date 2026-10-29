@@ -30,6 +30,7 @@ pub(super) async fn establish(
   (
     quinn::Connection,
     h3_cli::SendRequest<super::read_progress::Opener, SendBuffer>,
+    tokio::sync::watch::Receiver<Option<bool>>,
   ),
   UpstreamError,
 > {
@@ -37,6 +38,8 @@ pub(super) async fn establish(
   let quinn_conn =
     create_quic_connection(pool, tls_config, observation).await?;
   let (mut h3_conn, send_request) = h3::client::builder()
+    .enable_extended_connect(true)
+    .enable_datagram(pool.quic.datagram.http3_enable_datagram)
     .max_field_section_size(u64::from(pool.limits.bytes()))
     .build(super::read_progress::Connection::new(
       quinn_conn.clone(),
@@ -49,11 +52,27 @@ pub(super) async fn establish(
       ))
     })?;
 
+  let (settings_tx, settings_rx) = tokio::sync::watch::channel(None);
   tokio::spawn(async move {
-    let _ = std::future::poll_fn(|cx| h3_conn.poll_close(cx)).await;
+    use h3::ConnectionState;
+    let _ = std::future::poll_fn(|cx| {
+      let result = h3_conn.poll_close(cx);
+      if let std::borrow::Cow::Borrowed(settings) = h3_conn.settings() {
+        settings_tx.send_if_modified(|value| {
+          if value.is_none() {
+            *value = Some(settings.enable_extended_connect());
+            true
+          } else {
+            false
+          }
+        });
+      }
+      result
+    })
+    .await;
   });
 
-  Ok((quinn_conn, send_request))
+  Ok((quinn_conn, send_request, settings_rx))
 }
 
 async fn create_quic_connection(
@@ -129,6 +148,7 @@ async fn create_quic_connection(
       },
     )?);
   }
+  quic.datagram.apply(&mut transport);
   cli_config.transport_config(Arc::new(transport));
 
   let host = hostname

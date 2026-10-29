@@ -25,6 +25,7 @@ fn resolve_quic(
   pool: &super::connection_pool::ConnectionPoolConfig,
 ) -> QuicResolved {
   QuicResolved {
+    datagram: pool.datagram.clone(),
     max_idle_timeout: pool.quic_connection_max_idle_timeout,
     keep_alive_interval: pool
       .quic_connection_keep_alive_interval

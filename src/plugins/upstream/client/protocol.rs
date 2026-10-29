@@ -20,6 +20,7 @@ use crate::tracker::StreamTracker;
 /// Runtime QUIC configuration, copied from config at construction time.
 #[derive(Clone, Debug)]
 pub(crate) struct QuicConfig {
+  pub(crate) datagram: crate::quic_datagram::Config,
   pub(crate) max_idle_timeout: Option<Duration>,
   pub(crate) keep_alive_interval: Duration,
   pub(crate) max_concurrent_bidi_streams: Option<u64>,

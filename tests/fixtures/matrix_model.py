@@ -1,6 +1,6 @@
 """module: matrix_model; responsibility: describe two-hop protocol contracts.
 Public operations/data: ChainCase, AuthCase, CertificateFiles and protocol aliases.
-Tests: chain matrix local, Baidu and authentication process contracts.
+Tests: chain matrix local, Cloudflare and authentication process contracts.
 """
 
 from typing import Literal
@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 type ProxyProtocol = Literal["http", "https", "http3", "socks5"]
 type TargetScheme = Literal["http", "https"]
-type RequestMode = Literal["forward", "tunnel"]
+type RequestMode = Literal["forward", "tunnel", "udp"]
 type RequestMethod = Literal["GET", "HEAD", "POST"]
 
 

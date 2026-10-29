@@ -79,10 +79,6 @@ impl Api {
       };
     let (mut sender, connection) =
       hyper::client::conn::http1::handshake(TokioIo::new(io)).await?;
-    let driver = tokio::spawn(connection);
-    // Abort even if the requesting task is cancelled while reading the
-    // body.
-    let _driver = Driver(driver.abort_handle());
     let path =
       self.uri.path_and_query().map_or("/", |value| value.as_str());
     let encoded: String = id
@@ -111,22 +107,24 @@ impl Api {
       builder =
         builder.header("if-none-match", format!("\"{version}\""));
     }
-    let response = sender
-      .send_request(builder.body(Empty::<bytes::Bytes>::new())?)
-      .await?;
-    let (parts, body) = response.into_parts();
-    let body = Limited::new(body, 1024 * 1024)
-      .collect()
-      .await
-      .map_err(anyhow::Error::from_boxed)?
-      .to_bytes();
-    decode(parts.status, &parts.headers, &body, id, version)
-  }
-}
-struct Driver(tokio::task::AbortHandle);
-impl Drop for Driver {
-  fn drop(&mut self) {
-    self.0.abort();
+    let exchange = async {
+      let response = sender
+        .send_request(builder.body(Empty::<bytes::Bytes>::new())?)
+        .await?;
+      let (parts, body) = response.into_parts();
+      let body = Limited::new(body, 1024 * 1024)
+        .collect()
+        .await
+        .map_err(anyhow::Error::from_boxed)?
+        .to_bytes();
+      decode(parts.status, &parts.headers, &body, id, version)
+    };
+    tokio::pin!(exchange);
+    tokio::pin!(connection);
+    tokio::select! {
+      result = &mut exchange => result,
+      result = &mut connection => { result?; exchange.await },
+    }
   }
 }
 impl Source for Api {

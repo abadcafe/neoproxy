@@ -45,8 +45,8 @@ use crate::listener::{
   BuildListener, Listener, Listening, TransportLayer,
 };
 use crate::shutdown::{LISTENER_SHUTDOWN_TIMEOUT, ShutdownHandle};
+use crate::task_tracker::{ABORT_DRAIN_TIMEOUT, TaskTracker};
 use crate::tls::build_tls_server_config;
-use crate::tracker::{ABORT_DRAIN_TIMEOUT, StreamTracker};
 
 /// ALPN protocol for HTTP/3
 const H3_ALPN: &[u8] = b"h3";
@@ -68,7 +68,7 @@ struct Http3Listener {
   /// Routing table for hostname-based routing
   server_router: crate::server::ServerRouter,
   /// Stream tracker
-  stream_tracker: Rc<StreamTracker>,
+  requests: std::sync::Arc<TaskTracker>,
   /// Transport survives request draining and plugin uninstall.
   transport: Rc<Transport>,
   /// Shutdown handle
@@ -117,7 +117,7 @@ impl Http3Listener {
       server_router: crate::server::ServerRouter::build(
         server_routing_table,
       ),
-      stream_tracker: Rc::new(StreamTracker::new()),
+      requests: std::sync::Arc::new(TaskTracker::new()),
       transport: Rc::new(Transport::new()),
       shutdown_handle: ShutdownHandle::new(),
     }))
@@ -131,7 +131,7 @@ impl Listening for Http3Listener {
     let quic_config = self.quic_config.clone();
     let policy = self.policy;
     let header_deadline = self.header_deadline;
-    let stream_tracker = self.stream_tracker.clone();
+    let requests = self.requests.clone();
     let transport = self.transport.clone();
     let shutdown_handle = self.shutdown_handle.clone();
     let server_router = self.server_router.clone();
@@ -239,9 +239,11 @@ impl Listening for Http3Listener {
         match accept_result {
           Some((local_addr, conn)) => {
             let server_router = server_router.clone();
-            let tracker_for_handler = stream_tracker.clone();
+            let tracker_for_handler = requests.clone();
             let stream_shutdown = tracker_for_handler.shutdown_handle();
 
+            let transport_shutdown = transport.shutdown_handle();
+            let transport_for_handler = transport.clone();
             transport.spawn(async move {
               let handshake = tokio::select! {
                 biased;
@@ -260,11 +262,12 @@ impl Listening for Http3Listener {
                     quinn_conn.local_ip().map_or(local_addr, |ip| {
                       SocketAddr::new(ip, local_addr.port())
                     });
+                  let datagrams = transport_for_handler.datagrams(quinn_conn.clone());
                   handle_h3_connection(
-                    quinn_conn,
+                    (quinn_conn, datagrams),
                     server_router,
                     tracker_for_handler,
-                    stream_shutdown,
+                    (stream_shutdown, transport_shutdown),
                     local_addr,
                     header_deadline,
                     (policy,datagram_enabled),
@@ -295,7 +298,7 @@ impl Listening for Http3Listener {
       // Wait for active streams with timeout
       let wait_result = tokio::time::timeout(
         LISTENER_SHUTDOWN_TIMEOUT,
-        stream_tracker.wait_shutdown(),
+        requests.wait_shutdown(),
       )
       .await;
 
@@ -304,12 +307,12 @@ impl Listening for Http3Listener {
           "HTTP/3 Listener shutdown timeout ({:?}) expired, aborting \
            {} remaining streams",
           LISTENER_SHUTDOWN_TIMEOUT,
-          stream_tracker.active_count()
+          requests.active_count()
         );
-        stream_tracker.abort_all();
+        requests.abort_all();
         // Use the same cancellation cleanup budget as TCP listeners
         // and upstream tasks.
-        if stream_tracker
+        if requests
           .wait_shutdown_with_timeout(ABORT_DRAIN_TIMEOUT)
           .await
           .is_err()
@@ -331,12 +334,15 @@ impl Listening for Http3Listener {
     // request handlers keep running within the listener budget;
     // established tunnels are stopped later by their Service owner.
     self.shutdown_handle.shutdown();
-    self.stream_tracker.shutdown();
+    self.requests.shutdown();
   }
 
-  fn finish(&self) -> Pin<Box<dyn Future<Output = ()>>> {
+  fn finish(
+    &self,
+    deadline: tokio::time::Instant,
+  ) -> Pin<Box<dyn Future<Output = ()>>> {
     let transport = self.transport.clone();
-    Box::pin(async move { transport.drain().await })
+    Box::pin(async move { transport.drain(deadline).await })
   }
 }
 

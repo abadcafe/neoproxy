@@ -98,3 +98,17 @@ async fn test_shutdown_handle_notified_after_shutdown() {
   );
   assert!(result.unwrap().unwrap(), "notified() should have completed");
 }
+
+#[test]
+fn test_child_shutdown_is_scoped_and_parent_shutdown_propagates() {
+  let parent = ShutdownHandle::new();
+  let child = parent.child();
+  let sibling = parent.child();
+  child.shutdown();
+  assert!(child.is_shutdown());
+  assert!(!parent.is_shutdown());
+  assert!(!sibling.is_shutdown());
+  parent.shutdown();
+  assert!(sibling.is_shutdown());
+  assert!(parent.child().is_shutdown());
+}

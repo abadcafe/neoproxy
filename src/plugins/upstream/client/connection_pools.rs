@@ -18,6 +18,7 @@ pub(crate) struct ConnectionPool {
   pub(super) h3_runtime: tokio::runtime::Handle,
   pub(super) h3: Arc<super::http3::Store>,
   runtime: Mutex<Option<tokio::runtime::Runtime>>,
+  tasks: Arc<crate::task_tracker::TaskTracker>,
   pub(super) dns: Arc<super::dns_cache::DnsCache>,
   pub(super) tls: Arc<rustls::ClientConfig>,
 }
@@ -39,24 +40,31 @@ impl ConnectionPool {
       .thread_name("upstream-h3-io")
       .enable_all()
       .build()?;
+    let tasks = Arc::new(crate::task_tracker::TaskTracker::new());
     Ok(Arc::new(Self {
       http: Cache::new(
         config.http.max_idle_per_host,
         config.http.idle_timeout,
         settings.response_limits.limits(),
+        tasks.clone(),
+        runtime.handle().clone(),
       ),
       https: Cache::new(
         config.https.max_idle_per_host,
         config.https.idle_timeout,
         settings.response_limits.limits(),
+        tasks.clone(),
+        runtime.handle().clone(),
       ),
       h3_runtime: runtime.handle().clone(),
       h3: super::http3::Store::new(
         config.h3_connections,
         config.h3_idle_timeout,
         settings.response_limits.limits(),
+        tasks.clone(),
       ),
       runtime: Mutex::new(Some(runtime)),
+      tasks,
       dns,
       tls,
     }))
@@ -68,12 +76,18 @@ impl ConnectionPool {
     if let Some(runtime) =
       self.runtime.lock().expect("runtime lock poisoned").take()
     {
+      runtime.block_on(
+        self
+          .tasks
+          .graceful_shutdown(crate::shutdown::SERVICE_SHUTDOWN_TIMEOUT),
+      );
       runtime
         .shutdown_timeout(crate::shutdown::SERVICE_SHUTDOWN_TIMEOUT);
     }
   }
 
   pub(crate) fn close(&self) {
+    self.tasks.shutdown();
     self.http.close();
     self.https.close();
     self.h3.close();

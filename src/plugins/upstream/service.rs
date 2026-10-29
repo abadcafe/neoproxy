@@ -29,7 +29,7 @@ use crate::proxy_status::{
 };
 use crate::service::Service;
 use crate::stream::{self, Io};
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 // ============================================================================
 // Upstream Service (unified: chain mode when upstream is Some, direct
@@ -39,14 +39,14 @@ use crate::tracker::StreamTracker;
 #[derive(Clone)]
 pub(crate) struct UpstreamService {
   upstream_name: String,
-  stream_tracker: Rc<StreamTracker>,
+  task_tracker: std::sync::Arc<TaskTracker>,
   registry: Rc<UpstreamRegistry>,
 }
 
 impl UpstreamService {
   pub(crate) fn build(
     sargs: crate::config::SerializedArgs,
-    stream_tracker: Rc<StreamTracker>,
+    task_tracker: std::sync::Arc<TaskTracker>,
     registry: Rc<UpstreamRegistry>,
   ) -> Result<Service> {
     let args: super::config::UpstreamServiceArgs =
@@ -62,13 +62,13 @@ impl UpstreamService {
 
     Ok(Service::new(Self {
       upstream_name: args.upstream,
-      stream_tracker,
+      task_tracker,
       registry,
     }))
   }
 
   fn is_shutting_down(&self) -> bool {
-    self.stream_tracker.shutdown_handle().is_shutdown()
+    self.task_tracker.shutdown_handle().is_shutdown()
   }
 }
 
@@ -90,7 +90,7 @@ impl tower::Service<Request> for UpstreamService {
       return Box::pin(async { Ok(response) });
     }
     let upstream_name = self.upstream_name.clone();
-    let st = self.stream_tracker.clone();
+    let st = self.task_tracker.clone();
     let registry = self.registry.clone();
     let is_shutting_down = self.is_shutting_down();
 
@@ -172,7 +172,7 @@ impl tower::Service<Request> for UpstreamService {
 async fn chain_connect(
   upstream_name: &str,
   registry: &Rc<UpstreamRegistry>,
-  st: &Rc<StreamTracker>,
+  st: &std::sync::Arc<TaskTracker>,
   req_headers: http::request::Parts,
   upgrade: Option<stream::OnUpgrade>,
   ctx: &RequestContext,
@@ -235,7 +235,11 @@ async fn chain_connect(
     .cloned();
   let upgrade = upgrade.map(|upgrade| match ingress {
     Some(ingress) if udp.is_some() => {
-      stream::OnUpgrade::new(UdpUpgrade { upgrade, ingress })
+      stream::OnUpgrade::new(UdpUpgrade {
+        upgrade,
+        ingress,
+        tracker: registry.operation_tasks(),
+      })
     }
     _ => upgrade,
   });
@@ -272,6 +276,7 @@ async fn chain_connect(
 struct UdpUpgrade {
   upgrade: stream::OnUpgrade,
   ingress: crate::connect_udp::h3::Ingress,
+  tracker: std::sync::Arc<TaskTracker>,
 }
 impl std::future::Future for UdpUpgrade {
   type Output = Result<Box<dyn Io>>;
@@ -287,6 +292,7 @@ impl std::future::Future for UdpUpgrade {
           io,
           this.ingress.id,
           this.ingress.enabled,
+          &this.tracker,
         )
       })
     })
@@ -301,7 +307,7 @@ impl std::future::Future for UdpUpgrade {
 /// and stops its transfer when the plugin is uninstalled.
 async fn complete_tunnel(
   target: Box<dyn Io>,
-  st: &Rc<StreamTracker>,
+  st: &std::sync::Arc<TaskTracker>,
   upgrade: Option<stream::OnUpgrade>,
   ctx: &RequestContext,
   upstream_response: Option<http::response::Parts>,
@@ -343,7 +349,10 @@ async fn complete_tunnel(
 
   st.register(async move {
     let client = match upgrade {
-      Some(u) => match u.await {
+      Some(u) => match tokio::select! {
+        result = u => result,
+        _ = shutdown_handle.notified() => Err(anyhow::anyhow!("shutdown before tunnel upgrade")),
+      } {
         Ok(c) => c,
         Err(e) => {
           completion.upgrade_failed(&e);

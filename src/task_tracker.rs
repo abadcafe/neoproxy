@@ -1,23 +1,15 @@
-//! module: tracker
-//! responsibility: own local asynchronous task lifetimes through
+//! module: task_tracker
+//! responsibility: own asynchronous task lifetimes through
 //! shutdown
-//! public operations: ABORT_DRAIN_TIMEOUT, StreamTracker, new,
-//! register, register_connection, shutdown, abort_all, drain,
+//! public operations: ABORT_DRAIN_TIMEOUT, TaskTracker, new,
+//! register, register_on, shutdown, abort_all, drain,
 //! wait_shutdown, graceful_shutdown, wait_shutdown_with_timeout,
 //! shutdown_handle, active_count
-//! data entities: StreamTracker
-//! tests: tracker_tests.rs
+//! data entities: TaskTracker
+//! tests: task_tracker_tests.rs, task_tracker_background_tests.rs
 
-//! Task tracking for graceful shutdown.
-//!
-//! Provides [`StreamTracker`] for tracking async tasks with graceful
-//! shutdown support. Supports dual-layer tracking (connections +
-//! streams) for protocols like QUIC.
-//! Panicked task results are logged and resumed when collected.
-
-use std::cell::RefCell;
 use std::future::{Future, poll_fn};
-use std::rc::Rc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use tokio::task::{JoinError, JoinSet};
@@ -26,47 +18,49 @@ use crate::shutdown::ShutdownHandle;
 
 pub(crate) const ABORT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Stream task tracker for graceful shutdown.
-///
-/// Tracks all active stream tasks and provides graceful shutdown
-/// capabilities. Supports dual-layer tracking (connections + streams)
-/// for protocols like QUIC that have both concepts.
-///
-/// For listeners that only need single-layer tracking (hyper, socks5),
-/// use `register()` + `active_count()` only. The `connections` layer
-/// remains empty with zero overhead.
-pub(crate) struct StreamTracker {
-  streams: Rc<RefCell<JoinSet<()>>>,
-  connections: Rc<RefCell<JoinSet<()>>>,
+/// One group of tasks sharing a cooperative shutdown
+/// notification. Owners define shutdown ordering between groups. Tasks
+/// must explicitly observe the notification and complete their
+/// asynchronous cleanup.
+pub(crate) struct TaskTracker {
+  tasks: Mutex<JoinSet<()>>,
   shutdown_handle: ShutdownHandle,
 }
 
-impl StreamTracker {
+impl TaskTracker {
   pub(crate) fn new() -> Self {
     Self {
-      streams: Rc::new(RefCell::new(JoinSet::new())),
-      connections: Rc::new(RefCell::new(JoinSet::new())),
+      tasks: Mutex::new(JoinSet::new()),
       shutdown_handle: ShutdownHandle::new(),
     }
   }
 
-  /// Register a stream task.
+  /// Spawn and track a local task.
   pub(crate) fn register(
     &self,
-    stream_future: impl Future<Output = ()> + 'static,
+    task_future: impl Future<Output = ()> + 'static,
   ) -> tokio::task::AbortHandle {
-    reap_completed(&self.streams);
-    self.streams.borrow_mut().spawn_local(stream_future)
+    reap_completed(&self.tasks);
+    self
+      .tasks
+      .lock()
+      .expect("task tracker poisoned")
+      .spawn_local(task_future)
   }
 
-  /// Register a connection task (for protocols like QUIC).
-  /// Returns an AbortHandle for checking if the task is still running.
-  pub(crate) fn register_connection(
+  /// Spawn a Send task on the runtime owned by a shared resource.
+  /// This uses the same lifecycle semantics as local registration.
+  pub(crate) fn register_on(
     &self,
-    conn_future: impl Future<Output = ()> + 'static,
-  ) -> tokio::task::AbortHandle {
-    reap_completed(&self.connections);
-    self.connections.borrow_mut().spawn_local(conn_future)
+    runtime: &tokio::runtime::Handle,
+    task: impl Future<Output = ()> + Send + 'static,
+  ) {
+    reap_completed(&self.tasks);
+    self
+      .tasks
+      .lock()
+      .expect("task tracker poisoned")
+      .spawn_on(task, runtime);
   }
 
   /// Trigger shutdown notification.
@@ -76,8 +70,7 @@ impl StreamTracker {
 
   /// Abort all tracked tasks immediately.
   pub(crate) fn abort_all(&self) {
-    self.streams.borrow_mut().abort_all();
-    self.connections.borrow_mut().abort_all();
+    self.tasks.lock().expect("task tracker poisoned").abort_all();
   }
 
   /// Drain aborted tasks from the JoinSet with a safety timeout.
@@ -90,16 +83,14 @@ impl StreamTracker {
   /// locks or in CPU-bound loops, preventing immediate cancellation.
   pub(crate) async fn drain(&self) {
     let _ = tokio::time::timeout(ABORT_DRAIN_TIMEOUT, async {
-      drain_join_set(&self.streams).await;
-      drain_join_set(&self.connections).await;
+      drain_join_set(&self.tasks).await;
     })
     .await;
   }
 
   /// Wait for all tasks to complete.
   pub(crate) async fn wait_shutdown(&self) {
-    drain_join_set(&self.streams).await;
-    drain_join_set(&self.connections).await;
+    drain_join_set(&self.tasks).await;
   }
 
   /// Perform a graceful shutdown with timeout.
@@ -114,7 +105,7 @@ impl StreamTracker {
     if result.is_err() {
       tracing::warn!(
         "graceful shutdown timeout ({:?}) expired, aborting {} \
-         remaining connections",
+         remaining tasks",
         timeout,
         self.active_count()
       );
@@ -138,33 +129,38 @@ impl StreamTracker {
     self.shutdown_handle.clone()
   }
 
-  /// Count of active stream tasks.
+  /// Count all unfinished tasks after collecting completed results.
   pub(crate) fn active_count(&self) -> usize {
-    reap_completed(&self.streams);
-    self.streams.borrow().len()
+    reap_completed(&self.tasks);
+    self.tasks.lock().expect("task tracker poisoned").len()
   }
 }
 
-impl Default for StreamTracker {
+impl Default for TaskTracker {
   fn default() -> Self {
     Self::new()
   }
 }
 
 async fn join_next(
-  join_set: &RefCell<JoinSet<()>>,
+  join_set: &Mutex<JoinSet<()>>,
 ) -> Option<Result<(), JoinError>> {
-  poll_fn(|cx| join_set.borrow_mut().poll_join_next(cx)).await
+  poll_fn(|cx| {
+    join_set.lock().expect("task tracker poisoned").poll_join_next(cx)
+  })
+  .await
 }
 
-async fn drain_join_set(join_set: &RefCell<JoinSet<()>>) {
+async fn drain_join_set(join_set: &Mutex<JoinSet<()>>) {
   while let Some(result) = join_next(join_set).await {
     propagate_task_panic(result);
   }
 }
 
-fn reap_completed(join_set: &RefCell<JoinSet<()>>) {
-  while let Some(result) = join_set.borrow_mut().try_join_next() {
+fn reap_completed(join_set: &Mutex<JoinSet<()>>) {
+  while let Some(result) =
+    join_set.lock().expect("task tracker poisoned").try_join_next()
+  {
     propagate_task_panic(result);
   }
 }

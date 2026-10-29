@@ -239,3 +239,84 @@ def test_shutdown_closes_upgraded_connect_without_waiting_for_peer_eof(
         assert closed.wait(1)
         assert process.wait(timeout=2) == 0
         assert time.monotonic() - started < 2
+
+
+def test_shutdown_cancels_tls_handshake_without_waiting_for_handshake_timeout(
+    tmp_path: Path,
+) -> None:
+    with running_proxy(tmp_path, "https") as (process, connection):
+        with socket.create_connection(
+            (connection.host, connection.port), timeout=2
+        ) as raw:
+            # A partial TLS record keeps the handshake pending.
+            raw.sendall(b"\x16\x03")
+            process.send_signal(signal.SIGTERM)
+            try:
+                data = raw.recv(1)
+            except ConnectionResetError:
+                # A cancelled, incomplete handshake can close with TCP RST.
+                data = b""
+            assert data == b""
+            assert process.wait(timeout=2) == 0
+
+
+def test_shutdown_cancels_upstream_connect_operation_and_its_driver(
+    tmp_path: Path, target_server: TargetServerFactory
+) -> None:
+    upstream_port = get_unique_port()
+    entry_port = get_unique_port()
+    received = threading.Event()
+    closed = threading.Event()
+
+    def upstream(connection: socket.socket) -> None:
+        with connection:
+            connection.settimeout(8)
+            head = b""
+            while not head.endswith(b"\r\n\r\n"):
+                data = connection.recv(1)
+                assert data
+                head += data
+            assert head.startswith(b"CONNECT ")
+            received.set()
+            assert connection.recv(1) == b""
+            closed.set()
+
+    _ = target_server(upstream_port, upstream)
+    path = tmp_path / "pending-connect.yaml"
+    _ = path.write_text(f"""server_threads: 1
+plugins:
+  upstream:
+    upstreams:
+    - name: relay
+      addresses:
+      - address: 127.0.0.1:{upstream_port}
+        address_protocol: http
+        upstream_read_timeout: 30s
+listeners:
+- name: main
+  kind: http
+  addresses: ["127.0.0.1:{entry_port}"]
+services:
+- name: relay
+  kind: upstream.upstream
+  upstream: relay
+servers:
+- name: main
+  service: relay
+  listeners: [main]
+""")
+    process = start_proxy(str(path))
+    try:
+        assert process.wait_ready()
+        with socket.create_connection(("127.0.0.1", entry_port), timeout=2) as client:
+            client.sendall(
+                b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+            )
+            assert received.wait(2)
+            process.send_signal(signal.SIGTERM)
+            # The listener's 3s request budget cancels the whole operation.
+            # A detached driver would survive until plugin cleanup timed out.
+            assert closed.wait(4.5)
+            assert process.wait(timeout=2) == 0
+    finally:
+        terminate_process(process)

@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::idle::IdleTracker;
 use super::transfer::{
@@ -218,8 +218,19 @@ where
     ),
     IoSide::Upstream,
   );
+  let (client_read, client_write) =
+    tokio::io::split(&mut client_pinned);
+  let (target_read, target_write) =
+    tokio::io::split(&mut target_pinned);
+  let transfer = async {
+    tokio::try_join!(
+      copy_direction(client_read, target_write, &shutdown_handle),
+      copy_direction(target_read, client_write, &shutdown_handle),
+    )
+  };
   tokio::select! {
-    result = tokio::io::copy_bidirectional(&mut client_pinned, &mut target_pinned) => match result {
+    result = transfer => match result {
+      Ok(_) if shutdown_handle.is_shutdown() => TransferEnd::Shutdown,
       Ok(_) => TransferEnd::Completed,
       Err(error) => {
         let side = error.get_ref().and_then(|inner| inner.downcast_ref::<SideError>()).map(|tagged| tagged.side);
@@ -227,6 +238,34 @@ where
       }
     },
     _ = async { loop { tokio::time::sleep_until(tracker.deadline()).await; if tracker.is_idle() { break; } } } => TransferEnd::IdleTimeout,
-    _ = shutdown_handle.notified() => TransferEnd::Shutdown,
   }
+}
+
+// Cancellation is observed only between reads. Once bytes have been
+// accepted, retain and write them before shutting down the write half.
+// The owner bounds cleanup with its shutdown deadline; the idle timer
+// also bounds stalled writes/FIN during ordinary operation.
+async fn copy_direction<R, W>(
+  mut reader: R,
+  mut writer: W,
+  shutdown: &ShutdownHandle,
+) -> std::io::Result<()>
+where
+  R: AsyncRead + Unpin,
+  W: AsyncWrite + Unpin,
+{
+  let mut buffer = [0; 8192];
+  loop {
+    let count = tokio::select! {
+      biased;
+      _ = shutdown.notified() => break,
+      result = reader.read(&mut buffer) => result?,
+    };
+    if count == 0 {
+      break;
+    }
+    writer.write_all(&buffer[..count]).await?;
+    writer.flush().await?;
+  }
+  writer.shutdown().await
 }

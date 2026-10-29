@@ -38,11 +38,13 @@ pub(crate) trait Listening {
   /// Stop the listener gracefully.
   fn stop(&self);
 
-  /// Finish retained protocol drivers concurrently with plugin
-  /// shutdown. TCP drivers have already completed in start();
-  /// multiplexed transports can outlive request handlers and upgraded
-  /// I/O.
-  fn finish(&self) -> Pin<Box<dyn Future<Output = ()>>> {
+  /// Finish retained protocol drivers after plugin shutdown. TCP
+  /// drivers have already completed in start(); multiplexed
+  /// transports can outlive request handlers and upgraded I/O.
+  fn finish(
+    &self,
+    _deadline: tokio::time::Instant,
+  ) -> Pin<Box<dyn Future<Output = ()>>> {
     Box::pin(async {})
   }
 }
@@ -75,8 +77,11 @@ impl Listener {
     self.0.stop()
   }
 
-  pub(crate) fn finish(&self) -> Pin<Box<dyn Future<Output = ()>>> {
-    self.0.finish()
+  pub(crate) fn finish(
+    &self,
+    deadline: tokio::time::Instant,
+  ) -> Pin<Box<dyn Future<Output = ()>>> {
+    self.0.finish(deadline)
   }
 }
 

@@ -36,12 +36,18 @@ impl Session {
     >,
     observation: ConnectionObservation,
     peer_settings: tokio::sync::watch::Receiver<Option<bool>>,
-    reads: super::read_progress::Registry,
+    (reads, tasks): (
+      super::read_progress::Registry,
+      &crate::task_tracker::TaskTracker,
+    ),
     hostname: Option<String>,
     permit: tokio::sync::OwnedSemaphorePermit,
   ) -> Arc<Self> {
     Arc::new(Self {
-      datagrams: crate::connect_udp::h3::Hub::new(connection.clone()),
+      datagrams: crate::connect_udp::h3::Hub::new(
+        connection.clone(),
+        tasks,
+      ),
       connection,
       sender,
       observation,
@@ -86,6 +92,11 @@ impl SessionLease {
   pub(super) fn new(session: Arc<Session>) -> Self {
     session.acquire();
     Self { session }
+  }
+}
+impl Clone for SessionLease {
+  fn clone(&self) -> Self {
+    Self::new(self.session.clone())
   }
 }
 impl Drop for SessionLease {

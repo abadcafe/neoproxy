@@ -1,6 +1,5 @@
 //! Public adapter contract: selected endpoint, observations and tunnel
 //! handoff.
-use std::rc::Rc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -10,7 +9,7 @@ use super::protocol::ClientProtocol;
 use super::socks5::Socks5Client;
 use crate::context::{RequestContext, fields};
 use crate::plugins::upstream::target_parser::parse_connect_target;
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 #[tokio::test]
 async fn test_connect_for_tunnel_records_peer_and_preserves_bytes_and_eof()
@@ -50,7 +49,7 @@ async fn test_connect_for_tunnel_records_peer_and_preserves_bytes_and_eof()
     Duration::from_secs(17),
     None,
   );
-  let tracker = Rc::new(StreamTracker::new());
+  let tracker = std::sync::Arc::new(TaskTracker::new());
   let mut result = client
     .connect_for_tunnel(&target, &parts, &None, &tracker)
     .await

@@ -25,6 +25,8 @@ mod cli;
 mod config;
 mod connect_udp;
 #[cfg(test)]
+mod connect_udp_lifecycle_tests;
+#[cfg(test)]
 mod connect_udp_tests;
 mod context;
 mod h3_response;
@@ -79,8 +81,10 @@ mod startup_tests;
 mod stream;
 #[cfg(test)]
 mod stream_transfer_tests;
+mod task_tracker;
+#[cfg(test)]
+mod task_tracker_background_tests;
 mod tls;
-mod tracker;
 mod via;
 #[cfg(test)]
 mod via_tests;
@@ -127,11 +131,11 @@ mod stream_tests;
 #[cfg(test)]
 mod stream_tunnel_tests;
 #[cfg(test)]
+mod task_tracker_tests;
+#[cfg(test)]
 mod tls_selection_tests;
 #[cfg(test)]
 mod tls_tests;
-#[cfg(test)]
-mod tracker_tests;
 
 fn main() -> Result<std::process::ExitCode> {
   // Load config

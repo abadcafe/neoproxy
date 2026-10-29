@@ -1,4 +1,3 @@
-use std::rc::Rc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -12,7 +11,7 @@ use crate::plugins::upstream::error::UpstreamError;
 use crate::plugins::upstream::target_parser::{
   parse_connect_target, parse_forward_target,
 };
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 fn quic_config() -> QuicConfig {
   QuicConfig {
@@ -44,7 +43,7 @@ fn http3_client() -> Http3Client {
 #[tokio::test]
 async fn test_http3_client_forward_without_tls_config_is_rejected() {
   let client = http3_client();
-  let tracker = Rc::new(StreamTracker::new());
+  let tracker = std::sync::Arc::new(TaskTracker::new());
   let ctx = RequestContext::new();
   let req = http::Request::builder()
     .method(http::Method::GET)
@@ -65,7 +64,7 @@ async fn test_http3_client_forward_without_tls_config_is_rejected() {
 #[tokio::test]
 async fn test_http3_client_tunnel_without_tls_config_is_rejected() {
   let client = http3_client();
-  let tracker = Rc::new(StreamTracker::new());
+  let tracker = std::sync::Arc::new(TaskTracker::new());
 
   let request = http::Request::builder()
     .method(http::Method::CONNECT)
@@ -147,7 +146,7 @@ async fn test_http3_client_reconnects_after_goaway_without_quic_close()
         Duration::from_secs(2),
         Default::default(),
       );
-      let tracker = Rc::new(StreamTracker::new());
+      let tracker = std::sync::Arc::new(TaskTracker::new());
 
       for _ in 0..2 {
         let request = http::Request::builder()

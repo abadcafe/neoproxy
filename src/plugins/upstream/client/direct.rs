@@ -5,7 +5,6 @@
 //! tests: direct_tests.rs
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,11 +19,11 @@ use crate::plugins::upstream::error::{
 use crate::plugins::upstream::target_parser::{
   ConnectTarget, ForwardTarget,
 };
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 pub(super) struct DirectClient {
   connector: super::origin_connector::OriginConnector,
-  tracker: Rc<StreamTracker>,
+  tracker: std::sync::Arc<TaskTracker>,
   shared: Arc<super::ConnectionPool>,
   connect_timeout: Duration,
   tunnel_idle_timeout: Duration,
@@ -36,7 +35,7 @@ impl DirectClient {
     config: &config::Upstream,
     tls: Arc<rustls::ClientConfig>,
     endpoint: std::net::SocketAddr,
-    tracker: Rc<StreamTracker>,
+    tracker: std::sync::Arc<TaskTracker>,
     shared: Arc<super::ConnectionPool>,
   ) -> anyhow::Result<Self> {
     Ok(Self {
@@ -60,7 +59,7 @@ impl ClientProtocol for DirectClient {
   fn forward<'a>(
     &'a self,
     _tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    _tracker: &'a Rc<StreamTracker>,
+    _tracker: &'a std::sync::Arc<TaskTracker>,
     target: &'a ForwardTarget,
     mut req_headers: ::http::request::Parts,
     req_body: RequestBody,
@@ -113,7 +112,7 @@ impl ClientProtocol for DirectClient {
     _target: &'a ConnectTarget,
     request: &'a ::http::request::Parts,
     _tls: &'a Option<Arc<rustls::ClientConfig>>,
-    _tracker: &'a Rc<StreamTracker>,
+    tracker: &'a std::sync::Arc<TaskTracker>,
   ) -> Pin<
     Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
   > {
@@ -126,7 +125,7 @@ impl ClientProtocol for DirectClient {
         .is_some()
       {
         let transport =
-          crate::connect_udp::direct::connect(self.endpoint)
+          crate::connect_udp::direct::connect(self.endpoint, tracker)
             .await
             .map_err(|e| classify_connect_error(e.into()))?;
         return Ok(ConnectResult {

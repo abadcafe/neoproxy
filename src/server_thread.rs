@@ -228,25 +228,26 @@ pub(crate) fn run_server_thread(
       }
     }
 
-    // Protocol drivers can still be needed by upgraded tunnels. Finish
-    // them concurrently with plugin uninstall, sharing the second phase
-    // rather than adding another serial 3s + 2s wait.
+    // Plugins own the shutdown order of their operations. In
+    // particular, upgraded tunnels must finish before their
+    // listener's H3 transport receives its final shutdown
+    // notification. Both use one phase deadline rather than
+    // accumulating a new timeout per resource.
+    let cleanup_deadline = tokio::time::Instant::now()
+      + crate::shutdown::SERVICE_SHUTDOWN_TIMEOUT;
+    plugin_manager.uninstall_all().await;
     let mut finishing = task::JoinSet::new();
     for listener in &listeners {
-      finishing.spawn_local(listener.finish());
+      finishing.spawn_local(listener.finish(cleanup_deadline));
     }
-    tokio::join!(plugin_manager.uninstall_all(), async {
-      while let Some(result) = finishing.join_next().await {
-        if let Err(error) = result {
-          // A protocol-driver panic is a programming error. Preserve
-          // the panic instead of converting it to successful shutdown.
-          if error.is_panic() {
-            std::panic::resume_unwind(error.into_panic());
-          }
-          warn!("listener cleanup cancelled: {error}");
+    while let Some(result) = finishing.join_next().await {
+      if let Err(error) = result {
+        if error.is_panic() {
+          std::panic::resume_unwind(error.into_panic());
         }
+        warn!("listener cleanup cancelled: {error}");
       }
-    });
+    }
 
     // Retain endpoints and keep this runtime polling until every worker
     // finishes both phases. Early socket removal changes UDP reuseport

@@ -29,6 +29,12 @@ impl ShutdownHandle {
     Self::default()
   }
 
+  /// Parent shutdown propagates to children; child cancellation stays
+  /// local.
+  pub(crate) fn child(&self) -> Self {
+    Self { token: self.token.child_token() }
+  }
+
   pub(crate) fn shutdown(&self) {
     self.token.cancel();
   }

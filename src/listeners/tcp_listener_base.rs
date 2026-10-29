@@ -19,7 +19,7 @@ use tracing::{info, warn};
 
 use super::tcp_accept::{self, AcceptRetryDelay};
 use crate::shutdown::{LISTENER_SHUTDOWN_TIMEOUT, ShutdownHandle};
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 /// Accepted connection with complete transport metadata.
 pub(crate) struct TcpConnection {
@@ -32,7 +32,7 @@ pub(crate) struct TcpConnection {
 /// Owns TCP sockets, accept tasks and bounded connection shutdown.
 pub(crate) struct TcpListenerBase {
   listening_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
-  stream_tracker: Rc<StreamTracker>,
+  task_tracker: std::sync::Arc<TaskTracker>,
   graceful_shutdown_timeout: Duration,
   tcp_options: crate::tcp_options::TcpOptions,
 }
@@ -42,7 +42,7 @@ impl TcpListenerBase {
   pub(crate) fn new() -> Self {
     Self {
       listening_set: Rc::new(RefCell::new(task::JoinSet::new())),
-      stream_tracker: Rc::new(StreamTracker::new()),
+      task_tracker: std::sync::Arc::new(TaskTracker::new()),
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
       tcp_options: Default::default(),
     }
@@ -69,7 +69,7 @@ impl TcpListenerBase {
     H: Fn(TcpConnection) -> F + Clone + 'static,
     F: Future<Output = ()> + 'static,
   {
-    if self.stream_tracker.shutdown_handle().is_shutdown() {
+    if self.task_tracker.shutdown_handle().is_shutdown() {
       return Ok(Box::pin(std::future::ready(Ok(()))));
     }
     let listeners = {
@@ -87,7 +87,7 @@ impl TcpListenerBase {
     };
     let tcp_options = self.tcp_options;
     let tasks = listeners.into_iter().map(|listener| {
-      let tracker = self.stream_tracker.clone();
+      let tracker = self.task_tracker.clone();
       let shutdown = tracker.shutdown_handle();
       let handler = handler.clone();
       Box::pin(async move {
@@ -139,8 +139,8 @@ impl TcpListenerBase {
     for task in tasks {
       listening_set.borrow_mut().spawn_local(task);
     }
-    let stream_tracker = self.stream_tracker.clone();
-    let shutdown = self.stream_tracker.shutdown_handle();
+    let task_tracker = self.task_tracker.clone();
+    let shutdown = self.task_tracker.shutdown_handle();
     let graceful_timeout = self.graceful_shutdown_timeout;
     Box::pin(async move {
       let mut failure = None;
@@ -157,7 +157,7 @@ impl TcpListenerBase {
           }
         }
       }
-      stream_tracker.shutdown();
+      task_tracker.shutdown();
       while let Some(result) = join_next(&listening_set).await {
         match result {
           Ok(Ok(())) => {}
@@ -169,7 +169,7 @@ impl TcpListenerBase {
           }
         }
       }
-      stream_tracker.graceful_shutdown(graceful_timeout).await;
+      task_tracker.graceful_shutdown(graceful_timeout).await;
       match failure {
         Some(error) => Err(error),
         None => Ok(()),
@@ -179,7 +179,7 @@ impl TcpListenerBase {
 
   /// Trigger graceful shutdown.
   pub(crate) fn stop(&self) {
-    self.stream_tracker.shutdown()
+    self.task_tracker.shutdown()
   }
 }
 

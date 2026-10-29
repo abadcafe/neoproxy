@@ -137,7 +137,7 @@ fn test_run_tracked_task_panic_stops_other_workers() {
       .spawn(scope, "failed", || {
         runtime().block_on(tokio::task::LocalSet::new().run_until(
           async {
-            let tracker = crate::tracker::StreamTracker::new();
+            let tracker = crate::task_tracker::TaskTracker::new();
             tracker.register(async {
               // Deliberately crash a connection task: the worker must
               // unwind, stop its peers and report process failure.

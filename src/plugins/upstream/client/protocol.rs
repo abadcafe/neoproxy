@@ -5,7 +5,6 @@
 //! tests: upstream client black-box tests
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,7 +14,7 @@ use crate::plugins::upstream::error::UpstreamError;
 use crate::plugins::upstream::target_parser::{
   ConnectTarget, ForwardTarget,
 };
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 /// Runtime QUIC configuration, copied from config at construction time.
 #[derive(Clone, Debug)]
@@ -41,7 +40,7 @@ pub(crate) trait ClientProtocol {
   fn forward<'a>(
     &'a self,
     tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    tracker: &'a Rc<StreamTracker>,
+    tracker: &'a std::sync::Arc<TaskTracker>,
     target: &'a ForwardTarget,
     req_headers: ::http::request::Parts,
     req_body: RequestBody,
@@ -53,7 +52,7 @@ pub(crate) trait ClientProtocol {
     target: &'a ConnectTarget,
     request: &'a ::http::request::Parts,
     tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    tracker: &'a Rc<StreamTracker>,
+    tracker: &'a std::sync::Arc<TaskTracker>,
   ) -> Pin<
     Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
   >;

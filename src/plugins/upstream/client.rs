@@ -17,7 +17,7 @@ pub(crate) use runtime::Upstream;
 #[cfg(test)]
 use super::config::CertificateConfig;
 use super::error::UpstreamError;
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 // Sub-modules organized by protocol
 mod client_tls;
@@ -84,6 +84,7 @@ mod transport_io;
 
 pub(crate) struct UpstreamRegistry {
   entries: HashMap<String, Rc<Upstream>>,
+  tasks: Arc<TaskTracker>,
 }
 
 impl UpstreamRegistry {
@@ -91,7 +92,7 @@ impl UpstreamRegistry {
   pub(crate) fn new(
     upstreams: HashMap<String, super::config::Upstream>,
     certificates: Option<&CertificateConfig>,
-    tracker: Rc<StreamTracker>,
+    tracker: std::sync::Arc<TaskTracker>,
   ) -> Result<Self> {
     let config = super::config::connection_pool::ConnectionPoolConfig {
       name: "default".into(),
@@ -107,7 +108,7 @@ impl UpstreamRegistry {
 
   pub(crate) fn with_connection_pools(
     upstreams: HashMap<String, super::config::Upstream>,
-    tracker: Rc<StreamTracker>,
+    tracker: std::sync::Arc<TaskTracker>,
     connection_pools: Arc<ConnectionPools>,
   ) -> Result<Self> {
     let mut entries: HashMap<String, Rc<Upstream>> = HashMap::new();
@@ -124,7 +125,12 @@ impl UpstreamRegistry {
       );
     }
 
-    Ok(Self { entries })
+    Ok(Self { entries, tasks: tracker })
+  }
+
+  /// Register request-derived work with its plugin lifecycle owner.
+  pub(crate) fn operation_tasks(&self) -> Arc<TaskTracker> {
+    self.tasks.clone()
   }
 
   pub(crate) fn get_upstream(

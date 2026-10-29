@@ -144,7 +144,10 @@ async fn test_finish_waits_for_retained_protocol_resources() {
 
     fn stop(&self) {}
 
-    fn finish(&self) -> Pin<Box<dyn Future<Output = ()>>> {
+    fn finish(
+      &self,
+      _deadline: tokio::time::Instant,
+    ) -> Pin<Box<dyn Future<Output = ()>>> {
       let released = self.0.clone();
       Box::pin(async move { released.notified().await })
     }
@@ -152,7 +155,9 @@ async fn test_finish_waits_for_retained_protocol_resources() {
 
   let released = ShutdownHandle::new();
   let listener = Listener::new(ProtocolListener(released.clone()));
-  let mut finishing = listener.finish();
+  let mut finishing = listener.finish(
+    tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+  );
   assert!(
     tokio::time::timeout(
       std::time::Duration::from_millis(10),

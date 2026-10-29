@@ -1,6 +1,5 @@
 //! Black-box tunnel handoff contract for the HTTP proxy adapter.
 
-use std::rc::Rc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -10,7 +9,7 @@ use super::http::connector::ProxyConnector;
 use super::http_pool::ProxyPool;
 use super::protocol::ClientProtocol;
 use crate::plugins::upstream::target_parser::parse_connect_target;
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 #[tokio::test]
 async fn test_connect_for_tunnel_preserves_peer_and_bytes_after_response_headers()
@@ -38,7 +37,7 @@ async fn test_connect_for_tunnel_preserves_peer_and_bytes_after_response_headers
         assert_eq!(&request, b"ping");
         socket.write_all(b"pong").await.unwrap();
       });
-      let tracker = Rc::new(StreamTracker::new());
+      let tracker = std::sync::Arc::new(TaskTracker::new());
       let connector =
         ProxyConnector::new(address, Duration::from_secs(1));
       let client = HttpProxyClient::new(

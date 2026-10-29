@@ -38,12 +38,16 @@ pub(super) struct Cache {
   changed: Arc<tokio::sync::Notify>,
   max_idle: usize,
   idle_timeout: Duration,
+  tasks: Arc<crate::task_tracker::TaskTracker>,
+  runtime: tokio::runtime::Handle,
 }
 impl Cache {
   pub(super) fn new(
     max_idle: usize,
     idle_timeout: Duration,
     limits: crate::header_limits::Limits,
+    tasks: Arc<crate::task_tracker::TaskTracker>,
+    runtime: tokio::runtime::Handle,
   ) -> Arc<Self> {
     Arc::new(Self {
       limits,
@@ -52,6 +56,8 @@ impl Cache {
       changed: Arc::new(tokio::sync::Notify::new()),
       max_idle,
       idle_timeout,
+      tasks,
+      runtime,
     })
   }
 
@@ -89,7 +95,9 @@ impl Cache {
     }
     let weak = Arc::downgrade(self);
     let changed = self.changed.clone();
-    tokio::spawn(async move {
+    let shutdown = self.tasks.shutdown_handle();
+    self.tasks.register_on(&self.runtime, async move {
+      let maintenance = async {
       loop {
         let deadline = {
           let Some(cache) = weak.upgrade() else {
@@ -107,6 +115,11 @@ impl Cache {
         } else {
           changed.notified().await;
         }
+      }
+      };
+      tokio::select! {
+        _ = shutdown.notified() => {},
+        _ = maintenance => {},
       }
     });
   }

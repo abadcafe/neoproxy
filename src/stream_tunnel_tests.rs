@@ -138,3 +138,35 @@ async fn test_run_tunnel_eof_does_not_refresh_activity_deadline() {
   tokio::time::advance(Duration::from_millis(11)).await;
   assert!(futures::poll!(&mut tunnel).is_ready());
 }
+
+#[tokio::test]
+async fn test_run_tunnel_shutdown_delivers_already_read_bytes_before_eof()
+ {
+  let (client, mut left) = tokio::io::duplex(64);
+  let (target, mut right) = tokio::io::duplex(1);
+  let shutdown = ShutdownHandle::new();
+  left.write_all(b"buffered-tail").await.unwrap();
+  let mut tunnel = std::pin::pin!(run_tunnel(
+    client,
+    target,
+    shutdown.clone(),
+    Duration::from_secs(5),
+    crate::stream::TransferProgress::new(),
+  ));
+  assert!(futures::poll!(&mut tunnel).is_pending());
+  shutdown.shutdown();
+  let receive = async {
+    let mut bytes = Vec::new();
+    right.read_to_end(&mut bytes).await.unwrap();
+    assert_eq!(bytes, b"buffered-tail");
+    let mut response = Vec::new();
+    left.read_to_end(&mut response).await.unwrap();
+    assert!(response.is_empty());
+  };
+  let (end, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::join!(&mut tunnel, receive)
+  })
+  .await
+  .unwrap();
+  assert!(matches!(end, crate::stream::TransferEnd::Shutdown));
+}

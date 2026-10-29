@@ -13,15 +13,11 @@ pub(crate) struct Hub(Arc<State>);
 struct State {
   connection: quinn::Connection,
   routes: Mutex<HashMap<u64, tokio::sync::mpsc::Sender<Bytes>>>,
-  task: Mutex<Option<tokio::task::AbortHandle>>,
+  shutdown: crate::shutdown::ShutdownHandle,
 }
 impl Drop for State {
   fn drop(&mut self) {
-    if let Some(task) =
-      self.task.get_mut().expect("datagram task lock").take()
-    {
-      task.abort();
-    }
+    self.shutdown.shutdown();
   }
 }
 #[derive(Clone)]
@@ -46,15 +42,24 @@ impl Drop for Registration {
   }
 }
 impl Hub {
-  pub(crate) fn new(connection: quinn::Connection) -> Self {
+  pub(crate) fn new(
+    connection: quinn::Connection,
+    tasks: &crate::task_tracker::TaskTracker,
+  ) -> Self {
     let inner = Arc::new(State {
       connection: connection.clone(),
       routes: Mutex::new(HashMap::new()),
-      task: Mutex::new(None),
+      shutdown: tasks.shutdown_handle().child(),
     });
     let weak = Arc::downgrade(&inner);
-    let task = tokio::spawn(async move {
-      while let Ok(data) = connection.read_datagram().await {
+    let shutdown = inner.shutdown.clone();
+    tasks.register_on(&tokio::runtime::Handle::current(), async move {
+      loop {
+        let data = tokio::select! {
+          biased;
+          _ = shutdown.notified() => break,
+          result = connection.read_datagram() => match result { Ok(data) => data, Err(_) => break },
+        };
         let Some((quarter, size)) =
           super::capsule::decode_varint(&data)
         else {
@@ -76,8 +81,6 @@ impl Hub {
         }
       }
     });
-    *inner.task.lock().expect("datagram task lock") =
-      Some(task.abort_handle());
     Self(inner)
   }
 
@@ -86,13 +89,13 @@ impl Hub {
     io: Box<dyn crate::stream::Io>,
     id: u64,
     enabled: bool,
+    tracker: &crate::task_tracker::TaskTracker,
   ) -> Box<dyn crate::stream::Io> {
     let (tx, mut datagrams) = tokio::sync::mpsc::channel(64);
     self.0.routes.lock().expect("datagram routes lock").insert(id, tx);
     let guard = Registration { hub: self.clone(), id };
     let connection = self.0.connection.clone();
-    let (client, bridge) = tokio::io::duplex(131072);
-    tokio::spawn(async move {
+    super::bridge::spawn(tracker, move |bridge, shutdown| async move {
       let _guard = guard;
       let (local_read, mut local_write) = tokio::io::split(bridge);
       let (remote_read, mut remote_write) = tokio::io::split(io);
@@ -100,6 +103,8 @@ impl Hub {
       let mut incoming = super::capsule::Reader::new(remote_read);
       loop {
         tokio::select! {
+         biased;
+         _ = shutdown.notified() => break,
          packet=outgoing.receive()=>match packet {
           Ok(Some(data))=>{
            let mut wire=Vec::new();super::capsule::varint(id/4,&mut wire);wire.push(0);wire.extend_from_slice(&data);
@@ -118,7 +123,8 @@ impl Hub {
          }
         }
       }
-    });
-    Box::new(client)
+      let _ = remote_write.shutdown().await;
+      let _ = local_write.shutdown().await;
+    })
   }
 }

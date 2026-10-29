@@ -34,6 +34,9 @@ struct State {
   read_timer: Option<Pin<Box<tokio::time::Sleep>>>,
   write_timer: Option<Pin<Box<tokio::time::Sleep>>>,
   reader: Option<Waker>,
+  writer: Option<Waker>,
+  upload: Option<Waker>,
+  cancelled: bool,
 }
 #[derive(Clone, Default)]
 pub(super) struct Control(Arc<Mutex<State>>);
@@ -41,6 +44,26 @@ impl Control {
   pub(super) fn start(&self, settings: Timeouts) {
     *self.0.lock().expect("exchange timer poisoned") =
       State { settings: Some(settings), ..State::default() };
+  }
+
+  /// Cancel an abandoned exchange before closing its HTTP driver.
+  /// Wake every possible wait so cleanup never relies on peer traffic.
+  pub(super) fn cancel(&self) {
+    let mut state = self.0.lock().expect("exchange timer poisoned");
+    state.cancelled = true;
+    for waker in
+      [state.reader.take(), state.writer.take(), state.upload.take()]
+        .into_iter()
+        .flatten()
+    {
+      waker.wake();
+    }
+  }
+
+  fn poll_cancelled(&self, cx: &Context<'_>) -> bool {
+    let mut state = self.0.lock().expect("exchange timer poisoned");
+    state.reader = Some(cx.waker().clone());
+    state.cancelled
   }
 
   pub(super) fn upload_flushed(&self) -> bool {
@@ -106,6 +129,11 @@ impl<I: hyper::rt::Read + Unpin> hyper::rt::Read for TimedIo<I> {
     cx: &mut Context<'_>,
     buf: hyper::rt::ReadBufCursor<'_>,
   ) -> Poll<std::io::Result<()>> {
+    if self.control.poll_cancelled(cx) {
+      return Poll::Ready(Err(
+        std::io::ErrorKind::ConnectionAborted.into(),
+      ));
+    }
     let result = Pin::new(&mut self.inner).poll_read(cx, buf);
     let mut state =
       self.control.0.lock().expect("exchange timer poisoned");
@@ -133,6 +161,16 @@ impl<I: hyper::rt::Write + Unpin> hyper::rt::Write for TimedIo<I> {
     cx: &mut Context<'_>,
     bytes: &[u8],
   ) -> Poll<std::io::Result<usize>> {
+    {
+      let mut state =
+        self.control.0.lock().expect("exchange timer poisoned");
+      if state.cancelled {
+        return Poll::Ready(Err(
+          std::io::ErrorKind::ConnectionAborted.into(),
+        ));
+      }
+      state.writer = Some(cx.waker().clone());
+    }
     let result = Pin::new(&mut self.inner).poll_write(cx, bytes);
     let mut state =
       self.control.0.lock().expect("exchange timer poisoned");
@@ -155,6 +193,16 @@ impl<I: hyper::rt::Write + Unpin> hyper::rt::Write for TimedIo<I> {
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<std::io::Result<()>> {
+    {
+      let mut state =
+        self.control.0.lock().expect("exchange timer poisoned");
+      if state.cancelled {
+        return Poll::Ready(Err(
+          std::io::ErrorKind::ConnectionAborted.into(),
+        ));
+      }
+      state.writer = Some(cx.waker().clone());
+    }
     let result = Pin::new(&mut self.inner).poll_flush(cx);
     let mut state =
       self.control.0.lock().expect("exchange timer poisoned");
@@ -214,6 +262,17 @@ impl Body for UploadBody {
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    {
+      let mut state =
+        self.control.0.lock().expect("exchange timer poisoned");
+      if state.cancelled {
+        return Poll::Ready(Some(Err(
+          std::io::Error::from(std::io::ErrorKind::ConnectionAborted)
+            .into(),
+        )));
+      }
+      state.upload = Some(cx.waker().clone());
+    }
     let result = Pin::new(&mut self.inner).poll_frame(cx);
     if matches!(&result, Poll::Ready(Some(Ok(frame))) if frame.is_trailers())
       || matches!(result, Poll::Ready(None))

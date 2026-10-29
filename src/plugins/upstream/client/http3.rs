@@ -22,7 +22,6 @@ mod session_tests;
 mod upload;
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
@@ -45,7 +44,7 @@ use crate::plugins::upstream::error::UpstreamError;
 use crate::plugins::upstream::target_parser::{
   ConnectTarget, ForwardTarget,
 };
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 // ============================================================================
 // H3 Forward
@@ -55,7 +54,7 @@ use crate::tracker::StreamTracker;
 struct H3Sender<'a> {
   session: &'a SessionPool,
   tls: &'a rustls::ClientConfig,
-  tracker: &'a Rc<StreamTracker>,
+  tracker: &'a std::sync::Arc<TaskTracker>,
 }
 
 impl ForwardClient for H3Sender<'_> {
@@ -83,7 +82,7 @@ pub(super) async fn exchange(
   tls: &rustls::ClientConfig,
   request: http::Request<()>,
   req_body: RequestBody,
-  tracker: &Rc<StreamTracker>,
+  tracker: &std::sync::Arc<TaskTracker>,
 ) -> Result<Response, UpstreamError> {
   let settings = request
     .extensions()
@@ -109,6 +108,7 @@ pub(super) async fn exchange(
     tracker,
     request_id.clone(),
     settings.send,
+    lease.clone(),
   ));
   let proxy_resp = receive_final_response(
     &mut stream,
@@ -320,7 +320,7 @@ impl ClientProtocol for Http3Client {
   fn forward<'a>(
     &'a self,
     tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    tracker: &'a Rc<StreamTracker>,
+    tracker: &'a std::sync::Arc<TaskTracker>,
     target: &'a ForwardTarget,
     req_headers: ::http::request::Parts,
     req_body: RequestBody,
@@ -357,7 +357,7 @@ impl ClientProtocol for Http3Client {
     target: &'a ConnectTarget,
     request: &'a ::http::request::Parts,
     tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    tracker: &'a Rc<StreamTracker>,
+    tracker: &'a std::sync::Arc<TaskTracker>,
   ) -> Pin<
     Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
   > {
@@ -409,10 +409,10 @@ impl ClientProtocol for Http3Client {
       }
 
       if udp.is_some()
-        && !resp
+        && resp
           .headers()
           .get("capsule-protocol")
-          .is_some_and(|v| v == "?1")
+          .is_none_or(|v| v != "?1")
       {
         return Err(UpstreamError::InvalidResponse(
           "missing Capsule-Protocol negotiation".into(),
@@ -431,7 +431,7 @@ impl ClientProtocol for Http3Client {
         )),
       );
       let transport = if udp.is_some() {
-        hub.attach(transport, id, enabled)
+        hub.attach(transport, id, enabled, &tracker)
       } else {
         transport
       };

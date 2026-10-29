@@ -3,7 +3,6 @@
 //! capacity public operations: SessionPool::{new,shared,open,close},
 //! SessionLease data entities: SessionPool
 //! tests: session_tests.rs, http3_tests.rs
-use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -16,7 +15,7 @@ use super::sessions::{Bucket, Store};
 use crate::context::RequestContext;
 use crate::plugins::upstream::client::protocol::QuicConfig;
 use crate::plugins::upstream::error::UpstreamError;
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 pub(crate) struct SessionPool {
   settings: Settings,
@@ -43,6 +42,7 @@ impl SessionPool {
         1,
         pool.idle_timeout,
         crate::header_limits::ResponseLimits::default().limits(),
+        Arc::new(TaskTracker::new()),
       ),
       runtime,
     )
@@ -123,15 +123,19 @@ impl SessionPool {
     // Socket, timers and QUIC/H3 drivers are all created on the pool
     // runtime.
     let bucket = self.bucket.clone();
-    self.runtime.spawn(async move {
+    let tasks = self._store.tasks.clone();
+    let shutdown = tasks.shutdown_handle();
+    let tasks_for_driver = tasks.clone();
+    tasks.register_on(&self.runtime, async move {
       let observation =
         super::super::observation::ConnectionObservation::new();
       let reads = super::read_progress::Registry::default();
       let result = tokio::select! {
+        _ = shutdown.notified() => { drop(permit); bucket.changed.notify_waiters(); return; }
         _ = tx.closed() => { drop(permit); bucket.changed.notify_waiters(); return; }
-        result = establish::establish(&settings, &tls, &observation, reads.clone()) => result,
+        result = establish::establish(&settings, &tls, &observation, reads.clone(), &tasks_for_driver) => result,
       }.map(|(connection, sender, peer_settings)| {
-        let session = Session::new(connection, sender, observation.clone(), peer_settings, reads, settings.hostname, permit);
+        let session = Session::new(connection, sender, observation.clone(), peer_settings, (reads, tasks_for_driver.as_ref()), settings.hostname, permit);
         let lease = SessionLease::new(session.clone());
         bucket.insert(session);
         lease
@@ -156,7 +160,7 @@ impl SessionPool {
     &self,
     request: http::Request<()>,
     tls: &rustls::ClientConfig,
-    _tracker: &Rc<StreamTracker>,
+    _tracker: &std::sync::Arc<TaskTracker>,
   ) -> Result<
     (
       h3::client::RequestStream<super::read_progress::Bidi, SendBuffer>,

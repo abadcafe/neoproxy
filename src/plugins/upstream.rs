@@ -21,7 +21,7 @@ use crate::config::SerializedArgs;
 use crate::plugin::Plugin;
 use crate::service::{BuildService, Service};
 use crate::shutdown::SERVICE_SHUTDOWN_TIMEOUT;
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 mod client;
 mod config;
@@ -55,19 +55,21 @@ mod target_parser_tests;
 
 struct UpstreamPlugin {
   service_builders: HashMap<&'static str, Box<dyn BuildService>>,
-  stream_tracker: Rc<StreamTracker>,
+  sessions: std::sync::Arc<TaskTracker>,
   registry: Rc<UpstreamRegistry>,
+  operations: std::sync::Arc<TaskTracker>,
   is_uninstalled: Rc<AtomicBool>,
 }
 
 impl UpstreamPlugin {
   fn new(
     registry: UpstreamRegistry,
-    stream_tracker: Rc<StreamTracker>,
+    sessions: std::sync::Arc<TaskTracker>,
+    operations: std::sync::Arc<TaskTracker>,
   ) -> Self {
     let registry = Rc::new(registry);
 
-    let upstream_st = stream_tracker.clone();
+    let upstream_st = sessions.clone();
     let upstream_registry = registry.clone();
     let upstream_builder: Box<dyn BuildService> =
       Box::new(move |args: SerializedArgs| -> Result<Service> {
@@ -83,8 +85,9 @@ impl UpstreamPlugin {
 
     Self {
       service_builders,
-      stream_tracker,
+      sessions,
       registry,
+      operations,
       is_uninstalled: Rc::new(AtomicBool::new(false)),
     }
   }
@@ -102,8 +105,9 @@ impl Plugin for UpstreamPlugin {
       return Box::pin(async {});
     }
 
-    let st = self.stream_tracker.clone();
+    let st = self.sessions.clone();
     let registry = self.registry.clone();
+    let operations = self.operations.clone();
 
     Box::pin(async move {
       info!("upstream: starting graceful shutdown");
@@ -111,8 +115,9 @@ impl Plugin for UpstreamPlugin {
       // Stop transfers now, then wait for cleanup; this timeout is not
       // a grace period for continued tunnel traffic. Listener draining
       // has already allowed ordinary HTTP exchanges to finish first.
+      let deadline =
+        tokio::time::Instant::now() + SERVICE_SHUTDOWN_TIMEOUT;
       st.shutdown();
-      registry.close_all();
 
       match st
         .wait_shutdown_with_timeout(SERVICE_SHUTDOWN_TIMEOUT)
@@ -131,6 +136,18 @@ impl Plugin for UpstreamPlugin {
         }
       }
 
+      // Bridges/drivers support tunnel cleanup, so their notification
+      // follows tunnel completion. Both groups share one phase budget.
+      operations
+        .graceful_shutdown(
+          deadline
+            .saturating_duration_since(tokio::time::Instant::now()),
+        )
+        .await;
+      // Active operations have released their streams/leases. Only
+      // now release this plugin's transport resources; shared pools
+      // remain owned by the process until every worker has drained.
+      registry.close_all();
       info!("upstream: shutdown complete");
     })
   }
@@ -176,7 +193,8 @@ pub(crate) fn create_pooled_plugin(
 
   let upstreams = config::merge_chain_config(&plugin_config)?;
 
-  let tracker = Rc::new(StreamTracker::new());
+  let tracker = std::sync::Arc::new(TaskTracker::new());
+  let sessions = std::sync::Arc::new(TaskTracker::new());
   let registry = UpstreamRegistry::with_connection_pools(
     upstreams,
     tracker.clone(),
@@ -185,5 +203,5 @@ pub(crate) fn create_pooled_plugin(
 
   info!("upstream: initialized with {} upstream(s)", registry.len());
 
-  Ok(Box::new(UpstreamPlugin::new(registry, tracker)))
+  Ok(Box::new(UpstreamPlugin::new(registry, sessions, tracker)))
 }

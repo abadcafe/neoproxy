@@ -128,3 +128,30 @@ async fn test_reused_connection_uses_new_exchange_policy() {
     control.disable();
   }
 }
+
+#[tokio::test]
+async fn test_cancel_wakes_blocked_exchange_and_closes_without_timeout()
+{
+  let (io, _peer) = tokio::io::duplex(32);
+  let control = Control::default();
+  control.start(Timeouts::default());
+  let mut io = hyper_util::rt::TokioIo::new(TimedIo::new(
+    hyper_util::rt::TokioIo::new(io),
+    control.clone(),
+  ));
+  let read = async {
+    let mut byte = [0];
+    let error = io.read_exact(&mut byte).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
+    io.shutdown().await.unwrap();
+  };
+  let cancel = async {
+    tokio::task::yield_now().await;
+    control.cancel();
+  };
+  tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::join!(read, cancel);
+  })
+  .await
+  .unwrap();
+}

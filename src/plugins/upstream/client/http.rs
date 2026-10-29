@@ -11,14 +11,12 @@ pub(super) mod transport;
 
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use http::Uri;
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
-use tracing::warn;
 
 use super::connect_request::build_connect_request;
 use super::forward::forward_request;
@@ -27,11 +25,13 @@ use super::protocol::{ClientProtocol, ConnectResult};
 pub(super) use super::transport_io::ProxyIo;
 use crate::context::RequestContext;
 use crate::http_message::{BytesBufBodyWrapper, RequestBody, Response};
-use crate::plugins::upstream::error::UpstreamError;
+use crate::plugins::upstream::error::{
+  UpstreamError, classify_http_client_error,
+};
 use crate::plugins::upstream::target_parser::{
   ConnectTarget, ForwardTarget,
 };
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 pub(super) struct HttpProxyClient<C> {
   client: ProxyPool<C>,
@@ -57,7 +57,7 @@ where
   fn forward<'a>(
     &'a self,
     _tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    _tracker: &'a Rc<StreamTracker>,
+    _tracker: &'a std::sync::Arc<TaskTracker>,
     target: &'a ForwardTarget,
     req_headers: ::http::request::Parts,
     req_body: RequestBody,
@@ -82,7 +82,7 @@ where
     target: &'a ConnectTarget,
     request: &'a ::http::request::Parts,
     _tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    tracker: &'a Rc<StreamTracker>,
+    tracker: &'a std::sync::Arc<TaskTracker>,
   ) -> Pin<
     Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
   > {
@@ -123,7 +123,7 @@ async fn negotiate_tunnel<I>(
   target: &ConnectTarget,
   request: &::http::request::Parts,
   user: &Option<crate::config::UserCredential>,
-  tracker: &StreamTracker,
+  tracker: &TaskTracker,
   (upstream_addr, tunnel_idle_timeout): (
     Option<std::net::SocketAddr>,
     Duration,
@@ -163,19 +163,23 @@ where
   });
   let resp_fut = sr.send_request(req);
 
-  // Drive the connection via tracker (spawn_local + graceful
-  // shutdown support) while waiting for the CONNECT response.
-  tracker.register_connection(async move {
-    if let Err(e) = conn.with_upgrades().await {
-      warn!("upstream: CONNECT connection ended before upgrade: {e}");
+  // The CONNECT operation owns its HTTP driver. Cancelling this
+  // operation drops both together, rather than leaving a detached task
+  // until an I/O timeout. Keep polling the driver through upgrade.
+  let mut driver = Box::pin(conn.with_upgrades());
+  let shutdown = tracker.shutdown_handle();
+  let mut driver_done = false;
+  tokio::pin!(resp_fut);
+  let mut resp = tokio::select! {
+    biased;
+    _ = shutdown.notified() => return Err(UpstreamError::ConnectionTerminated("upstream shutdown".into())),
+    response = &mut resp_fut => response,
+    result = &mut driver, if !driver_done => {
+      driver_done = true;
+      result.map_err(|error| classify_http_client_error(error.into()))?;
+      resp_fut.await
     }
-  });
-
-  let mut resp = resp_fut.await.map_err(|e| {
-    crate::plugins::upstream::error::classify_http_client_error(
-      e.into(),
-    )
-  })?;
+  }.map_err(|error| classify_http_client_error(error.into()))?;
 
   // RFC 9110 §9.3.6: every 2xx establishes a CONNECT tunnel.
   if if udp.is_some() {
@@ -183,10 +187,10 @@ where
       || !resp.headers().get("upgrade").is_some_and(|v| {
         v.as_bytes().eq_ignore_ascii_case(b"connect-udp")
       })
-      || !resp
+      || resp
         .headers()
         .get("capsule-protocol")
-        .is_some_and(|v| v == "?1")
+        .is_none_or(|v| v != "?1")
   } else {
     !resp.status().is_success()
   } {
@@ -203,7 +207,16 @@ where
   // failure visible; the dependency case is recorded in
   // tests/integration/test_connect_upstream_status.py.
   let upgrade = hyper::upgrade::on(&mut resp);
-  let upgraded = upgrade.await.map_err(|e| {
+  tokio::pin!(upgrade);
+  let upgraded = tokio::select! {
+    biased;
+    _ = shutdown.notified() => return Err(UpstreamError::ConnectionTerminated("upstream shutdown".into())),
+    result = &mut upgrade => result,
+    result = &mut driver, if !driver_done => {
+      result.map_err(|error| classify_http_client_error(error.into()))?;
+      upgrade.await
+    }
+  }.map_err(|e| {
     if e.is_user() {
       UpstreamError::InvalidResponse(e.to_string())
     } else {

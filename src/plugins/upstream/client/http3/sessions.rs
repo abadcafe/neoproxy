@@ -90,18 +90,21 @@ pub(in crate::plugins::upstream::client) struct Store {
   buckets: Mutex<HashMap<std::net::SocketAddr, Arc<Bucket>>>,
   maximum: usize,
   timeout: Duration,
+  pub(super) tasks: Arc<crate::task_tracker::TaskTracker>,
 }
 impl Store {
   pub(in crate::plugins::upstream::client) fn new(
     maximum: usize,
     timeout: Duration,
     limits: crate::header_limits::Limits,
+    tasks: Arc<crate::task_tracker::TaskTracker>,
   ) -> Arc<Self> {
     Arc::new(Self {
       limits,
       buckets: Mutex::new(HashMap::new()),
       maximum,
       timeout,
+      tasks,
     })
   }
 
@@ -125,9 +128,13 @@ impl Store {
         });
         let weak = Arc::downgrade(&bucket);
         let interval = self.timeout.min(Duration::from_millis(100));
-        runtime.spawn(async move {
+        let shutdown = self.tasks.shutdown_handle();
+        self.tasks.register_on(runtime, async move {
           loop {
-            tokio::time::sleep(interval).await;
+            tokio::select! {
+              _ = shutdown.notified() => return,
+              _ = tokio::time::sleep(interval) => {},
+            }
             let Some(bucket) = weak.upgrade() else {
               return;
             };
@@ -140,6 +147,7 @@ impl Store {
   }
 
   pub(in crate::plugins::upstream::client) fn close(&self) {
+    self.tasks.shutdown();
     for bucket in
       self.buckets.lock().expect("H3 registry poisoned").values()
     {

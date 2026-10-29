@@ -10,15 +10,15 @@ use std::task::{Context, Poll};
 
 use http_body_util::BodyExt;
 use tokio::sync::oneshot;
-use tokio::task::AbortHandle;
 
 use super::io_progress::{Progress, SendBuffer};
 use crate::http_message::RequestBody;
 use crate::plugins::upstream::error::UpstreamError;
-use crate::tracker::StreamTracker;
+use crate::shutdown::ShutdownHandle;
+use crate::task_tracker::TaskTracker;
 
 pub(super) struct Upload {
-  task: AbortHandle,
+  shutdown: ShutdownHandle,
   result: oneshot::Receiver<Result<(), UpstreamError>>,
 }
 
@@ -36,6 +36,7 @@ enum UploadError {
   Body(anyhow::Error),
   Transport(h3::error::StreamError),
   Timeout,
+  Cancelled,
 }
 
 impl RequestWriter {
@@ -61,11 +62,16 @@ impl RequestWriter {
           "upstream send inactivity timeout".into(),
         ))
       }
+      Err(UploadError::Cancelled) => {
+        Err(UpstreamError::ConnectionTerminated(
+          "request upload cancelled".into(),
+        ))
+      }
       Err(UploadError::Body(error)) => {
         Err(UpstreamError::ProxyInternalError(error.to_string()))
       }
     };
-    self.finished = result.is_ok();
+    self.finished = self.finished || result.is_ok();
     result
   }
 }
@@ -85,16 +91,23 @@ impl Upload {
       SendBuffer,
     >,
     mut body: RequestBody,
-    tracker: &StreamTracker,
+    tracker: &TaskTracker,
     request_id: Option<crate::request_id::RequestId>,
     send_timeout: std::time::Duration,
+    lease: super::lease::SessionLease,
   ) -> Self {
     let (sender, result) = oneshot::channel();
     // Construct before spawning: even cancellation before the first
     // task poll must reset instead of finishing a truncated request.
     let mut writer = RequestWriter { stream, finished: false };
-    let task = tracker.register(async move {
-      let result = async {
+    let shutdown = ShutdownHandle::new();
+    let cancelled = shutdown.clone();
+    let stopping = tracker.shutdown_handle();
+    tracker.register(async move {
+      // Upload cleanup can outlive the response body which requested
+      // its cancellation. Keep the shared session active until done.
+      let _lease = lease;
+      let transfer = async {
         while let Some(frame) = body.frame().await {
           let frame = frame.map_err(UploadError::Body)?;
           match frame.into_data() {
@@ -150,12 +163,26 @@ impl Upload {
           .map_err(|_| UploadError::Timeout)?
           .map_err(UploadError::Transport)?;
         Ok::<(), UploadError>(())
+      };
+      let result = tokio::select! {
+        biased;
+        _ = cancelled.notified() => {
+          Err(UploadError::Cancelled)
+        }
+        _ = stopping.notified() => {
+          Err(UploadError::Cancelled)
+        }
+        result = transfer => result,
+      };
+      if matches!(result, Err(UploadError::Cancelled)) {
+        writer
+          .stream
+          .stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
       }
-      .await;
       let result = writer.complete(result);
       let _ = sender.send(result);
     });
-    Self { task, result }
+    Self { shutdown, result }
   }
 }
 
@@ -178,6 +205,6 @@ impl Future for Upload {
 
 impl Drop for Upload {
   fn drop(&mut self) {
-    self.task.abort();
+    self.shutdown.shutdown();
   }
 }

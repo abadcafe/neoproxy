@@ -12,19 +12,19 @@ use tracing::warn;
 
 use super::quic_bind::create_quic_endpoint;
 use super::quic_config::H3_NO_ERROR_CODE;
-use crate::shutdown::SERVICE_SHUTDOWN_TIMEOUT;
-use crate::tracker::{ABORT_DRAIN_TIMEOUT, StreamTracker};
+use crate::shutdown::ShutdownHandle;
+use crate::task_tracker::{ABORT_DRAIN_TIMEOUT, TaskTracker};
 
 pub(super) struct Transport {
   endpoints: RefCell<Vec<quinn::Endpoint>>,
-  drivers: StreamTracker,
+  drivers: TaskTracker,
 }
 
 impl Transport {
   pub(super) fn new() -> Self {
     Self {
       endpoints: RefCell::new(Vec::new()),
-      drivers: StreamTracker::new(),
+      drivers: TaskTracker::new(),
     }
   }
 
@@ -38,6 +38,13 @@ impl Transport {
     Ok(endpoint)
   }
 
+  pub(super) fn datagrams(
+    &self,
+    connection: quinn::Connection,
+  ) -> crate::connect_udp::h3::Hub {
+    crate::connect_udp::h3::Hub::new(connection, &self.drivers)
+  }
+
   pub(super) fn spawn(
     &self,
     driver: impl Future<Output = ()> + 'static,
@@ -45,23 +52,37 @@ impl Transport {
     self.drivers.register(driver);
   }
 
-  pub(super) async fn drain(&self) {
-    // Runs concurrently with plugin uninstall in the second phase.
-    // Its 3s + 2s budget is not a third serial shutdown period.
-    if tokio::time::timeout(SERVICE_SHUTDOWN_TIMEOUT, self.wait_idle())
+  pub(super) fn shutdown_handle(&self) -> ShutdownHandle {
+    self.drivers.shutdown_handle()
+  }
+
+  pub(super) async fn drain(&self, deadline: tokio::time::Instant) {
+    self.drivers.shutdown();
+    // Plugin cleanup has finished. Use the remainder of its shared
+    // phase deadline, retaining QUIC long enough to deliver queued
+    // data.
+    if tokio::time::timeout_at(deadline, self.wait_idle())
       .await
       .is_err()
     {
-      warn!(
-        "HTTP/3 transport shutdown timed out; aborting remaining \
-         drivers"
-      );
-      self.drivers.abort_all();
+      // Request/tunnel cleanup has completed. Explicitly close QUIC
+      // and let drivers process closure before resorting to abort.
+      for endpoint in self.endpoints.borrow().iter() {
+        endpoint.close(
+          quinn::VarInt::from_u32(H3_NO_ERROR_CODE),
+          b"listener shutdown",
+        );
+      }
       if tokio::time::timeout(ABORT_DRAIN_TIMEOUT, self.wait_idle())
         .await
         .is_err()
       {
-        warn!("HTTP/3 transport cancellation cleanup timed out");
+        warn!(
+          "HTTP/3 transport cleanup timed out; aborting remaining \
+           drivers"
+        );
+        self.drivers.abort_all();
+        self.drivers.drain().await;
       }
     }
   }

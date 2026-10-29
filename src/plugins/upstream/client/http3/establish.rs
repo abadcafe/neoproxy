@@ -26,6 +26,7 @@ pub(super) async fn establish(
   tls_config: &rustls::ClientConfig,
   observation: &ConnectionObservation,
   registry: super::read_progress::Registry,
+  tasks: &Arc<crate::task_tracker::TaskTracker>,
 ) -> Result<
   (
     quinn::Connection,
@@ -53,9 +54,11 @@ pub(super) async fn establish(
     })?;
 
   let (settings_tx, settings_rx) = tokio::sync::watch::channel(None);
-  tokio::spawn(async move {
+  let shutdown = tasks.shutdown_handle();
+  let connection = quinn_conn.clone();
+  tasks.register_on(&tokio::runtime::Handle::current(), async move {
     use h3::ConnectionState;
-    let _ = std::future::poll_fn(|cx| {
+    let driver = std::future::poll_fn(|cx| {
       let result = h3_conn.poll_close(cx);
       if let std::borrow::Cow::Borrowed(settings) = h3_conn.settings() {
         settings_tx.send_if_modified(|value| {
@@ -68,8 +71,15 @@ pub(super) async fn establish(
         });
       }
       result
-    })
-    .await;
+    });
+    tokio::pin!(driver);
+    tokio::select! {
+      _ = &mut driver => {},
+      _ = shutdown.notified() => {
+        connection.close(0x100u32.into(), b"pool shutdown");
+        let _ = driver.await;
+      }
+    }
   });
 
   Ok((quinn_conn, send_request, settings_rx))

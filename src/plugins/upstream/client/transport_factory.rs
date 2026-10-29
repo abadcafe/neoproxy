@@ -4,7 +4,6 @@
 //! data entities: ClientEntry
 //! tests: client_tests.rs, test_upstream_nodes.py
 use std::net::SocketAddr;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use super::http::HttpProxyClient;
@@ -13,7 +12,7 @@ use super::http3::{Http3Client, SessionPool};
 use super::protocol::{ClientProtocol, QuicConfig};
 use crate::plugins::upstream::config::{self, Address, Protocol};
 use crate::plugins::upstream::error::UpstreamError;
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 pub(super) struct ClientEntry {
   pub(super) tls: Arc<rustls::ClientConfig>,
@@ -25,7 +24,7 @@ pub(super) fn build(
   config: &config::Upstream,
   address: &Address,
   endpoint: SocketAddr,
-  tracker: &Rc<StreamTracker>,
+  tracker: &std::sync::Arc<TaskTracker>,
   connection_pools: &Arc<super::ConnectionPools>,
 ) -> Result<ClientEntry, UpstreamError> {
   let shared = connection_pools.get(&address.use_connection_pool);

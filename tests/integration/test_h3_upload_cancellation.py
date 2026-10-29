@@ -1,4 +1,4 @@
-"""Process contract: aborting a forward upload must reset its H3 request."""
+"""Process contract: cancelling an upload resets its flow and retains the session."""
 
 import asyncio
 from pathlib import Path
@@ -39,7 +39,10 @@ async def verify_upload_cancellation(directory: Path) -> None:
             for message in self.http.handle_event(event):
                 if isinstance(message, HeadersReceived):
                     self.http.send_headers(message.stream_id, [(b":status", b"200")])
-                    self.http.send_data(message.stream_id, b"ready", end_stream=False)
+                    method = dict(message.headers).get(b":method")
+                    self.http.send_data(
+                        message.stream_id, b"ready", end_stream=method == b"GET"
+                    )
                     self.transmit()
 
     configuration = QuicConfiguration(is_client=False, alpn_protocols=["h3"])
@@ -97,6 +100,19 @@ servers:
             async with asyncio.timeout(2):
                 reset = await resets.get()
                 assert reset.error_code == 0x10C  # H3_REQUEST_CANCELLED
+            # Cancelling the first stream must leave the pooled connection usable.
+            reader, writer = await asyncio.open_connection("127.0.0.1", entry_port)
+            try:
+                writer.write(
+                    b"GET http://origin.test/next HTTP/1.1\r\n"
+                    + b"Host: origin.test\r\nConnection: close\r\n\r\n"
+                )
+                await writer.drain()
+                response = await asyncio.wait_for(reader.read(), timeout=2)
+                assert response.startswith(b"HTTP/1.1 200 ")
+                assert b"ready" in response
+            finally:
+                await close_writer(writer)
     finally:
         peer.close()
 

@@ -19,7 +19,7 @@ use crate::plugins::upstream::error::UpstreamError;
 use crate::plugins::upstream::target_parser::{
   ConnectTarget, ForwardTarget,
 };
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 #[derive(Default)]
 struct Group {
@@ -52,13 +52,13 @@ pub(crate) struct Upstream {
   connection_pools: Arc<super::ConnectionPools>,
   name: String,
   config: config::Upstream,
-  tracker: Rc<StreamTracker>,
+  tracker: std::sync::Arc<TaskTracker>,
   groups: RefCell<HashMap<String, Rc<RefCell<Group>>>>,
 }
 impl Upstream {
   pub(super) fn new(
     config: config::Upstream,
-    tracker: Rc<StreamTracker>,
+    tracker: std::sync::Arc<TaskTracker>,
     connection_pools: Arc<super::ConnectionPools>,
     name: String,
   ) -> Self {

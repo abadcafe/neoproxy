@@ -1,8 +1,6 @@
-use std::rc::Rc;
-
 use super::client::UpstreamRegistry;
 use super::config::{self, UpstreamPluginConfig};
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 #[test]
 fn test_upstream_registry_new_accepts_empty_direct_registry() {
@@ -14,7 +12,7 @@ fn test_upstream_registry_new_accepts_empty_direct_registry() {
   let registry = UpstreamRegistry::new(
     upstreams,
     None,
-    Rc::new(StreamTracker::new()),
+    std::sync::Arc::new(TaskTracker::new()),
   )
   .unwrap();
 
@@ -46,7 +44,7 @@ fn test_upstream_registry_new_rejects_explicit_ca_without_certificates()
     let result = UpstreamRegistry::new(
       config::merge_chain_config(&config).unwrap(),
       Some(&certificates),
-      Rc::new(StreamTracker::new()),
+      std::sync::Arc::new(TaskTracker::new()),
     );
     let error = match result {
       Ok(_) => panic!("explicit CA without certificates was accepted"),

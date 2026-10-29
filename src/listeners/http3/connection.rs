@@ -5,20 +5,19 @@
 //! tests: HTTP/3 shutdown and streaming process tests
 
 use std::net::SocketAddr;
-use std::rc::Rc;
 
 use tracing::warn;
 
 use super::accepting_connection::AcceptingConnection;
 use super::stream_handler::handle_h3_stream;
 use crate::shutdown::ShutdownHandle;
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 pub(super) async fn handle_h3_connection(
-  connection: quinn::Connection,
+  (connection, hub): (quinn::Connection, crate::connect_udp::h3::Hub),
   router: crate::server::ServerRouter,
-  requests: Rc<StreamTracker>,
-  shutdown: ShutdownHandle,
+  requests: std::sync::Arc<TaskTracker>,
+  (shutdown, transport_shutdown): (ShutdownHandle, ShutdownHandle),
   local_addr: SocketAddr,
   header_deadline: crate::listeners::header_deadline::HeaderDeadline,
   (policy, datagram_enabled): (
@@ -60,8 +59,8 @@ pub(super) async fn handle_h3_connection(
       Err(error) => { warn!("Failed to create H3 connection: {error}"); return; }
     },
   };
-  let hub = crate::connect_udp::h3::Hub::new(connection.clone());
   let mut draining = false;
+  let mut finishing = false;
   // The worker's Transport owner retains this driver throughout plugin
   // shutdown, including CONNECT I/O which has left the request tracker.
   // Even when all streams are idle, keep polling H3 to reject new
@@ -80,6 +79,17 @@ pub(super) async fn handle_h3_connection(
         // Admission is independently enforced by the backend gate.
         if let Err(error) = h3.shutdown(1).await {
           if !error.is_h3_no_error() { warn!("H3 GOAWAY failed: {error}"); }
+          break;
+        }
+        continue;
+      }
+      _ = transport_shutdown.notified(), if !finishing => {
+        // Business requests and plugin-owned tunnels have completed.
+        // Finish H3 admission/control handling while QUIC delivers
+        // queued FIN/data. The transport owner bounds peer closure.
+        finishing = true;
+        if let Err(error) = h3.shutdown(0).await {
+          if !error.is_h3_no_error() { warn!("H3 final shutdown failed: {error}"); }
           break;
         }
         continue;

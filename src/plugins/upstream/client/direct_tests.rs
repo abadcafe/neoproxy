@@ -1,10 +1,9 @@
-use std::rc::Rc;
 use std::time::Duration;
 
 use super::direct::DirectClient;
 use super::protocol::ClientProtocol;
 use crate::plugins::upstream::target_parser::parse_connect_target;
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 #[tokio::test]
 async fn test_http_client_direct_tunnel_connects_to_target() {
@@ -30,11 +29,11 @@ async fn test_http_client_direct_tunnel_connects_to_target() {
     &upstreams["direct"],
     std::sync::Arc::new(tls),
     addr,
-    std::rc::Rc::new(crate::tracker::StreamTracker::new()),
+    std::sync::Arc::new(crate::task_tracker::TaskTracker::new()),
     super::ConnectionPool::new(Default::default()).unwrap(),
   )
   .unwrap();
-  let tracker = Rc::new(StreamTracker::new());
+  let tracker = std::sync::Arc::new(TaskTracker::new());
 
   let accept = async {
     let (_stream, peer) = listener.accept().await.unwrap();

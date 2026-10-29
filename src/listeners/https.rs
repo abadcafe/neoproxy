@@ -179,12 +179,12 @@ impl Listening for HttpsListener {
         let router = router.clone();
         async move {
           let peer = connection.peer_addr;
-          match timeout(
-            handshake_timeout,
-            tls_acceptor.accept(connection.stream),
-          )
-          .await
-          {
+          let handshake = tokio::select! {
+            biased;
+            _ = connection.shutdown.notified() => return,
+            result = timeout(handshake_timeout, tls_acceptor.accept(connection.stream)) => result,
+          };
+          match handshake {
             Ok(Ok(stream)) => {
               // TLS has already verified any presented certificate
               // against the listener's combined CA roots;

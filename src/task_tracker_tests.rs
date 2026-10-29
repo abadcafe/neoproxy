@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 #[derive(Clone, Default)]
 struct LogBuffer(Arc<Mutex<Vec<u8>>>);
@@ -40,17 +40,17 @@ fn capture_logs() -> (LogBuffer, tracing::subscriber::DefaultGuard) {
 }
 
 #[test]
-fn test_stream_tracker_new() {
-  let tracker = StreamTracker::new();
+fn test_task_tracker_new() {
+  let tracker = TaskTracker::new();
   assert_eq!(tracker.active_count(), 0);
 }
 
 #[tokio::test]
-async fn test_stream_tracker_register() {
+async fn test_task_tracker_register() {
   let local_set = tokio::task::LocalSet::new();
   local_set
     .run_until(async {
-      let tracker = StreamTracker::new();
+      let tracker = TaskTracker::new();
       tracker.register(std::future::pending());
       tokio::task::yield_now().await;
       assert_eq!(tracker.active_count(), 1);
@@ -59,11 +59,11 @@ async fn test_stream_tracker_register() {
 }
 
 #[tokio::test]
-async fn test_stream_tracker_register_multiple() {
+async fn test_task_tracker_register_multiple() {
   let local_set = tokio::task::LocalSet::new();
   local_set
     .run_until(async {
-      let tracker = StreamTracker::new();
+      let tracker = TaskTracker::new();
       tracker.register(std::future::pending());
       tracker.register(std::future::pending());
       tracker.register(std::future::pending());
@@ -77,7 +77,7 @@ async fn test_stream_tracker_register_multiple() {
 async fn test_register_reclaims_completed_tasks() {
   tokio::task::LocalSet::new()
     .run_until(async {
-      let tracker = StreamTracker::new();
+      let tracker = TaskTracker::new();
       for _ in 0..100 {
         tracker.register(async {});
         tokio::task::yield_now().await;
@@ -88,11 +88,11 @@ async fn test_register_reclaims_completed_tasks() {
 }
 
 #[tokio::test]
-async fn test_stream_tracker_shutdown() {
+async fn test_task_tracker_shutdown() {
   let local_set = tokio::task::LocalSet::new();
   local_set
     .run_until(async {
-      let tracker = StreamTracker::new();
+      let tracker = TaskTracker::new();
       let shutdown_handle = tracker.shutdown_handle();
 
       let notified = Rc::new(std::cell::Cell::new(false));
@@ -112,11 +112,11 @@ async fn test_stream_tracker_shutdown() {
 }
 
 #[tokio::test]
-async fn test_stream_tracker_abort_all() {
+async fn test_task_tracker_abort_all() {
   let local_set = tokio::task::LocalSet::new();
   local_set
     .run_until(async {
-      let tracker = StreamTracker::new();
+      let tracker = TaskTracker::new();
       tracker.register(async {
         std::future::pending::<()>().await;
       });
@@ -131,19 +131,19 @@ async fn test_stream_tracker_abort_all() {
 }
 
 #[test]
-fn test_stream_tracker_abort_all_empty() {
-  let tracker = StreamTracker::new();
+fn test_task_tracker_abort_all_empty() {
+  let tracker = TaskTracker::new();
   tracker.abort_all();
   assert_eq!(tracker.active_count(), 0);
 }
 
 #[tokio::test]
-async fn test_register_connection_returns_abort_handle() {
+async fn test_register_returns_abort_handle() {
   let local_set = tokio::task::LocalSet::new();
   local_set
     .run_until(async {
-      let tracker = StreamTracker::new();
-      let handle = tracker.register_connection(async {
+      let tracker = TaskTracker::new();
+      let handle = tracker.register(async {
         // empty task completes immediately
       });
       // Yield to let the task run
@@ -157,12 +157,12 @@ async fn test_register_connection_returns_abort_handle() {
 }
 
 #[tokio::test]
-async fn test_register_connection_handle_not_finished_while_running() {
+async fn test_register_handle_not_finished_while_running() {
   let local_set = tokio::task::LocalSet::new();
   local_set
     .run_until(async {
-      let tracker = StreamTracker::new();
-      let handle = tracker.register_connection(async {
+      let tracker = TaskTracker::new();
+      let handle = tracker.register(async {
         tokio::time::sleep(Duration::from_millis(100)).await;
       });
       // Should NOT be finished yet
@@ -213,7 +213,7 @@ async fn test_active_count_propagates_task_panic() {
   let (logs, _guard) = capture_logs();
   tokio::task::LocalSet::new()
     .run_until(async {
-      let tracker = StreamTracker::new();
+      let tracker = TaskTracker::new();
       let (task, completed) = panicking_task();
       tracker.register(task);
       completed.await.unwrap();
@@ -232,7 +232,7 @@ async fn test_active_count_propagates_task_panic() {
 async fn test_register_propagates_task_panic() {
   tokio::task::LocalSet::new()
     .run_until(async {
-      let tracker = StreamTracker::new();
+      let tracker = TaskTracker::new();
       let (task, completed) = panicking_task();
       tracker.register(task);
       completed.await.unwrap();
@@ -245,26 +245,10 @@ async fn test_register_propagates_task_panic() {
 }
 
 #[tokio::test]
-async fn test_register_connection_propagates_task_panic() {
+async fn test_wait_shutdown_propagates_task_panic() {
   tokio::task::LocalSet::new()
     .run_until(async {
-      let tracker = StreamTracker::new();
-      let (task, completed) = panicking_task();
-      tracker.register_connection(task);
-      completed.await.unwrap();
-      let collector = tokio::task::spawn_local(async move {
-        tracker.register_connection(async {});
-      });
-      assert_original_panic(collector).await;
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn test_wait_shutdown_propagates_stream_panic() {
-  tokio::task::LocalSet::new()
-    .run_until(async {
-      let tracker = StreamTracker::new();
+      let tracker = TaskTracker::new();
       let (task, completed) = panicking_task();
       tracker.register(task);
       completed.await.unwrap();
@@ -277,17 +261,58 @@ async fn test_wait_shutdown_propagates_stream_panic() {
 }
 
 #[tokio::test]
-async fn test_wait_shutdown_propagates_connection_panic() {
+async fn test_graceful_shutdown_waits_for_async_cleanup() {
   tokio::task::LocalSet::new()
     .run_until(async {
-      let tracker = StreamTracker::new();
-      let (task, completed) = panicking_task();
-      tracker.register_connection(task);
-      completed.await.unwrap();
-      let collector = tokio::task::spawn_local(async move {
-        tracker.wait_shutdown().await;
+      let tracker = TaskTracker::new();
+      let shutdown = tracker.shutdown_handle();
+      let (started, ready) = tokio::sync::oneshot::channel();
+      let (release, released) = tokio::sync::oneshot::channel();
+      let cleaned = Rc::new(std::cell::Cell::new(false));
+      let result = cleaned.clone();
+      tracker.register(async move {
+        shutdown.notified().await;
+        started.send(()).unwrap();
+        released.await.unwrap();
+        result.set(true);
       });
-      assert_original_panic(collector).await;
+      let closing = tracker.graceful_shutdown(Duration::from_secs(1));
+      tokio::pin!(closing);
+      tokio::select! {
+        _ = &mut closing => panic!("shutdown skipped async cleanup"),
+        result = ready => result.unwrap(),
+      }
+      assert!(!cleaned.get());
+      release.send(()).unwrap();
+      closing.await;
+      assert!(cleaned.get());
+      assert_eq!(tracker.active_count(), 0);
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_graceful_shutdown_aborts_only_after_deadline() {
+  tokio::task::LocalSet::new()
+    .run_until(async {
+      let tracker = TaskTracker::new();
+      let shutdown = tracker.shutdown_handle();
+      let (alive, mut dropped) = tokio::sync::oneshot::channel::<()>();
+      tracker.register(async move {
+        let _alive = alive;
+        shutdown.notified().await;
+        std::future::pending::<()>().await;
+      });
+      let closing = tracker.graceful_shutdown(Duration::from_secs(1));
+      tokio::pin!(closing);
+      assert!(futures::poll!(&mut closing).is_pending());
+      tokio::time::advance(Duration::from_millis(999)).await;
+      assert!(futures::poll!(&mut closing).is_pending());
+      assert!(dropped.try_recv().is_err());
+      tokio::time::advance(Duration::from_millis(1)).await;
+      closing.await;
+      assert!(dropped.await.is_err());
+      assert_eq!(tracker.active_count(), 0);
     })
     .await;
 }

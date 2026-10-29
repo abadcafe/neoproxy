@@ -5,7 +5,6 @@
 //! tests: HTTP pool process contracts
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 #[cfg(test)]
@@ -28,14 +27,14 @@ use crate::http_message::{
 use crate::plugins::upstream::error::{
   UpstreamError, classify_http_client_error,
 };
-use crate::tracker::StreamTracker;
+use crate::task_tracker::TaskTracker;
 
 #[derive(Clone)]
 pub(super) struct ProxyPool<C> {
   connector: C,
   cache: Arc<Cache>,
   key: Option<Key>,
-  tracker: Rc<StreamTracker>,
+  tracker: std::sync::Arc<TaskTracker>,
 }
 impl<C> ProxyPool<C> {
   #[cfg(test)]
@@ -43,7 +42,7 @@ impl<C> ProxyPool<C> {
     connector: C,
     max_idle: usize,
     idle_timeout: Duration,
-    tracker: Rc<StreamTracker>,
+    tracker: std::sync::Arc<TaskTracker>,
   ) -> Self {
     Self {
       connector,
@@ -51,6 +50,8 @@ impl<C> ProxyPool<C> {
         max_idle,
         idle_timeout,
         crate::header_limits::ResponseLimits::default().limits(),
+        std::sync::Arc::new(TaskTracker::new()),
+        tokio::runtime::Handle::current(),
       ),
       key: None,
       tracker,
@@ -61,7 +62,7 @@ impl<C> ProxyPool<C> {
     connector: C,
     cache: Arc<Cache>,
     key: Key,
-    tracker: Rc<StreamTracker>,
+    tracker: std::sync::Arc<TaskTracker>,
   ) -> Self {
     Self { connector, cache, key: Some(key), tracker }
   }
@@ -246,7 +247,7 @@ where
         ResponseBody::new(BytesBufBodyWrapper::new(inner)),
       ));
     }
-    let (recycle, completed) =
+    let (recycle, mut completed) =
       tokio::sync::oneshot::channel::<SendRequest<RequestBody>>();
     let (released, release) = tokio::sync::oneshot::channel();
     let Connection { sender, mut driver, observation, timeout } =
@@ -255,14 +256,35 @@ where
     let cache = self.cache.clone();
     // The driver belongs to this lease. Cancellation drops it instead
     // of returning a partially exchanged connection to the global pool.
-    self.tracker.register_connection(async move {
+    let shutdown = self.tracker.shutdown_handle();
+    self.tracker.register(async move {
       let mut sender = tokio::select! {
+        biased;
+        _ = shutdown.notified() => {
+          timeout.cancel();
+          drop(completed);
+          let _ = driver.await;
+          return;
+        },
         _ = &mut driver => return,
-        result = completed => match result { Ok(sender) => sender, Err(_) => return },
+        result = &mut completed => match result { Ok(sender) => sender, Err(_) => return },
       };
       tokio::select! {
+        biased;
+        _ = shutdown.notified() => {
+          timeout.cancel();
+          drop(sender);
+          let _ = driver.await;
+          return;
+        },
         _ = &mut driver => return,
         result = sender.ready() => { if result.is_err() { return; } }
+      }
+      if shutdown.is_shutdown() {
+        timeout.cancel();
+        drop(sender);
+        let _ = driver.await;
+        return;
       }
       timeout.disable();
       cache.put(key, Connection { sender, driver, observation, timeout });

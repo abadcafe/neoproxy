@@ -153,7 +153,7 @@ servers:
 }
 
 #[test]
-fn test_validate_hostname_routing_socks5_with_hostnames_error() {
+fn test_validate_hostname_routing_socks5_with_hostnames_ok() {
   let collector = validate_yaml(
     r#"
 listeners:
@@ -168,9 +168,7 @@ servers:
 "#,
   );
 
-  assert!(has_error(&collector, |e| {
-    matches!(e, ConfigError::InvalidFormat { .. })
-  }));
+  assert!(!collector.has_errors(), "{:?}", collector.errors());
 }
 
 #[test]
@@ -212,8 +210,7 @@ servers:
 }
 
 #[test]
-fn test_validate_hostname_routing_mixed_listeners_reports_only_unsupported_listener()
- {
+fn test_validate_hostname_routing_mixed_listeners_accepts_hostnames() {
   let collector = validate_yaml(
     r#"
 listeners:
@@ -231,13 +228,7 @@ servers:
 "#,
   );
 
-  let errors: Vec<_> = collector
-    .errors()
-    .iter()
-    .filter(|e| matches!(e, ConfigError::InvalidFormat { .. }))
-    .collect();
-  assert_eq!(errors.len(), 1);
-  assert!(errors[0].location().contains("listeners[1]"));
+  assert!(!collector.has_errors(), "{:?}", collector.errors());
 }
 
 #[test]

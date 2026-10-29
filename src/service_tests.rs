@@ -1,6 +1,6 @@
 //! Black-box tests for the service module.
 
-use crate::server::placeholder_service;
+use crate::server_fixtures::placeholder_service;
 use crate::service::Layer;
 
 #[derive(Clone)]

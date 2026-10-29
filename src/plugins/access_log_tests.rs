@@ -77,7 +77,8 @@ async fn call_file_layer(plugin: &dyn Plugin, path_prefix: &str) {
   let builder = plugin.layer_builder("file").unwrap();
   let layer =
     builder(layer_args(path_prefix, vec!["basic_auth.user"])).unwrap();
-  let mut service = layer.layer(crate::server::placeholder_service());
+  let mut service =
+    layer.layer(crate::server_fixtures::placeholder_service());
   let svc = service.ready().await.unwrap();
   assert!(
     tower::Service::call(svc, request_with_context()).await.is_err()
@@ -225,7 +226,8 @@ async fn test_uninstall_shared_plugin_keeps_other_plugin_and_process_writer_aliv
   let layer =
     second.layer_builder("file").unwrap()(layer_args(&prefix, vec![]))
       .unwrap();
-  let service = layer.layer(crate::server::placeholder_service());
+  let service =
+    layer.layer(crate::server_fixtures::placeholder_service());
   first.uninstall().await;
   assert!(
     first.layer_builder("file").unwrap()(layer_args(&prefix, vec![]))
@@ -260,7 +262,7 @@ async fn test_uninstall_returns_after_waiting_for_live_layer_sender() {
   let builder = plugin.layer_builder("file").unwrap();
   let layer = builder(layer_args(&prefix, vec![])).unwrap();
   let _service_holding_sender =
-    layer.layer(crate::server::placeholder_service());
+    layer.layer(crate::server_fixtures::placeholder_service());
 
   let start = std::time::Instant::now();
   plugin.uninstall().await;

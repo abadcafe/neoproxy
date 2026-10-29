@@ -11,8 +11,7 @@ use super::error::{ConfigError, ConfigErrorCollector};
 use super::listener::ListenerPropertiesProvider;
 use super::listener_validation::{
   validate_hostname, validate_hostname_conflicts,
-  validate_hostname_routing_compatibility, validate_listener_addresses,
-  validate_listener_references,
+  validate_listener_addresses, validate_listener_references,
 };
 use super::service::validate_service;
 use super::tls::validate_server_tls;
@@ -134,13 +133,6 @@ pub(super) fn validate_config(
   // Validate listener references
   validate_listener_references(config, collector);
 
-  // Validate hostname routing compatibility
-  validate_hostname_routing_compatibility(
-    config,
-    collector,
-    listener_manager,
-  );
-
   // Validate hostname conflicts across servers
-  validate_hostname_conflicts(config, collector, listener_manager);
+  validate_hostname_conflicts(config, collector);
 }

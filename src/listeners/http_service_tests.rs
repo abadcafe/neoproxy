@@ -151,7 +151,7 @@ async fn test_dispatch_service_errors_return_identified_internal_error()
   let service = HttpService::new_http(
     ServerRouter::build(vec![Server {
       hostnames: vec![],
-      service: crate::server::placeholder_service(),
+      service: crate::server_fixtures::placeholder_service(),
       service_name: "failure".into(),
       tls: None,
     }]),

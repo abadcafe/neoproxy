@@ -13,14 +13,14 @@ use super::upgrade::{
   Socks5UpgradeTrigger, http_status_to_socks5_error,
 };
 use crate::http_message::{BytesBufBodyWrapper, RequestBody};
+use crate::listeners::http_service::HttpService;
 use crate::listeners::tcp_listener_base::TcpConnection;
-use crate::service::Service as RuntimeService;
+use crate::server::ServerRouter;
 
 pub(super) async fn serve(
   connection: TcpConnection,
-  service: RuntimeService,
+  server_router: ServerRouter,
   deadline: Instant,
-  service_name: String,
 ) {
   let TcpConnection { stream, peer_addr, local_addr, .. } = connection;
   tracing::info!("SOCKS5 connection established from {peer_addr}");
@@ -143,6 +143,7 @@ pub(super) async fn serve(
     .method(http::Method::CONNECT)
     .uri(&uri)
     .version(http::Version::HTTP_11)
+    .header(http::header::HOST, &uri)
     .body(RequestBody::new(BytesBufBodyWrapper::new(
       http_body_util::Empty::<bytes::Bytes>::new(),
     )));
@@ -176,32 +177,13 @@ pub(super) async fn serve(
 
   request.extensions_mut().insert(on_upgrade);
 
-  // Build RequestContext with connection-level keys and
-  // insert into request extensions. Auth and
-  // access logging are now handled by the
-  // plugin layer in the service pipeline.
-  let ctx = crate::context::build_request_context(
-    &peer_addr,
-    &local_addr,
-    &service_name,
-  );
-  let id = match crate::request_id::RequestId::read_or_generate(
-    request.headers(),
-  ) {
-    Ok(id) => id,
-    Err(error) => {
-      tracing::error!("generating SOCKS5 request ID: {error}");
-      let _ = trigger
-        .send_error(fast_socks5::ReplyError::GeneralFailure)
-        .await;
-      return;
-    }
-  };
-  let ctx = ctx.with_request_id(id);
-  request.extensions_mut().insert(ctx);
-
-  // Step 5: Call the associated Service
-  let result = tower::ServiceExt::oneshot(service, request).await;
+  // All listeners enter the same request dispatcher. SOCKS5 has
+  // already decoded its wire protocol into an HTTP/1.1 CONNECT;
+  // validation, routing, request identity and layers are shared.
+  let result =
+    HttpService::new_http(server_router, peer_addr, local_addr)
+      .dispatch(request)
+      .await;
 
   // Step 6: Based on Response, send SOCKS5 reply via
   // trigger

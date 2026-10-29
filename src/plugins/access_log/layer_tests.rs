@@ -288,7 +288,7 @@ async fn test_access_log_layer_warns_when_sink_full() {
   );
   let mut service = tower::Layer::layer(
     &access_log_layer,
-    crate::server::placeholder_service(),
+    crate::server_fixtures::placeholder_service(),
   );
   let svc = service.ready().await.unwrap();
   let _ = tower::Service::call(svc, empty_request()).await;
@@ -314,7 +314,7 @@ async fn test_access_log_layer_warns_when_sink_stopped() {
   );
   let mut service = tower::Layer::layer(
     &access_log_layer,
-    crate::server::placeholder_service(),
+    crate::server_fixtures::placeholder_service(),
   );
   let svc = service.ready().await.unwrap();
   let _ = tower::Service::call(svc, empty_request()).await;
@@ -335,8 +335,10 @@ async fn test_access_log_layer_preserves_service_failure() {
     Arc::new(FailingSink { error: DeliveryError::Full }),
     vec![],
   );
-  let service =
-    tower::Layer::layer(&layer, crate::server::placeholder_service());
+  let service = tower::Layer::layer(
+    &layer,
+    crate::server_fixtures::placeholder_service(),
+  );
   let result = service.oneshot(empty_request()).await;
   assert!(
     result.is_err(),

@@ -68,6 +68,8 @@ mod request_id;
 #[cfg(test)]
 mod request_id_tests;
 mod server;
+#[cfg(test)]
+mod server_fixtures;
 mod server_thread;
 mod service;
 mod shutdown;

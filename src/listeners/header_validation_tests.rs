@@ -8,7 +8,7 @@ use crate::server::{Server, ServerRouter};
 fn default_server() -> Server {
   Server {
     hostnames: vec![],
-    service: crate::server::placeholder_service(),
+    service: crate::server_fixtures::placeholder_service(),
     service_name: "default".to_string(),
     tls: None,
   }
@@ -17,7 +17,7 @@ fn default_server() -> Server {
 fn api_server() -> Server {
   Server {
     hostnames: vec!["api.example.com".to_string()],
-    service: crate::server::placeholder_service(),
+    service: crate::server_fixtures::placeholder_service(),
     service_name: "api".to_string(),
     tls: None,
   }
@@ -202,7 +202,7 @@ fn test_validate_and_route_no_route_no_default_returns_404() {
   // Router with only hostname-specific server, no default
   let router = ServerRouter::build(vec![Server {
     hostnames: vec!["specific.example.com".to_string()],
-    service: crate::server::placeholder_service(),
+    service: crate::server_fixtures::placeholder_service(),
     service_name: "specific".to_string(),
     tls: None,
   }]);

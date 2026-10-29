@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use rustls::pki_types::CertificateDer;
 
-use crate::server::{Server, placeholder_service};
+use crate::server::Server;
+use crate::server_fixtures::placeholder_service;
 use crate::tls::build_tls_server_config;
 
 struct Identity {

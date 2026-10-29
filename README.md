@@ -451,7 +451,7 @@ SOCKS5 监听器，使用 RFC 1928/1929 报文；认证执行时机遵循下述�
 收到合法格式的用户名/密码报文后直接返回成功，**仅确认凭据收取完成，不表示认证通过**。
 这是有意区别于 RFC 1929 认证成功语义的产品行为。
 
-随后读取目标，将 SOCKS5 CONNECT 转成内部 HTTP CONNECT，统一执行 `auth.basic_auth`
+随后读取目标，将 SOCKS5 CONNECT 转成带目标 authority 和 Host 的内部 HTTP/1.1 CONNECT，经所有 listener 共用的 `HttpService::dispatch` 完成请求校验、RequestContext 创建和 server 路由，再执行 `auth.basic_auth`
 及其他中间件。配置认证时，缺失或错误凭据在此返回 HTTP 407，映射成 SOCKS5 CONNECT
 `REP=0x02` 并关闭连接，不建立上游隧道；未配置认证时无需验证凭据。
 凭据在构造 CONNECT 时编码为 `Proxy-Authorization: Basic ...`，与 HTTP 请求使用同一认证入口，不通过 extensions 传递。密码中的冒号可以保留；用户名含冒号，或用户名／密码包含 ASCII 控制字符（0x00–0x1F、0x7F）时，在 SOCKS5 凭据收取阶段返回非零 STATUS 并关闭连接，服务端日志记录格式错误原因。这仅是 Basic 格式检查，不校验账号密码是否正确；有效格式的凭据仍统一交由 CONNECT 阶段的认证中间件验证。访问日志可记录被拒绝的 CONNECT。
@@ -739,7 +739,7 @@ services:
 已有值作为不透明标识原样沿用。入口只把 ID 保存到 request context，保持入站请求头原样。
 向上游发送普通请求或 CONNECT 时，在逐跳头清理后从 context 写入 `X-Request-ID`；
 响应出口也从同一 context 写入该头，覆盖上游同名值。路由拒绝、认证拒绝和本地错误响应
-同样携带 ID。SOCKS5 在转换成内部 CONNECT 请求时建立 ID。
+同样携带 ID。SOCKS5 转换成内部 CONNECT 请求后，由统一的 HttpService 分发入口建立 ID。
 
 context 使用受类型约束的字段键保存原生值，耗时保存为 `Duration`、计数保存为整数、
 复用标志保存为布尔值，地址和解析结果保存为地址类型。只有选中的日志字段才会被提取和
@@ -769,7 +769,7 @@ access log 继续在 service 返回响应头时生成；完整正文或 tunnel �
 
 ### 虚拟主机路由
 
-服务器通过 `hostnames` 配置虚拟主机名，TLS 的 SNI 和 HTTP 的目标 authority/Host 分别使用它选 Server。精确匹配优先；通配符 `*.example.com` 只匹配一个非空标签，不匹配裸域或多层子域。本项目对齐 Nginx 的选 Server/证书流程，继续使用自身原有的单层通配语义。
+所有 HTTP、HTTPS、HTTP/3 和 SOCKS5 listener 均支持通过 `hostnames` 选择 Server，同一个 listener 可以被多个 Server 引用。SOCKS5 使用 CONNECT 命令提供的域名或 IP 路由，不执行反向 DNS，也不读取隧道内的 TLS SNI。TLS 的 SNI 和 HTTP 的目标 authority/Host 分别使用 `hostnames` 选 Server。精确匹配优先；通配符 `*.example.com` 只匹配一个非空标签，不匹配裸域或多层子域。本项目对齐 Nginx 的选 Server/证书流程，继续使用自身原有的单层通配语义。
 多个服务器必须引用同一个 listener 对象来共享地址，再按目标 authority 路由。不同 listener 对象不能重复绑定同一 socket，也不能配置相互覆盖的通配监听地址。空 hostnames 表示默认/兜底服务器。同一 listener 的各 worker 使用 `SO_REUSEPORT` 独立绑定，QUIC Endpoint 不跨 worker 共享。
 
 ```yaml

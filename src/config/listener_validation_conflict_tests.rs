@@ -16,7 +16,7 @@ fn has_error(
 }
 
 #[test]
-fn test_validate_hostname_conflicts_socks5_multiple_servers() {
+fn test_validate_hostname_conflicts_socks5_multiple_defaults() {
   let collector = validate_yaml(
     r#"
 listeners:
@@ -34,7 +34,7 @@ servers:
   );
 
   assert!(has_error(&collector, |e| {
-    matches!(e, ConfigError::InvalidFormat { .. })
+    matches!(e, ConfigError::HostnameConflict { .. })
   }));
 }
 
@@ -176,4 +176,33 @@ fn test_validate_allows_independent_ephemeral_bindings_for_one_listener()
      service: ''\n  listeners: [main]\n",
   );
   assert!(!collector.has_errors(), "{:?}", collector.errors());
+}
+
+#[test]
+fn test_validate_hostname_conflicts_socks5_routes() {
+  for (names, conflicts) in [
+    (["api.example.com", "web.example.com"], false),
+    (["api.example.com", "API.EXAMPLE.COM."], true),
+    (["*.example.com", "*.EXAMPLE.COM."], true),
+  ] {
+    let collector = validate_yaml(&format!(
+      "listeners:\n- name: main\n  kind: socks5\n  addresses: \
+       [127.0.0.1:1080]\nservers:\n- name: a\n  hostnames: ['{}']\n  \
+       listeners: [main]\n  service: ''\n- name: b\n  hostnames: \
+       ['{}']\n  listeners: [main]\n  service: ''\n",
+      names[0], names[1]
+    ));
+    assert_eq!(
+      collector.has_errors(),
+      conflicts,
+      "{:?}",
+      collector.errors()
+    );
+    if conflicts {
+      assert!(has_error(&collector, |error| matches!(
+        error,
+        ConfigError::HostnameConflict { .. }
+      )));
+    }
+  }
 }

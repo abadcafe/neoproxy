@@ -12,7 +12,17 @@ use super::session;
 use crate::context::RequestContext;
 use crate::http_message::{Request, Response, build_error_response};
 use crate::listeners::tcp_listener_base::TcpConnection;
+use crate::server::{Server, ServerRouter};
 use crate::service::Service;
+
+fn router(service: Service) -> ServerRouter {
+  ServerRouter::build(vec![Server {
+    hostnames: vec![],
+    service,
+    service_name: "session-test".into(),
+    tls: None,
+  }])
+}
 use crate::shutdown::ShutdownHandle;
 
 async fn connection_pair() -> (TcpConnection, TcpStream) {
@@ -58,6 +68,8 @@ async fn test_serve_translates_targets_and_metadata_then_maps_denied_response()
         Box::pin(async move {
           assert_eq!(request.method(), http::Method::CONNECT);
           assert_eq!(request.uri().to_string(), authority);
+          assert_eq!(request.headers()[http::header::HOST], authority);
+          assert_eq!(request.version(), http::Version::HTTP_11);
           assert!(
             request
               .extensions()
@@ -78,9 +90,8 @@ async fn test_serve_translates_targets_and_metadata_then_maps_denied_response()
     tokio::join!(
       session::serve(
         connection,
-        service,
-        tokio::time::Instant::now() + Duration::from_secs(1),
-        "session-test".into()
+        router(service),
+        tokio::time::Instant::now() + Duration::from_secs(1)
       ),
       async {
         client.write_all(&[5, 1, 0]).await.unwrap();
@@ -104,9 +115,8 @@ async fn test_serve_invalid_handshake_closes_without_connect_reply() {
   tokio::join!(
     session::serve(
       connection,
-      crate::server::placeholder_service(),
-      tokio::time::Instant::now() + Duration::from_secs(1),
-      "session-test".into()
+      router(crate::server_fixtures::placeholder_service()),
+      tokio::time::Instant::now() + Duration::from_secs(1)
     ),
     async {
       client.write_all(&[4, 1, 0]).await.unwrap();
@@ -127,9 +137,8 @@ async fn test_serve_handshake_timeout_closes_idle_client() {
   tokio::join!(
     session::serve(
       connection,
-      crate::server::placeholder_service(),
-      tokio::time::Instant::now() + Duration::from_secs(1),
-      "session-test".into()
+      router(crate::server_fixtures::placeholder_service()),
+      tokio::time::Instant::now() + Duration::from_secs(1)
     ),
     async {
       assert_eq!(client.read(&mut [0]).await.unwrap(), 0);
@@ -165,9 +174,8 @@ async fn test_serve_injects_basic_header_for_connect_authentication() {
   tokio::join!(
     session::serve(
       connection,
-      service,
-      tokio::time::Instant::now() + Duration::from_secs(1),
-      "session-test".into()
+      router(service),
+      tokio::time::Instant::now() + Duration::from_secs(1)
     ),
     async {
       client.write_all(&[5, 1, 2]).await.unwrap();
@@ -205,9 +213,8 @@ async fn test_serve_header_deadline_excludes_service_execution() {
   tokio::join!(
     session::serve(
       connection,
-      service,
-      tokio::time::Instant::now() + Duration::from_secs(1),
-      "session-test".into()
+      router(service),
+      tokio::time::Instant::now() + Duration::from_secs(1)
     ),
     async {
       client.write_all(&[5, 1, 0]).await.unwrap();
@@ -223,4 +230,72 @@ async fn test_serve_header_deadline_excludes_service_execution() {
       assert_eq!(reply[1], 2);
     }
   );
+}
+
+#[tokio::test]
+async fn test_serve_routes_connect_by_target_hostname() {
+  for (target, expected, default) in [
+    ("api.example.test", Some("exact"), true),
+    ("other.example.test", Some("wildcard"), true),
+    ("unmatched.test", Some("fallback"), true),
+    ("unmatched.test", None, false),
+  ] {
+    let (connection, mut client) = connection_pair().await;
+    let called = std::rc::Rc::new(std::cell::Cell::new(false));
+    let mut servers = Vec::new();
+    for (name, hostnames) in [
+      ("fallback", vec![]),
+      ("wildcard", vec!["*.example.test".into()]),
+      ("exact", vec!["api.example.test".into()]),
+    ] {
+      if name == "fallback" && !default {
+        continue;
+      }
+      let called = called.clone();
+      servers.push(Server {
+        hostnames,
+        service_name: name.into(),
+        tls: None,
+        service: Service::new(tower::service_fn(
+          move |request: Request| {
+            called.set(true);
+            let context =
+              request.extensions().get::<RequestContext>().unwrap();
+            assert_eq!(Some(name), expected);
+            assert_eq!(context.service_name(), Some(name));
+            assert!(context.request_id().is_some());
+            Box::pin(async {
+              Ok(build_error_response(
+                http::StatusCode::FORBIDDEN,
+                "denied",
+              ))
+            })
+              as Pin<Box<dyn Future<Output = Result<Response>>>>
+          },
+        )),
+      });
+    }
+    tokio::join!(
+      session::serve(
+        connection,
+        ServerRouter::build(servers),
+        tokio::time::Instant::now() + Duration::from_secs(1)
+      ),
+      async {
+        client.write_all(&[5, 1, 0]).await.unwrap();
+        let mut method = [0; 2];
+        client.read_exact(&mut method).await.unwrap();
+        assert_eq!(method, [5, 0]);
+        let mut command =
+          vec![5, 1, 0, 3, u8::try_from(target.len()).unwrap()];
+        command.extend_from_slice(target.as_bytes());
+        command.extend_from_slice(&443_u16.to_be_bytes());
+        client.write_all(&command).await.unwrap();
+        let mut reply = [0; 10];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_ne!(reply[1], 0);
+      },
+    );
+    assert_eq!(called.get(), expected.is_some());
+  }
 }

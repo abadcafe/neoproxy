@@ -46,13 +46,12 @@ fn test_socks5_listener_name_returns_socks5() {
 // ========== props ==========
 
 #[test]
-fn test_socks5_listener_props_tcp_without_hostname_routing() {
+fn test_socks5_listener_props_tcp() {
   let props = socks5::props();
   assert_eq!(
     props.transport_layer(),
     crate::listener::TransportLayer::Tcp
   );
-  assert!(!props.supports_hostname_routing());
 }
 
 // ========== create_listener_builder ==========

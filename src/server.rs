@@ -1,29 +1,13 @@
 //! module: server
 //! responsibility: select services by canonical hostname
-//! public operations: placeholder_service, Server, service_name,
+//! public operations: Server,
 //! requires_client_cert, ServerRouter, build, route
 //! data entities: Server, ServerRouter, Routes
 //! tests: server_tests.rs, server_thread_tests.rs
 
-use std::future::Future;
-use std::pin::Pin;
 use std::rc::Rc;
 
-use anyhow::Result;
-use tower::service_fn;
-
 use crate::service::Service;
-
-/// Create a placeholder service for routing table initialization.
-/// The actual service is selected at request time from the routing
-/// table.
-pub(crate) fn placeholder_service() -> Service {
-  Service::new(service_fn(|_req| {
-    Box::pin(async {
-      Err::<Response, _>(anyhow::anyhow!("placeholder"))
-    }) as Pin<Box<dyn Future<Output = Result<Response>>>>
-  }))
-}
 
 // ============================================================================
 // Shared-Address Listener Architecture (Task 020)
@@ -43,11 +27,6 @@ pub(crate) struct Server {
 }
 
 impl Server {
-  /// Get the service name for logging purposes.
-  pub(crate) fn service_name(&self) -> String {
-    self.service_name.clone()
-  }
-
   /// Whether HTTPS/H3 requests routed here require an authenticated
   /// client connection. TLS has already validated any presented client
   /// certificate against the listener's combined CA roots. This is a
@@ -128,5 +107,3 @@ impl ServerRouter {
       .or_else(|| self.routes.default.clone())
   }
 }
-
-use crate::http_message::Response;

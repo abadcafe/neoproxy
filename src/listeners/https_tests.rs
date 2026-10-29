@@ -42,13 +42,12 @@ fn test_https_listener_name_returns_https() {
 // ========== props ==========
 
 #[test]
-fn test_https_listener_props_tcp_with_hostname_routing() {
+fn test_https_listener_props_tcp() {
   let props = https::props();
   assert_eq!(
     props.transport_layer(),
     crate::listener::TransportLayer::Tcp
   );
-  assert!(props.supports_hostname_routing());
 }
 
 // ========== create_listener_builder ==========

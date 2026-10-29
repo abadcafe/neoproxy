@@ -64,7 +64,8 @@ async fn test_layer_missing_empty_duplicate_identity_forbidden() {
     args("default_policy: {}"),
   )
   .unwrap();
-  let mut service = layer.layer(crate::server::placeholder_service());
+  let mut service =
+    layer.layer(crate::server_fixtures::placeholder_service());
   for id in [None, Some("")] {
     assert_eq!(
       service.call(request(id)).await.unwrap().status(),
@@ -88,7 +89,8 @@ async fn test_layer_fetch_failure_uses_default_policy() {
     args("default_policy: {denyOut: [0.0.0.0/0]}"),
   )
   .unwrap();
-  let mut service = layer.layer(crate::server::placeholder_service());
+  let mut service =
+    layer.layer(crate::server_fixtures::placeholder_service());
   assert_eq!(
     service.call(request(Some("sandbox"))).await.unwrap().status(),
     http::StatusCode::FORBIDDEN

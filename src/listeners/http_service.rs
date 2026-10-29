@@ -6,11 +6,11 @@
 //! data entities: ClientCertPolicy, HttpService, HttpUpgrade
 //! tests: http_service_tests.rs
 
-//! Shared HTTP service adaptor for HTTP-family listeners.
+//! Shared HTTP service adaptor for all listeners.
 //!
 //! Provides a unified `hyper::Service` implementation that handles
 //! request routing, authenticated-connection requirements, and context
-//! injection for HTTP, HTTPS and HTTP/3 listeners.
+//! injection for HTTP, HTTPS, HTTP/3 and translated SOCKS5 requests.
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -45,7 +45,8 @@ impl ClientCertPolicy {
 /// Unified HTTP-family service adaptor with routing support.
 ///
 /// Handles request validation, routing, connection authentication
-/// requirements, and service invocation for HTTP, HTTPS and HTTP/3.
+/// requirements, and service invocation for HTTP, HTTPS, HTTP/3 and
+/// translated SOCKS5 requests.
 pub(crate) struct HttpService {
   policy: super::http_policy::HttpPolicy,
   write_control: Option<super::write_deadline::Control>,

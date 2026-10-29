@@ -54,40 +54,25 @@ addresses:
 
 #[test]
 fn test_listener_property_values_construction() {
-  let props =
-    ListenerPropertyValues::new(TransportLayer::Tcp, true, false);
+  let props = ListenerPropertyValues::new(TransportLayer::Tcp, false);
   assert_eq!(props.transport_layer(), TransportLayer::Tcp);
   assert!(!props.requires_server_certificate());
-  assert!(props.supports_hostname_routing());
 }
 
 // ========== ListenerPropertyValues ==========
 
 #[test]
-fn test_listener_property_values_tcp_with_hostname_routing() {
-  let props =
-    ListenerPropertyValues::new(TransportLayer::Tcp, true, false);
+fn test_listener_property_values_tcp_tls_requires_certificate() {
+  let props = ListenerPropertyValues::new(TransportLayer::Tcp, true);
   assert_eq!(props.transport_layer(), TransportLayer::Tcp);
-  assert!(!props.requires_server_certificate());
-  assert!(props.supports_hostname_routing());
+  assert!(props.requires_server_certificate());
 }
 
 #[test]
-fn test_listener_property_values_tcp_without_hostname_routing() {
-  let props =
-    ListenerPropertyValues::new(TransportLayer::Tcp, false, false);
-  assert_eq!(props.transport_layer(), TransportLayer::Tcp);
-  assert!(!props.requires_server_certificate());
-  assert!(!props.supports_hostname_routing());
-}
-
-#[test]
-fn test_listener_property_values_udp_with_hostname_routing() {
-  let props =
-    ListenerPropertyValues::new(TransportLayer::Udp, true, true);
+fn test_listener_property_values_udp() {
+  let props = ListenerPropertyValues::new(TransportLayer::Udp, true);
   assert_eq!(props.transport_layer(), TransportLayer::Udp);
   assert!(props.requires_server_certificate());
-  assert!(props.supports_hostname_routing());
 }
 
 #[test]

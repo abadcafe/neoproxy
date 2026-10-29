@@ -2,7 +2,6 @@
 //! responsibility: validate listener routing relationships
 //! public operations: validate_listener_addresses,
 //! validate_hostname, validate_listener_references,
-//! validate_hostname_routing_compatibility,
 //! validate_hostname_conflicts
 //! data entities: none
 //! tests: listener_validation_conflict_tests.rs,
@@ -13,7 +12,6 @@
 
 use std::collections::HashMap;
 
-use super::listener::{ListenerConfig, ListenerPropertiesProvider};
 use super::{Config, ConfigError, ConfigErrorCollector};
 
 /// Validate listener addresses.
@@ -82,13 +80,6 @@ pub(super) fn validate_hostname(
   }
 }
 
-/// Build a name -> ListenerConfig lookup map from the config.
-fn build_listener_map(
-  config: &Config,
-) -> HashMap<&str, &ListenerConfig> {
-  config.listeners().iter().map(|l| (l.name(), l)).collect()
-}
-
 /// Validate that each server's listener references exist in
 /// config.listeners.
 pub(super) fn validate_listener_references(
@@ -109,58 +100,6 @@ pub(super) fn validate_listener_references(
             server_idx, listener_idx
           ),
           message: format!("listener '{}' not found", listener_name),
-        });
-      }
-    }
-  }
-}
-
-/// Validate that listeners without hostname routing support
-/// are not configured with hostnames.
-///
-/// If a listener doesn't support hostname routing (e.g., socks5),
-/// the server's hostnames field must be empty.
-pub(super) fn validate_hostname_routing_compatibility(
-  config: &Config,
-  collector: &mut ConfigErrorCollector,
-  listener_manager: &dyn ListenerPropertiesProvider,
-) {
-  let registry = listener_manager;
-
-  // Build a name -> ListenerConfig lookup map
-  let listener_map = build_listener_map(config);
-
-  for (server_idx, server) in config.servers().iter().enumerate() {
-    if server.hostnames().is_empty() {
-      continue;
-    }
-
-    for (listener_idx, listener_name) in
-      server.listeners().iter().enumerate()
-    {
-      // Look up ListenerConfig by name to get the kind
-      let listener_kind = match listener_map.get(listener_name.as_str())
-      {
-        Some(lc) => lc.kind(),
-        None => continue, /* Unknown listener name -
-                           * validate_listener_references handles
-                           * this */
-      };
-
-      if let Some(props) = registry.listener_props(listener_kind)
-        && !props.supports_hostname_routing()
-      {
-        collector.add(ConfigError::InvalidFormat {
-          location: format!(
-            "servers[{}].listeners[{}]",
-            server_idx, listener_idx
-          ),
-          message: format!(
-            "listener kind '{}' does not support hostname routing, \
-             but server '{}' has hostnames configured",
-            listener_kind,
-            server.name()
-          ),
         });
       }
     }
@@ -229,13 +168,7 @@ fn report_hostname_overlaps(
 pub(super) fn validate_hostname_conflicts(
   config: &Config,
   collector: &mut ConfigErrorCollector,
-  listener_manager: &dyn ListenerPropertiesProvider,
 ) {
-  let registry = listener_manager;
-
-  // Build name -> ListenerConfig lookup map
-  let listener_map = build_listener_map(config);
-
   // Build listener_name -> Vec<&Server> mapping
   let mut listener_servers: std::collections::HashMap<
     &str,
@@ -251,32 +184,6 @@ pub(super) fn validate_hostname_conflicts(
   }
 
   for (listener_name, servers) in listener_servers {
-    // Get listener kind and check supports_hostname_routing
-    let supports_hostname_routing = listener_map
-      .get(listener_name)
-      .and_then(|l| registry.listener_props(l.kind()))
-      .map(|p| p.supports_hostname_routing())
-      .unwrap_or(false);
-
-    if !supports_hostname_routing {
-      if servers.len() <= 1 {
-        continue;
-      }
-      // Non-hostname-routing listener: only one server can reference it
-      let server_names: Vec<_> =
-        servers.iter().map(|s| s.name.as_str()).collect();
-      collector.add(ConfigError::InvalidFormat {
-        location: format!("listener '{}'", listener_name),
-        message: format!(
-          "multiple servers ({}) reference a listener without \
-           hostname routing support",
-          server_names.join(", ")
-        ),
-      });
-      continue;
-    }
-
-    // Hostname-routing listener: check hostname overlaps
     let entries =
       servers.iter().map(|s| (s.name.as_str(), s.hostnames.as_slice()));
     let (default_servers, hostname_map) =

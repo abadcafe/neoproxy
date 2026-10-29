@@ -1,11 +1,9 @@
 //! Black-box tests for the server module.
 
 use std::rc::Rc;
-use std::task::{Context, Poll, Waker};
 
-use tower::Service;
-
-use crate::server::{Server, ServerRouter, placeholder_service};
+use crate::server::{Server, ServerRouter};
+use crate::server_fixtures::placeholder_service;
 
 #[test]
 fn test_route_ipv6_uses_address_identity_instead_of_spelling() {
@@ -220,41 +218,6 @@ fn test_server_router_none_hostname_no_default() {
   assert!(result.is_none());
 }
 
-// ============== Placeholder Service Tests ==============
-
-#[test]
-fn test_placeholder_service_poll_ready() {
-  let waker = Waker::noop();
-  let mut cx = Context::from_waker(waker);
-
-  let mut service = placeholder_service();
-  match service.poll_ready(&mut cx) {
-    Poll::Ready(Ok(())) => {}
-    _ => panic!("Expected Poll::Ready(Ok(()))"),
-  }
-}
-
-#[test]
-fn test_placeholder_service_call() {
-  use http_body_util::BodyExt;
-  use http_body_util::combinators::UnsyncBoxBody;
-
-  let mut service = placeholder_service();
-  let body: UnsyncBoxBody<bytes::Bytes, anyhow::Error> =
-    http_body_util::Empty::<bytes::Bytes>::new()
-      .map_err(|e: std::convert::Infallible| anyhow::anyhow!("{}", e))
-      .boxed_unsync();
-  let request =
-    http::Request::builder().method("GET").uri("/").body(body).unwrap();
-
-  let future = service.call(request);
-  // The future should complete with an error
-  let rt = tokio::runtime::Runtime::new().unwrap();
-  let result = rt.block_on(future);
-  assert!(result.is_err());
-  assert!(result.unwrap_err().to_string().contains("placeholder"));
-}
-
 // ============== Hostname Matching via Router Tests ==============
 
 #[test]
@@ -323,7 +286,7 @@ fn test_requires_client_cert_only_for_nonempty_ca_paths() {
         .unwrap();
     let server = crate::server::Server {
       hostnames: vec![],
-      service: crate::server::placeholder_service(),
+      service: crate::server_fixtures::placeholder_service(),
       service_name: "client-ca".into(),
       tls: Some(tls),
     };

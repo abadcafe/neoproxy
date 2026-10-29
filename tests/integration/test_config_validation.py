@@ -695,41 +695,6 @@ class TestHostnameRouting:
         temp_file.close()
         return temp_file.name
 
-    def test_socks5_hostnames_rejected(self) -> None:
-        """
-        TC-HOST-001: SOCKS5 listener with hostnames should return error.
-
-        SOCKS5 protocol does not support hostname routing.
-        """
-        socks_port = get_unique_port()
-        config = f"""server_threads: 1
-
-plugins:
-  echo:
-
-services:
-- name: echo
-  kind: echo.echo
-
-listeners:
-- name: socks_main
-  kind: socks5
-  addresses: ["127.0.0.1:{socks_port}"]
-
-servers:
-- name: socks_server
-  hostnames: ["api.example.com"]
-  listeners: ["socks_main"]
-  service: echo
-"""
-        returncode, _, stderr = run_neoproxy_with_config(config)
-
-        assert returncode == 1, f"Expected exit code 1, got {returncode}"
-
-        assert "does not support hostname routing" in stderr, (
-            f"Expected hostname routing compatibility error, got: {stderr}"
-        )
-
     def test_exact_hostname_duplicate(self) -> None:
         """
         TC-HOST-003: Exact hostname duplicate on same address should return error.
@@ -848,7 +813,7 @@ servers:
         """
         TC-HOST-007: Multiple SOCKS5 servers on same address should return error.
 
-        SOCKS5 servers are treated as default servers (no hostname routing).
+        Empty hostnames select a default server for SOCKS5 as for HTTP.
         Multiple default servers on the same address is a conflict.
         """
         socks_port = get_unique_port()
@@ -882,8 +847,8 @@ servers:
 
         assert returncode == 1, f"Expected exit code 1, got {returncode}"
 
-        assert "without hostname routing support" in stderr, (
-            f"Expected 'without hostname routing support' error, got: {stderr}"
+        assert "multiple default servers" in stderr, (
+            f"Expected multiple default servers error, got: {stderr}"
         )
 
     def test_socks5_without_hostnames_ok(self) -> None:

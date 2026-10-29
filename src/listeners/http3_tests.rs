@@ -14,13 +14,12 @@ fn test_http3_listener_name_returns_http3() {
 // ========== props ==========
 
 #[test]
-fn test_http3_listener_props_udp_with_hostname_routing() {
+fn test_http3_listener_props_udp() {
   let props = http3::props();
   assert_eq!(
     props.transport_layer(),
     crate::listener::TransportLayer::Udp
   );
-  assert!(props.supports_hostname_routing());
 }
 
 // ========== create_listener_builder ==========

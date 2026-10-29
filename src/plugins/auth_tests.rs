@@ -137,7 +137,7 @@ users:
   .unwrap();
 
   let layer = builder(args).unwrap();
-  let inner = crate::server::placeholder_service();
+  let inner = crate::server_fixtures::placeholder_service();
   let _wrapped = layer.layer(inner);
 }
 
@@ -190,7 +190,7 @@ fn make_middleware_service() -> crate::service::Service {
   let users = vec![user_credential("admin", "secret")];
   let auth = crate::auth::UserPasswordAuth::from_users(&users);
   let layer = crate::service::Layer::new(AuthLayer { auth });
-  let inner = crate::server::placeholder_service();
+  let inner = crate::server_fixtures::placeholder_service();
   layer.layer(inner)
 }
 
@@ -262,7 +262,7 @@ fn test_valid_credentials_sets_context() {
     let users = vec![user_credential("admin", "secret")];
     let auth = crate::auth::UserPasswordAuth::from_users(&users);
     let layer = crate::service::Layer::new(AuthLayer { auth });
-    let inner = crate::server::placeholder_service();
+    let inner = crate::server_fixtures::placeholder_service();
     let mut svc = layer.layer(inner);
 
     let body: crate::http_message::RequestBody =

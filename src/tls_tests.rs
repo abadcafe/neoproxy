@@ -3,7 +3,8 @@
 use std::sync::OnceLock;
 
 use crate::config::ServerTlsConfig;
-use crate::server::{Server, placeholder_service};
+use crate::server::Server;
+use crate::server_fixtures::placeholder_service;
 use crate::tls::build_tls_server_config;
 
 static CRYPTO_PROVIDER_INSTALLED: OnceLock<bool> = OnceLock::new();

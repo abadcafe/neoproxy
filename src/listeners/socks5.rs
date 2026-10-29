@@ -42,7 +42,7 @@ use crate::config::{ListenerPropertyValues, SerializedArgs};
 use crate::listener::{
   BuildListener, Listener, Listening, TransportLayer,
 };
-use crate::service::Service as RuntimeService;
+use crate::server::ServerRouter;
 
 /// SOCKS5 listener implementation.
 ///
@@ -54,13 +54,11 @@ struct Socks5Listener {
   addresses: Vec<SocketAddr>,
   /// Shared lifecycle management (shutdown, join, graceful shutdown).
   base: TcpListenerBase,
-  /// Associated service for handling connections.
-  service: RuntimeService,
+  /// Shared hostname router used by the request dispatcher.
+  server_router: ServerRouter,
   /// Total deadline for negotiation, credentials and CONNECT command.
   header_read_timeout: HeaderDeadline,
   tcp_accept_retry_delay: AcceptRetryDelay,
-  /// Service name for identification in logs.
-  service_name: String,
 }
 
 impl Socks5Listener {
@@ -72,24 +70,15 @@ impl Socks5Listener {
   ) -> Result<Listener> {
     let addresses = resolve_addresses(&addresses)?;
 
-    let service = server_routing_table
-      .first()
-      .map(|e| e.service.clone())
-      .unwrap_or_else(crate::server::placeholder_service);
-
-    let service_name = server_routing_table
-      .first()
-      .map(|e| e.service_name())
-      .unwrap_or_default();
+    let server_router = ServerRouter::build(server_routing_table);
 
     Ok(Listener::new(Self {
       tcp_options: args.tcp_options,
       addresses,
       base: TcpListenerBase::new().with_tcp_options(args.tcp_options),
-      service,
+      server_router,
       header_read_timeout: args.header_read_timeout,
       tcp_accept_retry_delay: args.tcp_accept_retry_delay,
-      service_name,
     }))
   }
 }
@@ -98,8 +87,7 @@ impl Listening for Socks5Listener {
   fn start(
     &self,
   ) -> Result<std::pin::Pin<Box<dyn Future<Output = Result<()>>>>> {
-    let service = self.service.clone();
-    let service_name = self.service_name.clone();
+    let server_router = self.server_router.clone();
     let header_read_timeout = self.header_read_timeout;
     self.base.start(
       &self.addresses,
@@ -108,9 +96,8 @@ impl Listening for Socks5Listener {
       move |connection| {
         session::serve(
           connection,
-          service.clone(),
+          server_router.clone(),
           tokio::time::Instant::now() + header_read_timeout.duration(),
-          service_name.clone(),
         )
       },
     )
@@ -127,10 +114,9 @@ impl Clone for Socks5Listener {
       tcp_options: self.tcp_options,
       addresses: self.addresses.clone(),
       base: TcpListenerBase::new().with_tcp_options(self.tcp_options),
-      service: self.service.clone(),
+      server_router: self.server_router.clone(),
       header_read_timeout: self.header_read_timeout,
       tcp_accept_retry_delay: self.tcp_accept_retry_delay,
-      service_name: self.service_name.clone(),
     }
   }
 }
@@ -186,7 +172,7 @@ pub(crate) fn listener_name() -> &'static str {
 
 /// Get listener properties for conflict detection.
 pub(crate) fn props() -> ListenerPropertyValues {
-  ListenerPropertyValues::new(TransportLayer::Tcp, false, false)
+  ListenerPropertyValues::new(TransportLayer::Tcp, false)
 }
 
 /// Creates a listener builder.

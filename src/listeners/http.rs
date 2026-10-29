@@ -161,7 +161,7 @@ pub(crate) fn listener_name() -> &'static str {
 
 /// Get listener properties for conflict detection.
 pub(crate) fn props() -> ListenerPropertyValues {
-  ListenerPropertyValues::new(TransportLayer::Tcp, true, false)
+  ListenerPropertyValues::new(TransportLayer::Tcp, false)
 }
 
 pub(crate) fn create_listener_builder() -> Box<dyn BuildListener> {

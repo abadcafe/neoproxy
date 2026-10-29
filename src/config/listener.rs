@@ -2,7 +2,7 @@
 //! responsibility: describe configured listeners through a consumer-
 //! owned property contract
 //! public operations: TransportLayer, ListenerPropertyValues, new,
-//! transport_layer, supports_hostname_routing,
+//! transport_layer,
 //! requires_server_certificate, ListenerPropertiesProvider,
 //! ListenerConfig, name, kind, addresses, args
 //! data entities: TransportLayer, ListenerPropertyValues,
@@ -44,8 +44,6 @@ pub(crate) enum TransportLayer {
 pub(crate) struct ListenerPropertyValues {
   /// Transport layer protocol (TCP or UDP)
   pub(in crate::config) transport_layer: TransportLayer,
-  /// Whether the listener supports hostname-based routing
-  pub(in crate::config) supports_hostname_routing: bool,
   /// Each associated virtual server must own a TLS identity.
   requires_server_certificate: bool,
 }
@@ -53,14 +51,9 @@ pub(crate) struct ListenerPropertyValues {
 impl ListenerPropertyValues {
   pub(crate) fn new(
     transport_layer: TransportLayer,
-    supports_hostname_routing: bool,
     requires_server_certificate: bool,
   ) -> Self {
-    Self {
-      transport_layer,
-      supports_hostname_routing,
-      requires_server_certificate,
-    }
+    Self { transport_layer, requires_server_certificate }
   }
 
   pub(crate) fn requires_server_certificate(&self) -> bool {
@@ -69,10 +62,6 @@ impl ListenerPropertyValues {
 
   pub(crate) fn transport_layer(&self) -> TransportLayer {
     self.transport_layer
-  }
-
-  pub(crate) fn supports_hostname_routing(&self) -> bool {
-    self.supports_hostname_routing
   }
 }
 

@@ -6,7 +6,7 @@ use crate::server::Server;
 pub(crate) fn plain_servers() -> Vec<Server> {
   vec![Server {
     hostnames: vec![],
-    service: crate::server::placeholder_service(),
+    service: crate::server_fixtures::placeholder_service(),
     service_name: "test".to_string(),
     tls: None,
   }]
@@ -63,7 +63,7 @@ pub(crate) fn tls_servers() -> Vec<Server> {
 
   vec![Server {
     hostnames: vec!["test.local".to_string()],
-    service: crate::server::placeholder_service(),
+    service: crate::server_fixtures::placeholder_service(),
     service_name: "test".to_string(),
     tls: Some(server_tls_config(
       cert_path.to_str().unwrap(),
@@ -75,7 +75,7 @@ pub(crate) fn tls_servers() -> Vec<Server> {
 pub(crate) fn no_tls_servers() -> Vec<Server> {
   vec![Server {
     hostnames: vec![],
-    service: crate::server::placeholder_service(),
+    service: crate::server_fixtures::placeholder_service(),
     service_name: "test".to_string(),
     tls: None,
   }]

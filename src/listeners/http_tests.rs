@@ -43,13 +43,12 @@ fn test_http_listener_name_returns_http() {
 // ========== props ==========
 
 #[test]
-fn test_http_listener_props_tcp_with_hostname_routing() {
+fn test_http_listener_props_tcp() {
   let props = http::props();
   assert_eq!(
     props.transport_layer(),
     crate::listener::TransportLayer::Tcp
   );
-  assert!(props.supports_hostname_routing());
 }
 
 // ========== create_listener_builder ==========
@@ -93,13 +92,13 @@ fn test_http_builder_multiple_servers_with_hostnames_succeeds() {
   let servers = vec![
     Server {
       hostnames: vec![],
-      service: crate::server::placeholder_service(),
+      service: crate::server_fixtures::placeholder_service(),
       service_name: "default".to_string(),
       tls: None,
     },
     Server {
       hostnames: vec!["api.example.com".to_string()],
-      service: crate::server::placeholder_service(),
+      service: crate::server_fixtures::placeholder_service(),
       service_name: "api".to_string(),
       tls: None,
     },

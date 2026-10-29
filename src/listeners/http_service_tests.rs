@@ -67,12 +67,7 @@ fn request(version: Version) -> Request {
 #[tokio::test]
 async fn test_dispatch_routes_injects_context_and_normalizes_cookies_for_all_versions()
  {
-  for version in [
-    Version::HTTP_10,
-    Version::HTTP_11,
-    Version::HTTP_2,
-    Version::HTTP_3,
-  ] {
+  for version in [Version::HTTP_10, Version::HTTP_11, Version::HTTP_3] {
     let service = HttpService::new_http(
       router(false),
       "127.0.0.1:1234".parse().unwrap(),
@@ -175,7 +170,7 @@ async fn test_dispatch_service_errors_return_identified_internal_error()
 #[tokio::test]
 async fn test_dispatch_keeps_inbound_headers_and_sets_response_id_from_context()
  {
-  for version in [Version::HTTP_11, Version::HTTP_2, Version::HTTP_3] {
+  for version in [Version::HTTP_11, Version::HTTP_3] {
     for incoming in [None, Some("opaque-caller-id")] {
       let handler =
         Service::new(tower::service_fn(move |request: Request| {

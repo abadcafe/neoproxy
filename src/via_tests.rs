@@ -6,7 +6,6 @@ fn test_append_preserves_previous_hops_and_received_protocol_version() {
   for (version, expected) in [
     (http::Version::HTTP_10, "1.0 neoproxy"),
     (http::Version::HTTP_11, "1.1 neoproxy"),
-    (http::Version::HTTP_2, "2 neoproxy"),
     (http::Version::HTTP_3, "3 neoproxy"),
   ] {
     let mut headers = http::HeaderMap::new();

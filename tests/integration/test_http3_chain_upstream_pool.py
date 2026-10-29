@@ -199,10 +199,10 @@ plugins:
             address_protocol: http3
 
 listeners:
-  - name: http_1
+  - name: entry_one
     kind: http
     addresses: ["0.0.0.0:{http_port_1}"]
-  - name: http_2
+  - name: entry_two
     kind: http
     addresses: ["0.0.0.0:{http_port_2}"]
 
@@ -215,10 +215,10 @@ services:
     upstream: shared_upstream
 servers:
   - name: server_1
-    listeners: ["http_1"]
+    listeners: ["entry_one"]
     service: chain_1
   - name: server_2
-    listeners: ["http_2"]
+    listeners: ["entry_two"]
     service: chain_2
 """
             config_path = os.path.join(temp_dir, "shared_upstream.yaml")

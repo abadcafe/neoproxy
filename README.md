@@ -249,11 +249,11 @@ HTTP、HTTPS、HTTP/3 listener 还支持以下平铺参数；SOCKS5 不接受这
 | `max_request_headers` | `100` | 接收请求头的字段数量上限，重复字段分别计数 |
 | `max_request_header_size` | `32KiB` | 接收请求头的大小上限 |
 
-时长必须为正且能安全计时。超时衡量 I/O 空闲时间，不限制整个上传/下载的总时长；等待上游响应 body 不计客户端写超时，未消费请求 body 的背压等待不计读取超时。请求 body 超时且还没返回响应时返回 408，响应已开始则终止交换。HTTP/1 写超时关闭该连接，HTTP/3 写超时取消对应 stream。HTTP/2 保留 Hyper 的流控机制，这个写超时作用于底层连接的写阻塞，不单独计量某一流等待流控窗口的时间。成功 CONNECT 的后续数据仅使用 `tunnel_idle_timeout`。
+时长必须为正且能安全计时。超时衡量 I/O 空闲时间，不限制整个上传/下载的总时长；等待上游响应 body 不计客户端写超时，未消费请求 body 的背压等待不计读取超时。请求 body 超时且还没返回响应时返回 408，响应已开始则终止交换。HTTP/1 写超时关闭该连接，HTTP/3 写超时取消对应 stream。成功 CONNECT 的后续数据仅使用 `tunnel_idle_timeout`。
 
 上游响应方向在 `plugins.upstream.connection_pools[]` 配置 `max_response_headers`（默认 `100`）和 `max_response_header_size`（默认 `32KiB`），同一个池的解析策略一致，direct 与链式 HTTP/HTTPS/H3 都适用。它们不限制向上游发送的请求头；listener 请求限制也不限制向客户端发送的响应头。
 
-头大小必须在 `1..=4294967295` 字节范围内，数量必须是正整数。HTTP/1 按原始头部字节数检查，包含请求行/状态行；HTTP/2 和 HTTP/3 按协议定义的解压后字段列表大小检查，包含伪头和每字段开销。H2/H3 的字段数量检查针对普通头字段。初始头、informational response 及 trailers 都受对应方向的限制，每个头区段分别计算；这些参数不限制 body 总大小，也不要求攒满缓冲再发送。HTTP/1 请求初始头超限返回 431，上游初始响应头超限返回 502；已经开始的消息遇到非法 trailers 时终止流。
+头大小必须在 `1..=4294967295` 字节范围内，数量必须是正整数。HTTP/1 按原始头部字节数检查，包含请求行/状态行；HTTP/3 按协议定义的解压后字段列表大小检查，包含伪头和每字段开销。H3 的字段数量检查针对普通头字段。初始头、informational response 及 trailers 都受对应方向的限制，每个头区段分别计算；这些参数不限制 body 总大小，也不要求攒满缓冲再发送。HTTP/1 请求初始头超限返回 431，上游初始响应头超限返回 502；已经开始的消息遇到非法 trailers 时终止流。
 
 HTTP/HTTPS listener 的 `keep_alive` 默认为 `true`，控制 HTTP/1 连接是否可处理后续请求；设置 `false` 时普通响应完成后关闭连接，成功的 CONNECT 仍按隧道生命周期处理。它不控制 TCP 保活探测，也不作用于 H3。HTTP/1 的 `header_read_timeout` 同时覆盖 keep-alive 等待下一份请求头的时间。
 
@@ -527,7 +527,7 @@ curl --socks5 127.0.0.1:1080 --proxy-user admin:secret123 https://example.com
 
 Service 按方法处理请求：`CONNECT host:port` 建立透明隧道；其他方法统一转发完整的 HTTP 请求，目标 URL 支持 `http://` 和 `https://`。直连时，HTTP 目标使用 TCP，HTTPS 目标使用 TLS 并校验证书和目标主机名；链式模式将目标 scheme、authority、path、方法和消息体交给下一跳，不在中继节点建立目标 TLS。到 proxy 的连接地址、TLS 主机名与请求目标独立。GET/POST 的响应保留 HTTP 消息语义，CONNECT 成功后才转入双向字节传输。
 
-末端直连客户端只使用 HTTP/1.1：HTTP 目标走 TCP，HTTPS 目标走 TLS，ALPN 仅提供 `http/1.1`，并保留证书和主机名校验。连接池在进程内跨 worker、跨 upstream 共享，HTTP/HTTPS 共用连接池级 `http_max_idle_connections`（默认 100）和 `http_connection_idle_timeout`（默认 60s），但两种协议的连接缓存独立计数、隔离复用。直连按目标 authority 及选中 IP:port 隔离；代理连接按代理 IP:port 复用，TLS 另匹配 server_name。直连不使用 HTTP/2、HTTP/3，不解析或缓存 Alt-Svc，也不查询 DNS HTTPS 记录。
+末端直连客户端只使用 HTTP/1.1：HTTP 目标走 TCP，HTTPS 目标走 TLS，ALPN 仅提供 `http/1.1`，并保留证书和主机名校验。连接池在进程内跨 worker、跨 upstream 共享，HTTP/HTTPS 共用连接池级 `http_max_idle_connections`（默认 100）和 `http_connection_idle_timeout`（默认 60s），但两种协议的连接缓存独立计数、隔离复用。直连按目标 authority 及选中 IP:port 隔离；代理连接按代理 IP:port 复用，TLS 另匹配 server_name。直连不使用 HTTP/3，不解析或缓存 Alt-Svc，也不查询 DNS HTTPS 记录。
 
 direct 从请求目标构造一个权重为 1 的 address，链式模式使用配置的全部 addresses；各域名先解析为所有 A/AAAA 地址，再对全部 IP 节点做平滑加权轮询。每个 IP 继承所属 address 的完整权重、协议、认证及超时配置。同一 IP 属于不同 address 时保持不同身份。连接池按选中节点及目标身份隔离，复用连接也先经过节点调度，不再做 IP 并发竞速。所有 TCP 监听和上游连接均启用 `TCP_NODELAY`；`quic_connection_*` 只作用于 HTTP/3 链式上游。
 
@@ -1027,7 +1027,7 @@ neoproxy 支持优雅关闭：
 
 优雅关闭流程：
 1. 停止接收新连接
-2. 通知 HTTP 协议连接优雅关闭：HTTP/1 和 HTTP/2 关闭空闲连接、停止连接复用；H3 发送 GOAWAY，并在解析请求头之前拒绝新请求流。允许正在进行的普通请求及其 body、trailers、CONNECT 建立和升级收尾。等待这些请求任务最多 3 秒；超时取消后，再等待回收最多 2 秒。H3 对未完成的请求流发送取消重置
+2. 通知 HTTP 协议连接优雅关闭：HTTP/1 关闭空闲连接、停止连接复用；H3 发送 GOAWAY，并在解析请求头之前拒绝新请求流。允许正在进行的普通请求及其 body、trailers、CONNECT 建立和升级收尾。等待这些请求任务最多 3 秒；超时取消后，再等待回收最多 2 秒。H3 对未完成的请求流发送取消重置
 3. 卸载上游插件，通知已升级的隧道立即停止转发并关闭上游连接池；同时收尾 H3 连接驱动。H3 驱动继续处理控制帧和拒绝新请求，保留排队中的 GOAWAY、响应及流结束帧，等待对端关闭；不主动关闭连接的客户端由此阶段的时限终止。两类清理并行进行，共用第二阶段最多 3 秒、取消回收最多 2 秒的预算。这不是让隧道继续传输的宽限期
 4. 所有 worker 完成前两阶段后，再释放各自的 QUIC Endpoint 和 UDP socket。已完成清理的 worker 保持运行时和 socket 存活，避免 reuseport 组提前缩小影响其他 worker 的收包
 5. 访问日志 writer 线程刷新缓冲区

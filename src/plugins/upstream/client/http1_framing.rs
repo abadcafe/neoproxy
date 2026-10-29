@@ -9,7 +9,7 @@ use http_body::Body;
 use crate::http_message::{Request, Response};
 
 /// Hyper assumes an unknown-length GET/HEAD has no content unless its
-/// framing is explicit. Normalized H3/H2 bodies and decoded HTTP/1
+/// framing is explicit. Normalized H3 bodies and decoded HTTP/1
 /// chunked bodies must retain their content when converted to HTTP/1.
 /// H3 never passes through this HTTP/1 client adapter.
 pub(super) fn prepare_request(request: &mut Request) {

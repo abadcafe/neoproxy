@@ -135,16 +135,14 @@ fn test_validate_and_route_http10_without_host_uses_default() {
 }
 
 #[test]
-fn test_validate_and_route_requires_authority_for_http2_and_http3() {
-  for version in [http::Version::HTTP_2, http::Version::HTTP_3] {
-    let request = http::Request::builder()
-      .version(version)
-      .uri("/")
-      .header("host", "")
-      .body(())
-      .unwrap();
-    assert!(validate_and_route(&request, &build_router()).is_err());
-  }
+fn test_validate_and_route_requires_authority_for_http3() {
+  let request = http::Request::builder()
+    .version(http::Version::HTTP_3)
+    .uri("/")
+    .header("host", "")
+    .body(())
+    .unwrap();
+  assert!(validate_and_route(&request, &build_router()).is_err());
 }
 
 #[test]

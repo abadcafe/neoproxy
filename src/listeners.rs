@@ -147,9 +147,6 @@ mod incoming_body;
 #[cfg(test)]
 mod incoming_body_tests;
 
-mod http_protocol;
-#[cfg(test)]
-mod http_protocol_tests;
 mod write_deadline;
 #[cfg(test)]
 mod write_deadline_tests;

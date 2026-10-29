@@ -21,7 +21,7 @@ fn test_forward_response_preserves_chain_and_consumes_hop_fields() {
     .append("alt-svc", "h3=\":443\"; ma=60".parse().unwrap());
   original
     .headers_mut()
-    .append("alt-svc", "h2=\":8443\"".parse().unwrap());
+    .append("alt-svc", "h3=\":8443\"".parse().unwrap());
   let ctx = build_request_context(
     &"127.0.0.1:1234".parse().unwrap(),
     &"127.0.0.1:8080".parse().unwrap(),

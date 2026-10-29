@@ -12,7 +12,6 @@ pub(crate) fn append(
   let value = match received {
     http::Version::HTTP_09 => "0.9 neoproxy",
     http::Version::HTTP_10 => "1.0 neoproxy",
-    http::Version::HTTP_2 => "2 neoproxy",
     http::Version::HTTP_3 => "3 neoproxy",
     _ => "1.1 neoproxy",
   };

@@ -13,7 +13,7 @@ from tests.fixtures.origin_peer import PeerConfig, origin_peer
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("chain", [False, True])
-@pytest.mark.parametrize("alpn", [("h2", "http/1.1"), ()])
+@pytest.mark.parametrize("alpn", [("http/1.1",), ()])
 async def test_direct_https_uses_http1_and_reuses_connection(
     tmp_path: Path, chain: bool, alpn: tuple[str, ...]
 ) -> None:

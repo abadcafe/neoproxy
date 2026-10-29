@@ -163,14 +163,14 @@ def test_fragmented_trailers_reset_body_read_timeout(
             assert b" 200 " in read_request(conn).split(b"\r\n")[0]
 
 
-def test_protocol_detection_does_not_restart_first_header_deadline(
+def test_partial_request_line_does_not_restart_first_header_deadline(
     tmp_path: Path,
 ) -> None:
     with running_proxy(
         tmp_path, configuration({"header_read_timeout": "600ms"}, {})
     ) as proxy:
         with socket.create_connection(("127.0.0.1", proxy.port), timeout=2) as conn:
-            # P is also the start of the HTTP/2 preface. O selects HTTP/1.
+            # Progress on a partial request line must not extend the deadline.
             conn.sendall(b"P")
             time.sleep(0.4)
             conn.sendall(b"O")

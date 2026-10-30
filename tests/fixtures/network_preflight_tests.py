@@ -35,6 +35,7 @@ def test_check_cloudflare_probes_http_https_and_h3(
     ) -> subprocess.CompletedProcess[str]:
         assert not any(key.lower().endswith("_proxy") for key in env)
         assert command[:6] == ["curl", "--disable", "--proxy", "", "--noproxy", "*"]
+        assert "--ipv4" in command
         assert capture_output and text and not check and timeout == 12
         failed = len(calls) == failure
         calls.append((command[-1], command[-2]))

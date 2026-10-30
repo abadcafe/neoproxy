@@ -9,7 +9,7 @@ import subprocess
 
 
 def check_cloudflare() -> str | None:
-    """Return a diagnostic when either HTTP version cannot be reached directly."""
+    """Check the same public IPv4 path used by the external matrix."""
     environment = {
         key: value
         for key, value in os.environ.items()
@@ -30,6 +30,7 @@ def check_cloudflare() -> str | None:
                     "",
                     "--noproxy",
                     "*",
+                    "--ipv4",
                     "--silent",
                     "--show-error",
                     "--output",

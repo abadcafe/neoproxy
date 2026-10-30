@@ -1153,6 +1153,8 @@ socket 路径长度问题；普通文件路径形式的通知不依赖 systemd�
 运行尚未在此 Linux 环境中执行。测试覆盖无 sleep 等待、提前退出、超时重试、资源清理，
 以及 TCP/UDP 后续 listener 绑定失败时不得通知成功的 1/4 worker 场景。
 
+Cloudflare 外网链式矩阵只使用实时 DNS 的 IPv4 A 记录：测试 DNS 同时供入口和中转的连接池使用，curl 与网络预检也限定 IPv4。目标域名、TLS 证书校验、HTTP/3 和全部矩阵断言保持；本地 IPv6 用例独立验证 IPv6 能力，不依赖测试机的公网 IPv6 路由。
+
 ### 代码检查
 
 ```bash

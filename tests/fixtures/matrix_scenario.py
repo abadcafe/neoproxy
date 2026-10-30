@@ -27,6 +27,7 @@ def run_exchange(
     relay_auth: AuthCase | None = None,
     origin_timing: ResponseTiming | None = None,
     tunnel_idle_timeout: str = "10s",
+    dns_servers: tuple[str, ...] | None = None,
 ) -> Exchange:
     if target == "cloudflare":
         tunnel_idle_timeout = "30s"
@@ -45,6 +46,7 @@ def run_exchange(
         listener_auth=relay_auth,
         quic_idle_timeout=quic_idle_timeout,
         upstream_io_timeout="30s" if target == "cloudflare" else "10s",
+        dns_servers=dns_servers,
     )
     entry_config = write_node(
         entry_dir,
@@ -57,6 +59,7 @@ def run_exchange(
         tunnel_idle_timeout=tunnel_idle_timeout,
         quic_idle_timeout=quic_idle_timeout,
         upstream_io_timeout="30s" if target == "cloudflare" else "10s",
+        dns_servers=dns_servers,
     )
     sent_body = b"matrix-upload\x00\xff\n" * 1024
     origin_requests: list[OriginRequest] = []

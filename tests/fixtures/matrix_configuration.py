@@ -46,6 +46,7 @@ def write_node(
     tunnel_idle_timeout: str = "10s",
     quic_idle_timeout: str = "5s",
     upstream_io_timeout: str = "10s",
+    dns_servers: tuple[str, ...] | None = None,
 ) -> str:
     directory.mkdir(parents=True, exist_ok=True)
     upstream: ConfigDict = {"name": "route"}
@@ -75,20 +76,21 @@ def write_node(
             ],
         }
     ]
+    pool: ConfigDict = {
+        "name": "default",
+        "tcp_connect_timeout": upstream_io_timeout,
+        "tls_handshake_timeout": upstream_io_timeout,
+        "certificates": trust,
+        "quic_stream_receive_window": "4KiB",
+    }
+    if dns_servers is not None:
+        pool["dns_servers"] = list(dns_servers)
     plugins: ConfigDict = {
         "upstream": {
             "upstream_read_timeout": upstream_io_timeout,
             "tunnel_idle_timeout": tunnel_idle_timeout,
             "upstreams": [upstream],
-            "connection_pools": [
-                {
-                    "name": "default",
-                    "tcp_connect_timeout": upstream_io_timeout,
-                    "tls_handshake_timeout": upstream_io_timeout,
-                    "certificates": trust,
-                    "quic_stream_receive_window": "4KiB",
-                }
-            ],
+            "connection_pools": [pool],
         },
         "access_log": {
             "writers": [

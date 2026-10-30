@@ -42,6 +42,10 @@ def curl_command(
         "--proxy-cacert",
         certs.ca,
     ]
+    # Public matrix reachability is IPv4-only. Local IPv6 cases retain
+    # their original address family and exercise IPv6 independently.
+    if urlsplit(url).hostname == "cloudflare.com":
+        command.append("--ipv4")
     if urlsplit(url).hostname == "127.0.0.1":
         command.extend(["--cacert", certs.ca])
     transfer_url = (

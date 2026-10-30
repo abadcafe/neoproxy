@@ -189,7 +189,20 @@ fn main() -> Result<std::process::ExitCode> {
   let policies = config
     .plugins()
     .get("e2b")
-    .map(plugins::e2b::SharedPolicies::new)
+    .map(|args| {
+      plugins::e2b::SharedPolicies::new(
+        args,
+        config
+          .services()
+          .iter()
+          .flat_map(|service| service.layers())
+          .filter(|layer| {
+            layer.plugin_name() == "e2b"
+              && layer.kind() == "sandbox_network_policy"
+          })
+          .map(|layer| layer.args()),
+      )
+    })
     .transpose()?;
   // Create shutdown signal
   let shutdown = ShutdownHandle::new();
@@ -257,7 +270,7 @@ fn main() -> Result<std::process::ExitCode> {
     }))
   })?;
 
-  if let Some(shared) = &connection_pools {
+  if let Some(shared) = connection_pools {
     shared.shutdown();
   }
 

@@ -42,7 +42,12 @@ impl Transport {
     &self,
     connection: quinn::Connection,
   ) -> crate::connect_udp::h3::Hub {
-    crate::connect_udp::h3::Hub::new(connection, &self.drivers)
+    let (hub, driver) = crate::connect_udp::h3::Hub::new(
+      connection,
+      self.drivers.shutdown_handle(),
+    );
+    self.drivers.register(driver);
+    hub
   }
 
   pub(super) fn spawn(

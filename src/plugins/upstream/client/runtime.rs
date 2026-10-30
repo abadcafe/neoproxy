@@ -53,13 +53,13 @@ pub(crate) struct Upstream {
   connection_pools: Arc<super::ConnectionPools>,
   name: String,
   config: config::Upstream,
-  tracker: std::sync::Arc<TaskTracker>,
+  tracker: std::rc::Rc<TaskTracker>,
   groups: RefCell<RetainedCache<String, Rc<RefCell<Group>>>>,
 }
 impl Upstream {
   pub(super) fn new(
     config: config::Upstream,
-    tracker: std::sync::Arc<TaskTracker>,
+    tracker: std::rc::Rc<TaskTracker>,
     connection_pools: Arc<super::ConnectionPools>,
     name: String,
   ) -> Self {

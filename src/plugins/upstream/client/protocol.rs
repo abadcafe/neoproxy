@@ -40,7 +40,7 @@ pub(crate) trait ClientProtocol {
   fn forward<'a>(
     &'a self,
     tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    tracker: &'a std::sync::Arc<TaskTracker>,
+    tracker: &'a std::rc::Rc<TaskTracker>,
     target: &'a ForwardTarget,
     req_headers: ::http::request::Parts,
     req_body: RequestBody,
@@ -52,7 +52,7 @@ pub(crate) trait ClientProtocol {
     target: &'a ConnectTarget,
     request: &'a ::http::request::Parts,
     tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    tracker: &'a std::sync::Arc<TaskTracker>,
+    tracker: &'a std::rc::Rc<TaskTracker>,
   ) -> Pin<
     Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
   >;

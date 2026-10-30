@@ -69,9 +69,18 @@ impl Nodes {
     }
   }
 
+  #[cfg(test)]
   pub(super) fn select(
     &mut self,
     tried: &[NodeKey],
+  ) -> Option<NodeKey> {
+    self.select_excluding(tried, &[])
+  }
+
+  fn select_excluding(
+    &mut self,
+    tried: &[NodeKey],
+    excluded_owners: &[usize],
   ) -> Option<NodeKey> {
     let single = self.peers.len() == 1;
     let now = Instant::now();
@@ -81,6 +90,7 @@ impl Nodes {
       let peer =
         self.peers.get_mut(key).expect("node order is synchronized");
       if tried.contains(key)
+        || excluded_owners.contains(&key.owner)
         || (!single
           && peer.policy.max_fails != 0
           && peer.fails >= peer.policy.max_fails
@@ -151,16 +161,11 @@ impl SharedNodes {
     tried: &[NodeKey],
     excluded_owners: &[usize],
   ) -> Option<NodeKey> {
-    let mut nodes = self.0.lock().expect("nodes poisoned");
-    let mut excluded = tried.to_vec();
-    excluded.extend(
-      nodes
-        .order
-        .iter()
-        .filter(|key| excluded_owners.contains(&key.owner))
-        .cloned(),
-    );
-    nodes.select(&excluded)
+    self
+      .0
+      .lock()
+      .expect("nodes poisoned")
+      .select_excluding(tried, excluded_owners)
   }
 
   pub(super) fn failed(&self, key: &NodeKey) {

@@ -4,11 +4,13 @@
 //! Control::{disable,reads}, QUIC stream traits
 //! data entities: Controls, Control, State, TimedSend, TrackedRecv
 //! tests: h3_io_deadline_tests.rs; listener timeout process contracts
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
@@ -33,14 +35,19 @@ impl Control {
     self.0.disabled.store(true, Ordering::Release);
   }
 }
+#[derive(Default)]
+struct Registry {
+  streams: HashMap<StreamId, Weak<State>>,
+  sweep_at: usize,
+}
 #[derive(Clone)]
 pub(crate) struct Controls {
   duration: Duration,
-  entries: Arc<Mutex<HashMap<StreamId, Weak<State>>>>,
+  entries: Rc<RefCell<Registry>>,
 }
 impl Controls {
   pub(crate) fn new(duration: Duration) -> Self {
-    Self { duration, entries: Arc::default() }
+    Self { duration, entries: Rc::default() }
   }
 
   pub(crate) fn register<S: SendStreamUnframed<Bytes>>(
@@ -51,10 +58,17 @@ impl Controls {
       disabled: AtomicBool::new(false),
       reads: crate::io_progress::Progress::default(),
     }));
-    let mut entries =
-      self.entries.lock().expect("H3 write controls poisoned");
-    entries.retain(|_, entry| entry.strong_count() > 0);
-    entries.insert(stream.send_id(), Arc::downgrade(&control.0));
+    let mut entries = self.entries.borrow_mut();
+    // Amortize cleanup instead of scanning all pending streams on every
+    // accept.
+    if entries.streams.len() >= entries.sweep_at {
+      entries.streams.retain(|_, entry| entry.strong_count() > 0);
+      entries.sweep_at =
+        entries.streams.len().saturating_mul(2).max(64);
+    }
+    entries
+      .streams
+      .insert(stream.send_id(), Arc::downgrade(&control.0));
     TimedSend {
       inner: stream,
       pending: None,
@@ -71,8 +85,8 @@ impl Controls {
     let id = stream.recv_id();
     let state = self
       .entries
-      .lock()
-      .expect("H3 controls poisoned")
+      .borrow()
+      .streams
       .get(&id)
       .and_then(Weak::upgrade)
       .expect("registered request stream");
@@ -83,8 +97,8 @@ impl Controls {
     Control(
       self
         .entries
-        .lock()
-        .expect("H3 write controls poisoned")
+        .borrow_mut()
+        .streams
         .remove(&id)
         .and_then(|entry| entry.upgrade())
         .expect("accepted stream has write control"),

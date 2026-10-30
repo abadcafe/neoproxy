@@ -23,7 +23,7 @@ use crate::task_tracker::TaskTracker;
 
 pub(super) struct DirectClient {
   connector: super::origin_connector::OriginConnector,
-  tracker: std::sync::Arc<TaskTracker>,
+  tracker: std::rc::Rc<TaskTracker>,
   shared: Arc<super::ConnectionPool>,
   connect_timeout: Duration,
   tunnel_idle_timeout: Duration,
@@ -35,7 +35,7 @@ impl DirectClient {
     config: &config::Upstream,
     tls: Arc<rustls::ClientConfig>,
     endpoint: std::net::SocketAddr,
-    tracker: std::sync::Arc<TaskTracker>,
+    tracker: std::rc::Rc<TaskTracker>,
     shared: Arc<super::ConnectionPool>,
   ) -> anyhow::Result<Self> {
     Ok(Self {
@@ -59,7 +59,7 @@ impl ClientProtocol for DirectClient {
   fn forward<'a>(
     &'a self,
     _tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    _tracker: &'a std::sync::Arc<TaskTracker>,
+    _tracker: &'a std::rc::Rc<TaskTracker>,
     target: &'a ForwardTarget,
     mut req_headers: ::http::request::Parts,
     req_body: RequestBody,
@@ -112,7 +112,7 @@ impl ClientProtocol for DirectClient {
     _target: &'a ConnectTarget,
     request: &'a ::http::request::Parts,
     _tls: &'a Option<Arc<rustls::ClientConfig>>,
-    tracker: &'a std::sync::Arc<TaskTracker>,
+    tracker: &'a std::rc::Rc<TaskTracker>,
   ) -> Pin<
     Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
   > {

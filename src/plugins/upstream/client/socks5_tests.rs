@@ -49,7 +49,7 @@ async fn test_connect_for_tunnel_records_peer_and_preserves_bytes_and_eof()
     Duration::from_secs(17),
     None,
   );
-  let tracker = std::sync::Arc::new(TaskTracker::new());
+  let tracker = std::rc::Rc::new(TaskTracker::new());
   let mut result = client
     .connect_for_tunnel(&target, &parts, &None, &tracker)
     .await

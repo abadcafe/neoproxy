@@ -6,22 +6,22 @@
 //! Snapshot, DnsObservation, ObservedError tests: observation_tests.rs
 use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::context::RequestContext;
 use crate::context::fields::{connection, dns};
 
 #[derive(Clone, Debug)]
-pub(super) struct ConnectionObservation(Arc<Mutex<Snapshot>>);
+pub(super) struct ConnectionObservation(Arc<Snapshot>);
 #[derive(Debug, Default)]
 struct Snapshot {
-  used: bool,
-  dns: Option<DnsObservation>,
-  peer: Option<SocketAddr>,
-  local: Option<SocketAddr>,
-  tcp: Option<Duration>,
-  tls: Option<Duration>,
+  used: AtomicBool,
+  dns: OnceLock<DnsObservation>,
+  endpoints: OnceLock<(Option<SocketAddr>, Option<SocketAddr>)>,
+  tcp: OnceLock<Duration>,
+  tls: OnceLock<Duration>,
 }
 #[derive(Debug)]
 struct DnsObservation {
@@ -56,17 +56,19 @@ impl ConnectionObservation {
     peer: Option<SocketAddr>,
     local: Option<SocketAddr>,
   ) {
-    let mut data = self.0.lock().expect("observation lock poisoned");
-    data.peer = peer;
-    data.local = local;
+    self
+      .0
+      .endpoints
+      .set((peer, local))
+      .expect("connection endpoints set once");
   }
 
   pub(super) fn peer(&self) -> Option<SocketAddr> {
-    self.0.lock().expect("observation lock poisoned").peer
+    self.0.endpoints.get().and_then(|(peer, _)| *peer)
   }
 
   pub(super) fn new() -> Self {
-    Self(Arc::new(Mutex::new(Snapshot::default())))
+    Self(Arc::new(Snapshot::default()))
   }
 
   pub(super) fn dns(
@@ -81,13 +83,16 @@ impl ConnectionObservation {
     {
       return;
     }
-    self.0.lock().expect("observation lock poisoned").dns =
-      Some(DnsObservation {
+    self
+      .0
+      .dns
+      .set(DnsObservation {
         host: Arc::from(host),
         elapsed,
         deadline,
         addresses: addresses.iter().map(SocketAddr::ip).collect(),
-      });
+      })
+      .expect("DNS setup recorded once");
   }
 
   pub(super) fn tcp(
@@ -96,43 +101,46 @@ impl ConnectionObservation {
     local: Option<SocketAddr>,
     elapsed: Duration,
   ) {
-    let mut data = self.0.lock().expect("observation lock poisoned");
-    data.peer = peer;
-    data.local = local;
-    data.tcp = Some(elapsed.saturating_sub(
-      data.dns.as_ref().map(|dns| dns.elapsed).unwrap_or_default(),
-    ));
+    self.endpoint(peer, local);
+    self
+      .0
+      .tcp
+      .set(elapsed.saturating_sub(
+        self.0.dns.get().map(|dns| dns.elapsed).unwrap_or_default(),
+      ))
+      .expect("TCP setup recorded once");
   }
 
   pub(super) fn tls(&self, elapsed: Duration) {
-    self.0.lock().expect("observation lock poisoned").tls =
-      Some(elapsed);
+    self.0.tls.set(elapsed).expect("TLS setup recorded once");
   }
 
   pub(super) fn record(&self, ctx: &RequestContext) {
-    let mut data = self.0.lock().expect("observation lock poisoned");
-    ctx.set(connection::REUSED, data.used);
-    if let Some(peer) = data.peer {
-      ctx.set(connection::PEER, peer);
+    let data = &self.0;
+    let used = data.used.swap(true, Ordering::Relaxed);
+    ctx.set(connection::REUSED, used);
+    if let Some((peer, local)) = data.endpoints.get() {
+      if let Some(peer) = peer {
+        ctx.set(connection::PEER, *peer);
+      }
+      if let Some(local) = local {
+        ctx.set(connection::LOCAL, *local);
+      }
     }
-    if let Some(local) = data.local {
-      ctx.set(connection::LOCAL, local);
-    }
-    if !data.used {
-      if let Some(dns) = &data.dns {
+    if !used {
+      if let Some(dns) = data.dns.get() {
         ctx.set(dns::HOST, dns.host.clone());
         ctx.set(dns::TIME, dns.elapsed);
         ctx.set(dns::DEADLINE, dns.deadline);
         ctx.set(dns::ADDRESSES, dns.addresses.clone());
       }
-      if let Some(elapsed) = data.tcp {
-        ctx.set(connection::CONNECT_TIME, elapsed);
+      if let Some(elapsed) = data.tcp.get() {
+        ctx.set(connection::CONNECT_TIME, *elapsed);
       }
-      if let Some(elapsed) = data.tls {
-        ctx.set(connection::TLS_TIME, elapsed);
+      if let Some(elapsed) = data.tls.get() {
+        ctx.set(connection::TLS_TIME, *elapsed);
       }
     }
-    data.used = true;
   }
 
   pub(super) fn error(&self, source: std::io::Error) -> std::io::Error {

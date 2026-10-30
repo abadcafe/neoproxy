@@ -5,10 +5,12 @@
 //! tests: exchange_timeout_tests.rs
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
+use futures_util::task::AtomicWaker;
 use http_body::{Body, Frame, SizeHint};
 
 #[derive(Clone, Copy, Debug)]
@@ -24,77 +26,72 @@ impl Default for Timeouts {
     }
   }
 }
+const UPLOAD_DONE: u8 = 1;
+const UPLOAD_FLUSHED: u8 = 2;
+const READING: u8 = 4;
+const RESPONSE_DONE: u8 = 8;
+const CANCELLED: u8 = 16;
+
 #[derive(Default)]
 struct State {
-  settings: Option<Timeouts>,
-  upload_done: bool,
-  upload_flushed: bool,
-  reading: bool,
-  response_done: bool,
-  read_timer: Option<Pin<Box<tokio::time::Sleep>>>,
-  write_timer: Option<Pin<Box<tokio::time::Sleep>>>,
-  reader: Option<Waker>,
-  writer: Option<Waker>,
-  upload: Option<Waker>,
-  cancelled: bool,
+  // Only exchange configuration changes take this lock. I/O polls use
+  // the driver's cached configuration and its exclusively owned
+  // timers.
+  settings: Mutex<Option<Timeouts>>,
+  generation: AtomicU64,
+  flags: AtomicU8,
+  reader: AtomicWaker,
+  writer: AtomicWaker,
+  upload: AtomicWaker,
 }
 #[derive(Clone, Default)]
-pub(super) struct Control(Arc<Mutex<State>>);
+pub(super) struct Control(Arc<State>);
 impl Control {
   pub(super) fn start(&self, settings: Timeouts) {
-    *self.0.lock().expect("exchange timer poisoned") =
-      State { settings: Some(settings), ..State::default() };
+    self.configure(Some(settings));
   }
 
-  /// Cancel an abandoned exchange before closing its HTTP driver.
-  /// Wake every possible wait so cleanup never relies on peer traffic.
+  fn configure(&self, settings: Option<Timeouts>) {
+    let mut current =
+      self.0.settings.lock().expect("exchange settings poisoned");
+    *current = settings;
+    self.0.flags.store(0, Ordering::Release);
+    self.0.generation.fetch_add(1, Ordering::Release);
+  }
+
   pub(super) fn cancel(&self) {
-    let mut state = self.0.lock().expect("exchange timer poisoned");
-    state.cancelled = true;
-    for waker in
-      [state.reader.take(), state.writer.take(), state.upload.take()]
-        .into_iter()
-        .flatten()
-    {
-      waker.wake();
-    }
-  }
-
-  fn poll_cancelled(&self, cx: &Context<'_>) -> bool {
-    let mut state = self.0.lock().expect("exchange timer poisoned");
-    state.reader = Some(cx.waker().clone());
-    state.cancelled
+    self.0.flags.fetch_or(CANCELLED, Ordering::AcqRel);
+    self.0.reader.wake();
+    self.0.writer.wake();
+    self.0.upload.wake();
   }
 
   pub(super) fn upload_flushed(&self) -> bool {
-    self.0.lock().expect("exchange timer poisoned").upload_flushed
+    self.0.flags.load(Ordering::Acquire) & UPLOAD_FLUSHED != 0
   }
 
   pub(super) fn upload_complete(&self) {
-    let mut state = self.0.lock().expect("exchange timer poisoned");
-    state.upload_done = true;
-    if let Some(waker) = state.reader.take() {
-      waker.wake();
-    }
+    self.0.flags.fetch_or(UPLOAD_DONE, Ordering::AcqRel);
+    self.0.reader.wake();
   }
 
   pub(super) fn response_started(&self) {
-    let mut state = self.0.lock().expect("exchange timer poisoned");
-    state.reading = true;
-    if let Some(waker) = state.reader.take() {
-      waker.wake();
-    }
+    self.0.flags.fetch_or(READING, Ordering::AcqRel);
+    self.0.reader.wake();
   }
 
   pub(super) fn response_complete(&self) {
-    let mut state = self.0.lock().expect("exchange timer poisoned");
-    state.response_done = true;
-    state.reading = false;
-    state.read_timer = None;
+    self
+      .0
+      .flags
+      .fetch_update(Ordering::AcqRel, Ordering::Acquire, |flags| {
+        Some((flags | RESPONSE_DONE) & !READING)
+      })
+      .expect("unconditional state update");
   }
 
   pub(super) fn disable(&self) {
-    *self.0.lock().expect("exchange timer poisoned") = State::default();
+    self.configure(None);
   }
 }
 fn pending_timeout<T>(
@@ -117,10 +114,39 @@ fn pending_timeout<T>(
 pub(super) struct TimedIo<I> {
   inner: I,
   control: Control,
+  generation: u64,
+  settings: Option<Timeouts>,
+  read_timer: Option<Pin<Box<tokio::time::Sleep>>>,
+  write_timer: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 impl<I> TimedIo<I> {
+  fn refresh(&mut self) {
+    if self.generation
+      != self.control.0.generation.load(Ordering::Acquire)
+    {
+      let settings = self
+        .control
+        .0
+        .settings
+        .lock()
+        .expect("exchange settings poisoned");
+      self.settings = *settings;
+      self.generation =
+        self.control.0.generation.load(Ordering::Acquire);
+      self.read_timer = None;
+      self.write_timer = None;
+    }
+  }
+
   pub(super) fn new(inner: I, control: Control) -> Self {
-    Self { inner, control }
+    Self {
+      inner,
+      control,
+      generation: 0,
+      settings: None,
+      read_timer: None,
+      write_timer: None,
+    }
   }
 }
 impl<I: hyper::rt::Read + Unpin> hyper::rt::Read for TimedIo<I> {
@@ -129,29 +155,29 @@ impl<I: hyper::rt::Read + Unpin> hyper::rt::Read for TimedIo<I> {
     cx: &mut Context<'_>,
     buf: hyper::rt::ReadBufCursor<'_>,
   ) -> Poll<std::io::Result<()>> {
-    if self.control.poll_cancelled(cx) {
+    self.refresh();
+    self.control.0.reader.register(cx.waker());
+    if self.control.0.flags.load(Ordering::Acquire) & CANCELLED != 0 {
       return Poll::Ready(Err(
         std::io::ErrorKind::ConnectionAborted.into(),
       ));
     }
     let result = Pin::new(&mut self.inner).poll_read(cx, buf);
-    let mut state =
-      self.control.0.lock().expect("exchange timer poisoned");
     if result.is_ready() {
-      state.read_timer = None;
+      self.read_timer = None;
       return result;
     }
-    state.reader = Some(cx.waker().clone());
-    if state.reading
-      && let Some(settings) = state.settings
+    if self.control.0.flags.load(Ordering::Acquire) & READING != 0
+      && let Some(settings) = self.settings
     {
       return pending_timeout(
-        &mut state.read_timer,
+        &mut self.read_timer,
         settings.read,
         cx,
         "upstream read inactivity timeout",
       );
     }
+    self.read_timer = None;
     result
   }
 }
@@ -161,26 +187,21 @@ impl<I: hyper::rt::Write + Unpin> hyper::rt::Write for TimedIo<I> {
     cx: &mut Context<'_>,
     bytes: &[u8],
   ) -> Poll<std::io::Result<usize>> {
-    {
-      let mut state =
-        self.control.0.lock().expect("exchange timer poisoned");
-      if state.cancelled {
-        return Poll::Ready(Err(
-          std::io::ErrorKind::ConnectionAborted.into(),
-        ));
-      }
-      state.writer = Some(cx.waker().clone());
+    self.refresh();
+    self.control.0.writer.register(cx.waker());
+    if self.control.0.flags.load(Ordering::Acquire) & CANCELLED != 0 {
+      return Poll::Ready(Err(
+        std::io::ErrorKind::ConnectionAborted.into(),
+      ));
     }
     let result = Pin::new(&mut self.inner).poll_write(cx, bytes);
-    let mut state =
-      self.control.0.lock().expect("exchange timer poisoned");
     if result.is_ready() {
-      state.write_timer = None;
+      self.write_timer = None;
       return result;
     }
-    if let Some(settings) = state.settings {
+    if let Some(settings) = self.settings {
       return pending_timeout(
-        &mut state.write_timer,
+        &mut self.write_timer,
         settings.send,
         cx,
         "upstream send inactivity timeout",
@@ -193,37 +214,39 @@ impl<I: hyper::rt::Write + Unpin> hyper::rt::Write for TimedIo<I> {
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<std::io::Result<()>> {
-    {
-      let mut state =
-        self.control.0.lock().expect("exchange timer poisoned");
-      if state.cancelled {
-        return Poll::Ready(Err(
-          std::io::ErrorKind::ConnectionAborted.into(),
-        ));
-      }
-      state.writer = Some(cx.waker().clone());
+    self.refresh();
+    self.control.0.writer.register(cx.waker());
+    if self.control.0.flags.load(Ordering::Acquire) & CANCELLED != 0 {
+      return Poll::Ready(Err(
+        std::io::ErrorKind::ConnectionAborted.into(),
+      ));
     }
     let result = Pin::new(&mut self.inner).poll_flush(cx);
-    let mut state =
-      self.control.0.lock().expect("exchange timer poisoned");
     if result.is_ready() {
-      state.write_timer = None;
+      self.write_timer = None;
       // Body EOF alone is insufficient: Hyper may still have buffered
       // request bytes. Start response waiting only after they flush.
-      if state.upload_done {
-        state.upload_flushed = true;
-      }
-      if state.upload_done && !state.response_done {
-        state.reading = true;
-        if let Some(waker) = state.reader.take() {
-          waker.wake();
-        }
+      if self.control.0.flags.load(Ordering::Acquire) & UPLOAD_DONE != 0
+      {
+        self
+          .control
+          .0
+          .flags
+          .fetch_update(Ordering::AcqRel, Ordering::Acquire, |flags| {
+            Some(
+              flags
+                | UPLOAD_FLUSHED
+                | if flags & RESPONSE_DONE == 0 { READING } else { 0 },
+            )
+          })
+          .expect("unconditional state update");
+        self.control.0.reader.wake();
       }
       return result;
     }
-    if let Some(settings) = state.settings {
+    if let Some(settings) = self.settings {
       return pending_timeout(
-        &mut state.write_timer,
+        &mut self.write_timer,
         settings.send,
         cx,
         "upstream send inactivity timeout",
@@ -262,16 +285,12 @@ impl Body for UploadBody {
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-    {
-      let mut state =
-        self.control.0.lock().expect("exchange timer poisoned");
-      if state.cancelled {
-        return Poll::Ready(Some(Err(
-          std::io::Error::from(std::io::ErrorKind::ConnectionAborted)
-            .into(),
-        )));
-      }
-      state.upload = Some(cx.waker().clone());
+    self.control.0.upload.register(cx.waker());
+    if self.control.0.flags.load(Ordering::Acquire) & CANCELLED != 0 {
+      return Poll::Ready(Some(Err(
+        std::io::Error::from(std::io::ErrorKind::ConnectionAborted)
+          .into(),
+      )));
     }
     let result = Pin::new(&mut self.inner).poll_frame(cx);
     if matches!(&result, Poll::Ready(Some(Ok(frame))) if frame.is_trailers())

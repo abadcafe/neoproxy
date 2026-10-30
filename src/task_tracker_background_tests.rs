@@ -2,7 +2,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::task_tracker::TaskTracker;
+use crate::task_tracker::background::TaskTracker;
 
 #[tokio::test]
 async fn test_shutdown_waits_for_background_cleanup() {

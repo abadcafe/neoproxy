@@ -4,9 +4,10 @@
 //! create_shared_plugin, plugin_name data entities: SharedPolicies,
 //! PluginConfig, LayerConfig, E2bPlugin tests: e2b_tests.rs,
 //! test_e2b_policy.py
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -56,24 +57,9 @@ struct LayerConfig {
   default_policy: serde_json::Value,
 }
 
-pub(crate) struct SharedPolicies {
-  source: Arc<fetch::Api>,
-  caches: Mutex<HashMap<String, Arc<cache::Cache>>>,
-}
-impl SharedPolicies {
-  pub(crate) fn new(args: &SerializedArgs) -> Result<Arc<Self>> {
-    let config: PluginConfig = serde_yaml::from_value(args.clone())?;
-    Ok(Arc::new(Self {
-      source: Arc::new(fetch::Api::new(
-        &config.policy_api_url,
-        config.policy_api_timeout,
-      )?),
-      caches: Mutex::new(HashMap::new()),
-    }))
-  }
-
-  fn build_layer(&self, args: SerializedArgs) -> Result<Layer> {
-    let config: LayerConfig = serde_yaml::from_value(args)?;
+impl LayerConfig {
+  fn parse(args: SerializedArgs) -> Result<(String, Self)> {
+    let config: Self = serde_yaml::from_value(args)?;
     anyhow::ensure!(
       !config.policy_fallback_ttl.is_zero()
         && tokio::time::Instant::now()
@@ -86,24 +72,55 @@ impl SharedPolicies {
       config.policy_cache_capacity,
       &config.default_policy,
     ))?;
-    let mut caches =
-      self.caches.lock().expect("policy registry poisoned");
-    let cache = match caches.get(&key) {
-      Some(cache) => cache.clone(),
-      None => {
-        let default =
-          Arc::new(policy::Policy::parse(config.default_policy)?);
-        let cache = Arc::new(cache::Cache::new(
-          self.source.clone(),
-          default,
-          config.policy_fallback_ttl,
-          config.policy_cache_capacity,
-        ));
-        caches.insert(key, cache.clone());
-        cache
+    Ok((key, config))
+  }
+
+  fn cache(self, source: Arc<fetch::Api>) -> Result<Arc<cache::Cache>> {
+    Ok(Arc::new(cache::Cache::new(
+      source,
+      Arc::new(policy::Policy::parse(self.default_policy)?),
+      self.policy_fallback_ttl,
+      self.policy_cache_capacity,
+    )))
+  }
+}
+fn source(args: &SerializedArgs) -> Result<Arc<fetch::Api>> {
+  let config: PluginConfig = serde_yaml::from_value(args.clone())?;
+  Ok(Arc::new(fetch::Api::new(
+    &config.policy_api_url,
+    config.policy_api_timeout,
+  )?))
+}
+
+pub(crate) struct SharedPolicies {
+  caches: HashMap<String, Arc<cache::Cache>>,
+}
+impl SharedPolicies {
+  pub(crate) fn new<'a>(
+    args: &SerializedArgs,
+    layers: impl Iterator<Item = &'a SerializedArgs>,
+  ) -> Result<Arc<Self>> {
+    let source = source(args)?;
+    let mut caches = HashMap::new();
+    for args in layers {
+      let (key, config) = LayerConfig::parse(args.clone())?;
+      if let std::collections::hash_map::Entry::Vacant(entry) =
+        caches.entry(key)
+      {
+        entry.insert(config.cache(source.clone())?);
       }
-    };
-    Ok(Layer::new(layer::PolicyLayer::new(cache)))
+    }
+    Ok(Arc::new(Self { caches }))
+  }
+
+  fn build_layer(&self, args: SerializedArgs) -> Result<Layer> {
+    let (key, _) = LayerConfig::parse(args)?;
+    let cache = self.caches.get(&key).ok_or_else(|| {
+      anyhow::anyhow!(
+        "policy layer was not prepared by the process owner"
+      )
+    })?;
+    Ok(Layer::new(layer::PolicyLayer::new(cache.clone())))
   }
 }
 struct E2bPlugin {
@@ -120,11 +137,31 @@ pub(crate) fn plugin_name() -> &'static str {
 pub(crate) fn create_plugin(
   args: Option<&SerializedArgs>,
 ) -> Result<Box<dyn Plugin>> {
-  create_shared_plugin(SharedPolicies::new(
-    args
-      .ok_or_else(|| anyhow::anyhow!("e2b requires policy_api_url"))?,
-  )?)
+  let source =
+    source(args.ok_or_else(|| {
+      anyhow::anyhow!("e2b requires policy_api_url")
+    })?)?;
+  // A standalone plugin has one local layer builder. Process workers
+  // instead consume the immutable, prebuilt SharedPolicies directory.
+  let caches =
+    RefCell::new(HashMap::<String, Arc<cache::Cache>>::new());
+  Ok(Box::new(E2bPlugin {
+    builder: Box::new(move |args| {
+      let (key, config) = LayerConfig::parse(args)?;
+      let mut caches = caches.borrow_mut();
+      let cache = match caches.entry(key) {
+        std::collections::hash_map::Entry::Occupied(entry) => {
+          entry.get().clone()
+        }
+        std::collections::hash_map::Entry::Vacant(entry) => {
+          entry.insert(config.cache(source.clone())?).clone()
+        }
+      };
+      Ok(Layer::new(layer::PolicyLayer::new(cache)))
+    }),
+  }))
 }
+
 pub(crate) fn create_shared_plugin(
   shared: Arc<SharedPolicies>,
 ) -> Result<Box<dyn Plugin>> {

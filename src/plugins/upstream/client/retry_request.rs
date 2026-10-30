@@ -33,24 +33,41 @@ impl Progress {
   }
 }
 pub(super) struct RetryRequest {
-  body: Arc<std::sync::Mutex<RequestBody>>,
+  body: Arc<std::sync::Mutex<Option<RequestBody>>>,
   consumed: Arc<AtomicBool>,
 }
 struct RetainedBody {
-  body: Arc<std::sync::Mutex<RequestBody>>,
+  inner: Option<RequestBody>,
+  returned: Arc<std::sync::Mutex<Option<RequestBody>>>,
   consumed: Arc<AtomicBool>,
+}
+impl Drop for RetainedBody {
+  fn drop(&mut self) {
+    if !self.consumed.load(Ordering::Acquire) {
+      *self.returned.lock().expect("request body handoff poisoned") =
+        self.inner.take();
+    }
+  }
 }
 impl RetryRequest {
   pub(super) fn new(body: RequestBody) -> Self {
     Self {
-      body: Arc::new(std::sync::Mutex::new(body)),
+      body: Arc::new(std::sync::Mutex::new(Some(body))),
       consumed: Arc::new(AtomicBool::new(false)),
     }
   }
 
   pub(super) fn body(&self) -> RequestBody {
     RequestBody::new(RetainedBody {
-      body: self.body.clone(),
+      inner: Some(
+        self
+          .body
+          .lock()
+          .expect("request body handoff poisoned")
+          .take()
+          .expect("previous request attempt released its body"),
+      ),
+      returned: self.body.clone(),
       consumed: self.consumed.clone(),
     })
   }
@@ -83,25 +100,21 @@ impl Body for RetainedBody {
     self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-    let result = Pin::new(
-      &mut *self.body.lock().expect("request body lock poisoned"),
-    )
-    .poll_frame(cx);
+    let this = self.get_mut();
+    let result =
+      Pin::new(this.inner.as_mut().expect("owned request body"))
+        .poll_frame(cx);
     if matches!(&result, Poll::Ready(Some(_))) {
-      self.consumed.store(true, Ordering::Relaxed);
+      this.consumed.store(true, Ordering::Release);
     }
     result
   }
 
   fn is_end_stream(&self) -> bool {
-    self
-      .body
-      .lock()
-      .expect("request body lock poisoned")
-      .is_end_stream()
+    self.inner.as_ref().expect("owned request body").is_end_stream()
   }
 
   fn size_hint(&self) -> SizeHint {
-    self.body.lock().expect("request body lock poisoned").size_hint()
+    self.inner.as_ref().expect("owned request body").size_hint()
   }
 }

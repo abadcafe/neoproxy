@@ -177,7 +177,7 @@ async fn test_forward_request_normalizes_policy_without_choosing_wire_protocol()
 async fn verify_unknown_length_requests<C: ForwardClient>(
   build: impl Fn(
     std::net::SocketAddr,
-    std::sync::Arc<crate::task_tracker::TaskTracker>,
+    std::rc::Rc<crate::task_tracker::TaskTracker>,
   ) -> C,
 ) {
   tokio::task::LocalSet::new().run_until(async {
@@ -195,7 +195,7 @@ async fn verify_unknown_length_requests<C: ForwardClient>(
           }),
         ).await.unwrap();
       });
-      let tracker = std::sync::Arc::new(crate::task_tracker::TaskTracker::new());
+      let tracker = std::rc::Rc::new(crate::task_tracker::TaskTracker::new());
       let client = build(address, tracker.clone());
       let body = http_body_util::StreamBody::new(futures::stream::iter([
         Ok::<_, std::io::Error>(http_body::Frame::data(Bytes::from_static(b"streamed-"))),
@@ -246,7 +246,7 @@ async fn test_send_proxy_preserves_unknown_length_get_and_head_bodies()
 async fn verify_trailer_forwarding<C: ForwardClient>(
   build: impl Fn(
     std::net::SocketAddr,
-    std::sync::Arc<crate::task_tracker::TaskTracker>,
+    std::rc::Rc<crate::task_tracker::TaskTracker>,
   ) -> C,
 ) {
   tokio::task::LocalSet::new().run_until(async {
@@ -268,7 +268,7 @@ async fn verify_trailer_forwarding<C: ForwardClient>(
           }),
         ).await.unwrap();
       });
-      let tracker = std::sync::Arc::new(crate::task_tracker::TaskTracker::new());
+      let tracker = std::rc::Rc::new(crate::task_tracker::TaskTracker::new());
       let client = build(address, tracker.clone());
       let mut trailers = http::HeaderMap::new();
       trailers.insert("x-checksum", "complete".parse().unwrap());

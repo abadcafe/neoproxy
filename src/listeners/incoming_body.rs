@@ -4,7 +4,8 @@
 //! data entities: IncomingBody, Failure, FailureState
 //! tests: incoming_body_tests.rs
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -15,14 +16,20 @@ use crate::http_message::RequestBody;
 
 #[derive(Default)]
 struct FailureState {
-  status: Mutex<Option<http::StatusCode>>,
+  status: AtomicU16,
   notify: tokio::sync::Notify,
 }
 #[derive(Clone, Default)]
 pub(super) struct Failure(Arc<FailureState>);
 impl Failure {
   pub(super) fn status(&self) -> Option<http::StatusCode> {
-    *self.0.status.lock().expect("body failure poisoned")
+    match self.0.status.load(Ordering::Acquire) {
+      0 => None,
+      value => Some(
+        http::StatusCode::from_u16(value)
+          .expect("published HTTP status"),
+      ),
+    }
   }
 
   pub(super) async fn notified(&self) {
@@ -30,8 +37,7 @@ impl Failure {
   }
 
   fn report(&self, status: http::StatusCode) {
-    *self.0.status.lock().expect("body failure poisoned") =
-      Some(status);
+    self.0.status.store(status.as_u16(), Ordering::Release);
     self.0.notify.notify_one();
   }
 }

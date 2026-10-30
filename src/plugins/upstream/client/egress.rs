@@ -264,7 +264,7 @@ impl<'a> Egress<'a> {
     mut parts: http::request::Parts,
     body: RequestBody,
     ctx: &RequestContext,
-    tracker: &std::sync::Arc<TaskTracker>,
+    tracker: &std::rc::Rc<TaskTracker>,
   ) -> Result<Response, UpstreamError> {
     ctx.set(
       crate::context::fields::upstream::PROTOCOL,
@@ -313,7 +313,9 @@ impl<'a> Egress<'a> {
         0,
         std::time::Duration::from_secs(60),
         self.pools.get(&self.config.use_connection_pool).http.limits,
-        std::sync::Arc::new(TaskTracker::new()),
+        std::sync::Arc::new(
+          crate::task_tracker::background::TaskTracker::new(),
+        ),
         tokio::runtime::Handle::current(),
       ),
       super::http_cache::Key {

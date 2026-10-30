@@ -45,7 +45,7 @@ fn build_registry(
   ensure_crypto_provider();
   let merged =
     super::config::merge_chain_config(&plugin_config).unwrap();
-  let st = std::sync::Arc::new(TaskTracker::new());
+  let st = std::rc::Rc::new(TaskTracker::new());
   UpstreamRegistry::new(merged, None, st.clone()).unwrap()
 }
 
@@ -57,7 +57,7 @@ fn make_direct_service() -> RuntimeService {
     serde_yaml::Value::String("direct".into()),
   )]))
   .unwrap();
-  let st = std::sync::Arc::new(TaskTracker::new());
+  let st = std::rc::Rc::new(TaskTracker::new());
   let registry = Rc::new(build_registry(plugin_config));
   UpstreamService::build(sargs, st, registry).unwrap()
 }
@@ -76,7 +76,7 @@ async fn test_direct_service_new_with_direct_upstream() {
     serde_yaml::Value::String("direct".into()),
   )]))
   .unwrap();
-  let st = std::sync::Arc::new(TaskTracker::new());
+  let st = std::rc::Rc::new(TaskTracker::new());
   let registry = Rc::new(build_registry(plugin_config));
   let result = UpstreamService::build(sargs, st, registry);
   assert!(result.is_ok());
@@ -201,7 +201,7 @@ async fn test_upstream_service_new_missing_upstream_fails() {
     serde_yaml::Value::String("nonexistent".into()),
   )]))
   .unwrap();
-  let st = std::sync::Arc::new(TaskTracker::new());
+  let st = std::rc::Rc::new(TaskTracker::new());
   let registry = Rc::new(build_registry(plugin_config));
   let result = UpstreamService::build(sargs, st, registry);
   assert!(result.is_err());
@@ -209,7 +209,7 @@ async fn test_upstream_service_new_missing_upstream_fails() {
 
 #[tokio::test]
 async fn test_upstream_service_new_with_chain_upstream() {
-  let st = std::sync::Arc::new(TaskTracker::new());
+  let st = std::rc::Rc::new(TaskTracker::new());
 
   let plugin_config: super::config::UpstreamPluginConfig =
     serde_yaml::from_str(

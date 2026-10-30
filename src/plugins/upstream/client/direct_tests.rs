@@ -25,15 +25,21 @@ async fn test_http_client_direct_tunnel_connects_to_target() {
   .unwrap()
   .with_root_certificates(rustls::RootCertStore::empty())
   .with_no_client_auth();
+  let pools =
+    super::ConnectionPools::new(std::collections::HashMap::from([(
+      "default".into(),
+      Default::default(),
+    )]))
+    .unwrap();
   let http_client = DirectClient::new(
     &upstreams["direct"],
     std::sync::Arc::new(tls),
     addr,
-    std::sync::Arc::new(crate::task_tracker::TaskTracker::new()),
-    super::ConnectionPool::new(Default::default()).unwrap(),
+    std::rc::Rc::new(crate::task_tracker::TaskTracker::new()),
+    pools.get("default"),
   )
   .unwrap();
-  let tracker = std::sync::Arc::new(TaskTracker::new());
+  let tracker = std::rc::Rc::new(TaskTracker::new());
 
   let accept = async {
     let (_stream, peer) = listener.accept().await.unwrap();

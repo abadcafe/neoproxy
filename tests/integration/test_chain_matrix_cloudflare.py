@@ -37,6 +37,10 @@ def test_two_hop_cloudflare_matrix(
     case: ChainCase,
 ) -> None:
     result = run_exchange(tmp_path, case, "cloudflare", matrix_certificates)
+    # A selected Cloudflare A/AAAA endpoint can reset TCP after CONNECT
+    # succeeds. A TLS proxy then exposes that origin reset as an unexpected
+    # EOF. The saved relay tunnel log identifies the remote socket and error;
+    # this external failure must remain visible, without an exchange retry.
     # This live UDP case also depends on the selected Cloudflare A/AAAA
     # address responding on UDP/443. Local 101/200 tunnel negotiation
     # does not prove that reachability. Keep failures visible and use

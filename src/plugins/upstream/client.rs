@@ -84,7 +84,7 @@ mod transport_io;
 
 pub(crate) struct UpstreamRegistry {
   entries: HashMap<String, Rc<Upstream>>,
-  tasks: Arc<TaskTracker>,
+  tasks: std::rc::Rc<TaskTracker>,
 }
 
 impl UpstreamRegistry {
@@ -92,7 +92,7 @@ impl UpstreamRegistry {
   pub(crate) fn new(
     upstreams: HashMap<String, super::config::Upstream>,
     certificates: Option<&CertificateConfig>,
-    tracker: std::sync::Arc<TaskTracker>,
+    tracker: std::rc::Rc<TaskTracker>,
   ) -> Result<Self> {
     let config = super::config::connection_pool::ConnectionPoolConfig {
       name: "default".into(),
@@ -108,7 +108,7 @@ impl UpstreamRegistry {
 
   pub(crate) fn with_connection_pools(
     upstreams: HashMap<String, super::config::Upstream>,
-    tracker: std::sync::Arc<TaskTracker>,
+    tracker: std::rc::Rc<TaskTracker>,
     connection_pools: Arc<ConnectionPools>,
   ) -> Result<Self> {
     let mut entries: HashMap<String, Rc<Upstream>> = HashMap::new();
@@ -129,7 +129,7 @@ impl UpstreamRegistry {
   }
 
   /// Register request-derived work with its plugin lifecycle owner.
-  pub(crate) fn operation_tasks(&self) -> Arc<TaskTracker> {
+  pub(crate) fn operation_tasks(&self) -> std::rc::Rc<TaskTracker> {
     self.tasks.clone()
   }
 

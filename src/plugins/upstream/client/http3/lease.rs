@@ -4,8 +4,8 @@
 //! data entities: SessionLease, LeasedIo
 //! tests: H3 pool process contracts
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -24,7 +24,7 @@ pub(super) struct Session {
   pub(super) hostname: Option<String>,
   pub(super) draining: AtomicBool,
   active: AtomicUsize,
-  used: Mutex<tokio::time::Instant>,
+  used: crate::io_progress::Progress,
   _permit: tokio::sync::OwnedSemaphorePermit,
 }
 impl Session {
@@ -38,16 +38,18 @@ impl Session {
     peer_settings: tokio::sync::watch::Receiver<Option<bool>>,
     (reads, tasks): (
       super::read_progress::Registry,
-      &crate::task_tracker::TaskTracker,
+      &crate::task_tracker::background::TaskTracker,
     ),
     hostname: Option<String>,
     permit: tokio::sync::OwnedSemaphorePermit,
   ) -> Arc<Self> {
+    let (datagrams, driver) = crate::connect_udp::h3::Hub::new(
+      connection.clone(),
+      tasks.shutdown_handle(),
+    );
+    tasks.register_on(&tokio::runtime::Handle::current(), driver);
     Arc::new(Self {
-      datagrams: crate::connect_udp::h3::Hub::new(
-        connection.clone(),
-        tasks,
-      ),
+      datagrams,
       connection,
       sender,
       observation,
@@ -56,7 +58,7 @@ impl Session {
       hostname,
       draining: AtomicBool::new(false),
       active: AtomicUsize::new(0),
-      used: Mutex::new(tokio::time::Instant::now()),
+      used: crate::io_progress::Progress::default(),
       _permit: permit,
     })
   }
@@ -66,8 +68,7 @@ impl Session {
   }
 
   pub(super) fn release(&self) {
-    *self.used.lock().expect("H3 activity poisoned") =
-      tokio::time::Instant::now();
+    self.used.mark();
     self.active.fetch_sub(1, Ordering::AcqRel);
   }
 
@@ -75,8 +76,7 @@ impl Session {
     self.connection.close_reason().is_some()
       || (self.active.load(Ordering::Acquire) == 0
         && (self.draining.load(Ordering::Acquire)
-          || self.used.lock().expect("H3 activity poisoned").elapsed()
-            >= timeout))
+          || self.used.elapsed() >= timeout))
   }
 }
 

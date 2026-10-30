@@ -34,7 +34,7 @@ pub(super) struct ProxyPool<C> {
   connector: C,
   cache: Arc<Cache>,
   key: Option<Key>,
-  tracker: std::sync::Arc<TaskTracker>,
+  tracker: std::rc::Rc<TaskTracker>,
 }
 impl<C> ProxyPool<C> {
   #[cfg(test)]
@@ -42,7 +42,7 @@ impl<C> ProxyPool<C> {
     connector: C,
     max_idle: usize,
     idle_timeout: Duration,
-    tracker: std::sync::Arc<TaskTracker>,
+    tracker: std::rc::Rc<TaskTracker>,
   ) -> Self {
     Self {
       connector,
@@ -50,7 +50,9 @@ impl<C> ProxyPool<C> {
         max_idle,
         idle_timeout,
         crate::header_limits::ResponseLimits::default().limits(),
-        std::sync::Arc::new(TaskTracker::new()),
+        std::sync::Arc::new(
+          crate::task_tracker::background::TaskTracker::new(),
+        ),
         tokio::runtime::Handle::current(),
       ),
       key: None,
@@ -62,7 +64,7 @@ impl<C> ProxyPool<C> {
     connector: C,
     cache: Arc<Cache>,
     key: Key,
-    tracker: std::sync::Arc<TaskTracker>,
+    tracker: std::rc::Rc<TaskTracker>,
   ) -> Self {
     Self { connector, cache, key: Some(key), tracker }
   }

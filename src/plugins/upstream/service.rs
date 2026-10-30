@@ -39,14 +39,14 @@ use crate::task_tracker::TaskTracker;
 #[derive(Clone)]
 pub(crate) struct UpstreamService {
   upstream_name: String,
-  task_tracker: std::sync::Arc<TaskTracker>,
+  task_tracker: std::rc::Rc<TaskTracker>,
   registry: Rc<UpstreamRegistry>,
 }
 
 impl UpstreamService {
   pub(crate) fn build(
     sargs: crate::config::SerializedArgs,
-    task_tracker: std::sync::Arc<TaskTracker>,
+    task_tracker: std::rc::Rc<TaskTracker>,
     registry: Rc<UpstreamRegistry>,
   ) -> Result<Service> {
     let args: super::config::UpstreamServiceArgs =
@@ -184,7 +184,7 @@ impl tower::Service<Request> for UpstreamService {
 async fn chain_connect(
   upstream_name: &str,
   registry: &Rc<UpstreamRegistry>,
-  st: &std::sync::Arc<TaskTracker>,
+  st: &std::rc::Rc<TaskTracker>,
   req_headers: http::request::Parts,
   upgrade: Option<stream::OnUpgrade>,
   ctx: &RequestContext,
@@ -245,15 +245,19 @@ async fn chain_connect(
     .extensions
     .get::<crate::connect_udp::h3::Ingress>()
     .cloned();
-  let upgrade = upgrade.map(|upgrade| match ingress {
-    Some(ingress) if udp.is_some() => {
-      stream::OnUpgrade::new(UdpUpgrade {
-        upgrade,
-        ingress,
-        tracker: registry.operation_tasks(),
-      })
-    }
-    _ => upgrade,
+  let datagrams = ingress.filter(|_| udp.is_some());
+  let operations = registry.operation_tasks();
+  let upgrade = upgrade.map(|upgrade| async move {
+    let io = upgrade.await?;
+    Ok(match datagrams {
+      Some(ingress) => {
+        ingress
+          .hub
+          .attach(io, ingress.id, ingress.enabled, &operations)
+          .await?
+      }
+      None => io,
+    })
   });
   let mut response = complete_tunnel(
     target_io,
@@ -284,43 +288,18 @@ async fn chain_connect(
   Ok(response)
 }
 
-#[derive(Clone)]
-struct UdpUpgrade {
-  upgrade: stream::OnUpgrade,
-  ingress: crate::connect_udp::h3::Ingress,
-  tracker: std::sync::Arc<TaskTracker>,
-}
-impl std::future::Future for UdpUpgrade {
-  type Output = Result<Box<dyn Io>>;
-
-  fn poll(
-    self: Pin<&mut Self>,
-    cx: &mut TaskContext<'_>,
-  ) -> Poll<Self::Output> {
-    let this = self.get_mut();
-    Pin::new(&mut this.upgrade).poll(cx).map(|result| {
-      result.map(|io| {
-        this.ingress.hub.attach(
-          io,
-          this.ingress.id,
-          this.ingress.enabled,
-          &this.tracker,
-        )
-      })
-    })
-  }
-}
-
 /// Complete a CONNECT tunnel by building the 200 response and
 /// registering bidirectional transfer.
 ///
 /// Unlike ordinary response bodies, upgraded I/O leaves the listener's
 /// HTTP driver. The plugin tracks this task across the upgrade handoff
 /// and stops its transfer when the plugin is uninstalled.
-async fn complete_tunnel(
+async fn complete_tunnel<
+  U: std::future::Future<Output = Result<Box<dyn Io>>> + 'static,
+>(
   target: Box<dyn Io>,
-  st: &std::sync::Arc<TaskTracker>,
-  upgrade: Option<stream::OnUpgrade>,
+  st: &std::rc::Rc<TaskTracker>,
+  upgrade: Option<U>,
   ctx: &RequestContext,
   upstream_response: Option<http::response::Parts>,
   tunnel_idle_timeout: Duration,

@@ -1,13 +1,13 @@
 //! module: cache
 //! responsibility: synchronously refresh process-shared sandbox policy
 //! snapshots public operations: Cache::{new,get}, Source::fetch,
-//! Update, Snapshot data entities: Cache, Entry, Update, Snapshot,
-//! CapacityExceeded, Source tests: cache_tests.rs
+//! Update, Snapshot data entities: Cache, Entry, Slot, Update,
+//! Snapshot, CapacityExceeded, Source tests: cache_tests.rs
 use std::collections::HashMap;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex as MapMutex};
+use std::sync::{Arc, Mutex as MapMutex, RwLock};
 use std::time::Duration;
 
 use tokio::sync::Mutex;
@@ -35,13 +35,23 @@ struct Entry {
   snapshot: Snapshot,
   expires: Instant,
 }
+#[derive(Default)]
+struct Slot {
+  entry: RwLock<Option<Arc<Entry>>>,
+  refresh: Mutex<()>,
+}
+impl Slot {
+  fn snapshot(&self) -> Option<Arc<Entry>> {
+    self.entry.read().expect("policy snapshot poisoned").clone()
+  }
+}
 #[derive(Debug)]
 pub(super) struct CapacityExceeded;
 pub(super) struct Cache {
   source: Arc<dyn Source>,
   default: Arc<Policy>,
   fallback: Duration,
-  entries: MapMutex<HashMap<String, Arc<Mutex<Option<Entry>>>>>,
+  entries: MapMutex<HashMap<String, Arc<Slot>>>,
   capacity: NonZeroUsize,
 }
 impl Cache {
@@ -77,7 +87,7 @@ impl Cache {
           // disposable; in-flight fetches and their waiters pin slots.
           entries.retain(|_, slot| {
             Arc::strong_count(slot) > 1
-              || slot.try_lock().map_or(true, |entry| {
+              || slot.entry.try_read().map_or(true, |entry| {
                 entry.as_ref().is_some_and(|entry| {
                   entry.snapshot.version.is_some()
                     || Instant::now() < entry.expires
@@ -90,16 +100,23 @@ impl Cache {
         }
         entries
           .entry(sandbox_id.to_owned())
-          .or_insert_with(|| Arc::new(Mutex::new(None)))
+          .or_insert_with(|| Arc::new(Slot::default()))
           .clone()
       }
     };
+    let current = slot.snapshot();
+    if let Some(current) = current
+      && Instant::now() < current.expires
+    {
+      return Ok(current.snapshot.clone());
+    }
     // Product contract: hold this sandbox's asynchronous mutex
     // throughout the fetch. Waiters recheck freshness after acquiring
     // it. Expired snapshots are retained ONLY for fallback after a
     // confirmed fetch failure. Other sandboxes never wait on this
     // network request.
-    let mut entry = slot.lock().await;
+    let _refresh = slot.refresh.lock().await;
+    let entry = slot.snapshot();
     if let Some(current) = entry.as_ref()
       && Instant::now() < current.expires
     {
@@ -167,7 +184,8 @@ impl Cache {
       }
     };
     let snapshot = next.snapshot.clone();
-    *entry = Some(next);
+    *slot.entry.write().expect("policy snapshot poisoned") =
+      Some(Arc::new(next));
     Ok(snapshot)
   }
 }

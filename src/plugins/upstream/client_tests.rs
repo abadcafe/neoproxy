@@ -12,7 +12,7 @@ fn test_upstream_registry_new_accepts_empty_direct_registry() {
   let registry = UpstreamRegistry::new(
     upstreams,
     None,
-    std::sync::Arc::new(TaskTracker::new()),
+    std::rc::Rc::new(TaskTracker::new()),
   )
   .unwrap();
 
@@ -44,7 +44,7 @@ fn test_upstream_registry_new_rejects_explicit_ca_without_certificates()
     let result = UpstreamRegistry::new(
       config::merge_chain_config(&config).unwrap(),
       Some(&certificates),
-      std::sync::Arc::new(TaskTracker::new()),
+      std::rc::Rc::new(TaskTracker::new()),
     );
     let error = match result {
       Ok(_) => panic!("explicit CA without certificates was accepted"),

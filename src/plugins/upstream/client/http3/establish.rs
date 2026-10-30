@@ -26,7 +26,7 @@ pub(super) async fn establish(
   tls_config: &rustls::ClientConfig,
   observation: &ConnectionObservation,
   registry: super::read_progress::Registry,
-  tasks: &Arc<crate::task_tracker::TaskTracker>,
+  tasks: &Arc<crate::task_tracker::background::TaskTracker>,
 ) -> Result<
   (
     quinn::Connection,

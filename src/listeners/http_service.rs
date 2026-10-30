@@ -52,7 +52,7 @@ pub(crate) struct HttpService {
   write_control: Option<super::write_deadline::Control>,
   reads: Option<crate::io_progress::Progress>,
   first_header:
-    std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    std::cell::Cell<Option<tokio::sync::oneshot::Sender<()>>>,
   /// Server router for hostname-based routing
   server_router: ServerRouter,
   /// Client (peer) address from accept
@@ -74,7 +74,7 @@ impl HttpService {
       policy: Default::default(),
       write_control: None,
       reads: None,
-      first_header: std::sync::Mutex::new(None),
+      first_header: std::cell::Cell::new(None),
       server_router,
       client_addr,
       local_addr,
@@ -93,7 +93,7 @@ impl HttpService {
       policy: Default::default(),
       write_control: None,
       reads: None,
-      first_header: std::sync::Mutex::new(None),
+      first_header: std::cell::Cell::new(None),
       server_router,
       client_addr,
       local_addr,
@@ -107,7 +107,7 @@ impl HttpService {
     mut self,
     sender: tokio::sync::oneshot::Sender<()>,
   ) -> Self {
-    self.first_header = std::sync::Mutex::new(Some(sender));
+    self.first_header = std::cell::Cell::new(Some(sender));
     self
   }
 
@@ -256,12 +256,7 @@ impl hyper_svc::Service<hyper::Request<hyper_body::Incoming>>
     &self,
     mut req: http::Request<hyper_body::Incoming>,
   ) -> Self::Future {
-    if let Some(sender) = self
-      .first_header
-      .lock()
-      .expect("first header notification poisoned")
-      .take()
-    {
+    if let Some(sender) = self.first_header.take() {
       let _ = sender.send(());
     }
     // Adapt only at the Hyper entry point, before shared dispatch.

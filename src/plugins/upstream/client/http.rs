@@ -57,7 +57,7 @@ where
   fn forward<'a>(
     &'a self,
     _tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    _tracker: &'a std::sync::Arc<TaskTracker>,
+    _tracker: &'a std::rc::Rc<TaskTracker>,
     target: &'a ForwardTarget,
     req_headers: ::http::request::Parts,
     req_body: RequestBody,
@@ -82,7 +82,7 @@ where
     target: &'a ConnectTarget,
     request: &'a ::http::request::Parts,
     _tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    tracker: &'a std::sync::Arc<TaskTracker>,
+    tracker: &'a std::rc::Rc<TaskTracker>,
   ) -> Pin<
     Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
   > {

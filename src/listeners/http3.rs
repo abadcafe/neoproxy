@@ -68,7 +68,7 @@ struct Http3Listener {
   /// Routing table for hostname-based routing
   server_router: crate::server::ServerRouter,
   /// Stream tracker
-  requests: std::sync::Arc<TaskTracker>,
+  requests: std::rc::Rc<TaskTracker>,
   /// Transport survives request draining and plugin uninstall.
   transport: Rc<Transport>,
   /// Shutdown handle
@@ -117,7 +117,7 @@ impl Http3Listener {
       server_router: crate::server::ServerRouter::build(
         server_routing_table,
       ),
-      requests: std::sync::Arc::new(TaskTracker::new()),
+      requests: std::rc::Rc::new(TaskTracker::new()),
       transport: Rc::new(Transport::new()),
       shutdown_handle: ShutdownHandle::new(),
     }))

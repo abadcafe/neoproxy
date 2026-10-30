@@ -155,3 +155,42 @@ async fn test_cancel_wakes_blocked_exchange_and_closes_without_timeout()
   .await
   .unwrap();
 }
+
+#[tokio::test]
+async fn test_cancel_wakes_blocked_write_and_upload() {
+  use http_body_util::BodyExt;
+  let control = Control::default();
+  control.start(Timeouts::default());
+  let (io, _peer) = tokio::io::duplex(1);
+  let mut io = hyper_util::rt::TokioIo::new(TimedIo::new(
+    hyper_util::rt::TokioIo::new(io),
+    control.clone(),
+  ));
+  let pending = futures_util::stream::pending::<
+    Result<http_body::Frame<bytes::Bytes>, anyhow::Error>,
+  >();
+  let mut body = super::exchange_timeout::UploadBody::wrap(
+    crate::http_message::RequestBody::new(
+      http_body_util::StreamBody::new(pending),
+    ),
+    control.clone(),
+  );
+  tokio::time::timeout(Duration::from_secs(1), async {
+    let write = async {
+      assert_eq!(
+        io.write_all(b"ab").await.unwrap_err().kind(),
+        std::io::ErrorKind::ConnectionAborted
+      );
+    };
+    let upload = async {
+      assert!(body.frame().await.unwrap().is_err());
+    };
+    let cancel = async {
+      tokio::task::yield_now().await;
+      control.cancel();
+    };
+    tokio::join!(write, upload, cancel);
+  })
+  .await
+  .unwrap();
+}

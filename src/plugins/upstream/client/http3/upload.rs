@@ -85,6 +85,11 @@ impl Drop for RequestWriter {
 }
 
 impl Upload {
+  pub(super) async fn cancel(mut self) {
+    self.shutdown.shutdown();
+    let _ = (&mut self).await;
+  }
+
   pub(super) fn start(
     stream: h3::client::RequestStream<
       h3_quinn::SendStream<SendBuffer>,
@@ -180,6 +185,8 @@ impl Upload {
           .stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
       }
       let result = writer.complete(result);
+      // Publish completion only after returning any unconsumed body.
+      drop(body);
       let _ = sender.send(result);
     });
     Self { shutdown, result }

@@ -4,23 +4,36 @@
 //! Progress::{mark,poll_stalled,wait} data entities: SendBuffer,
 //! Progress tests: io_progress_tests.rs
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
 use bytes::{Buf, Bytes};
 
 #[derive(Clone)]
-pub(crate) struct Progress(Arc<Mutex<tokio::time::Instant>>);
+pub(crate) struct Progress {
+  epoch: tokio::time::Instant,
+  last: Arc<AtomicU64>,
+}
 impl Default for Progress {
   fn default() -> Self {
-    Self(Arc::new(Mutex::new(tokio::time::Instant::now())))
+    Self { epoch: tokio::time::Instant::now(), last: Arc::default() }
   }
 }
 impl Progress {
+  fn last(&self) -> tokio::time::Instant {
+    self.epoch + Duration::from_nanos(self.last.load(Ordering::Relaxed))
+  }
+
+  pub(crate) fn elapsed(&self) -> Duration {
+    self.last().elapsed()
+  }
+
   pub(crate) fn mark(&self) {
-    *self.0.lock().expect("HTTP I/O progress poisoned") =
-      tokio::time::Instant::now();
+    let elapsed =
+      self.epoch.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+    self.last.fetch_max(elapsed, Ordering::Relaxed);
   }
 
   pub(crate) fn poll_stalled(
@@ -33,7 +46,7 @@ impl Progress {
       self.mark();
       Box::pin(tokio::time::sleep(duration))
     });
-    let last = *self.0.lock().expect("HTTP I/O progress poisoned");
+    let last = self.last();
     timer.as_mut().reset(last + duration);
     timer.as_mut().poll(cx).is_ready()
   }
@@ -51,7 +64,7 @@ impl Progress {
       if let Poll::Ready(result) = future.as_mut().poll(cx) {
         return Poll::Ready(Ok(result));
       }
-      let last = *self.0.lock().expect("HTTP I/O progress poisoned");
+      let last = self.last();
       timer.as_mut().reset(last + timeout);
       if timer.as_mut().poll(cx).is_ready() {
         Poll::Ready(Err(()))
@@ -90,8 +103,7 @@ impl Buf for SendBuffer {
     if count > 0
       && let Some(progress) = &self.progress
     {
-      *progress.0.lock().expect("HTTP I/O progress poisoned") =
-        tokio::time::Instant::now();
+      progress.mark();
     }
   }
 }

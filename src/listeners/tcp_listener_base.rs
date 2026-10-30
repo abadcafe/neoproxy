@@ -32,7 +32,7 @@ pub(crate) struct TcpConnection {
 /// Owns TCP sockets, accept tasks and bounded connection shutdown.
 pub(crate) struct TcpListenerBase {
   listening_set: Rc<RefCell<task::JoinSet<Result<()>>>>,
-  task_tracker: std::sync::Arc<TaskTracker>,
+  task_tracker: std::rc::Rc<TaskTracker>,
   graceful_shutdown_timeout: Duration,
   tcp_options: crate::tcp_options::TcpOptions,
 }
@@ -42,7 +42,7 @@ impl TcpListenerBase {
   pub(crate) fn new() -> Self {
     Self {
       listening_set: Rc::new(RefCell::new(task::JoinSet::new())),
-      task_tracker: std::sync::Arc::new(TaskTracker::new()),
+      task_tracker: std::rc::Rc::new(TaskTracker::new()),
       graceful_shutdown_timeout: LISTENER_SHUTDOWN_TIMEOUT,
       tcp_options: Default::default(),
     }

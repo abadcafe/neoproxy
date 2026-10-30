@@ -16,7 +16,7 @@ use crate::task_tracker::TaskTracker;
 pub(super) async fn handle_h3_connection(
   (connection, hub): (quinn::Connection, crate::connect_udp::h3::Hub),
   router: crate::server::ServerRouter,
-  requests: std::sync::Arc<TaskTracker>,
+  requests: std::rc::Rc<TaskTracker>,
   (shutdown, transport_shutdown): (ShutdownHandle, ShutdownHandle),
   local_addr: SocketAddr,
   header_deadline: crate::listeners::header_deadline::HeaderDeadline,

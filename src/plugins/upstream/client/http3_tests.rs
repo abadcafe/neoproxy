@@ -43,7 +43,7 @@ fn http3_client() -> Http3Client {
 #[tokio::test]
 async fn test_http3_client_forward_without_tls_config_is_rejected() {
   let client = http3_client();
-  let tracker = std::sync::Arc::new(TaskTracker::new());
+  let tracker = std::rc::Rc::new(TaskTracker::new());
   let ctx = RequestContext::new();
   let req = http::Request::builder()
     .method(http::Method::GET)
@@ -64,7 +64,7 @@ async fn test_http3_client_forward_without_tls_config_is_rejected() {
 #[tokio::test]
 async fn test_http3_client_tunnel_without_tls_config_is_rejected() {
   let client = http3_client();
-  let tracker = std::sync::Arc::new(TaskTracker::new());
+  let tracker = std::rc::Rc::new(TaskTracker::new());
 
   let request = http::Request::builder()
     .method(http::Method::CONNECT)
@@ -146,7 +146,7 @@ async fn test_http3_client_reconnects_after_goaway_without_quic_close()
         Duration::from_secs(2),
         Default::default(),
       );
-      let tracker = std::sync::Arc::new(TaskTracker::new());
+      let tracker = std::rc::Rc::new(TaskTracker::new());
 
       for _ in 0..2 {
         let request = http::Request::builder()

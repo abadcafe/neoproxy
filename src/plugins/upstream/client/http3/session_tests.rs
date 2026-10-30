@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::session::SessionPool;
 use crate::plugins::upstream::client::protocol::QuicConfig;
-use crate::task_tracker::TaskTracker;
+use crate::task_tracker::background::TaskTracker;
 
 #[tokio::test(start_paused = true)]
 async fn test_session_pool_drop_cancels_maintenance_after_failed_handshake()
@@ -12,7 +12,7 @@ async fn test_session_pool_drop_cancels_maintenance_after_failed_handshake()
     .run_until(async {
       let peer =
         tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-      let tracker = std::sync::Arc::new(TaskTracker::new());
+      let tracker = Arc::new(TaskTracker::new());
       let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
       ))
@@ -49,8 +49,7 @@ async fn test_session_pool_drop_cancels_maintenance_after_failed_handshake()
               .uri("https://localhost/")
               .body(())
               .unwrap(),
-            &tls,
-            &tracker
+            &tls
           )
           .await
           .is_err()
@@ -117,7 +116,6 @@ async fn test_session_pool_peer_closure_during_h3_setup_is_bad_gateway()
         connection.close(0_u32.into(), b"reject H3 setup");
       }
     });
-    let tracker = std::sync::Arc::new(TaskTracker::new());
     let pool = SessionPool::new(
       endpoint.local_addr().unwrap(), Some("localhost".into()),
       QuicConfig {
@@ -130,14 +128,13 @@ async fn test_session_pool_peer_closure_during_h3_setup_is_bad_gateway()
     );
     let result = pool.open(
       http::Request::builder().uri("https://localhost/").body(()).unwrap(),
-      &tls, &tracker,
+      &tls,
     ).await;
     let Err(error) = result else { panic!("peer rejection unexpectedly succeeded") };
     assert!(matches!(&error, UpstreamError::ConnectionTerminated(message) if message.contains("H3 connection setup")), "{error}");
     assert_eq!(error.http_status(), http::StatusCode::BAD_GATEWAY);
     peer.await.unwrap();
     drop(pool);
-    tracker.drain().await;
     endpoint.close(0_u32.into(), b"done");
   }).await;
 }
@@ -168,10 +165,9 @@ async fn test_session_pool_cancelled_handshake_releases_capacity() {
     Duration::from_secs(30),
     Default::default(),
   );
-  let tracker = std::sync::Arc::new(TaskTracker::new());
   let mut bytes = [0; 2048];
   let first_address = {
-    let request = pool.open(http::Request::new(()), &tls, &tracker);
+    let request = pool.open(http::Request::new(()), &tls);
     tokio::pin!(request);
     tokio::select! {
       result = &mut request => panic!("handshake completed unexpectedly: {}", result.is_ok()),
@@ -179,7 +175,7 @@ async fn test_session_pool_cancelled_handshake_releases_capacity() {
     }
   };
   let second = async {
-    let request = pool.open(http::Request::new(()), &tls, &tracker);
+    let request = pool.open(http::Request::new(()), &tls);
     tokio::pin!(request);
     loop {
       tokio::select! {

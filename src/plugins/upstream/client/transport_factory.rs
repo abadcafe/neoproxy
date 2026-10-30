@@ -24,7 +24,7 @@ pub(super) fn build(
   config: &config::Upstream,
   address: &Address,
   endpoint: SocketAddr,
-  tracker: &std::sync::Arc<TaskTracker>,
+  tracker: &std::rc::Rc<TaskTracker>,
   connection_pools: &Arc<super::ConnectionPools>,
 ) -> Result<ClientEntry, UpstreamError> {
   let shared = connection_pools.get(&address.use_connection_pool);

@@ -13,6 +13,8 @@ mod quic_connect;
 mod quic_connect_tests;
 mod session;
 mod sessions;
+#[cfg(test)]
+mod sessions_tests;
 pub(super) use sessions::Store;
 
 use crate::io_progress;
@@ -54,7 +56,7 @@ use crate::task_tracker::TaskTracker;
 struct H3Sender<'a> {
   session: &'a SessionPool,
   tls: &'a rustls::ClientConfig,
-  tracker: &'a std::sync::Arc<TaskTracker>,
+  tracker: &'a std::rc::Rc<TaskTracker>,
 }
 
 impl ForwardClient for H3Sender<'_> {
@@ -82,7 +84,7 @@ pub(super) async fn exchange(
   tls: &rustls::ClientConfig,
   request: http::Request<()>,
   req_body: RequestBody,
-  tracker: &std::sync::Arc<TaskTracker>,
+  tracker: &std::rc::Rc<TaskTracker>,
 ) -> Result<Response, UpstreamError> {
   let settings = request
     .extensions()
@@ -94,8 +96,7 @@ pub(super) async fn exchange(
     .get::<RequestContext>()
     .and_then(RequestContext::request_id)
     .cloned();
-  let (stream, lease, reads) =
-    session.open(request, tls, tracker).await?;
+  let (stream, lease, reads) = session.open(request, tls).await?;
   // Snapshot immutable metadata before receiving. h3-quinn 0.0.10
   // temporarily moves its RecvStream into a pending read future;
   // asking recv_id() during that read panics in the dependency.
@@ -117,7 +118,16 @@ pub(super) async fn exchange(
     &reads,
     session.limits(),
   )
-  .await?;
+  .await;
+  let proxy_resp = match proxy_resp {
+    Ok(response) => response,
+    Err(error) => {
+      if let Some(upload) = upload.take() {
+        upload.cancel().await;
+      }
+      return Err(error);
+    }
+  };
   let (parts, ()) = proxy_resp.into_parts();
   Ok(Response::from_parts(
     parts,
@@ -320,7 +330,7 @@ impl ClientProtocol for Http3Client {
   fn forward<'a>(
     &'a self,
     tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    tracker: &'a std::sync::Arc<TaskTracker>,
+    tracker: &'a std::rc::Rc<TaskTracker>,
     target: &'a ForwardTarget,
     req_headers: ::http::request::Parts,
     req_body: RequestBody,
@@ -357,7 +367,7 @@ impl ClientProtocol for Http3Client {
     target: &'a ConnectTarget,
     request: &'a ::http::request::Parts,
     tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    tracker: &'a std::sync::Arc<TaskTracker>,
+    tracker: &'a std::rc::Rc<TaskTracker>,
   ) -> Pin<
     Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
   > {
@@ -387,7 +397,7 @@ impl ClientProtocol for Http3Client {
         .copied()
         .unwrap_or_default();
       let (mut stream, lease, reads) =
-        self.session.open(req, &tls, &tracker).await?;
+        self.session.open(req, &tls).await?;
 
       let mut resp = receive_final_response(
         &mut stream,
@@ -430,7 +440,11 @@ impl ClientProtocol for Http3Client {
         )),
       );
       let transport = if udp.is_some() {
-        hub.attach(transport, id, enabled, &tracker)
+        hub.attach(transport, id, enabled, &tracker).await.map_err(
+          |error| {
+            UpstreamError::ConnectionTerminated(error.to_string())
+          },
+        )?
       } else {
         transport
       };
@@ -464,8 +478,11 @@ async fn receive_final_response<S: h3::quic::RecvStream>(
         biased;
         result = &mut pending => result,
         result = sending => {
-          result?;
+          // Completion consumes the oneshot even when it reports an
+          // error. Release the upload before propagating that error so
+          // exchange cleanup never polls the completed receiver again.
           *upload = None;
+          result?;
           reads.wait(&mut pending, read_timeout).await.map_err(|_| UpstreamError::ConnectionTimeout("upstream read inactivity timeout".into()))?
         }
       }

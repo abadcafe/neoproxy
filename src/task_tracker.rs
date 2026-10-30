@@ -1,218 +1,88 @@
 //! module: task_tracker
-//! responsibility: own asynchronous task lifetimes through
-//! shutdown
-//! public operations: ABORT_DRAIN_TIMEOUT, TaskTracker, new,
-//! register, register_on, shutdown, abort_all, drain,
-//! wait_shutdown, graceful_shutdown, wait_shutdown_with_timeout,
-//! shutdown_handle, active_count, monitor
+//! responsibility: own worker-local tasks through shutdown
+//! public operations:
+//! TaskTracker::{new,register,monitor,shutdown,abort_all,
+//! drain,wait_shutdown,graceful_shutdown,wait_shutdown_with_timeout,
+//! shutdown_handle,active_count}, ABORT_DRAIN_TIMEOUT
 //! data entities: TaskTracker
-//! tests: task_tracker_tests.rs, task_tracker_background_tests.rs
-
-use std::future::{Future, poll_fn};
-use std::sync::Mutex;
-use std::task::Poll;
+//! tests: task_tracker_tests.rs
+pub(crate) mod background;
+mod lifecycle;
+use std::cell::RefCell;
+use std::future::Future;
 use std::time::Duration;
 
-use futures_util::task::AtomicWaker;
-use tokio::task::{JoinError, JoinSet};
+pub(crate) use lifecycle::ABORT_DRAIN_TIMEOUT;
+use lifecycle::{Lifecycle, TaskSet};
+use tokio::task::JoinSet;
 
 use crate::shutdown::ShutdownHandle;
 
-pub(crate) const ABORT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// One group of tasks sharing a cooperative shutdown
-/// notification. Owners define shutdown ordering between groups. Tasks
-/// must explicitly observe the notification and complete their
-/// asynchronous cleanup.
 pub(crate) struct TaskTracker {
-  tasks: Mutex<JoinSet<()>>,
-  shutdown_handle: ShutdownHandle,
-  monitor_waker: AtomicWaker,
+  tasks: RefCell<JoinSet<()>>,
+  lifecycle: Lifecycle,
 }
-
+impl TaskSet for TaskTracker {
+  fn with<T>(&self, action: impl FnOnce(&mut JoinSet<()>) -> T) -> T {
+    action(&mut self.tasks.borrow_mut())
+  }
+}
 impl TaskTracker {
   pub(crate) fn new() -> Self {
     Self {
-      tasks: Mutex::new(JoinSet::new()),
-      shutdown_handle: ShutdownHandle::new(),
-      monitor_waker: AtomicWaker::new(),
+      tasks: RefCell::new(JoinSet::new()),
+      lifecycle: Lifecycle::new(),
     }
   }
 
-  /// Spawn and track a local task.
   pub(crate) fn register(
     &self,
-    task_future: impl Future<Output = ()> + 'static,
+    future: impl Future<Output = ()> + 'static,
   ) -> tokio::task::AbortHandle {
-    reap_completed(&self.tasks);
-    let handle = self
-      .tasks
-      .lock()
-      .expect("task tracker poisoned")
-      .spawn_local(task_future);
-    self.monitor_waker.wake();
-    handle
+    self.lifecycle.register(self, |tasks| tasks.spawn_local(future))
   }
 
-  /// Spawn a Send task on the runtime owned by a shared resource.
-  /// This uses the same lifecycle semantics as local registration.
-  pub(crate) fn register_on(
-    &self,
-    runtime: &tokio::runtime::Handle,
-    task: impl Future<Output = ()> + Send + 'static,
-  ) {
-    reap_completed(&self.tasks);
-    self
-      .tasks
-      .lock()
-      .expect("task tracker poisoned")
-      .spawn_on(task, runtime);
-    self.monitor_waker.wake();
-  }
-
-  /// Continuously collect task outcomes, including when admission is
-  /// idle. Exactly one lifecycle owner polls this monitor; drop it
-  /// before entering the shutdown drain. Empty groups remain pending.
-  /// Registration wakes this monitor, and JoinSet wakes it on task
-  /// completion. No timer or separate notification loop is needed.
   pub(crate) fn monitor(&self) -> impl Future<Output = ()> + '_ {
-    poll_fn(|cx| {
-      // Register before inspecting the set: a concurrent registration
-      // must either be visible to poll_join_next or wake this waiter.
-      // JoinSet itself does not register a waiter when it is empty.
-      self.monitor_waker.register(cx.waker());
-      loop {
-        let result = self
-          .tasks
-          .lock()
-          .expect("task tracker poisoned")
-          .poll_join_next(cx);
-        match result {
-          // The set lock is released before propagating a panic so the
-          // owner can still drop/clean up the tracker during unwinding.
-          Poll::Ready(Some(result)) => propagate_task_panic(result),
-          Poll::Ready(None) | Poll::Pending => return Poll::Pending,
-        }
-      }
-    })
+    self.lifecycle.monitor(self)
   }
 
-  /// Trigger shutdown notification.
   pub(crate) fn shutdown(&self) {
-    self.shutdown_handle.shutdown();
+    self.lifecycle.shutdown();
   }
 
-  /// Abort all tracked tasks immediately.
   pub(crate) fn abort_all(&self) {
-    self.tasks.lock().expect("task tracker poisoned").abort_all();
+    self.lifecycle.abort_all(self);
   }
 
-  /// Drain aborted tasks from the JoinSet with a safety timeout.
-  ///
-  /// After `abort_all()`, tasks are marked cancelled but remain in the
-  /// JoinSet until polled via `join_next()`. This method drains them
-  /// so `active_count()` reflects the true state.
-  ///
-  /// A timeout is applied because aborted tasks may still be holding
-  /// locks or in CPU-bound loops, preventing immediate cancellation.
   pub(crate) async fn drain(&self) {
-    let _ = tokio::time::timeout(ABORT_DRAIN_TIMEOUT, async {
-      drain_join_set(&self.tasks).await;
-    })
-    .await;
+    self.lifecycle.drain(self).await;
   }
 
-  /// Wait for all tasks to complete.
   pub(crate) async fn wait_shutdown(&self) {
-    drain_join_set(&self.tasks).await;
+    self.lifecycle.wait_shutdown(self).await;
   }
 
-  /// Perform a graceful shutdown with timeout.
-  ///
-  /// Triggers shutdown, then waits for all active tasks to complete
-  /// within the given timeout. If the timeout expires, forcefully
-  /// aborts remaining tasks.
   pub(crate) async fn graceful_shutdown(&self, timeout: Duration) {
-    self.shutdown();
-    let result =
-      tokio::time::timeout(timeout, self.wait_shutdown()).await;
-    if result.is_err() {
-      tracing::warn!(
-        "graceful shutdown timeout ({:?}) expired, aborting {} \
-         remaining tasks",
-        timeout,
-        self.active_count()
-      );
-      self.abort_all();
-      self.drain().await;
-    }
+    self.lifecycle.graceful_shutdown(self, timeout).await;
   }
 
-  /// Wait with timeout.
   pub(crate) async fn wait_shutdown_with_timeout(
     &self,
     timeout: Duration,
-  ) -> std::result::Result<(), ()> {
-    tokio::time::timeout(timeout, self.wait_shutdown())
-      .await
-      .map_err(|_| ())
+  ) -> Result<(), ()> {
+    self.lifecycle.wait_shutdown_with_timeout(self, timeout).await
   }
 
-  /// Get shutdown handle for listening in tasks.
   pub(crate) fn shutdown_handle(&self) -> ShutdownHandle {
-    self.shutdown_handle.clone()
+    self.lifecycle.shutdown_handle()
   }
 
-  /// Count all unfinished tasks after collecting completed results.
   pub(crate) fn active_count(&self) -> usize {
-    reap_completed(&self.tasks);
-    self.tasks.lock().expect("task tracker poisoned").len()
+    self.lifecycle.active_count(self)
   }
 }
-
 impl Default for TaskTracker {
   fn default() -> Self {
     Self::new()
-  }
-}
-
-async fn join_next(
-  join_set: &Mutex<JoinSet<()>>,
-) -> Option<Result<(), JoinError>> {
-  poll_fn(|cx| {
-    join_set.lock().expect("task tracker poisoned").poll_join_next(cx)
-  })
-  .await
-}
-
-async fn drain_join_set(join_set: &Mutex<JoinSet<()>>) {
-  while let Some(result) = join_next(join_set).await {
-    propagate_task_panic(result);
-  }
-}
-
-fn reap_completed(join_set: &Mutex<JoinSet<()>>) {
-  while let Some(result) =
-    join_set.lock().expect("task tracker poisoned").try_join_next()
-  {
-    propagate_task_panic(result);
-  }
-}
-
-// Tokio turns spawned-task panics into JoinError values. A panic is a
-// programming error, not a recoverable connection failure: deliberately
-// resume the original unwind so listener/worker supervision observes
-// it. Expected cancellation from abort_all() is not a programming
-// error.
-fn propagate_task_panic(result: Result<(), JoinError>) {
-  if let Err(error) = result
-    && error.is_panic()
-  {
-    tracing::error!(
-      task_id = %error.id(),
-      error = %error,
-      "tracked task panicked; propagating programming failure"
-    );
-    std::panic::resume_unwind(error.into_panic());
   }
 }

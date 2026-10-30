@@ -322,7 +322,7 @@ async fn test_monitor_observes_registration_after_waiting_on_empty_tracker()
   tokio::task::LocalSet::new()
     .run_until(async {
       let tracker =
-        std::sync::Arc::new(crate::task_tracker::TaskTracker::new());
+        std::rc::Rc::new(crate::task_tracker::TaskTracker::new());
       let tasks = tracker.clone();
       let monitor =
         tokio::task::spawn_local(async move { tasks.monitor().await });

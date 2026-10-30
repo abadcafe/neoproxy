@@ -37,7 +37,7 @@ async fn test_connect_for_tunnel_preserves_peer_and_bytes_after_response_headers
         assert_eq!(&request, b"ping");
         socket.write_all(b"pong").await.unwrap();
       });
-      let tracker = std::sync::Arc::new(TaskTracker::new());
+      let tracker = std::rc::Rc::new(TaskTracker::new());
       let connector =
         ProxyConnector::new(address, Duration::from_secs(1));
       let client = HttpProxyClient::new(

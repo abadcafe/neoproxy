@@ -51,7 +51,7 @@ impl ClientProtocol for Socks5Client {
   fn forward<'a>(
     &'a self,
     _tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    _tracker: &'a std::sync::Arc<TaskTracker>,
+    _tracker: &'a std::rc::Rc<TaskTracker>,
     _target: &'a ForwardTarget,
     _req_headers: http::request::Parts,
     _req_body: RequestBody,
@@ -70,7 +70,7 @@ impl ClientProtocol for Socks5Client {
     target: &'a ConnectTarget,
     request: &'a http::request::Parts,
     _tls_config: &'a Option<Arc<rustls::ClientConfig>>,
-    _tracker: &'a std::sync::Arc<TaskTracker>,
+    _tracker: &'a std::rc::Rc<TaskTracker>,
   ) -> Pin<
     Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
   > {

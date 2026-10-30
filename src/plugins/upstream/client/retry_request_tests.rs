@@ -59,3 +59,40 @@ async fn test_retry_empty_body_remains_replayable_after_eof() {
   progress.mark();
   assert!(request.can_retry(&progress, &http::Method::GET, false));
 }
+
+#[tokio::test]
+async fn test_pending_attempt_returns_body_before_retry() {
+  use std::future::Future;
+  use std::pin::Pin;
+  use std::task::{Context, Waker};
+  let (tx, rx) = tokio::sync::mpsc::channel::<
+    Result<http_body::Frame<Bytes>, anyhow::Error>,
+  >(1);
+  let stream = futures_util::stream::unfold(rx, |mut rx| async {
+    rx.recv().await.map(|frame| (frame, rx))
+  });
+  let request = RetryRequest::new(RequestBody::new(
+    http_body_util::StreamBody::new(stream),
+  ));
+  let mut attempt = request.body();
+  let mut frame = attempt.frame();
+  assert!(
+    Pin::new(&mut frame)
+      .poll(&mut Context::from_waker(Waker::noop()))
+      .is_pending()
+  );
+  drop(frame);
+  drop(attempt);
+  tx.send(Ok(http_body::Frame::data(Bytes::from_static(b"kept"))))
+    .await
+    .unwrap();
+  assert!(request.can_retry(
+    &Progress::default(),
+    &http::Method::POST,
+    false
+  ));
+  assert_eq!(
+    request.body().frame().await.unwrap().unwrap().into_data().unwrap(),
+    "kept"
+  );
+}

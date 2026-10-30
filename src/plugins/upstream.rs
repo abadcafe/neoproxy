@@ -8,9 +8,9 @@
 //! tests: service::tests, config::tests, error::tests, inherit::tests,
 //! target_parser_tests.rs, upstream child module tests
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use tracing::{info, warn};
@@ -55,16 +55,16 @@ mod target_parser_tests;
 
 struct UpstreamPlugin {
   service_builders: HashMap<&'static str, Box<dyn BuildService>>,
-  sessions: std::sync::Arc<TaskTracker>,
-  operations: std::sync::Arc<TaskTracker>,
-  is_uninstalled: Rc<AtomicBool>,
+  sessions: std::rc::Rc<TaskTracker>,
+  operations: std::rc::Rc<TaskTracker>,
+  is_uninstalled: Rc<Cell<bool>>,
 }
 
 impl UpstreamPlugin {
   fn new(
     registry: UpstreamRegistry,
-    sessions: std::sync::Arc<TaskTracker>,
-    operations: std::sync::Arc<TaskTracker>,
+    sessions: std::rc::Rc<TaskTracker>,
+    operations: std::rc::Rc<TaskTracker>,
   ) -> Self {
     let registry = Rc::new(registry);
 
@@ -86,7 +86,7 @@ impl UpstreamPlugin {
       service_builders,
       sessions,
       operations,
-      is_uninstalled: Rc::new(AtomicBool::new(false)),
+      is_uninstalled: Rc::new(Cell::new(false)),
     }
   }
 }
@@ -110,7 +110,7 @@ impl Plugin for UpstreamPlugin {
   fn uninstall(
     &self,
   ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> {
-    if self.is_uninstalled.swap(true, Ordering::SeqCst) {
+    if self.is_uninstalled.replace(true) {
       return Box::pin(async {});
     }
 
@@ -198,8 +198,8 @@ pub(crate) fn create_pooled_plugin(
 
   let upstreams = config::merge_chain_config(&plugin_config)?;
 
-  let tracker = std::sync::Arc::new(TaskTracker::new());
-  let sessions = std::sync::Arc::new(TaskTracker::new());
+  let tracker = std::rc::Rc::new(TaskTracker::new());
+  let sessions = std::rc::Rc::new(TaskTracker::new());
   let registry = UpstreamRegistry::with_connection_pools(
     upstreams,
     tracker.clone(),

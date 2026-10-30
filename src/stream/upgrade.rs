@@ -81,7 +81,8 @@ impl OnUpgrade {
     (
       UpgradeTrigger { sender },
       Self::new(Notification {
-        receiver: Arc::new(Mutex::new(receiver)),
+        receiver: Arc::new(Mutex::new(Some(receiver))),
+        owned: None,
       }),
     )
   }
@@ -98,12 +99,27 @@ impl Future for OnUpgrade {
 }
 
 type UpgradeReceiver =
-  Arc<Mutex<oneshot::Receiver<Result<Box<dyn Io>>>>>;
+  Arc<Mutex<Option<oneshot::Receiver<Result<Box<dyn Io>>>>>>;
 
 /// Only notification-backed listeners need this shared receiver.
-#[derive(Clone)]
 struct Notification {
   receiver: UpgradeReceiver,
+  owned: Option<oneshot::Receiver<Result<Box<dyn Io>>>>,
+}
+impl Clone for Notification {
+  fn clone(&self) -> Self {
+    Self { receiver: self.receiver.clone(), owned: None }
+  }
+}
+impl Drop for Notification {
+  fn drop(&mut self) {
+    if let Some(receiver) = self.owned.take() {
+      // A cancelled pending waiter returns ownership to remaining
+      // handles.
+      *self.receiver.lock().expect("upgrade handoff poisoned") =
+        Some(receiver);
+    }
+  }
 }
 impl Future for Notification {
   type Output = Result<Box<dyn Io>>;
@@ -112,11 +128,23 @@ impl Future for Notification {
     self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<Self::Output> {
-    Pin::new(
-      &mut *self.receiver.lock().expect("upgrade receiver poisoned"),
-    )
-    .poll(cx)
-    .map(|result| {
+    let this = self.get_mut();
+    if this.owned.is_none() {
+      this.owned = Some(
+        this
+          .receiver
+          .lock()
+          .expect("upgrade handoff poisoned")
+          .take()
+          .expect("upgrade has one consumer"),
+      );
+    }
+    let result =
+      Pin::new(this.owned.as_mut().expect("claimed receiver")).poll(cx);
+    if result.is_ready() {
+      this.owned = None;
+    }
+    result.map(|result| {
       result
         .unwrap_or_else(|_| Err(anyhow::anyhow!("upgrade canceled")))
     })

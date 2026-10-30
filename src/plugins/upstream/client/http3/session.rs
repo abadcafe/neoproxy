@@ -15,7 +15,6 @@ use super::sessions::{Bucket, Store};
 use crate::context::RequestContext;
 use crate::plugins::upstream::client::protocol::QuicConfig;
 use crate::plugins::upstream::error::UpstreamError;
-use crate::task_tracker::TaskTracker;
 
 pub(crate) struct SessionPool {
   settings: Settings,
@@ -42,7 +41,7 @@ impl SessionPool {
         1,
         pool.idle_timeout,
         crate::header_limits::ResponseLimits::default().limits(),
-        Arc::new(TaskTracker::new()),
+        Arc::new(crate::task_tracker::background::TaskTracker::new()),
       ),
       runtime,
     )
@@ -115,7 +114,12 @@ impl SessionPool {
       {
         return Ok(session);
       }
-      notified.await;
+      tokio::select! {
+        _ = notified => {},
+        permit = self.bucket.wait_capacity() => {
+          if let Some(permit) = permit { break permit; }
+        }
+      }
     };
     let settings = self.settings.clone();
     let tls = tls.clone();
@@ -160,7 +164,6 @@ impl SessionPool {
     &self,
     request: http::Request<()>,
     tls: &rustls::ClientConfig,
-    _tracker: &std::sync::Arc<TaskTracker>,
   ) -> Result<
     (
       h3::client::RequestStream<super::read_progress::Bidi, SendBuffer>,

@@ -317,7 +317,7 @@ async fn test_graceful_shutdown_aborts_only_after_deadline() {
     .await;
 }
 #[tokio::test]
-async fn test_supervise_observes_registration_after_waiting_on_empty_tracker()
+async fn test_monitor_observes_registration_after_waiting_on_empty_tracker()
  {
   tokio::task::LocalSet::new()
     .run_until(async {
@@ -325,9 +325,7 @@ async fn test_supervise_observes_registration_after_waiting_on_empty_tracker()
         std::sync::Arc::new(crate::task_tracker::TaskTracker::new());
       let tasks = tracker.clone();
       let monitor =
-        tokio::task::spawn_local(
-          async move { tasks.supervise().await },
-        );
+        tokio::task::spawn_local(async move { tasks.monitor().await });
       tokio::task::yield_now().await;
       tracker.register(async { panic!("late task programming error") });
       let error = tokio::time::timeout(
@@ -338,6 +336,125 @@ async fn test_supervise_observes_registration_after_waiting_on_empty_tracker()
       .unwrap()
       .unwrap_err();
       assert!(error.is_panic());
+    })
+    .await;
+}
+
+#[derive(Default)]
+struct MonitorWake(std::sync::atomic::AtomicUsize);
+
+impl std::task::Wake for MonitorWake {
+  fn wake(self: Arc<Self>) {
+    self.wake_by_ref();
+  }
+
+  fn wake_by_ref(self: &Arc<Self>) {
+    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+  }
+}
+
+#[test]
+fn test_monitor_stays_pending_when_empty_and_after_shutdown() {
+  let tracker = TaskTracker::new();
+  let mut monitor = Box::pin(tracker.monitor());
+  let mut context =
+    std::task::Context::from_waker(std::task::Waker::noop());
+  assert!(monitor.as_mut().poll(&mut context).is_pending());
+  tracker.shutdown();
+  assert!(monitor.as_mut().poll(&mut context).is_pending());
+}
+
+#[tokio::test]
+async fn test_monitor_registration_wakes_latest_empty_waiter() {
+  tokio::task::LocalSet::new()
+    .run_until(async {
+      let tracker = TaskTracker::new();
+      let first = Arc::new(MonitorWake::default());
+      let latest = Arc::new(MonitorWake::default());
+      let first_waker = std::task::Waker::from(first.clone());
+      let latest_waker = std::task::Waker::from(latest.clone());
+      let mut monitor = Box::pin(tracker.monitor());
+      assert!(
+        monitor
+          .as_mut()
+          .poll(&mut std::task::Context::from_waker(&first_waker))
+          .is_pending()
+      );
+      assert!(
+        monitor
+          .as_mut()
+          .poll(&mut std::task::Context::from_waker(&latest_waker))
+          .is_pending()
+      );
+      tracker.register(std::future::pending());
+      assert_eq!(first.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+      assert_eq!(latest.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+      drop(monitor);
+      tracker.abort_all();
+      tracker.drain().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_monitor_collects_completed_tasks_and_waits_for_next_registration()
+ {
+  tokio::task::LocalSet::new()
+    .run_until(async {
+      let tracker = TaskTracker::new();
+      tracker.register(async {});
+      let wake = Arc::new(MonitorWake::default());
+      let waker = std::task::Waker::from(wake.clone());
+      let mut context = std::task::Context::from_waker(&waker);
+      let mut monitor = Box::pin(tracker.monitor());
+      assert!(monitor.as_mut().poll(&mut context).is_pending());
+      tokio::task::yield_now().await;
+      assert!(wake.0.load(std::sync::atomic::Ordering::SeqCst) > 0);
+      assert!(monitor.as_mut().poll(&mut context).is_pending());
+      assert_eq!(tracker.active_count(), 0);
+      wake.0.store(0, std::sync::atomic::Ordering::SeqCst);
+      tracker.register(std::future::pending());
+      assert_eq!(wake.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+      drop(monitor);
+      tracker.abort_all();
+      tracker.drain().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_monitor_can_be_replaced_before_shutdown_drain() {
+  tokio::task::LocalSet::new()
+    .run_until(async {
+      let tracker = TaskTracker::new();
+      let first = Arc::new(MonitorWake::default());
+      let latest = Arc::new(MonitorWake::default());
+      let first_waker = std::task::Waker::from(first.clone());
+      let latest_waker = std::task::Waker::from(latest.clone());
+      let mut monitor = Box::pin(tracker.monitor());
+      assert!(
+        monitor
+          .as_mut()
+          .poll(&mut std::task::Context::from_waker(&first_waker))
+          .is_pending()
+      );
+      drop(monitor);
+      let mut replacement = Box::pin(tracker.monitor());
+      assert!(
+        replacement
+          .as_mut()
+          .poll(&mut std::task::Context::from_waker(&latest_waker))
+          .is_pending()
+      );
+      let shutdown = tracker.shutdown_handle();
+      tracker.register(async move {
+        shutdown.notified().await;
+      });
+      assert_eq!(first.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+      assert_eq!(latest.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+      drop(replacement);
+      tracker.graceful_shutdown(Duration::from_secs(1)).await;
+      assert_eq!(tracker.active_count(), 0);
     })
     .await;
 }

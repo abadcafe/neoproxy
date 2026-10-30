@@ -249,7 +249,7 @@ fn main() -> Result<std::process::ExitCode> {
       if let Some(pools) = &connection_pools {
         tokio::select! {
           exit = running => exit,
-          () = pools.supervise() => unreachable!("pool supervision never completes"),
+          () = pools.monitor() => unreachable!("pool monitoring never completes"),
         }
       } else {
         running.await

@@ -4,14 +4,16 @@
 //! public operations: ABORT_DRAIN_TIMEOUT, TaskTracker, new,
 //! register, register_on, shutdown, abort_all, drain,
 //! wait_shutdown, graceful_shutdown, wait_shutdown_with_timeout,
-//! shutdown_handle, active_count, supervise
+//! shutdown_handle, active_count, monitor
 //! data entities: TaskTracker
 //! tests: task_tracker_tests.rs, task_tracker_background_tests.rs
 
 use std::future::{Future, poll_fn};
 use std::sync::Mutex;
+use std::task::Poll;
 use std::time::Duration;
 
+use futures_util::task::AtomicWaker;
 use tokio::task::{JoinError, JoinSet};
 
 use crate::shutdown::ShutdownHandle;
@@ -25,7 +27,7 @@ pub(crate) const ABORT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) struct TaskTracker {
   tasks: Mutex<JoinSet<()>>,
   shutdown_handle: ShutdownHandle,
-  changed: tokio::sync::Notify,
+  monitor_waker: AtomicWaker,
 }
 
 impl TaskTracker {
@@ -33,7 +35,7 @@ impl TaskTracker {
     Self {
       tasks: Mutex::new(JoinSet::new()),
       shutdown_handle: ShutdownHandle::new(),
-      changed: tokio::sync::Notify::new(),
+      monitor_waker: AtomicWaker::new(),
     }
   }
 
@@ -48,7 +50,7 @@ impl TaskTracker {
       .lock()
       .expect("task tracker poisoned")
       .spawn_local(task_future);
-    self.changed.notify_one();
+    self.monitor_waker.wake();
     handle
   }
 
@@ -65,21 +67,34 @@ impl TaskTracker {
       .lock()
       .expect("task tracker poisoned")
       .spawn_on(task, runtime);
-    self.changed.notify_one();
+    self.monitor_waker.wake();
   }
 
   /// Continuously collect task outcomes, including when admission is
   /// idle. Exactly one lifecycle owner polls this monitor; drop it
-  /// before entering the shutdown drain. Registration wakes an empty
-  /// monitor, and JoinSet wakes it on completion without a timer.
-  pub(crate) async fn supervise(&self) {
-    loop {
-      let changed = self.changed.notified();
-      tokio::pin!(changed);
-      changed.as_mut().enable();
-      drain_join_set(&self.tasks).await;
-      changed.await;
-    }
+  /// before entering the shutdown drain. Empty groups remain pending.
+  /// Registration wakes this monitor, and JoinSet wakes it on task
+  /// completion. No timer or separate notification loop is needed.
+  pub(crate) fn monitor(&self) -> impl Future<Output = ()> + '_ {
+    poll_fn(|cx| {
+      // Register before inspecting the set: a concurrent registration
+      // must either be visible to poll_join_next or wake this waiter.
+      // JoinSet itself does not register a waiter when it is empty.
+      self.monitor_waker.register(cx.waker());
+      loop {
+        let result = self
+          .tasks
+          .lock()
+          .expect("task tracker poisoned")
+          .poll_join_next(cx);
+        match result {
+          // The set lock is released before propagating a panic so the
+          // owner can still drop/clean up the tracker during unwinding.
+          Poll::Ready(Some(result)) => propagate_task_panic(result),
+          Poll::Ready(None) | Poll::Pending => return Poll::Pending,
+        }
+      }
+    })
   }
 
   /// Trigger shutdown notification.

@@ -165,16 +165,16 @@ impl ConnectionPools {
     }
   }
 
-  pub(crate) async fn supervise(&self) {
+  pub(crate) async fn monitor(&self) {
     let monitors: Vec<_> = self
       .pools
       .values()
-      .map(|pool| Box::pin(pool.tasks.supervise()))
+      .map(|pool| Box::pin(pool.tasks.monitor()))
       .collect();
     if monitors.is_empty() {
       std::future::pending::<()>().await;
     }
     futures_util::future::select_all(monitors).await;
-    unreachable!("connection pool supervision never completes");
+    unreachable!("connection pool monitoring never completes");
   }
 }

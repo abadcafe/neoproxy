@@ -56,8 +56,8 @@ impl Transport {
     self.drivers.shutdown_handle()
   }
 
-  pub(super) async fn supervise(&self) {
-    self.drivers.supervise().await;
+  pub(super) async fn monitor(&self) {
+    self.drivers.monitor().await;
   }
 
   pub(super) async fn drain(&self, deadline: tokio::time::Instant) {

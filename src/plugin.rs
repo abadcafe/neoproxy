@@ -3,7 +3,7 @@
 //! module: plugin
 //! responsibilities: define the interface that all plugins must
 //! implement public operations: Plugin::service_builder,
-//! Plugin::layer_builder, Plugin::supervise, Plugin::uninstall data
+//! Plugin::layer_builder, Plugin::monitor, Plugin::uninstall data
 //! entities: Plugin (trait) tests: plugin_tests.rs
 
 use std::future::Future;
@@ -18,7 +18,7 @@ use crate::service::{BuildLayer, BuildService};
 pub(crate) trait Plugin {
   /// Observe background programming failures while the worker is live.
   /// The worker drops this monitor before calling uninstall.
-  fn supervise(&self) -> Pin<Box<dyn Future<Output = ()> + '_>> {
+  fn monitor(&self) -> Pin<Box<dyn Future<Output = ()> + '_>> {
     Box::pin(std::future::pending())
   }
 

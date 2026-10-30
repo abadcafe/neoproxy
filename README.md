@@ -541,7 +541,7 @@ HTTP/HTTPS 普通转发独占借出完整连接，由当前 worker 驱动。请�
 
 H3 池内部持有独立多线程 runtime，负责 QUIC/H3 建联、驱动和回收。按需创建至每个 IP:port 的连接上限后轮流打开 stream，普通转发和 CONNECT 共用轮转。创建中及仍有活跃 stream 的排空连接计入上限；GOAWAY 不接受新请求，已有 stream 排空。容量等待纳入请求超时，不计为节点健康失败。池空闲超时从最后一个活跃响应或隧道结束后起算；QUIC keepalive 不重置池空闲时间。`quic_connection_max_idle_timeout` 是独立的传输层空闲超时，仍可能终止活跃 stream。
 
-TLS 信任和客户端证书使用连接池级统一配置；连接参数仅在新建时生效，复用沿用原连接参数。关闭时 listener 先停止新连接和新请求，并在期限内等待普通请求（含上传、响应 body 和 trailers）完成。随后调用各插件的 `uninstall()`，由插件安排内部任务的关闭顺序；upstream 先通知并等待 CONNECT 隧道收尾，再通知和等待上传、UDP 桥接及活动 H1 驱动。入站 H3 驱动保留到插件清理完成；所有 worker 排空业务后才关闭共享连接池。任务收到 shutdown 通知后主动收尾，超时才 abort 并等待取消完成，最后退出 H3 runtime 和 worker runtime。日志 writer 的活动文件和轮转归档必须拥有互不重叠的路径命名空间。
+TLS 信任和客户端证书使用连接池级统一配置；连接参数仅在新建时生效，复用沿用原连接参数。关闭时 listener 先停止新连接和新请求，并在期限内等待普通请求（含上传、响应 body 和 trailers）完成。随后调用各插件的 `uninstall()`，由插件安排内部任务的关闭顺序；upstream 先通知并等待 CONNECT 隧道收尾，再通知和等待上传、UDP 桥接及活动 H1 驱动。入站 H3 驱动保留到插件清理完成；所有 worker 排空业务后才关闭共享连接池。任务收到 shutdown 通知后主动收尾，超时才 abort 并等待取消完成，最后退出 H3 runtime 和 worker runtime。 运行期间由各资源所有者轮询 `TaskTracker::monitor()`，及时收集任务结果并传播 panic；空集合时保持等待，新任务注册通过 waker 唤醒监控，无需定时轮询。日志 writer 的活动文件和轮转归档必须拥有互不重叠的路径命名空间。
 
 普通转发响应移除 `Alt-Svc`，中继同样不保留该响应头；响应 trailers 也会移除该字段。CONNECT 保持字节透传，不解析隧道内的 TLS 或 HTTP。
 

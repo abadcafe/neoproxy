@@ -92,13 +92,13 @@ impl UpstreamPlugin {
 }
 
 impl Plugin for UpstreamPlugin {
-  fn supervise(
+  fn monitor(
     &self,
   ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>> {
     Box::pin(async {
       tokio::select! {
-        () = self.sessions.supervise() => {},
-        () = self.operations.supervise() => {},
+        () = self.sessions.monitor() => {},
+        () = self.operations.monitor() => {},
       }
     })
   }

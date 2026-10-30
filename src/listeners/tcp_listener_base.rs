@@ -147,7 +147,7 @@ impl TcpListenerBase {
       loop {
         tokio::select! {
           _ = shutdown.notified() => break,
-          () = task_tracker.supervise() => unreachable!("task supervision never completes"),
+          () = task_tracker.monitor() => unreachable!("task monitoring never completes"),
           result = join_next(&listening_set), if !listening_set.borrow().is_empty() => {
             match result {
               Some(Ok(Ok(()))) => {},

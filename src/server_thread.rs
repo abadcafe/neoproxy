@@ -199,7 +199,7 @@ pub(crate) fn run_server_thread(
     } else {
       tokio::select! {
         _ = shutdown.notified() => {},
-        () = plugin_manager.supervise() => unreachable!("plugin supervision never completes"),
+        () = plugin_manager.monitor() => unreachable!("plugin monitoring never completes"),
         result = join_set.join_next(), if !join_set.is_empty() => {
           // Notify peers before cleanup/rendezvous. Waiting until this
           // thread returns would leave peers running while it waits for them.

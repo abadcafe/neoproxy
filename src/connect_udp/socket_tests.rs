@@ -19,22 +19,29 @@ async fn test_receive_preserves_boundaries_of_segmented_udp_transmission()
   let mut poller = peer.clone().create_io_poller();
   let content =
     [b"a".repeat(32), b"b".repeat(32), b"c".repeat(7)].concat();
-  let transmit = quinn::udp::Transmit {
-    destination: local,
-    contents: &content,
-    segment_size: Some(32),
-    ecn: None,
-    src_ip: None,
-  };
-  loop {
-    match peer.try_send(&transmit) {
-      Ok(()) => break,
-      Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-        std::future::poll_fn(|cx| poller.as_mut().poll_writable(cx))
-          .await
-          .unwrap()
+  // Respect the sender's batching capability. Linux can use GSO;
+  // macOS without fast-apple-datapath accepts one datagram per send.
+  // Both paths must deliver the same three original packet boundaries.
+  for contents in content.chunks(32 * peer.max_transmit_segments()) {
+    let transmit = quinn::udp::Transmit {
+      destination: local,
+      contents,
+      segment_size: Some(32),
+      ecn: None,
+      src_ip: None,
+    };
+    loop {
+      match peer.try_send(&transmit) {
+        Ok(()) => break,
+        Err(error)
+          if error.kind() == std::io::ErrorKind::WouldBlock =>
+        {
+          std::future::poll_fn(|cx| poller.as_mut().poll_writable(cx))
+            .await
+            .unwrap()
+        }
+        Err(error) => panic!("UDP transmission failed: {error}"),
       }
-      Err(error) => panic!("UDP transmission failed: {error}"),
     }
   }
   let mut received = Vec::new();

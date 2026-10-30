@@ -1,66 +1,67 @@
 use std::time::Duration;
 
-use super::idle::IdleTracker;
+use super::idle::IdleDeadline;
 
 #[tokio::test(start_paused = true)]
-async fn test_is_idle_at_exact_deadline_and_after_submillisecond_activity()
+async fn test_is_expired_at_exact_deadline_and_after_submillisecond_activity()
  {
-  let tracker = IdleTracker::new(Duration::from_nanos(100));
-  assert!(!tracker.is_idle());
+  let idle_deadline = IdleDeadline::new(Duration::from_nanos(100));
+  assert!(!idle_deadline.is_expired());
   tokio::time::advance(Duration::from_nanos(100)).await;
-  assert!(tracker.is_idle());
-  tracker.touch();
-  assert!(!tracker.is_idle());
+  assert!(idle_deadline.is_expired());
+  idle_deadline.record_activity();
+  assert!(!idle_deadline.is_expired());
   assert_eq!(
-    tracker.deadline(),
+    idle_deadline.deadline(),
     tokio::time::Instant::now() + Duration::from_nanos(100)
   );
 }
 
-// ============== IdleTracker Tests ==============
-
 #[test]
-fn test_idle_tracker_new_not_idle() {
-  let tracker = IdleTracker::new(Duration::from_secs(30));
+fn test_new_deadline_is_not_expired() {
+  let idle_deadline = IdleDeadline::new(Duration::from_secs(30));
   assert!(
-    !tracker.is_idle(),
-    "Newly created tracker should not be idle"
+    !idle_deadline.is_expired(),
+    "Newly created deadline should not be expired"
   );
 }
 
 #[test]
-fn test_idle_tracker_touch_updates_deadline() {
-  let tracker = IdleTracker::new(Duration::from_secs(30));
-  let d1 = tracker.deadline();
+fn test_record_activity_advances_deadline() {
+  let idle_deadline = IdleDeadline::new(Duration::from_secs(30));
+  let d1 = idle_deadline.deadline();
   std::thread::sleep(std::time::Duration::from_millis(50));
-  tracker.touch();
-  let d2 = tracker.deadline();
+  idle_deadline.record_activity();
+  let d2 = idle_deadline.deadline();
   assert!(
     d2 > d1,
-    "After touch, deadline should advance: {d2:?} <= {d1:?}"
+    "After activity, deadline should advance: {d2:?} <= {d1:?}"
   );
 }
 
 #[test]
-fn test_idle_tracker_stale_alarm_not_idle() {
-  let tracker = IdleTracker::new(Duration::from_millis(200));
+fn test_record_activity_invalidates_previous_deadline() {
+  let idle_deadline = IdleDeadline::new(Duration::from_millis(200));
 
-  assert!(!tracker.is_idle());
+  assert!(!idle_deadline.is_expired());
 
   std::thread::sleep(std::time::Duration::from_millis(150));
-  tracker.touch();
+  idle_deadline.record_activity();
 
-  assert!(!tracker.is_idle(), "Should not be idle right after touch");
+  assert!(
+    !idle_deadline.is_expired(),
+    "Deadline should not expire immediately after activity"
+  );
 
   std::thread::sleep(std::time::Duration::from_millis(50));
   assert!(
-    !tracker.is_idle(),
-    "50ms after touch should not be idle with 200ms timeout"
+    !idle_deadline.is_expired(),
+    "50ms after activity should not expire a 200ms deadline"
   );
 
   std::thread::sleep(std::time::Duration::from_millis(200));
   assert!(
-    tracker.is_idle(),
-    "200ms after touch should be idle with 200ms timeout"
+    idle_deadline.is_expired(),
+    "200ms after activity should expire a 200ms deadline"
   );
 }

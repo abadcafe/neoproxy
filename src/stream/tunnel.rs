@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use super::idle::IdleTracker;
+use super::idle::IdleDeadline;
 use super::transfer::{
   IoSide, TransferEnd, TransferProgress, WrittenCounter,
 };
@@ -22,17 +22,17 @@ use crate::shutdown::ShutdownHandle;
 /// flush/shutdown after both read directions have reached EOF.
 struct ActivityStream<S> {
   stream: S,
-  tracker: IdleTracker,
+  idle_deadline: IdleDeadline,
   written: WrittenCounter,
 }
 
 impl<S> ActivityStream<S> {
   fn new(
     stream: S,
-    tracker: IdleTracker,
+    idle_deadline: IdleDeadline,
     written: WrittenCounter,
   ) -> Self {
-    Self { stream, tracker, written }
+    Self { stream, idle_deadline, written }
   }
 }
 
@@ -47,7 +47,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for ActivityStream<S> {
     match Pin::new(&mut this.stream).poll_read(cx, buf) {
       Poll::Ready(Ok(())) => {
         if buf.filled().len() > before {
-          this.tracker.touch();
+          this.idle_deadline.record_activity();
         }
         Poll::Ready(Ok(()))
       }
@@ -67,7 +67,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for ActivityStream<S> {
       Poll::Ready(Ok(n)) => {
         if n > 0 {
           this.written.add(n);
-          this.tracker.touch();
+          this.idle_deadline.record_activity();
         }
         Poll::Ready(Ok(n))
       }
@@ -201,11 +201,11 @@ where
   if shutdown_handle.is_shutdown() {
     return TransferEnd::Shutdown;
   }
-  let tracker = IdleTracker::new(idle_timeout);
+  let idle_deadline = IdleDeadline::new(idle_timeout);
   let mut client_pinned = TaggedIo::new(
     ActivityStream::new(
       client,
-      tracker.clone(),
+      idle_deadline.clone(),
       progress.client_written(),
     ),
     IoSide::Client,
@@ -213,7 +213,7 @@ where
   let mut target_pinned = TaggedIo::new(
     ActivityStream::new(
       target,
-      tracker.clone(),
+      idle_deadline.clone(),
       progress.upstream_written(),
     ),
     IoSide::Upstream,
@@ -237,7 +237,7 @@ where
         TransferEnd::Failed { side, error }
       }
     },
-    _ = async { loop { tokio::time::sleep_until(tracker.deadline()).await; if tracker.is_idle() { break; } } } => TransferEnd::IdleTimeout,
+    _ = async { loop { tokio::time::sleep_until(idle_deadline.deadline()).await; if idle_deadline.is_expired() { break; } } } => TransferEnd::IdleTimeout,
   }
 }
 

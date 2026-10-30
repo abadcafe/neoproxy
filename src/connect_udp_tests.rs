@@ -46,7 +46,9 @@ async fn test_capsule_skips_unknown_types_contexts_and_oversized_capsules()
     let mut header = vec![0];
     capsule::varint(70000, &mut header);
     tx.write_all(&header).await.unwrap();
-    tx.write_all(&vec![0; 70000]).await.unwrap();
+    // Oversized unknown contexts are ignored without buffering.
+    tx.write_all(&[1]).await.unwrap();
+    tx.write_all(&vec![0; 69999]).await.unwrap();
     tx.write_all(&capsule::encode(b"after")).await.unwrap();
   });
   let mut reader = capsule::Reader::new(rx);
@@ -55,6 +57,29 @@ async fn test_capsule_skips_unknown_types_contexts_and_oversized_capsules()
     b"after".as_slice()
   );
   task.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_capsule_rejects_oversized_udp_payload_before_buffering() {
+  let mut header = vec![0];
+  capsule::varint(65529, &mut header);
+  header.push(0);
+  let error = capsule::Reader::new(header.as_slice())
+    .receive()
+    .await
+    .unwrap_err();
+  assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+
+  let payload = vec![42; 65527];
+  let wire = capsule::encode(&payload);
+  assert_eq!(
+    capsule::Reader::new(wire.as_slice())
+      .receive()
+      .await
+      .unwrap()
+      .unwrap(),
+    payload
+  );
 }
 
 #[tokio::test]
@@ -85,5 +110,19 @@ fn test_request_requires_valid_upgrade_and_default_template() {
   assert!(request::recognize(&request).is_err());
   request.method = http::Method::GET;
   request.headers.remove("capsule-protocol");
-  assert!(request::recognize(&request).is_err());
+  // connect-udp identifies Capsule Protocol without this advisory
+  // field.
+  assert!(request::recognize(&request).unwrap().is_some());
+  request
+    .headers
+    .insert("capsule-protocol", "?1;future=token".parse().unwrap());
+  assert!(request::recognize(&request).unwrap().is_some());
+  for name in ["content-length", "content-type", "transfer-encoding"] {
+    let mut invalid = request.clone();
+    invalid.headers.insert(
+      http::header::HeaderName::from_static(name),
+      "0".parse().unwrap(),
+    );
+    assert!(request::recognize(&invalid).is_err(), "{name}");
+  }
 }

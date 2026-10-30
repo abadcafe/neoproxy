@@ -24,8 +24,16 @@ where
   let shutdown = tracker.shutdown_handle().child();
   let task = handler(bridge, shutdown.clone());
   let (finished, done) = tokio::sync::oneshot::channel();
+  let cancelled = shutdown.clone();
   tracker.register(async move {
-    task.await;
+    // Own cancellation around the entire handler, including writes and
+    // shutdown inside a select branch. A blocked peer must never keep
+    // the bridge, UDP socket or H3 registration alive after its owner.
+    tokio::select! {
+      biased;
+      _ = cancelled.notified() => {},
+      () = task => {},
+    }
     let _ = finished.send(());
   });
   Box::new(BridgeIo { io, shutdown, done, finished: false })

@@ -112,10 +112,6 @@ where
       .await
     })
   }
-
-  fn close(&self) {
-    self.client.close();
-  }
 }
 
 async fn negotiate_tunnel<I>(
@@ -184,13 +180,6 @@ where
   // RFC 9110 §9.3.6: every 2xx establishes a CONNECT tunnel.
   if if udp.is_some() {
     resp.status() != http::StatusCode::SWITCHING_PROTOCOLS
-      || !resp.headers().get("upgrade").is_some_and(|v| {
-        v.as_bytes().eq_ignore_ascii_case(b"connect-udp")
-      })
-      || resp
-        .headers()
-        .get("capsule-protocol")
-        .is_none_or(|v| v != "?1")
   } else {
     !resp.status().is_success()
   } {
@@ -200,6 +189,15 @@ where
         resp.headers_mut(),
       ),
     });
+  }
+  if udp.is_some() {
+    crate::connect_udp::negotiation::validate_http1_response(
+      resp.status(),
+      resp.headers(),
+    )
+    .map_err(|error| {
+      UpstreamError::InvalidResponse(error.to_string())
+    })?;
   }
 
   // Hyper 1.6.0 incorrectly classifies 204 before checking CONNECT,

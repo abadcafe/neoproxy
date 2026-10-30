@@ -1,6 +1,37 @@
 use crate::process::Workers;
 use crate::shutdown::ShutdownHandle;
 
+#[tokio::test]
+async fn test_shutdown_signal_subscribes_before_future_is_polled() {
+  // Install a guard first so this regression cannot terminate the test
+  // process even when the implementation subscribes too late.
+  let mut guard = tokio::signal::unix::signal(
+    tokio::signal::unix::SignalKind::terminate(),
+  )
+  .unwrap();
+  let pending =
+    crate::process::shutdown_signal(&tokio::runtime::Handle::current())
+      .unwrap();
+  assert!(
+    tokio::process::Command::new("kill")
+      .arg("-TERM")
+      .arg(std::process::id().to_string())
+      .status()
+      .await
+      .unwrap()
+      .success()
+  );
+  tokio::time::timeout(std::time::Duration::from_secs(1), guard.recv())
+    .await
+    .unwrap()
+    .unwrap();
+  tokio::time::timeout(std::time::Duration::from_secs(1), pending)
+    .await
+    .expect(
+      "shutdown subscription missed the signal before its first poll",
+    );
+}
+
 fn runtime() -> tokio::runtime::Runtime {
   tokio::runtime::Builder::new_current_thread()
     .enable_all()
@@ -137,13 +168,29 @@ fn test_run_tracked_task_panic_stops_other_workers() {
       .spawn(scope, "failed", || {
         runtime().block_on(tokio::task::LocalSet::new().run_until(
           async {
-            let tracker = crate::task_tracker::TaskTracker::new();
-            tracker.register(async {
-              // Deliberately crash a connection task: the worker must
-              // unwind, stop its peers and report process failure.
-              panic!("connection task programming error")
-            });
-            tracker.wait_shutdown().await;
+            let reservation =
+              std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = reservation.local_addr().unwrap();
+            drop(reservation);
+            let listener =
+              crate::listeners::tcp_listener_base::TcpListenerBase::new(
+              );
+            let running = listener
+              .start(
+                &[address],
+                "panic",
+                Default::default(),
+                |_| async {
+                  // No new connection or shutdown may be needed to
+                  // observe a handler failure and
+                  // stop the other workers.
+                  panic!("connection task programming error")
+                },
+              )
+              .unwrap();
+            let _client =
+              tokio::net::TcpStream::connect(address).await.unwrap();
+            running.await.unwrap();
           },
         ));
         Ok(())

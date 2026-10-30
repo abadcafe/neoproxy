@@ -181,7 +181,6 @@ async fn test_http3_client_reconnects_after_goaway_without_quic_close()
       }
       let connections = server.await.unwrap();
       drop(connections);
-      client.close();
       endpoint.close(0_u32.into(), b"test complete");
       tracker.abort_all();
       tracker.drain().await;

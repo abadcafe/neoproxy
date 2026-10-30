@@ -147,11 +147,15 @@ impl TcpListenerBase {
       loop {
         tokio::select! {
           _ = shutdown.notified() => break,
+          () = task_tracker.supervise() => unreachable!("task supervision never completes"),
           result = join_next(&listening_set), if !listening_set.borrow().is_empty() => {
             match result {
               Some(Ok(Ok(()))) => {},
               Some(Ok(Err(error))) => { failure = Some(error); break; },
-              Some(Err(error)) => { failure = Some(error.into()); break; },
+              Some(Err(error)) => {
+                if error.is_panic() { std::panic::resume_unwind(error.into_panic()); }
+                failure = Some(error.into()); break;
+              },
               None => break,
             }
           }
@@ -165,6 +169,9 @@ impl TcpListenerBase {
             failure.get_or_insert(error);
           }
           Err(error) => {
+            if error.is_panic() {
+              std::panic::resume_unwind(error.into_panic());
+            }
             failure.get_or_insert(error.into());
           }
         }

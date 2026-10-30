@@ -86,6 +86,18 @@ impl tower::Service<Request> for UpstreamService {
   }
 
   fn call(&mut self, mut req: Request) -> Self::Future {
+    // Extended CONNECT changes the meaning of :authority and :path.
+    // Never reinterpret an unsupported extension as a raw TCP tunnel.
+    if req.extensions().get::<h3::ext::Protocol>().is_some_and(
+      |protocol| *protocol != h3::ext::Protocol::CONNECT_UDP,
+    ) {
+      return Box::pin(async {
+        Ok(build_error_response(
+          http::StatusCode::NOT_IMPLEMENTED,
+          "Unsupported Extended CONNECT protocol",
+        ))
+      });
+    }
     if let Some(response) = crate::max_forwards::apply(&mut req) {
       return Box::pin(async { Ok(response) });
     }

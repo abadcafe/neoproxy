@@ -38,10 +38,7 @@ pub(crate) fn recognize(
         && token(&parts.headers, "connection", "upgrade")),
     "invalid CONNECT-UDP negotiation"
   );
-  anyhow::ensure!(
-    parts.headers.get("capsule-protocol").is_some_and(|v| v == "?1"),
-    "Capsule-Protocol must be ?1"
-  );
+  super::negotiation::validate_headers(&parts.headers)?;
   target(parts.uri.path())?;
   Ok(Some(Udp {
     authority: parts

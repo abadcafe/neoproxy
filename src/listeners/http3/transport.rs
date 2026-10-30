@@ -56,6 +56,10 @@ impl Transport {
     self.drivers.shutdown_handle()
   }
 
+  pub(super) async fn supervise(&self) {
+    self.drivers.supervise().await;
+  }
+
   pub(super) async fn drain(&self, deadline: tokio::time::Instant) {
     self.drivers.shutdown();
     // Plugin cleanup has finished. Use the remainder of its shared

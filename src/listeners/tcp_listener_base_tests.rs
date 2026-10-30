@@ -14,6 +14,33 @@ fn available_address() -> SocketAddr {
 }
 
 #[tokio::test]
+async fn test_start_propagates_handler_panic_without_another_connection_or_shutdown()
+ {
+  tokio::task::LocalSet::new()
+    .run_until(async {
+      let base = TcpListenerBase::new();
+      let address = available_address();
+      let running = tokio::task::spawn_local(
+        base
+          .start(&[address], "panic", Default::default(), |_| async {
+            panic!("handler programming error")
+          })
+          .unwrap(),
+      );
+      let _client =
+        tokio::net::TcpStream::connect(address).await.unwrap();
+      let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        running,
+      )
+      .await
+      .expect("handler panic was left unobserved");
+      assert!(result.unwrap_err().is_panic());
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn test_start_accepts_multiple_addresses_with_connection_metadata()
  {
   tokio::task::LocalSet::new()

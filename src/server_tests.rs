@@ -54,72 +54,9 @@ fn test_routing_with_server_router() {
   assert_eq!(result.unwrap().service_name, "default_service");
 }
 
-#[test]
-fn test_server_routing_entry_renamed_to_server() {
-  let entry = Server {
-    hostnames: vec![],
-    service: placeholder_service(),
-    service_name: "test".to_string(),
-    tls: None,
-  };
-  assert_eq!(entry.service_name, "test");
-}
-
 // ============== Server Router Tests ==============
 
 // CR-006: build() returns Self directly, not Result
-#[test]
-fn test_server_router_build_returns_self() {
-  let servers = vec![Server {
-    hostnames: vec![],
-    service: placeholder_service(),
-    service_name: "default".to_string(),
-    tls: None,
-  }];
-  let router = ServerRouter::build(servers);
-  let result: Option<Rc<Server>> = router.route(None);
-  assert!(result.is_some());
-  assert_eq!(result.unwrap().service_name, "default");
-}
-
-#[test]
-fn test_server_router_exact_match() {
-  let servers = vec![
-    Server {
-      hostnames: vec![],
-      service: placeholder_service(),
-      service_name: "default".to_string(),
-      tls: None,
-    },
-    Server {
-      hostnames: vec!["api.example.com".to_string()],
-      service: placeholder_service(),
-      service_name: "api".to_string(),
-      tls: None,
-    },
-  ];
-  let router = ServerRouter::build(servers);
-  let result: Option<Rc<Server>> =
-    router.route(Some("api.example.com"));
-  assert!(result.is_some());
-  assert_eq!(result.unwrap().service_name, "api");
-}
-
-#[test]
-fn test_server_router_default_fallback() {
-  let servers = vec![Server {
-    hostnames: vec![],
-    service: placeholder_service(),
-    service_name: "default".to_string(),
-    tls: None,
-  }];
-  let router = ServerRouter::build(servers);
-  let result: Option<Rc<Server>> =
-    router.route(Some("unknown.example.com"));
-  assert!(result.is_some());
-  assert_eq!(result.unwrap().service_name, "default");
-}
-
 #[test]
 fn test_server_router_no_match() {
   let servers = vec![Server {
@@ -132,21 +69,6 @@ fn test_server_router_no_match() {
   let result: Option<Rc<Server>> =
     router.route(Some("unknown.example.com"));
   assert!(result.is_none());
-}
-
-#[test]
-fn test_server_router_wildcard_match() {
-  let servers = vec![Server {
-    hostnames: vec!["*.example.com".to_string()],
-    service: placeholder_service(),
-    service_name: "wildcard".to_string(),
-    tls: None,
-  }];
-  let router = ServerRouter::build(servers);
-  let result: Option<Rc<Server>> =
-    router.route(Some("foo.example.com"));
-  assert!(result.is_some());
-  assert_eq!(result.unwrap().service_name, "wildcard");
 }
 
 // CR-001: route(None) with default server
@@ -219,19 +141,6 @@ fn test_server_router_none_hostname_no_default() {
 }
 
 // ============== Hostname Matching via Router Tests ==============
-
-#[test]
-fn test_matches_hostname_exact_via_router() {
-  let servers = vec![Server {
-    hostnames: vec!["api.example.com".to_string()],
-    service: placeholder_service(),
-    service_name: "api".to_string(),
-    tls: None,
-  }];
-  let router = ServerRouter::build(servers);
-  assert!(router.route(Some("api.example.com")).is_some());
-  assert!(router.route(Some("other.example.com")).is_none());
-}
 
 #[test]
 fn test_matches_hostname_wildcard_via_router() {

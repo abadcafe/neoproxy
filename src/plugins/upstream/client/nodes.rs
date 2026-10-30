@@ -4,7 +4,7 @@
 //! Nodes::{update,select,failed,succeeded}, NodeKey, NodePolicy
 //! data entities: Nodes, NodeKey, NodePolicy, Node
 //! tests: nodes_tests.rs
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -15,7 +15,7 @@ pub(super) struct NodeKey {
   pub(super) owner: usize,
   pub(super) address: SocketAddr,
 }
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct NodePolicy {
   pub(super) key: NodeKey,
   pub(super) weight: usize,
@@ -37,8 +37,22 @@ pub(super) struct Nodes {
 }
 impl Nodes {
   pub(super) fn update(&mut self, policies: Vec<NodePolicy>) {
+    // DNS usually returns the same snapshot. Keep the hot path linear
+    // without rebuilding keys or disturbing weight/health history.
+    if policies.len() == self.order.len()
+      && policies.iter().zip(&self.order).all(|(policy, key)| {
+        &policy.key == key
+          && self
+            .peers
+            .get(key)
+            .is_some_and(|node| node.policy == *policy)
+      })
+    {
+      return;
+    }
     self.order = policies.iter().map(|p| p.key.clone()).collect();
-    self.peers.retain(|key, _| self.order.contains(key));
+    let retained: HashSet<_> = self.order.iter().collect();
+    self.peers.retain(|key, _| retained.contains(key));
     for policy in policies {
       self
         .peers

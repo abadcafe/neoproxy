@@ -93,3 +93,11 @@ fn test_new_rejects_invalid_api_url() {
     assert!(Api::new(url, std::time::Duration::from_secs(5)).is_err());
   }
 }
+
+#[test]
+fn test_new_rejects_unrepresentable_timeout() {
+  let _ = rustls::crypto::ring::default_provider().install_default();
+  assert!(
+    Api::new("http://api/policy", std::time::Duration::MAX).is_err()
+  );
+}

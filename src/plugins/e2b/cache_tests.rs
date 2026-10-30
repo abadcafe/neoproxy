@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -47,6 +48,7 @@ fn make_cache(source: Arc<SourceStub>) -> Arc<Cache> {
     source,
     Arc::new(Policy::parse(serde_json::json!({})).unwrap()),
     Duration::from_secs(60),
+    NonZeroUsize::new(1024).unwrap(),
   ))
 }
 
@@ -64,7 +66,7 @@ async fn test_get_concurrent_same_sandbox_fetches_once() {
   }
   source.gate.add_permits(1);
   for task in tasks {
-    assert_eq!(task.await.unwrap().version, Some(2));
+    assert_eq!(task.await.unwrap().unwrap().version, Some(2));
   }
   assert_eq!(source.calls.load(Ordering::SeqCst), 1);
 }
@@ -76,17 +78,17 @@ async fn test_get_expiry_revalidates_and_failure_caches_default() {
     gate: Semaphore::new(20),
   });
   let cache = make_cache(source.clone());
-  assert_eq!(cache.get("sandbox").await.version, Some(2));
+  assert_eq!(cache.get("sandbox").await.unwrap().version, Some(2));
   tokio::time::advance(Duration::from_secs(11)).await;
-  assert_eq!(cache.get("sandbox").await.version, Some(2));
+  assert_eq!(cache.get("sandbox").await.unwrap().version, Some(2));
   assert_eq!(source.calls.load(Ordering::SeqCst), 2);
-  let fallback = cache.get("fail").await;
+  let fallback = cache.get("fail").await.unwrap();
   assert_eq!(fallback.version, None);
   assert!(fallback.policy.allows_ip("127.0.0.1".parse().unwrap()));
-  let _ = cache.get("fail").await;
+  let _ = cache.get("fail").await.unwrap();
   assert_eq!(source.calls.load(Ordering::SeqCst), 3);
   tokio::time::advance(Duration::from_secs(61)).await;
-  let _ = cache.get("fail").await;
+  let _ = cache.get("fail").await.unwrap();
   assert_eq!(source.calls.load(Ordering::SeqCst), 4);
 }
 
@@ -126,16 +128,20 @@ async fn test_get_version_rollback_and_equal_version_preserve_policy() {
     ])),
     versions: std::sync::Mutex::new(Vec::new()),
   });
-  let cache =
-    Cache::new(source.clone(), allow, Duration::from_secs(60));
+  let cache = Cache::new(
+    source.clone(),
+    allow,
+    Duration::from_secs(60),
+    NonZeroUsize::new(1024).unwrap(),
+  );
   for elapsed in [0, 11, 11, 61] {
     tokio::time::advance(Duration::from_secs(elapsed)).await;
-    let snapshot = cache.get("sandbox").await;
+    let snapshot = cache.get("sandbox").await.unwrap();
     assert_eq!(snapshot.version, Some(3));
     assert!(!snapshot.policy.allows_ip("1.1.1.1".parse().unwrap()));
   }
   tokio::time::advance(Duration::from_secs(61)).await;
-  let snapshot = cache.get("sandbox").await;
+  let snapshot = cache.get("sandbox").await.unwrap();
   assert_eq!(snapshot.version, Some(4));
   assert!(snapshot.policy.allows_ip("1.1.1.1".parse().unwrap()));
   assert_eq!(
@@ -160,6 +166,67 @@ async fn test_get_cancelled_fetch_releases_sandbox_mutex() {
   let result = pending.await;
   assert!(matches!(result, Err(error) if error.is_cancelled()));
   source.gate.add_permits(1);
-  assert_eq!(cache.get("sandbox").await.version, Some(2));
+  assert_eq!(cache.get("sandbox").await.unwrap().version, Some(2));
+  assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_get_capacity_preserves_remote_policy_and_version_on_refresh_failure()
+ {
+  let deny = Arc::new(
+    Policy::parse(serde_json::json!({"denyOut":["0.0.0.0/0"]}))
+      .unwrap(),
+  );
+  let source = Arc::new(SequenceSource {
+    steps: std::sync::Mutex::new(std::collections::VecDeque::from([
+      Ok(Update::Modified {
+        version: 2,
+        ttl: Duration::from_secs(10),
+        policy: deny.clone(),
+      }),
+      Ok(Update::Modified {
+        version: 2,
+        ttl: Duration::from_secs(10),
+        policy: deny,
+      }),
+      Err(anyhow::anyhow!("offline")),
+    ])),
+    versions: std::sync::Mutex::new(Vec::new()),
+  });
+  let cache = Cache::new(
+    source.clone(),
+    Arc::new(Policy::parse(serde_json::json!({})).unwrap()),
+    Duration::from_secs(60),
+    NonZeroUsize::new(2).unwrap(),
+  );
+  assert_eq!(cache.get("a").await.unwrap().version, Some(2));
+  assert_eq!(cache.get("b").await.unwrap().version, Some(2));
+  assert!(cache.get("c").await.is_err());
+  tokio::time::advance(Duration::from_secs(11)).await;
+  let snapshot = cache.get("a").await.unwrap();
+  assert_eq!(snapshot.version, Some(2));
+  assert!(!snapshot.policy.allows_ip("1.1.1.1".parse().unwrap()));
+  assert_eq!(
+    *source.versions.lock().unwrap(),
+    vec![None, None, Some(2)]
+  );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_get_capacity_reclaims_only_expired_default_policy() {
+  let source = Arc::new(SourceStub {
+    calls: AtomicUsize::new(0),
+    gate: Semaphore::new(3),
+  });
+  let cache = Cache::new(
+    source.clone(),
+    Arc::new(Policy::parse(serde_json::json!({})).unwrap()),
+    Duration::from_secs(60),
+    NonZeroUsize::new(1).unwrap(),
+  );
+  assert!(cache.get("fail").await.unwrap().version.is_none());
+  assert!(cache.get("new").await.is_err());
+  tokio::time::advance(Duration::from_secs(61)).await;
+  assert_eq!(cache.get("new").await.unwrap().version, Some(2));
   assert_eq!(source.calls.load(Ordering::SeqCst), 2);
 }

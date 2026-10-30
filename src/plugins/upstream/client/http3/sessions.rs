@@ -3,12 +3,12 @@
 //! rotation public operations: Store::{new,bucket,close},
 //! Bucket::{reserve,insert,select,retire}, Session data entities:
 //! Store, Bucket, Session tests: H3 pool process contracts
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::lease::{Session, SessionLease};
+use crate::retained_cache::RetainedCache;
 pub(super) struct Bucket {
   sessions: Mutex<Vec<Arc<Session>>>,
   capacity: Arc<tokio::sync::Semaphore>,
@@ -87,7 +87,7 @@ impl Bucket {
 pub(in crate::plugins::upstream::client) struct Store {
   pub(in crate::plugins::upstream::client) limits:
     crate::header_limits::Limits,
-  buckets: Mutex<HashMap<std::net::SocketAddr, Arc<Bucket>>>,
+  buckets: Mutex<RetainedCache<std::net::SocketAddr, Arc<Bucket>>>,
   maximum: usize,
   timeout: Duration,
   pub(super) tasks: Arc<crate::task_tracker::TaskTracker>,
@@ -101,7 +101,7 @@ impl Store {
   ) -> Arc<Self> {
     Arc::new(Self {
       limits,
-      buckets: Mutex::new(HashMap::new()),
+      buckets: Mutex::new(RetainedCache::new(128)),
       maximum,
       timeout,
       tasks,
@@ -117,32 +117,40 @@ impl Store {
       .buckets
       .lock()
       .expect("H3 registry poisoned")
-      .entry(address)
-      .or_insert_with(|| {
-        let bucket = Arc::new(Bucket {
-          sessions: Mutex::new(Vec::new()),
-          capacity: Arc::new(tokio::sync::Semaphore::new(self.maximum)),
-          changed: tokio::sync::Notify::new(),
-          sequence: AtomicUsize::new(0),
-          timeout: self.timeout,
-        });
-        let weak = Arc::downgrade(&bucket);
-        let interval = self.timeout.min(Duration::from_millis(100));
-        let shutdown = self.tasks.shutdown_handle();
-        self.tasks.register_on(runtime, async move {
-          loop {
-            tokio::select! {
-              _ = shutdown.notified() => return,
-              _ = tokio::time::sleep(interval) => {},
+      .get_or_insert_with(
+        address,
+        || {
+          let bucket = Arc::new(Bucket {
+            sessions: Mutex::new(Vec::new()),
+            capacity: Arc::new(tokio::sync::Semaphore::new(
+              self.maximum,
+            )),
+            changed: tokio::sync::Notify::new(),
+            sequence: AtomicUsize::new(0),
+            timeout: self.timeout,
+          });
+          let weak = Arc::downgrade(&bucket);
+          let interval = self.timeout.min(Duration::from_millis(100));
+          let shutdown = self.tasks.shutdown_handle();
+          self.tasks.register_on(runtime, async move {
+            loop {
+              tokio::select! {
+                _ = shutdown.notified() => return,
+                _ = tokio::time::sleep(interval) => {},
+              }
+              let Some(bucket) = weak.upgrade() else {
+                return;
+              };
+              bucket.retire();
             }
-            let Some(bucket) = weak.upgrade() else {
-              return;
-            };
-            bucket.retire();
-          }
-        });
-        bucket
-      })
+          });
+          bucket
+        },
+        |bucket| {
+          Arc::strong_count(bucket) == 1
+            && bucket.capacity.available_permits() == self.maximum
+        },
+      )
       .clone()
   }
 

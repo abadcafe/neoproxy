@@ -100,6 +100,18 @@ async fn test_direct_connect_no_authority_returns_400() {
 }
 
 #[tokio::test]
+async fn test_call_rejects_unsupported_extended_connect_before_dialing()
+{
+  let mut service = make_direct_service();
+  let mut request =
+    make_request(http::Method::CONNECT, "https://127.0.0.1:1/tunnel");
+  *request.version_mut() = http::Version::HTTP_3;
+  request.extensions_mut().insert(h3::ext::Protocol::WEB_TRANSPORT);
+  let response = service.call(request).await.unwrap();
+  assert_eq!(response.status(), http::StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test]
 async fn test_direct_connect_no_port_returns_400() {
   let mut svc = make_direct_service();
   let req = make_request(http::Method::CONNECT, "example.com");

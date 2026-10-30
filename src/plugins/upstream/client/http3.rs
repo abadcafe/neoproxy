@@ -408,15 +408,14 @@ impl ClientProtocol for Http3Client {
         });
       }
 
-      if udp.is_some()
-        && resp
-          .headers()
-          .get("capsule-protocol")
-          .is_none_or(|v| v != "?1")
-      {
-        return Err(UpstreamError::InvalidResponse(
-          "missing Capsule-Protocol negotiation".into(),
-        ));
+      if udp.is_some() {
+        crate::connect_udp::negotiation::validate_http3_response(
+          resp.status(),
+          resp.headers(),
+        )
+        .map_err(|error| {
+          UpstreamError::InvalidResponse(error.to_string())
+        })?;
       }
       let id = stream.id().into_inner();
       use h3::ConnectionState;
@@ -442,10 +441,6 @@ impl ClientProtocol for Http3Client {
         tunnel_idle_timeout,
       })
     })
-  }
-
-  fn close(&self) {
-    self.session.close();
   }
 }
 

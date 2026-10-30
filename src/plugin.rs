@@ -3,8 +3,8 @@
 //! module: plugin
 //! responsibilities: define the interface that all plugins must
 //! implement public operations: Plugin::service_builder,
-//! Plugin::layer_builder, Plugin::uninstall data entities: Plugin
-//! (trait) tests: plugin_tests.rs
+//! Plugin::layer_builder, Plugin::supervise, Plugin::uninstall data
+//! entities: Plugin (trait) tests: plugin_tests.rs
 
 use std::future::Future;
 use std::pin::Pin;
@@ -16,6 +16,12 @@ use crate::service::{BuildLayer, BuildService};
 /// Plugins provide service builders for handling requests.
 /// Each plugin can provide multiple services by name.
 pub(crate) trait Plugin {
+  /// Observe background programming failures while the worker is live.
+  /// The worker drops this monitor before calling uninstall.
+  fn supervise(&self) -> Pin<Box<dyn Future<Output = ()> + '_>> {
+    Box::pin(std::future::pending())
+  }
+
   /// Get a service builder by name.
   ///
   /// Returns `None` if the plugin doesn't provide a service with that

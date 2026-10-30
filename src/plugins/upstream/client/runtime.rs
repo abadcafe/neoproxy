@@ -1,7 +1,7 @@
 //! module: runtime
 //! responsibility: dispatch upstream exchanges through resolved healthy
 //! peer pools public operations:
-//! Upstream::{new,forward,connect_for_tunnel,close} data entities:
+//! Upstream::{new,forward,connect_for_tunnel} data entities:
 //! Upstream, Group tests: client_tests.rs, test_upstream_nodes.py
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -19,6 +19,7 @@ use crate::plugins::upstream::error::UpstreamError;
 use crate::plugins::upstream::target_parser::{
   ConnectTarget, ForwardTarget,
 };
+use crate::retained_cache::RetainedCache;
 use crate::task_tracker::TaskTracker;
 
 #[derive(Default)]
@@ -53,7 +54,7 @@ pub(crate) struct Upstream {
   name: String,
   config: config::Upstream,
   tracker: std::sync::Arc<TaskTracker>,
-  groups: RefCell<HashMap<String, Rc<RefCell<Group>>>>,
+  groups: RefCell<RetainedCache<String, Rc<RefCell<Group>>>>,
 }
 impl Upstream {
   pub(super) fn new(
@@ -67,7 +68,7 @@ impl Upstream {
       name,
       config,
       tracker,
-      groups: RefCell::new(HashMap::new()),
+      groups: RefCell::new(RetainedCache::new(1024)),
     }
   }
 
@@ -173,22 +174,25 @@ impl Upstream {
     let group = self
       .groups
       .borrow_mut()
-      .entry(key.clone())
-      .or_insert_with(|| {
-        Rc::new(RefCell::new(Group {
-          nodes: self
-            .connection_pools
-            .nodes((self.name.clone(), key.clone())),
-          clients: HashMap::new(),
-          addresses: addresses.clone(),
-        }))
-      })
+      .get_or_insert_with(
+        key.clone(),
+        || {
+          Rc::new(RefCell::new(Group {
+            nodes: self
+              .connection_pools
+              .nodes((self.name.clone(), key.clone())),
+            clients: HashMap::new(),
+            addresses: addresses.clone(),
+          }))
+        },
+        |group| Rc::strong_count(group) == 1,
+      )
       .clone();
     {
       let mut group = group.borrow_mut();
-      group.clients.retain(|key, _| {
-        policies.iter().any(|policy| &policy.key == key)
-      });
+      let retained: std::collections::HashSet<_> =
+        policies.iter().map(|policy| &policy.key).collect();
+      group.clients.retain(|key, _| retained.contains(key));
       for policy in &policies {
         if !group.clients.contains_key(&policy.key) {
           let client = transport_factory::build(
@@ -482,14 +486,6 @@ impl Upstream {
           }
           last_error = Some(error);
         }
-      }
-    }
-  }
-
-  pub(super) fn close(&self) {
-    for group in self.groups.borrow().values() {
-      for client in group.borrow().clients.values() {
-        client.client.close();
       }
     }
   }

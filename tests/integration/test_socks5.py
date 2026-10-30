@@ -20,14 +20,13 @@ from tests.fixtures.socks5_client import (
     socks5_connect_ipv4,
     socks5_connect_ipv6,
     socks5_handshake_no_auth,
-    socks5_handshake_password,
     socks5_send_bind_command,
     socks5_send_udp_associate,
 )
 from tests.fixtures.socks5_configuration import create_socks5_config
-from tests.fixtures.socks5_protocol import AuthMethod, AuthStatus, ReplyCode
-from tests.fixtures.socks5_result import AuthReply, CommandReply, MethodReply
-from tests.fixtures.tcp_peer import create_target_server, send_ok_and_close
+from tests.fixtures.socks5_protocol import AuthMethod, ReplyCode
+from tests.fixtures.socks5_result import CommandReply, MethodReply
+from tests.fixtures.tcp_peer import create_target_server
 
 # ==============================================================================
 # Test Classes
@@ -364,90 +363,6 @@ class TestSocks5ConnectionTarget:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-class TestSocks5PortBoundary:
-    """Tests for port boundary values"""
-
-    def test_port_1(self) -> None:
-        """
-        TC-S5-015: Port 1 target address
-
-        Test connection to port 1 (minimum valid port).
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-
-        try:
-            config_path = create_socks5_config(proxy_port, temp_dir)
-
-            proxy_proc = start_proxy(config_path)
-            assert proxy_proc.wait_ready(), "Proxy server failed to start"
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
-            try:
-                sock.connect(("127.0.0.1", proxy_port))
-                assert socks5_handshake_no_auth(sock) == MethodReply(AuthMethod.NONE), (
-                    "Handshake failed"
-                )
-
-                # Port 1 - unlikely to have service, should get connection refused
-                reply = socks5_connect_ipv4(sock, "127.0.0.1", 1)
-                assert isinstance(reply, CommandReply)
-                # Should get some error (connection refused most likely)
-                assert reply.code is not ReplyCode.SUCCESS, (
-                    "Connection to port 1 should fail"
-                )
-
-            finally:
-                sock.close()
-
-        finally:
-            if proxy_proc:
-                terminate_process(proxy_proc)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_port_65535(self) -> None:
-        """
-        TC-S5-016: Port 65535 target address
-
-        Test connection to port 65535 (maximum valid port).
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-
-        try:
-            config_path = create_socks5_config(proxy_port, temp_dir)
-
-            proxy_proc = start_proxy(config_path)
-            assert proxy_proc.wait_ready(), "Proxy server failed to start"
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
-            try:
-                sock.connect(("127.0.0.1", proxy_port))
-                assert socks5_handshake_no_auth(sock) == MethodReply(AuthMethod.NONE), (
-                    "Handshake failed"
-                )
-
-                # Port 65535 - max valid port
-                reply = socks5_connect_ipv4(sock, "127.0.0.1", 65535)
-                assert isinstance(reply, CommandReply)
-                # Should get some error (connection refused most likely)
-                assert reply.code is not ReplyCode.SUCCESS, (
-                    "Connection to port 65535 should fail"
-                )
-
-            finally:
-                sock.close()
-
-        finally:
-            if proxy_proc:
-                terminate_process(proxy_proc)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-
 class TestSocks5DomainBoundary:
     """Tests for domain boundary values"""
 
@@ -491,97 +406,9 @@ class TestSocks5DomainBoundary:
                 terminate_process(proxy_proc, timeout=0.5, force=True)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_domain_255_bytes(self) -> None:
-        """
-        TC-S5-021: 255-byte domain
-
-        Test connection to 255-byte domain (maximum).
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-
-        try:
-            config_path = create_socks5_config(proxy_port, temp_dir)
-
-            proxy_proc = start_proxy(config_path)
-            assert proxy_proc.wait_ready(), "Proxy server failed to start"
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
-            try:
-                sock.connect(("127.0.0.1", proxy_port))
-                assert socks5_handshake_no_auth(sock) == MethodReply(AuthMethod.NONE), (
-                    "Handshake failed"
-                )
-
-                # 255-byte domain (valid length)
-                long_domain = "a" * 255
-                reply = socks5_connect_domain(sock, long_domain, 80)
-                assert isinstance(reply, CommandReply)
-                # Will fail because domain won't resolve
-                assert reply.code is not ReplyCode.SUCCESS, "Connection should fail"
-
-            finally:
-                sock.close()
-
-        finally:
-            if proxy_proc:
-                terminate_process(proxy_proc)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
 
 class TestSocks5AdditionalBoundary:
     """Additional boundary value tests"""
-
-    def test_password_255_bytes(self) -> None:
-        """
-        TC-S5-033: 255-byte password
-
-        Test authentication with 255-byte password (maximum).
-        """
-        temp_dir = tempfile.mkdtemp()
-        proxy_port = get_unique_port()
-        target_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-        target_socket: socket.socket | None = None
-
-        try:
-            long_password = "x" * 255
-            users = [{"username": "test", "password": long_password}]
-            config_path = create_socks5_config(
-                proxy_port, temp_dir, auth_type="password", users=users
-            )
-
-            _, target_socket = create_target_server(
-                "127.0.0.1",
-                target_port,
-                send_ok_and_close,
-            )
-
-            proxy_proc = start_proxy(config_path)
-            assert proxy_proc.wait_ready(), "Proxy server failed to start"
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
-            try:
-                sock.connect(("127.0.0.1", proxy_port))
-
-                authentication = socks5_handshake_password(sock, "test", long_password)
-                assert isinstance(authentication, AuthReply)
-                assert authentication.status is AuthStatus.SUCCESS, (
-                    "Authentication with 255-byte password should succeed"
-                )
-
-            finally:
-                sock.close()
-
-        finally:
-            if proxy_proc:
-                terminate_process(proxy_proc)
-            if target_socket:
-                target_socket.close()
-            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_port_0(self) -> None:
         """

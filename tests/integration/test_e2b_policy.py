@@ -160,6 +160,29 @@ async def test_cold_failure_default_cached_without_remote_etag(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_policy_capacity_refuses_new_sandbox_and_preserves_existing_policy(
+    tmp_path: Path,
+) -> None:
+    async with policy_api() as api:
+        api.replies["existing"] = PolicyReply(policy={"denyOut": ["0.0.0.0/0"]})
+        config = configuration(api.port)
+        services = config["services"]
+        assert isinstance(services, list)
+        service = services[0]
+        assert isinstance(service, dict)
+        layers = service["layers"]
+        assert isinstance(layers, list)
+        layer = layers[0]
+        assert isinstance(layer, dict)
+        layer["policy_cache_capacity"] = 1
+        with running_proxy(tmp_path, config) as proxy:
+            for sandbox, status in [("existing", 403), ("new", 503), ("existing", 403)]:
+                result = await curl_policy(proxy.port, "http://1.1.1.1/", sandbox)
+                assert result.status == status, result
+        assert [request.sandbox_id for request in api.requests] == ["existing"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("domain", ["allowed.test", "sub.allowed.test", "other.test"])
 async def test_domains_use_pool_dns_and_socks_remote_dns(
     tmp_path: Path, domain: str

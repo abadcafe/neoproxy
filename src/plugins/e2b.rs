@@ -5,6 +5,7 @@
 //! PluginConfig, LayerConfig, E2bPlugin tests: e2b_tests.rs,
 //! test_e2b_policy.py
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -41,11 +42,17 @@ fn api_timeout() -> Duration {
 fn fallback_ttl() -> Duration {
   Duration::from_secs(60)
 }
+fn policy_cache_capacity() -> NonZeroUsize {
+  NonZeroUsize::new(1024)
+    .expect("positive default policy cache capacity")
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LayerConfig {
   #[serde(default = "fallback_ttl", with = "humantime_serde")]
   policy_fallback_ttl: Duration,
+  #[serde(default = "policy_cache_capacity")]
+  policy_cache_capacity: NonZeroUsize,
   default_policy: serde_json::Value,
 }
 
@@ -76,6 +83,7 @@ impl SharedPolicies {
     );
     let key = serde_json::to_string(&(
       config.policy_fallback_ttl,
+      config.policy_cache_capacity,
       &config.default_policy,
     ))?;
     let mut caches =
@@ -89,6 +97,7 @@ impl SharedPolicies {
           self.source.clone(),
           default,
           config.policy_fallback_ttl,
+          config.policy_cache_capacity,
         ));
         caches.insert(key, cache.clone());
         cache

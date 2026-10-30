@@ -14,7 +14,7 @@ from aioquic.h3.connection import H3Connection
 from aioquic.h3.events import DatagramReceived, DataReceived, HeadersReceived
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
-from aioquic.quic.events import QuicEvent
+from aioquic.quic.events import ConnectionTerminated, QuicEvent
 from pydantic import TypeAdapter
 
 from tests.fixtures.certificates import generate_test_certificates
@@ -42,9 +42,14 @@ class UdpClient(H3ProtocolBase):
         self.events: asyncio.Queue[
             HeadersReceived | DataReceived | DatagramReceived
         ] = asyncio.Queue()
+        self.terminated: asyncio.Future[ConnectionTerminated] = (
+            asyncio.get_running_loop().create_future()
+        )
 
     @override
     def quic_event_received(self, event: QuicEvent) -> None:
+        if isinstance(event, ConnectionTerminated) and not self.terminated.done():
+            self.terminated.set_result(event)
         http = self.h3_connection
         assert http is not None
         for message in http.handle_event(event):
@@ -311,3 +316,28 @@ def test_connect_udp_requires_authentication_and_valid_target(
                 assert reader.readline().split()[1] == (
                     b"400" if authorized else b"407"
                 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quarter", [1 << 60, (1 << 62) - 1])
+async def test_connect_udp_rejects_datagram_stream_id_outside_quic_range(
+    tmp_path: Path,
+    quarter: int,
+) -> None:
+    cert, key, ca, _ = generate_test_certificates(str(tmp_path))
+    config = QuicConfiguration(
+        is_client=True, alpn_protocols=["h3"], max_datagram_frame_size=65536
+    )
+    config.server_name = "localhost"
+    config.load_verify_locations(cafile=ca)
+    with running_proxy(tmp_path, configuration("http3", cert, key, ca, None)) as proxy:
+        async with connect(
+            "127.0.0.1", proxy.port, configuration=config, create_protocol=UdpClient
+        ) as client:
+            assert isinstance(client, UdpClient)
+            client.quic_connection.send_datagram_frame(
+                (quarter | (3 << 62)).to_bytes(8, "big") + b"\x00packet"
+            )
+            client.transmit()
+            terminated = await asyncio.wait_for(client.terminated, 3)
+            assert terminated.error_code == 0x33

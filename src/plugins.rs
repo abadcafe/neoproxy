@@ -4,8 +4,8 @@
 //! responsibilities: manage plugin loading, service/layer building, and
 //! shutdown public operations: PluginManager::new,
 //! PluginManager::build_service, PluginManager::build_layer,
-//! PluginManager::uninstall_all data entities: PluginManager,
-//! PluginLoadError tests: plugins_tests.rs
+//! PluginManager::supervise, PluginManager::uninstall_all data
+//! entities: PluginManager, PluginLoadError tests: plugins_tests.rs
 
 use std::collections::HashMap;
 
@@ -139,6 +139,16 @@ impl PluginManager {
     for (_, plugin) in self.plugins.drain() {
       plugin.uninstall().await;
     }
+  }
+
+  pub(crate) async fn supervise(&self) {
+    let monitors: Vec<_> =
+      self.plugins.values().map(|plugin| plugin.supervise()).collect();
+    if monitors.is_empty() {
+      std::future::pending::<()>().await;
+    }
+    futures_util::future::select_all(monitors).await;
+    unreachable!("plugin supervision never completes");
   }
 
   pub(crate) fn build_service(

@@ -12,14 +12,15 @@ import asyncio
 import shutil
 import socket
 import tempfile
-import threading
 import time
+from pathlib import Path
 
 import pytest
 
 from tests.fixtures.http_configuration import create_test_config
 from tests.fixtures.ports import get_unique_port
-from tests.fixtures.proxy_process import BytesProcess, start_proxy
+from tests.fixtures.proxy_process import BytesProcess, start_proxy, terminate_process
+from tests.fixtures.stream_cleanup import close_writer
 from tests.fixtures.tcp_peer import create_target_server
 
 # ==============================================================================
@@ -274,107 +275,72 @@ class TestPerformance:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.mark.asyncio
-    async def test_1000_concurrent_connections(self) -> None:
-        """
-        TC-PERF-005: 1000 concurrent connections handled correctly.
-
-        Target: Verify proxy handles 1000+ concurrent connections
-        as required by architecture document section 3.1.
-        """
-        temp_dir = tempfile.mkdtemp()
+    async def test_1000_concurrent_connections(self, tmp_path: Path) -> None:
+        """Hold 1000 real tunnels open together before permitting any to close."""
         proxy_port = get_unique_port()
         target_port = get_unique_port()
-        proxy_proc: BytesProcess | None = None
-        target_socket: socket.socket | None = None
+        config = create_test_config(proxy_port, str(tmp_path), server_threads=8)
+        origins_ready = asyncio.Barrier(1000)
+        clients_ready = asyncio.Barrier(1000)
+        active = 0
+        peak = 0
 
-        try:
-            config_path = create_test_config(proxy_port, temp_dir, server_threads=8)
+        async with asyncio.TaskGroup() as origins:
 
-            # Create target server
-            connections_count: dict[str, int] = {"count": 0}
-            connections_lock = threading.Lock()
-
-            def counting_handler(conn: socket.socket) -> None:
-                with connections_lock:
-                    connections_count["count"] += 1
+            async def echo(
+                reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+            ) -> None:
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
                 try:
-                    while True:
-                        data = conn.recv(1024)
-                        if not data:
-                            break
-                        conn.sendall(b"ECHO:" + data)
-                except OSError:
-                    pass
-                finally:
-                    conn.close()
-
-            _, target_socket = create_target_server(
-                "127.0.0.1", target_port, counting_handler
-            )
-
-            proxy_proc = start_proxy(config_path)
-
-            assert proxy_proc.wait_ready(), "Proxy server failed to start"
-
-            # Create 1000 concurrent connections via asyncio
-            num_connections = 1000
-            concurrency = 200
-
-            async def make_connection(
-                conn_id: int, sem: asyncio.Semaphore
-            ) -> tuple[int, bool]:
-                async with sem:
-                    try:
-                        reader, writer = await asyncio.wait_for(
-                            asyncio.open_connection("127.0.0.1", proxy_port),
-                            timeout=10.0,
-                        )
-
-                        # Send CONNECT request
-                        connect_request = (
-                            f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost:"
-                            + f" 127.0.0.1:{target_port}\r\n\r\n"
-                        ).encode()
-                        writer.write(connect_request)
+                    _ = await origins_ready.wait()
+                    while data := await reader.read(1024):
+                        writer.write(data)
                         await writer.drain()
+                finally:
+                    active -= 1
+                    await close_writer(writer)
 
-                        # Read response
-                        response = await asyncio.wait_for(
-                            reader.readuntil(b"\r\n\r\n"),
-                            timeout=10.0,
-                        )
+            def accept(
+                reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+            ) -> None:
+                _ = origins.create_task(echo(reader, writer))
 
-                        if b"200" in response:
-                            # Send and receive data
-                            writer.write(b"TEST")
-                            await writer.drain()
-                            echo = await asyncio.wait_for(
-                                reader.read(1024), timeout=10.0
-                            )
-                            success = b"ECHO:TEST" in echo
-                        else:
-                            success = False
-
-                        writer.close()
-                        return (conn_id, success)
-                    except OSError, asyncio.TimeoutError:
-                        return (conn_id, False)
-
-            sem = asyncio.Semaphore(concurrency)
-            results = await asyncio.gather(
-                *(make_connection(i, sem) for i in range(num_connections))
+            server = await asyncio.start_server(
+                accept, "127.0.0.1", target_port, backlog=1024
             )
+            async with server:
+                process = start_proxy(config)
+                try:
+                    assert process.wait_ready()
 
-            # Verify results
-            assert len(results) == num_connections
-            assert all(success for _, success in results), [
-                result for result in results if not result[1]
-            ]
+                    async def exchange(index: int) -> None:
+                        reader, writer = await asyncio.open_connection(
+                            "127.0.0.1", proxy_port
+                        )
+                        try:
+                            writer.write(
+                                (
+                                    f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\n"
+                                    f"Host: 127.0.0.1:{target_port}\r\n\r\n"
+                                ).encode()
+                            )
+                            await writer.drain()
+                            headers = await reader.readuntil(b"\r\n\r\n")
+                            assert headers.split(b"\r\n", 1)[0].split()[1] == b"200"
+                            _ = await clients_ready.wait()
+                            payload = f"connection-{index}".encode()
+                            writer.write(payload)
+                            await writer.drain()
+                            assert await reader.readexactly(len(payload)) == payload
+                        finally:
+                            await close_writer(writer)
 
-        finally:
-            if proxy_proc:
-                proxy_proc.kill()
-                _ = proxy_proc.wait(timeout=15)
-            if target_socket:
-                target_socket.close()
-            shutil.rmtree(temp_dir, ignore_errors=True)
+                    async with asyncio.TaskGroup() as clients:
+                        for index in range(1000):
+                            _ = clients.create_task(exchange(index))
+                    assert peak == 1000
+                finally:
+                    terminate_process(process)
+        assert active == 0

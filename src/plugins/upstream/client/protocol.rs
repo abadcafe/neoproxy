@@ -56,9 +56,6 @@ pub(crate) trait ClientProtocol {
   ) -> Pin<
     Box<dyn Future<Output = Result<ConnectResult, UpstreamError>> + 'a>,
   >;
-
-  /// Close any held connections (QUIC, etc.). Default is no-op.
-  fn close(&self) {}
 }
 
 pub(crate) struct ConnectResult {

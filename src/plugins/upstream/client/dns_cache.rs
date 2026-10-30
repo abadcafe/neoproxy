@@ -3,7 +3,6 @@
 //! on failure public operations: DnsCache::{new,resolve}
 //! data entities: DnsCache, Entry
 //! tests: dns_cache_tests.rs; test_upstream_nodes.py
-use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +18,7 @@ use tokio::time::Instant;
 use super::observation::ConnectionObservation;
 use crate::context::RequestContext;
 use crate::plugins::upstream::error::UpstreamError;
+use crate::retained_cache::RetainedCache;
 
 struct Entry {
   addresses: Vec<IpAddr>,
@@ -30,7 +30,7 @@ pub(super) struct DnsCache {
   resolver: TokioResolver,
   timeout: Duration,
   retry: Duration,
-  entries: std::sync::Mutex<HashMap<String, Arc<Mutex<Entry>>>>,
+  entries: std::sync::Mutex<RetainedCache<String, Arc<Mutex<Entry>>>>,
 }
 impl DnsCache {
   pub(super) fn new(
@@ -64,7 +64,7 @@ impl DnsCache {
       resolver: builder.build()?,
       timeout,
       retry,
-      entries: std::sync::Mutex::new(HashMap::new()),
+      entries: std::sync::Mutex::new(RetainedCache::new(1024)),
     })
   }
 
@@ -89,15 +89,18 @@ impl DnsCache {
       .entries
       .lock()
       .expect("DNS cache poisoned")
-      .entry(host.clone())
-      .or_insert_with(|| {
-        Arc::new(Mutex::new(Entry {
-          addresses: Vec::new(),
-          refresh: Instant::now(),
-          updated: Instant::now(),
-          error: None,
-        }))
-      })
+      .get_or_insert_with(
+        host.clone(),
+        || {
+          Arc::new(Mutex::new(Entry {
+            addresses: Vec::new(),
+            refresh: Instant::now(),
+            updated: Instant::now(),
+            error: None,
+          }))
+        },
+        |slot| Arc::strong_count(slot) == 1,
+      )
       .clone();
     let started = std::time::Instant::now();
     let waiting_since = Instant::now();

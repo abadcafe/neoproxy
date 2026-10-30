@@ -56,7 +56,6 @@ mod target_parser_tests;
 struct UpstreamPlugin {
   service_builders: HashMap<&'static str, Box<dyn BuildService>>,
   sessions: std::sync::Arc<TaskTracker>,
-  registry: Rc<UpstreamRegistry>,
   operations: std::sync::Arc<TaskTracker>,
   is_uninstalled: Rc<AtomicBool>,
 }
@@ -86,7 +85,6 @@ impl UpstreamPlugin {
     Self {
       service_builders,
       sessions,
-      registry,
       operations,
       is_uninstalled: Rc::new(AtomicBool::new(false)),
     }
@@ -94,6 +92,17 @@ impl UpstreamPlugin {
 }
 
 impl Plugin for UpstreamPlugin {
+  fn supervise(
+    &self,
+  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>> {
+    Box::pin(async {
+      tokio::select! {
+        () = self.sessions.supervise() => {},
+        () = self.operations.supervise() => {},
+      }
+    })
+  }
+
   fn service_builder(&self, name: &str) -> Option<&dyn BuildService> {
     self.service_builders.get(name).map(|b| b.as_ref())
   }
@@ -106,7 +115,6 @@ impl Plugin for UpstreamPlugin {
     }
 
     let st = self.sessions.clone();
-    let registry = self.registry.clone();
     let operations = self.operations.clone();
 
     Box::pin(async move {
@@ -144,10 +152,7 @@ impl Plugin for UpstreamPlugin {
             .saturating_duration_since(tokio::time::Instant::now()),
         )
         .await;
-      // Active operations have released their streams/leases. Only
-      // now release this plugin's transport resources; shared pools
-      // remain owned by the process until every worker has drained.
-      registry.close_all();
+      // Process-owned pools close after every worker has drained.
       info!("upstream: shutdown complete");
     })
   }

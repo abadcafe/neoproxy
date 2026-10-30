@@ -199,13 +199,17 @@ pub(crate) fn run_server_thread(
     } else {
       tokio::select! {
         _ = shutdown.notified() => {},
+        () = plugin_manager.supervise() => unreachable!("plugin supervision never completes"),
         result = join_set.join_next(), if !join_set.is_empty() => {
           // Notify peers before cleanup/rendezvous. Waiting until this
           // thread returns would leave peers running while it waits for them.
           shutdown.shutdown();
           failure = match result {
             Some(Ok(Err(error))) => Some(error),
-            Some(Err(error)) => Some(error.into()),
+            Some(Err(error)) => {
+              if error.is_panic() { std::panic::resume_unwind(error.into_panic()); }
+              Some(error.into())
+            },
             _ => Some(anyhow::anyhow!("listener stopped unexpectedly")),
           };
         }
@@ -219,6 +223,12 @@ pub(crate) fn run_server_thread(
       listener.stop();
     }
     while let Some(result) = join_set.join_next().await {
+      let result = result.map_err(|error| {
+        if error.is_panic() {
+          std::panic::resume_unwind(error.into_panic());
+        }
+        error
+      });
       if failure.is_none() {
         failure = match result {
           Ok(Ok(())) => None,

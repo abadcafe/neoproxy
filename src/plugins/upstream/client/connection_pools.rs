@@ -11,6 +11,7 @@ use anyhow::Context;
 use super::http_cache::Cache;
 use super::nodes::SharedNodes;
 use crate::plugins::upstream::config::connection_pool::ConnectionPoolConfig;
+use crate::retained_cache::RetainedCache;
 
 pub(crate) struct ConnectionPool {
   pub(super) http: Arc<Cache>,
@@ -108,7 +109,7 @@ impl Drop for ConnectionPool {
 /// choices.
 pub(crate) struct ConnectionPools {
   pools: HashMap<String, Arc<ConnectionPool>>,
-  nodes: Mutex<HashMap<(String, String), Arc<SharedNodes>>>,
+  nodes: Mutex<RetainedCache<(String, String), Arc<SharedNodes>>>,
 }
 impl ConnectionPools {
   pub(crate) fn new(
@@ -122,7 +123,10 @@ impl ConnectionPools {
         Ok((name, pool))
       })
       .collect::<anyhow::Result<_>>()?;
-    Ok(Arc::new(Self { pools, nodes: Mutex::new(HashMap::new()) }))
+    Ok(Arc::new(Self {
+      pools,
+      nodes: Mutex::new(RetainedCache::new(1024)),
+    }))
   }
 
   pub(super) fn get(&self, name: &str) -> Arc<ConnectionPool> {
@@ -141,8 +145,11 @@ impl ConnectionPools {
       .nodes
       .lock()
       .expect("node registry poisoned")
-      .entry(key)
-      .or_default()
+      .get_or_insert_with(
+        key,
+        || Arc::new(SharedNodes::default()),
+        |nodes| Arc::strong_count(nodes) == 1,
+      )
       .clone()
   }
 
@@ -156,5 +163,18 @@ impl ConnectionPools {
     for pool in self.pools.values() {
       pool.shutdown();
     }
+  }
+
+  pub(crate) async fn supervise(&self) {
+    let monitors: Vec<_> = self
+      .pools
+      .values()
+      .map(|pool| Box::pin(pool.tasks.supervise()))
+      .collect();
+    if monitors.is_empty() {
+      std::future::pending::<()>().await;
+    }
+    futures_util::future::select_all(monitors).await;
+    unreachable!("connection pool supervision never completes");
   }
 }

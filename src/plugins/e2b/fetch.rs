@@ -38,7 +38,11 @@ impl Api {
       uri.authority().expect("checked authority"),
     )
     .map_err(|_| anyhow::anyhow!("invalid policy API authority"))?;
-    ensure!(!timeout.is_zero(), "policy_api_timeout must be positive");
+    ensure!(
+      !timeout.is_zero()
+        && std::time::Instant::now().checked_add(timeout).is_some(),
+      "policy_api_timeout must be positive and representable"
+    );
     let mut roots = rustls::RootCertStore::empty();
     for cert in rustls_native_certs::load_native_certs().certs {
       roots.add(cert)?;

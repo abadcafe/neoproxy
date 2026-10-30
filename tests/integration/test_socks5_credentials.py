@@ -17,7 +17,9 @@ from tests.fixtures.socks5_client import (
 from tests.fixtures.socks5_protocol import AuthMethod, AuthStatus, ReplyCode
 from tests.fixtures.socks5_result import AuthReply, CommandReply, MethodReply
 
-type Credentials = Literal["valid", "wrong", "unknown", "missing", "password_colon"]
+type Credentials = Literal[
+    "valid", "wrong", "unknown", "missing", "password_colon", "max_password"
+]
 
 
 class AccessEntry(BaseModel):
@@ -38,7 +40,7 @@ def _receive_exact(client: socket.socket, size: int) -> bytes:
 @pytest.mark.parametrize("auth_enabled", [True, False])
 @pytest.mark.parametrize(
     "credentials",
-    ["valid", "wrong", "unknown", "missing", "password_colon"],
+    ["valid", "wrong", "unknown", "missing", "password_colon", "max_password"],
 )
 def test_socks5_defers_credential_verification_to_connect(
     tmp_path: Path, credentials: Credentials, auth_enabled: bool
@@ -53,10 +55,13 @@ def test_socks5_defers_credential_verification_to_connect(
       password: correct
     - username: password_colon
       password: "pass:word"
+    - username: max_password
+      password: "{max_password}"
 """
         if auth_enabled
         else ""
     )
+    auth_layer = auth_layer.format(max_password="x" * 255)
     _ = config.write_text(f"""server_threads: 1
 plugins:
   auth: {{}}
@@ -84,7 +89,11 @@ services:
   service: direct
   listeners: [main]
 """)
-    authorized = not auth_enabled or credentials in ("valid", "password_colon")
+    authorized = not auth_enabled or credentials in (
+        "valid",
+        "password_colon",
+        "max_password",
+    )
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as target:
         target.bind(("127.0.0.1", target_port))
         target.listen(1)
@@ -104,6 +113,8 @@ services:
                     password = "wrong" if credentials == "wrong" else "correct"
                     if credentials == "password_colon":
                         username, password = "password_colon", "pass:word"
+                    if credentials == "max_password":
+                        username, password = "max_password", "x" * 255
                     status = socks5_handshake_password(client, username, password)
                     assert isinstance(status, AuthReply)
                     assert status.status is AuthStatus.SUCCESS

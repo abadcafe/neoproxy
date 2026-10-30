@@ -1,6 +1,6 @@
 //! module: http_pool
 //! responsibility: lease complete HTTP/1 connections to the calling
-//! worker public operations: ProxyPool::{new,shared,connect,close},
+//! worker public operations: ProxyPool::{new,shared,connect},
 //! ForwardClient data entities: ProxyPool, PooledBody
 //! tests: HTTP pool process contracts
 use std::future::Future;
@@ -93,9 +93,6 @@ impl<C> ProxyPool<C> {
         (self.cache.limits.bytes() as usize).max(8192 + 4096 * 100),
       );
     builder
-  }
-
-  pub(super) fn close(&self) { /* Shared pools outlive individual upstreams. */
   }
 }
 impl<C> ProxyPool<C>

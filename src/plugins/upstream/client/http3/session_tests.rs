@@ -20,7 +20,7 @@ async fn test_session_pool_drop_cancels_maintenance_after_failed_handshake()
       .unwrap()
       .with_root_certificates(rustls::RootCertStore::empty())
       .with_no_client_auth();
-      let pool = SessionPool::new(
+      let pool = SessionPool::shared(
         peer.local_addr().unwrap(),
         Some("localhost".into()),
         QuicConfig {
@@ -34,7 +34,13 @@ async fn test_session_pool_drop_cancels_maintenance_after_failed_handshake()
           receive_window: None,
         },
         Duration::from_millis(100),
-        Default::default(),
+        super::sessions::Store::new(
+          1,
+          Duration::from_secs(60),
+          crate::header_limits::ResponseLimits::default().limits(),
+          tracker.clone(),
+        ),
+        tokio::runtime::Handle::current(),
       );
       assert!(
         pool

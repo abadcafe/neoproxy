@@ -10,7 +10,7 @@ use std::thread;
 use anyhow::Result;
 use tokio::signal::unix as signal;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::shutdown::ShutdownHandle;
 
@@ -68,39 +68,21 @@ fn determine_exit_code(exit_reasons: &[ExitReason]) -> i32 {
   0
 }
 
-/// Create a signal waiting future for SIGINT/SIGTERM.
-pub(crate) fn shutdown_signal()
--> Pin<Box<dyn Future<Output = ()> + Send>> {
-  Box::pin(async {
-    let sigint = async {
-      match signal::signal(signal::SignalKind::interrupt()) {
-        Ok(mut stream) => {
-          stream.recv().await;
-        }
-        Err(e) => {
-          warn!("failed to register SIGINT handler: {e}");
-          std::future::pending::<()>().await;
-        }
-      }
-    };
-
-    let sigterm = async {
-      match signal::signal(signal::SignalKind::terminate()) {
-        Ok(mut stream) => {
-          stream.recv().await;
-        }
-        Err(e) => {
-          warn!("failed to register SIGTERM handler: {e}");
-          std::future::pending::<()>().await;
-        }
-      }
-    };
-
+/// Subscribe synchronously, before any worker can report readiness.
+/// The required runtime is explicit; the factory owns entering it.
+/// Subscription failure rejects startup instead of disabling shutdown.
+pub(crate) fn shutdown_signal(
+  runtime: &tokio::runtime::Handle,
+) -> std::io::Result<Pin<Box<dyn Future<Output = ()> + Send>>> {
+  let _entered = runtime.enter();
+  let mut sigint = signal::signal(signal::SignalKind::interrupt())?;
+  let mut sigterm = signal::signal(signal::SignalKind::terminate())?;
+  Ok(Box::pin(async move {
     tokio::select! {
-      _ = sigint => {}
-      _ = sigterm => {}
+      _ = sigint.recv() => {}
+      _ = sigterm.recv() => {}
     }
-  })
+  }))
 }
 
 impl<'scope> Workers<'scope> {

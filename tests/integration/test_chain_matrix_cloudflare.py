@@ -37,6 +37,11 @@ def test_two_hop_cloudflare_matrix(
     case: ChainCase,
 ) -> None:
     result = run_exchange(tmp_path, case, "cloudflare", matrix_certificates)
+    # This live UDP case also depends on the selected Cloudflare A/AAAA
+    # address responding on UDP/443. Local 101/200 tunnel negotiation
+    # does not prove that reachability. Keep failures visible and use
+    # the saved curl trace/socket observations to distinguish the two;
+    # do not retry the exchange or weaken its success assertion.
     assert result.returncode == 0, result.stderr
     assert result.http_status == 301
     assert len(result.entry_logs) == len(result.relay_logs) == 1

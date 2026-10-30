@@ -233,6 +233,8 @@ impl Listening for Http3Listener {
           _ = shutdown_handle.notified() => {
             break;
           }
+          () = requests.supervise() => unreachable!("request supervision never completes"),
+          () = transport.supervise() => unreachable!("transport supervision never completes"),
           res = conn_rx.recv() => res,
         };
 

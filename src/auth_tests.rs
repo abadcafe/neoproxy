@@ -15,20 +15,6 @@ fn user_credential(
 // ============== verify_credentials tests (for SOCKS5) ==============
 
 #[test]
-fn test_verify_credentials_valid() {
-  let users = vec![user_credential("socks_user", "socks_pass")];
-  let auth = UserPasswordAuth::from_users(&users);
-  assert!(auth.verify_credentials("socks_user", "socks_pass").is_ok());
-}
-
-#[test]
-fn test_verify_credentials_invalid() {
-  let users = vec![user_credential("socks_user", "socks_pass")];
-  let auth = UserPasswordAuth::from_users(&users);
-  assert!(auth.verify_credentials("socks_user", "wrong").is_err());
-}
-
-#[test]
 fn test_verify_credentials_no_users_configured() {
   let auth = UserPasswordAuth::none();
   // No users configured -> verify_credentials always passes

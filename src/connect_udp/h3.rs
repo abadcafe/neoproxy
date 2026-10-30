@@ -66,11 +66,12 @@ impl Hub {
           connection.close(0x33_u32.into(), b"malformed HTTP Datagram");
           break;
         };
-        let Some(id) = quarter.checked_mul(4) else {
+        if quarter >= 1 << 60 {
           connection
             .close(0x33_u32.into(), b"invalid HTTP Datagram stream ID");
           break;
-        };
+        }
+        let id = quarter * 4;
         let Some(state) = weak.upgrade() else {
           break;
         };
@@ -119,7 +120,16 @@ impl Hub {
          },
          packet=incoming.receive()=>match packet {Ok(Some(data))=>{if local_write.write_all(&super::capsule::encode(&data)).await.is_err(){break;}},_=>break},
          packet=datagrams.recv()=>match packet {
-          Some(data)=>{if let Some((0,size))=super::capsule::decode_varint(&data) && local_write.write_all(&super::capsule::encode(&data[size..])).await.is_err(){break;}},None=>break
+          Some(data)=>{
+            match super::capsule::decode_varint(&data) {
+              Some((0,size)) => {
+                if data.len() - size > super::capsule::MAX_UDP_PAYLOAD
+                  || local_write.write_all(&super::capsule::encode(&data[size..])).await.is_err() { break; }
+              },
+              Some(_) => {},
+              None => break,
+            }
+          },None=>break
          }
         }
       }

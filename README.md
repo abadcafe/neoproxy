@@ -533,6 +533,10 @@ direct 从请求目标构造一个权重为 1 的 address，链式模式使用�
 
 节点健康和权重状态跨 worker 共享，按 upstream 和目标隔离。`address_max_fails` 默认 1，`address_fail_timeout` 默认 10s，采用 Nginx 风格的被动失败计数、有效权重恢复和到期重试；只有一个 IP 节点时不因失败摘除，`address_max_fails: 0` 禁用摘除。失败只统计建连（含 TLS/QUIC 握手）、发送请求、等待响应头阶段的传输错误或超时，不按 HTTP 4xx/5xx 状态摘除，不统计非法响应头、客户端请求体错误、响应 body 或已建立隧道的后续错误。发送前的建连失败可尝试同组其他节点，不受方法幂等性限制。发送后，GET、HEAD、PUT、DELETE、OPTIONS、TRACE 允许重试；其他方法仅在 `upstream_non_idempotent_retry: true` 时允许。该配置默认为 `false`，仅按 plugin → upstream 继承，不支持 address 级。任何重试都要求尚未消费请求 body、尚未返回下游响应、属于可重试的传输故障且存在未尝试节点；不缓存或落盘 body，也不因 HTTP 错误状态重试。已经消费 body 的 PUT 即使幂等也不能重放。已建立的 CONNECT/SOCKS5 隧道不重放。主动健康探测不启用。
 
+按请求产生的状态采用 LRU 保留策略：每个连接池的 DNS 目录、每个 worker/upstream 的目标分组目录、进程共享节点目录，目标容量均为 1024 条。正在解析或调度的条目不驱逐，容量可以暂时超过目标，后续访问时回收已释放的条目。被回收的目标再次访问时重新解析或建立调度状态。H3 端点目录目标容量为 128 个桶，仅回收没有客户端引用、连接或建连许可占用的桶；空闲连接仍按池的 idle timeout 退出。
+
+后台请求、隧道和连接池任务由其生命周期所有者持续监督，空闲期间也会收集任务结果。任务 panic 作为编程错误传播并停止进程，不转换成普通代理 I/O 失败；正常网络错误仍由各协议处理。
+
 HTTP/HTTPS 普通转发独占借出完整连接，由当前 worker 驱动。请求和响应完整结束且协议状态允许复用时才归还；异常、取消、状态不确定则关闭。空闲超时从归还时起算，池上限只限制空闲缓存。HTTP/HTTPS CONNECT、SOCKS5 和 direct CONNECT 使用专用连接，不进入缓存池。
 
 H3 池内部持有独立多线程 runtime，负责 QUIC/H3 建联、驱动和回收。按需创建至每个 IP:port 的连接上限后轮流打开 stream，普通转发和 CONNECT 共用轮转。创建中及仍有活跃 stream 的排空连接计入上限；GOAWAY 不接受新请求，已有 stream 排空。容量等待纳入请求超时，不计为节点健康失败。池空闲超时从最后一个活跃响应或隧道结束后起算；QUIC keepalive 不重置池空闲时间。`quic_connection_max_idle_timeout` 是独立的传输层空闲超时，仍可能终止活跃 stream。
@@ -1188,6 +1192,10 @@ SOCKS5 的 9 种组合（SOCKS5 仅支持隧道）。
 
 HTTP、HTTPS 和 HTTP/3 listener/upstream 支持 RFC 9298 CONNECT-UDP，复用 `upstream.upstream` 服务、`auth.basic_auth`、节点调度和健康反馈。无需新增开关。默认 URI 模板为 `https://{proxy}/.well-known/masque/udp/{target_host}/{target_port}/`，IPv6 地址中的冒号使用 `%3A` 编码，端口为 1～65535。
 
+`connect-udp` 本身标识 Capsule Protocol，因此接收时不强制要求可选的 `Capsule-Protocol` 声明，也不因未知声明参数拒绝连接；发送时统一使用 `Capsule-Protocol: ?1`。Capsule 请求和成功响应禁止 `Content-Length`、`Content-Type`、`Transfer-Encoding`；成功响应不能使用 204、205、206。HTTP/1 成功响应必须为 101，并包含单个 `Upgrade: connect-udp` 和 `Connection: Upgrade`。UDP payload 上限为 65527 字节，超限中止对应流；未知 capsule 类型和 context 流式丢弃。HTTP/3 Datagram 的 Quarter Stream ID 必须小于 `2^60`，越界关闭连接并报告 `H3_DATAGRAM_ERROR`。不支持的 Extended CONNECT 协议由 upstream 服务返回 501，不会作为普通 TCP CONNECT 拨号。
+
+直连 UDP 复用 Quinn 的安全 UDP socket 实现，在支持的平台禁用 IP 分片；超过实际 IP/接口 MTU 的单个包按丢包处理，不关闭隧道。接收时保留空包及 GRO 合并包中的原始数据报边界，并只接收已授权目标的响应。
+
 HTTP/HTTPS 使用 HTTP/1.1 `GET`、`Connection: Upgrade`、`Upgrade: connect-udp`，成功响应为 101。HTTP/3 使用 Extended CONNECT，`:protocol` 为 `connect-udp`，成功响应为 200。请求和成功响应携带 `Capsule-Protocol: ?1`。HTTP/1.1 通过 DATAGRAM Capsule 承载 UDP，HTTP/3 支持 QUIC DATAGRAM，并可通过 Capsule 承载；大于可用 QUIC DATAGRAM 大小的报文走 Capsule。只支持 Context ID 0，忽略未知 Context ID 和未知 Capsule 类型。
 
 末端 `addresses: []` 解析目标后创建连接到所选 IP 的 UDP socket；链式配置按每一跳的协议在 Capsule 与 HTTP/3 Datagram 间转换。一个请求对应一个固定 UDP 目标及独立 UDP socket，连接关闭、服务卸载或 `tunnel_idle_timeout` 到期后回收。SOCKS5 节点不参与 UDP 请求选择；没有可用的 HTTP/HTTPS/H3 节点时返回 502。UDP socket 建立成功不表示目标已经响应。
@@ -1223,6 +1231,7 @@ services:
     layers:
       - kind: e2b.sandbox_network_policy
         policy_fallback_ttl: 60s
+        policy_cache_capacity: 1024
         default_policy:
           denyOut: [0.0.0.0/0, "::/0"]
 ```
@@ -1238,6 +1247,8 @@ services:
 无效 JSON/策略/响应头、HTTP 错误或超时均按失败处理。失败保留原策略和版本；没有原策略时
 使用 `default_policy`；两者均续期 `policy_fallback_ttl`（默认 60s）。默认策略不带远端 ETag。
 没有后台轮询，只有请求到达时才检查过期；已有隧道使用建立时的策略，不强制中断。
+
+每个策略缓存通过 `policy_cache_capacity` 限制 sandbox 数量，默认 1024，必须为正整数。容量已满时，只回收已过期且从未取得远端版本的默认策略条目，以及没有等待者的已取消拉取；已有远端策略和版本始终保留，避免 API 故障时退回更宽松的默认策略。无法回收出空间时，新 sandbox 请求明确返回 503；已有 sandbox 继续按原策略、版本和刷新规则服务。不同容量配置的 layer 不共享缓存。
 
 `policy` 支持以下出站字段：
 

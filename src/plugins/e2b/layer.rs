@@ -69,7 +69,15 @@ impl tower::Service<Request> for Middleware {
           "Missing or invalid x-sandbox-id",
         ));
       };
-      let snapshot = cache.get(&id).await;
+      let snapshot = match cache.get(&id).await {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+          return Ok(build_error_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "Sandbox policy capacity exhausted",
+          ));
+        }
+      };
       let (parts, body) = req.into_parts();
       let udp = crate::connect_udp::request::recognize(&parts);
       if !matches!(udp, Ok(None)) {

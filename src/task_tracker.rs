@@ -4,7 +4,7 @@
 //! public operations: ABORT_DRAIN_TIMEOUT, TaskTracker, new,
 //! register, register_on, shutdown, abort_all, drain,
 //! wait_shutdown, graceful_shutdown, wait_shutdown_with_timeout,
-//! shutdown_handle, active_count
+//! shutdown_handle, active_count, supervise
 //! data entities: TaskTracker
 //! tests: task_tracker_tests.rs, task_tracker_background_tests.rs
 
@@ -25,6 +25,7 @@ pub(crate) const ABORT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) struct TaskTracker {
   tasks: Mutex<JoinSet<()>>,
   shutdown_handle: ShutdownHandle,
+  changed: tokio::sync::Notify,
 }
 
 impl TaskTracker {
@@ -32,6 +33,7 @@ impl TaskTracker {
     Self {
       tasks: Mutex::new(JoinSet::new()),
       shutdown_handle: ShutdownHandle::new(),
+      changed: tokio::sync::Notify::new(),
     }
   }
 
@@ -41,11 +43,13 @@ impl TaskTracker {
     task_future: impl Future<Output = ()> + 'static,
   ) -> tokio::task::AbortHandle {
     reap_completed(&self.tasks);
-    self
+    let handle = self
       .tasks
       .lock()
       .expect("task tracker poisoned")
-      .spawn_local(task_future)
+      .spawn_local(task_future);
+    self.changed.notify_one();
+    handle
   }
 
   /// Spawn a Send task on the runtime owned by a shared resource.
@@ -61,6 +65,21 @@ impl TaskTracker {
       .lock()
       .expect("task tracker poisoned")
       .spawn_on(task, runtime);
+    self.changed.notify_one();
+  }
+
+  /// Continuously collect task outcomes, including when admission is
+  /// idle. Exactly one lifecycle owner polls this monitor; drop it
+  /// before entering the shutdown drain. Registration wakes an empty
+  /// monitor, and JoinSet wakes it on completion without a timer.
+  pub(crate) async fn supervise(&self) {
+    loop {
+      let changed = self.changed.notified();
+      tokio::pin!(changed);
+      changed.as_mut().enable();
+      drain_join_set(&self.tasks).await;
+      changed.await;
+    }
   }
 
   /// Trigger shutdown notification.

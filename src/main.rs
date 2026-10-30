@@ -69,6 +69,9 @@ mod redaction_tests;
 mod request_id;
 #[cfg(test)]
 mod request_id_tests;
+mod retained_cache;
+#[cfg(test)]
+mod retained_cache_tests;
 mod server;
 #[cfg(test)]
 mod server_fixtures;
@@ -195,6 +198,7 @@ fn main() -> Result<std::process::ExitCode> {
   // listeners)
   let rt =
     runtime::Builder::new_current_thread().enable_all().build()?;
+  let signal = process::shutdown_signal(rt.handle())?;
   // Workers borrow the same configuration. The scope guarantees all
   // workers have exited before that configuration can be dropped.
   let exit_code = thread::scope(|scope| -> Result<i32> {
@@ -240,7 +244,17 @@ fn main() -> Result<std::process::ExitCode> {
     }
 
     // Supervise and explicitly join workers within their borrow scope.
-    Ok(rt.block_on(supervisor.run(process::shutdown_signal())))
+    Ok(rt.block_on(async {
+      let running = supervisor.run(signal);
+      if let Some(pools) = &connection_pools {
+        tokio::select! {
+          exit = running => exit,
+          () = pools.supervise() => unreachable!("pool supervision never completes"),
+        }
+      } else {
+        running.await
+      }
+    }))
   })?;
 
   if let Some(shared) = &connection_pools {

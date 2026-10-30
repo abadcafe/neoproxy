@@ -1,6 +1,6 @@
 //! module: session
 //! responsibility: open leased H3 streams using process-owned session
-//! capacity public operations: SessionPool::{new,shared,open,close},
+//! capacity public operations: SessionPool::{new,shared,open},
 //! SessionLease data entities: SessionPool
 //! tests: session_tests.rs, http3_tests.rs
 use std::sync::Arc;
@@ -254,8 +254,5 @@ impl SessionPool {
       }
     }
     unreachable!("second attempt returns")
-  }
-
-  pub(crate) fn close(&self) { /* Process-owned store closes after all workers drain. */
   }
 }

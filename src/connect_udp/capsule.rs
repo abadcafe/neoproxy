@@ -8,6 +8,8 @@ use std::io;
 use bytes::{Buf, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+pub(crate) const MAX_UDP_PAYLOAD: usize = 65527;
+
 pub(crate) fn varint(value: u64, out: &mut Vec<u8>) {
   let size = if value < 64 {
     1
@@ -72,10 +74,34 @@ impl<R: AsyncRead + Unpin> Reader<R> {
           decode_varint(&self.buffer[first..])
       {
         let header = first + second;
-        if kind != 0 || length > 65536 {
+        if kind != 0 {
           self.buffer.advance(header);
           self.skip = length;
           continue;
+        }
+        // Parse the context before buffering the value. Unknown
+        // contexts can have arbitrarily large capsules; context zero
+        // is a UDP payload and RFC 9298 §5 caps it at 65527 bytes.
+        let available = self.buffer.len() - header;
+        let prefix =
+          &self.buffer[header..header + available.min(length as usize)];
+        if let Some((context, size)) = decode_varint(prefix) {
+          if context != 0 {
+            self.buffer.advance(header);
+            self.skip = length;
+            continue;
+          }
+          if length - size as u64 > MAX_UDP_PAYLOAD as u64 {
+            return Err(io::Error::new(
+              io::ErrorKind::InvalidData,
+              "UDP payload exceeds 65527 bytes",
+            ));
+          }
+        } else if available as u64 >= length {
+          return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing context ID",
+          ));
         }
         if self.buffer.len() >= header + length as usize {
           self.buffer.advance(header);

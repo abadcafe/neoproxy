@@ -316,3 +316,28 @@ async fn test_graceful_shutdown_aborts_only_after_deadline() {
     })
     .await;
 }
+#[tokio::test]
+async fn test_supervise_observes_registration_after_waiting_on_empty_tracker()
+ {
+  tokio::task::LocalSet::new()
+    .run_until(async {
+      let tracker =
+        std::sync::Arc::new(crate::task_tracker::TaskTracker::new());
+      let tasks = tracker.clone();
+      let monitor =
+        tokio::task::spawn_local(
+          async move { tasks.supervise().await },
+        );
+      tokio::task::yield_now().await;
+      tracker.register(async { panic!("late task programming error") });
+      let error = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        monitor,
+      )
+      .await
+      .unwrap()
+      .unwrap_err();
+      assert!(error.is_panic());
+    })
+    .await;
+}

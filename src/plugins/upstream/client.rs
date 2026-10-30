@@ -3,7 +3,7 @@
 //! pools
 //! public operations: Upstream, forward, connect_for_tunnel,
 //! UpstreamRegistry, new, get_upstream, contains_upstream, len,
-//! tls_config, tracker, close_all
+//! operation_tasks
 //! data entities: ScheduledClient, Upstream, UpstreamRegistry
 //! tests: client_tests.rs
 
@@ -154,12 +154,6 @@ impl UpstreamRegistry {
 
   pub(crate) fn len(&self) -> usize {
     self.entries.len()
-  }
-
-  pub(crate) fn close_all(&self) {
-    for upstream in self.entries.values() {
-      upstream.close();
-    }
   }
 }
 
